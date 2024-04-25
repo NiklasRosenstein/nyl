@@ -1,0 +1,19 @@
+[project]
+name = "nyl"
+version = "0.0.0"
+description = "Nyl facilitates the orchestration of infrastructure and application deployment pipelines across different tools, making them work together in a seamless manner."
+authors = [
+    {name = "Niklas Rosenstein", email = "rosensteinniklas@gmail.com"},
+]
+dependencies = []
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
