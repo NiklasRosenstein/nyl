@@ -5,4 +5,4 @@ Nyl facilitates the orchestration of infrastructure and application deployment p
 making them work together in a seamless manner.
 </p>
 &nbsp;
-<p align="center"><img src="./assets/nyl-pipeline-schema.png"></p>
+<p align="center"><img src="./assets/nyl-pipeline-schema.png" width="500px"></p>
