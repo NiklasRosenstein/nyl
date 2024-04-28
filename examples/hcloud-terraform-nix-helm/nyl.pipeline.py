@@ -1,4 +1,3 @@
-
 from nyl.pipeline import Pipeline
 from nyl.contrib.nixos import NixosAnywhereStep
 from nyl.contrib.terraform import ApplyTerraformStep
@@ -15,7 +14,7 @@ def pipeline(location: str = "nbg1", node_count: int = 3) -> Pipeline:
         vars={
             "location": location,
             "node_count": node_count,
-        }
+        },
     )
     p.add_step(provision)
 
