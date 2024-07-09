@@ -3,7 +3,7 @@
 Profiles are a way to define targets for deploying your application directly with Nyl. They are not needed when
 deploying with ArgoCD, as the target cluster is defined in the ArgoCD application.
 
-Profiles are defined in a `nyl-profiles.yaml` file that is located in the current working directory or any of its parent directories. As a last resort, the file will be searched in `~/.config/nyl/nyl-profiles.yaml`.
+Profiles are defined in a `nyl-profiles.yaml` file that is located in the current working directory or any of its parent directories. As a last resort, the file will be searched in `~/.nyl/nyl-profiles.yaml`.
 
 The configuration describes
 
@@ -38,7 +38,7 @@ the tunnel. The tunnel will typically remain open unless it is explicitly closed
 setting up the connection for each invocation of Nyl.
 
 Connections can be managed manually using the `nyl conn` command. Connection state is stored globally in
-`~/.config/nyl/.state/nyl-connections.json`. Note that while you may have multiple `nyl-profiles.yaml` files on your
+`~/.nyl/.state/nyl-connections.json`. Note that while you may have multiple `nyl-profiles.yaml` files on your
 system, the connection state is stored globally, and such is the interaction with `nyl conn`.
 
 ```

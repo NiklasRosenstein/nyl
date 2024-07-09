@@ -59,13 +59,10 @@ class SecretsConfig:
         if cwd is None:
             cwd = Path.cwd()
 
-        prev: Path | None = None
-        while cwd and cwd != prev:
-            file = cwd / SecretsConfig.FILENAME
+        for directory in [cwd] + list(cwd.parents):
+            file = directory / SecretsConfig.FILENAME
             if file.exists():
                 return file
-            prev = cwd
-            cwd = cwd.parent
 
         raise FileNotFoundError(
             f"Could not find '{SecretsConfig.FILENAME}' in '{Path.cwd()}' or any of its parent directories."

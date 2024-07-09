@@ -3,6 +3,8 @@ Manage cluster connections configured in `nyl-profiles.yaml`.
 """
 
 from typing import Optional
+from nyl.profiles.config import ProfileConfig
+from nyl.profiles.connections import ConnectionManager
 from nyl.utils import new_typer
 
 
@@ -15,12 +17,22 @@ def list() -> None:
     List all active connections.
     """
 
+    manager = ConnectionManager()
+    with manager.locked():
+        for conn in manager.get_connection_statuses():
+            print(conn)
+
 
 @app.command()
 def open(profile: str) -> None:
     """
     Open a connection to the cluster targeted by the profile.
     """
+
+    config = ProfileConfig.load(ProfileConfig.find_config_file())
+    manager = ConnectionManager()
+    with manager.locked():
+        manager.open_connection(config_file=config.file, alias=profile, config=config.profiles[profile].tunnel)
 
 
 @app.command()

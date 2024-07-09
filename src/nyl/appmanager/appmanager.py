@@ -55,7 +55,7 @@ class ApplicationManager:
         """
 
         api = CustomObjectsApi(self._client)
-        objects = api.list_cluster_custom_object(
+        objects = api.list_cluster_custom_object(  # noqa
             group=crd.GROUP,
             version=crd.VERSION,
             plural=crd.PLURAL,
