@@ -3,6 +3,7 @@ Manage cluster connections configured in `nyl-profiles.yaml`.
 """
 
 from typing import Optional
+
 from nyl.profiles.config import ProfileConfig
 from nyl.profiles.connections import ConnectionManager
 from nyl.utils import new_typer
@@ -36,7 +37,18 @@ def open(profile: str) -> None:
 
 
 @app.command()
-def close(profile: Optional[str]) -> None:
+def close(profile: Optional[str] = None) -> None:
     """
     Close all connections or the connection for a specific profile.
     """
+
+    manager = ConnectionManager()
+
+    if profile is None:
+        with manager.locked():
+            for conn in manager.get_connection_statuses():
+                manager.close_connection(conn.id)
+        return
+
+    # TODO
+    raise NotImplementedError("Closing a specific connection is not yet implemented.")

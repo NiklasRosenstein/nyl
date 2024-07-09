@@ -14,6 +14,7 @@ from nyl.profiles.config import SshTunnel
 
 @dataclass
 class ConnectionStatus:
+    id: str
     config_file: Path
     profile_alias: str
     status: Literal["open", "broken"]
@@ -93,6 +94,7 @@ class ConnectionManager:
         for connection in connections:
             # TODO: Check if tunnel PID is still running
             yield ConnectionStatus(
+                id=connection.id,
                 config_file=connection.config_file,
                 profile_alias=connection.alias,
                 status="open" if connection.tunnel_pid is not None else "broken",
@@ -111,13 +113,13 @@ class ConnectionManager:
 
         state = self._load_state()
         if (conn := state.get_connection(config_file, alias)) is None:
-            conn = _Connection(config_file, alias, None)
+            conn = _Connection(new_connection_id(), config_file, alias, None)
             state.connections.append(conn)
 
         conn.kill_tunnel()
         conn.start_tunnel(config)
 
-    def close_connection(self, config_file: Path, alias: str) -> bool:
+    def close_connection(self, id: str) -> bool:
         """
         Close the connection for the given profile alias.
 
@@ -128,11 +130,21 @@ class ConnectionManager:
         if not self._is_locked:
             raise RuntimeError("ConnectionManager.locked() context must be active")
 
-        if conn := self._load_state().get_connection(config_file, alias):
+        state = self._load_state()
+        if conn := state.get_connection_by_id(id):
             conn.kill_tunnel()
+            state.connections.remove(conn)
             return True
 
         return False
+
+
+def new_connection_id() -> str:
+    """
+    Generate a new unique connection ID.
+    """
+
+    return f"conn-{random.randint(1000, 9999)}"
 
 
 @dataclass
@@ -142,6 +154,11 @@ class _Connection:
     """
 
     # TODO: Assign unique IDs to connections/random names to be able to identify them later in the CLI?
+
+    id: str
+    """
+    A unique ID for the connection.
+    """
 
     config_file: Path
     """
@@ -213,6 +230,17 @@ class _State:
 
         for conn in self.connections:
             if conn.config_file == config_file and conn.alias == alias:
+                return conn
+
+        return None
+
+    def get_connection_by_id(self, id: str) -> _Connection | None:
+        """
+        Get the connection for the given profile alias. If no connection exists, a new one is created.
+        """
+
+        for conn in self.connections:
+            if conn.id == id:
                 return conn
 
         return None
