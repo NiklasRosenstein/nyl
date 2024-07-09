@@ -24,19 +24,23 @@ class SopsFile(SecretProvider):
     provider is defined in.
     """
 
-    _cache: SecretValue | None = field(init=False, default=None)
+    _cache: SecretValue | None = field(init=False, repr=False, default=None)
 
     def _load(self) -> SecretValue:
         if self._cache is None:
             logger.info("Loading secrets with Sops from '{}'", self.path)
-            self._cache = json.loads(
-                subprocess.run(
-                    ["sops", "--output-type", "json", "--decrypt", str(self.path)],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout
-            )
+            try:
+                self._cache = json.loads(
+                    subprocess.run(
+                        ["sops", "--output-type", "json", "--decrypt", str(self.path)],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout
+                )
+            except subprocess.CalledProcessError as exc:
+                logger.error("Failed to load secrets from '{}'; stderr={}", self.path, exc.stderr)
+                raise
         return self._cache
 
     # SecretProvider

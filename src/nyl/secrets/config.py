@@ -44,5 +44,40 @@ class SecretProvider(ABC):
         """
 
 
-class SecretsConfig(list[SecretProvider]):
-    pass
+@dataclass
+class SecretsConfig:
+    FILENAME = "nyl-secrets.yaml"
+
+    provider: SecretProvider
+
+    @staticmethod
+    def find_config_file(cwd: Path | None = None) -> Path:
+        """
+        Find the `nyl-secrets.yaml` in the given *cwd* or any of its parent directories.
+        """
+
+        if cwd is None:
+            cwd = Path.cwd()
+
+        prev: Path | None = None
+        while cwd and cwd != prev:
+            file = cwd / SecretsConfig.FILENAME
+            if file.exists():
+                return file
+            prev = cwd
+            cwd = cwd.parent
+
+        raise FileNotFoundError(
+            f"Could not find '{SecretsConfig.FILENAME}' in '{Path.cwd()}' or any of its parent directories."
+        )
+
+    @staticmethod
+    def load(file: Path) -> "SecretsConfig":
+        """
+        Load the secrets configuration from a file.
+        """
+
+        from databind.json import load as deser
+        from yaml import safe_load
+
+        return SecretsConfig(deser(safe_load(file.read_text()), SecretProvider, filename=str(file)))
