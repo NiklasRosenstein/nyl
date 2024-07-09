@@ -21,7 +21,7 @@ __Example__
 ```yaml title="nyl-secrets.yaml"
 ---
 provider: Sops
-name: sops
+alias: sops
 path: ../secrets.yaml
 ```
 
@@ -31,3 +31,12 @@ files apply. The `path` field is relative to the location of the `nyl-secrets.ya
 !!! todo
     Give a recommendation on how to best configure ArgoCD with a private key for Sops, and how to use the public key
     for encrypting secrets locally before committing them to the repository.
+
+## Inspecting secret providers
+
+You can inspect secret providers using the `nyl secrets` command.
+
+```
+nyl secrets list <alias>            List the keys for all secrets in the provider.
+nyl secrets get <alias> <key>       Get the value of a secret as JSON.
+```
