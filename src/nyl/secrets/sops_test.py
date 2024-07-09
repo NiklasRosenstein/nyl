@@ -19,7 +19,12 @@ def test_SopsFile_keys(provider: SopsFile) -> None:
 
 
 def test_SopsFile_get(provider: SopsFile) -> None:
-    assert list(provider.keys()) == ["a", "b", "b.c", "d"]
+    assert provider.get("a") == 1
+    assert provider.get("b") == {"c": 2}
+    assert provider.get("b.c") == 2
+    assert provider.get("d") == [3, 4]
+    with pytest.raises(KeyError):
+        assert provider.get("e")
 
 
 @pytest.mark.skipif(condition=shutil.which("sops") is None, reason="sops not installed")
