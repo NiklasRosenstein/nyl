@@ -19,7 +19,6 @@ must have the `sops` program installed.
 __Example__
 
 ```yaml title="nyl-secrets.yaml"
----
 provider: Sops
 alias: sops
 path: ../secrets.yaml
