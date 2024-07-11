@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.4.1"
-content_hash = "sha256:f70c0909d371715a324040fb1bb1e60b5bf621e64b992b136b8ee1a1e1bc64fe"
+content_hash = "sha256:a101ee39479e76d93b4b4d6eac49263a37d3b253dbfb8498805de03f4519d069"
 
 [[package]]
 name = "babel"
@@ -947,6 +947,17 @@ groups = ["default", "dev"]
 files = [
     {file = "six-1.16.0-py2.py3-none-any.whl", hash = "sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254"},
     {file = "six-1.16.0.tar.gz", hash = "sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926"},
+]
+
+[[package]]
+name = "stablehash"
+version = "0.2.0"
+requires_python = ">=3.10"
+summary = "Stable hashing of Python data structures across separate processes and platforms."
+groups = ["default"]
+files = [
+    {file = "stablehash-0.2.0-py3-none-any.whl", hash = "sha256:d3376dd4f6784faf01f424de53b2076ec7b133755b9cc5149bfe9b03da12df06"},
+    {file = "stablehash-0.2.0.tar.gz", hash = "sha256:cdf1a6d39b2efa763b224224c88b9bec2bffa8d0d6f423f62a2e57608b8ffa08"},
 ]
 
 [[package]]

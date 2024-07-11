@@ -49,7 +49,7 @@ class KubeconfigFromSsh:
 @dataclass(kw_only=True)
 class SshTunnel:
     """
-    Represents configuration for an SSH tunnel to a host from which the Kubernetes cluster can be accessed.
+    Configuration for an SSH tunnel.
     """
 
     type: Literal["ssh"] = "ssh"

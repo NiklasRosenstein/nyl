@@ -4,8 +4,11 @@ Manage cluster connections configured in `nyl-profiles.yaml`.
 
 from typing import Optional
 
+from loguru import logger
+from typer import Argument
+
 from nyl.profiles.config import ProfileConfig
-from nyl.profiles.connections import ConnectionManager
+from nyl.profiles.tunnelmanager import TunnelManager, TunnelSpec
 from nyl.utils import new_typer
 
 
@@ -18,37 +21,55 @@ def list() -> None:
     List all active connections.
     """
 
-    manager = ConnectionManager()
-    with manager.locked():
-        for conn in manager.get_connection_statuses():
+    with TunnelManager() as manager:
+        for conn in manager.get_tunnels():
             print(conn)
 
 
 @app.command()
-def open(profile: str) -> None:
+def open(profile_name: str) -> None:
     """
     Open a connection to the cluster targeted by the profile.
     """
 
     config = ProfileConfig.load(ProfileConfig.find_config_file())
-    manager = ConnectionManager()
-    with manager.locked():
-        manager.open_connection(config_file=config.file, alias=profile, config=config.profiles[profile].tunnel)
+
+    try:
+        profile = config.profiles[profile_name]
+    except KeyError:
+        logger.error("Profile '{}' not found in '{}'.", profile_name, config.file)
+        exit(1)
+
+    if not profile.tunnel:
+        raise ValueError(f"Profile '{profile_name}' does not have a tunnel configuration.")
+
+    # TODO: Know the Kubernetes host/port to forward.
+    spec = TunnelSpec(
+        locator=f"{config.file}:{profile_name}",
+        forwardings={"kubernetes": TunnelSpec.Forwarding(host="localhost", port=6443)},
+        user=profile.tunnel.user,
+        host=profile.tunnel.host,
+        identity_file=profile.tunnel.identity_file,
+    )
+
+    with TunnelManager() as manager:
+        manager.open_tunnel(spec)
 
 
 @app.command()
-def close(profile: Optional[str] = None) -> None:
+def close(profile_name: Optional[str] = Argument(None)) -> None:
     """
     Close all connections or the connection for a specific profile.
     """
 
-    manager = ConnectionManager()
-
-    if profile is None:
-        with manager.locked():
-            for conn in manager.get_connection_statuses():
-                manager.close_connection(conn.id)
+    if profile_name is None:
+        with TunnelManager() as manager:
+            for spec, _status in manager.get_tunnels():
+                manager.close_tunnel(spec.locator)
         return
 
-    # TODO
-    raise NotImplementedError("Closing a specific connection is not yet implemented.")
+    config = ProfileConfig.load(ProfileConfig.find_config_file())
+    locator = f"{config.file}:{profile_name}"
+
+    with TunnelManager() as manager:
+        manager.close_tunnel(locator)
