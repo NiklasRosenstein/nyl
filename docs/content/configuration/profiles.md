@@ -31,18 +31,18 @@ default:
 !!! todo
     Include specification of configuration data model.
 
-## Connection management
+## Tunnel management
 
-The Nyl CLI will automatically manage the connection to the target cluster by obtaining the kubeconfig and setting up
-the tunnel. The tunnel will typically remain open unless it is explicitly closed by the user to reduce the overhead of
-setting up the connection for each invocation of Nyl.
+The Nyl CLI will automatically manage tunnels to the target cluster by proxying through an SSH jump host. 
+The tunnel will typically remain open unless it is explicitly closed by the user to reduce the overhead of
+setting up the tunnel for each invocation of Nyl.
 
-Connections can be managed manually using the `nyl conn` command. Connection state is stored globally in
-`~/.nyl/.state/nyl-connections.json`. Note that while you may have multiple `nyl-profiles.yaml` files on your
-system, the connection state is stored globally, and such is the interaction with `nyl conn`.
+Tunnels can be managed manually using the `nyl tun` command. Tunnel state is stored globally in
+`~/.nyl/tunnels/state.json`. Note that while you may have multiple `nyl-profiles.yaml` files on your
+system, the tunnel state is stored globally, and such is the interaction with `nyl tun`.
 
 ```
-nyl conn list                 List all active connections.
-nyl conn open <profile>       Open a connection to the cluster targeted by the profile.
-nyl conn close [<profile>]    Close all connections or the connection for a specific profile.
+nyl tun list                 List all known tunnels.
+nyl tun open <profile>       Open a tunnel to the cluster targeted by the profile.
+nyl tun close [<profile>]    Close all tunnels or the tunnel for a specific profile.
 ```

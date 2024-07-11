@@ -1,35 +1,61 @@
 """
-Manage cluster connections configured in `nyl-profiles.yaml`.
+Manage cluster tunnels configured in `nyl-profiles.yaml`.
 """
 
 from typing import Optional
 
 from loguru import logger
 from typer import Argument
+from rich.console import Console
+from rich.table import Table
 
 from nyl.profiles.config import ProfileConfig
 from nyl.profiles.tunnelmanager import TunnelManager, TunnelSpec
 from nyl.utils import new_typer
 
 
-app = new_typer(name="conn", help=__doc__)
+app = new_typer(name="tun", help=__doc__)
 
 
 @app.command()
-def list() -> None:
+def status(all: bool = False) -> None:
     """
-    List all active connections.
+    Show the status of all tunnels.
     """
 
+    config = ProfileConfig.load(ProfileConfig.find_config_file())
+
+    table = Table()
+    table.add_column("Tunnel ID", justify="right", style="cyan")
+    table.add_column("Profile")
+    table.add_column("Status")
+    table.add_column("Proxy")
+    table.add_column("Forwardings")
+
     with TunnelManager() as manager:
-        for conn in manager.get_tunnels():
-            print(conn)
+        for spec, status in manager.get_tunnels():
+            is_current = spec.locator.split(":")[0] == str(config.file)
+            if not all and not is_current:
+                continue
+
+            forwardings = ", ".join(
+                f"{status.local_ports.get(k, '?')}:{v.host}:{v.port}" for k, v in spec.forwardings.items()
+            )
+            table.add_row(
+                f"{status.id}*" if is_current and all else status.id,
+                spec.locator.split(":")[1],
+                status.status,
+                f"{spec.user}@{spec.host}",
+                forwardings,
+            )
+
+    Console().print(table)
 
 
 @app.command()
 def open(profile_name: str) -> None:
     """
-    Open a connection to the cluster targeted by the profile.
+    Open a tunnel to the cluster targeted by the profile.
     """
 
     config = ProfileConfig.load(ProfileConfig.find_config_file())
@@ -59,7 +85,7 @@ def open(profile_name: str) -> None:
 @app.command()
 def close(profile_name: Optional[str] = Argument(None)) -> None:
     """
-    Close all connections or the connection for a specific profile.
+    Close all tunnels or the tunnel for a specific profile.
     """
 
     if profile_name is None:

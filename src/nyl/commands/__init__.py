@@ -9,8 +9,8 @@ from nyl.utils import new_typer
 app = new_typer(help=__doc__)
 
 
-from . import conn  # noqa: E402
+from . import tun  # noqa: E402
 from . import secrets  # noqa: E402
 
-app.add_typer(conn.app)
+app.add_typer(tun.app)
 app.add_typer(secrets.app)
