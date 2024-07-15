@@ -31,6 +31,19 @@ default:
 !!! todo
     Include specification of configuration data model.
 
+
+## Activating a profile
+
+Profiles can be activated using the `nyl profile activate` command. It fetches the Kubeconfig and opens the SSH tunnel
+(if any) and prints the `KUBECONFIG` environment variable that can be used to interact with the target cluster.
+
+```sh
+$ eval $(nyl profile activate default)
+```
+
+The profile name can be omitted, in which case it defaults to the value of the `NYL_PROFILE` environment variable
+or the string `"default"`.
+
 ## Tunnel management
 
 The Nyl CLI will automatically manage tunnels to the target cluster by proxying through an SSH jump host. 

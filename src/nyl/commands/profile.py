@@ -3,6 +3,8 @@ Interact with your Nyl profile configuration.
 """
 
 import shlex
+
+from typer import Argument
 from nyl.profiles import ProfileManager
 from nyl.utils import new_typer
 
@@ -11,7 +13,7 @@ app = new_typer(name="profile", help=__doc__)
 
 
 @app.command()
-def activate(profile_name: str) -> None:
+def activate(profile_name: str = Argument("default", envvar="NYL_PROFILE")) -> None:
     """
     Activate the given profile.
 
