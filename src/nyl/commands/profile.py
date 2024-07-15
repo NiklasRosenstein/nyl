@@ -15,7 +15,7 @@ app = new_typer(name="profile", help=__doc__)
 @app.command()
 def activate(profile_name: str = Argument("default", envvar="NYL_PROFILE")) -> None:
     """
-    Activate the given profile.
+    Activate a Nyl profile.
 
     Evaluate the stdout of this command to export the KUBECONFIG into your environment.
     """
@@ -23,4 +23,8 @@ def activate(profile_name: str = Argument("default", envvar="NYL_PROFILE")) -> N
     with ProfileManager.load() as manager:
         profile = manager.activate_profile(profile_name)
 
+    # For standard tooling, like kubectl.
     print(f"export KUBECONFIG={shlex.quote(str(profile.kubeconfig.absolute()))}")
+
+    # Used by Terraform providers.
+    print(f"export KUBE_CONFIG_PATH={shlex.quote(str(profile.kubeconfig.absolute()))}")
