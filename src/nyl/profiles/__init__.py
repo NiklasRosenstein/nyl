@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Any
 import warnings
 
 from loguru import logger
 import requests
+import requests.adapters
 import urllib3
 
 from .tunnel import TunnelManager, TunnelSpec
@@ -89,12 +91,28 @@ class ProfileManager:
 
 
 def _wait_for_api_server(url: str, timeout: float) -> None:
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=requests.adapters.Retry(total=100, backoff_factor=0.2, backoff_max=2)
+    )
+    session = requests.Session()
+    session.adapters["https://"] = adapter
+    session.verify = False
+
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-        response = requests.get(url, verify=False, timeout=timeout)
+
+        # Measure the time it takes for API server to respond. This is useful to clarify what took so long
+        # for example for an SSH tunnel that has only just been created.
+        tstart = time.time()
+        response = session.get(url, timeout=timeout)
+        tdelta = time.time() - tstart
+        logger.debug("{:.2f}s until successful API server connection.", tdelta)
+
     if response.json().get("kind") == "Status":
         # Looks well enough like a Kubernetes status object.
         return
+
+    raise RuntimeError(f"Unexpected response from API server: {response.text}")
 
 
 def get_tunnel_spec(config_file: Path, profile: str, conf: SshTunnel) -> TunnelSpec:
