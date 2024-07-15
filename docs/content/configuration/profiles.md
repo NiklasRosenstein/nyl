@@ -38,7 +38,9 @@ Profiles can be activated using the `nyl profile activate` command. It fetches t
 (if any) and prints the `KUBECONFIG` environment variable that can be used to interact with the target cluster.
 
 ```sh
-$ eval $(nyl profile activate default)
+$ nyl profile activate
+export KUBECONFIG=/project/path/.nyl/profiles/default/kubeconfig.local
+export KUBE_CONFIG_PATH=/project/path/.nyl/profiles/default/kubeconfig.local
 ```
 
 The profile name can be omitted, in which case it defaults to the value of the `NYL_PROFILE` environment variable
