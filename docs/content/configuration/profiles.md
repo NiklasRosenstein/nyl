@@ -31,7 +31,6 @@ default:
 !!! todo
     Include specification of configuration data model.
 
-
 ## Activating a profile
 
 Profiles can be activated using the `nyl profile activate` command. It fetches the Kubeconfig and opens the SSH tunnel

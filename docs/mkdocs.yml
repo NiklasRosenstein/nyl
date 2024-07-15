@@ -15,10 +15,9 @@ theme:
     - navigation.path
     - navigation.sections
     - toc.follow
-    - toc.integrate
+    # - toc.integrate
 markdown_extensions:
 - admonition
-
 # https://squidfunk.github.io/mkdocs-material/reference/code-blocks/
 - pymdownx.highlight:
     anchor_linenums: true
@@ -27,3 +26,8 @@ markdown_extensions:
 - pymdownx.inlinehilite
 - pymdownx.snippets
 - pymdownx.superfences
+- pymdownx.details
+
+plugins:
+- search
+- mkdocstrings

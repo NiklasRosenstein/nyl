@@ -28,8 +28,17 @@ class LocalKubeconfig:
     """
 
     type: Literal["local"] = "local"
+
     path: str | None = None
+    """
+    Path to the Kubernetes configuration file. Relative to the profile configuration file. If not specified, it falls
+    back to the default location (per `KUBECONFIG` or otherwise `~/.kube/config`).
+    """
+
     context: str | None = None
+    """
+    The context to use from the Kubeconfig file. If not specified, the current context is used.
+    """
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -40,10 +49,29 @@ class KubeconfigFromSsh:
 
     type: Literal["ssh"] = "ssh"
     user: str
+    """
+    The username to connect to the remote host with.
+    """
+
     host: str
-    path: str
+    """
+    The remote host to connect to.
+    """
+
     identity_file: str | None = None
+    """
+    An SSH private key file to use for authentication.
+    """
+
+    path: str
+    """
+    The path where the Kubeconfig can be retrieved from.
+    """
+
     context: str | None = None
+    """
+    The context to use from the Kubeconfig file. If not specified, the current context is used.
+    """
 
 
 @dataclass(kw_only=True)
@@ -53,9 +81,21 @@ class SshTunnel:
     """
 
     type: Literal["ssh"] = "ssh"
+
     user: str
+    """
+    The username to connect to the remote host with.
+    """
+
     host: str
+    """
+    The host to tunnel through.
+    """
+
     identity_file: str | None = None
+    """
+    An SSH private key file to use for authentication.
+    """
 
 
 @dataclass
