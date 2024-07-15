@@ -26,24 +26,27 @@ def status(all: bool = False) -> None:
     config = ProfileConfig.load(ProfileConfig.find_config_file())
 
     table = Table()
-    table.add_column("Tunnel ID", justify="right", style="cyan")
-    table.add_column("Profile")
+    table.add_column("Profile", justify="right", style="cyan")
+    table.add_column("Tunnel ID")
     table.add_column("Status")
     table.add_column("Proxy")
     table.add_column("Forwardings")
 
     with TunnelManager() as manager:
         for spec, status in manager.get_tunnels():
-            is_current = spec.locator.split(":")[0] == str(config.file)
-            if not all and not is_current:
+            if not all and spec.locator.config_file != str(config.file):
                 continue
+
+            profile = spec.locator.profile
+            if all:
+                profile = f"{profile} ({spec.locator.config_file})"
 
             forwardings = ", ".join(
                 f"{status.local_ports.get(k, '?')}:{v.host}:{v.port}" for k, v in spec.forwardings.items()
             )
             table.add_row(
-                f"{status.id}*" if is_current and all else status.id,
-                spec.locator.split(":")[1],
+                profile,
+                status.id,
                 status.status,
                 f"{spec.user}@{spec.host}",
                 forwardings,
@@ -71,7 +74,7 @@ def open(profile_name: str) -> None:
 
     # TODO: Know the Kubernetes host/port to forward.
     spec = TunnelSpec(
-        locator=f"{config.file}:{profile_name}",
+        locator=TunnelSpec.Locator(str(config.file), profile_name),
         forwardings={"kubernetes": TunnelSpec.Forwarding(host="localhost", port=6443)},
         user=profile.tunnel.user,
         host=profile.tunnel.host,
@@ -95,7 +98,5 @@ def close(profile_name: Optional[str] = Argument(None)) -> None:
         return
 
     config = ProfileConfig.load(ProfileConfig.find_config_file())
-    locator = f"{config.file}:{profile_name}"
-
     with TunnelManager() as manager:
-        manager.close_tunnel(locator)
+        manager.close_tunnel(TunnelSpec.Locator(str(config.file), profile_name))

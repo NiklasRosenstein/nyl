@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.4.1"
-content_hash = "sha256:a101ee39479e76d93b4b4d6eac49263a37d3b253dbfb8498805de03f4519d069"
+content_hash = "sha256:c995991dfa3cc8114ec7a2a7421dcc51375bf4ea22fb845b9e257698d35f7160"
 
 [[package]]
 name = "babel"
@@ -276,6 +276,16 @@ dependencies = [
 files = [
     {file = "kubernetes-30.1.0-py2.py3-none-any.whl", hash = "sha256:e212e8b7579031dd2e512168b617373bc1e03888d41ac4e04039240a292d478d"},
     {file = "kubernetes-30.1.0.tar.gz", hash = "sha256:41e4c77af9f28e7a6c314e3bd06a8c6229ddd787cad684e0ab9f69b498e98ebc"},
+]
+
+[[package]]
+name = "kubernetes-stubs"
+version = "22.6.0.post1"
+summary = "Type stubs for the Kubernetes Python API client"
+groups = ["dev"]
+files = [
+    {file = "kubernetes-stubs-22.6.0.post1.tar.gz", hash = "sha256:9f4de86ef3c5aeb8ca555164f7427e8d909b00ad0b2081cf2bf17dc44cfb63e9"},
+    {file = "kubernetes_stubs-22.6.0.post1-py2.py3-none-any.whl", hash = "sha256:46a4d6fc30458f245c54d2f5777dcb2ecc16bc86258fb37c7b87c631d2ac61da"},
 ]
 
 [[package]]

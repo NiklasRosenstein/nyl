@@ -38,6 +38,7 @@ dev = [
     "mkdocs-material>=9.5.28",
     "mkdocstrings[python]>=0.25.1",
     "pytest>=8.2.2",
+    "kubernetes-stubs>=22.6.0.post1",
 ]
 
 [tool.ruff]

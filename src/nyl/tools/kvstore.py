@@ -57,6 +57,9 @@ class JsonFileKvStore(KvStore):
             self._data = {}
             self._loaded = False
 
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._path})"
+
     def _load(self) -> None:
         if self._loaded:
             return
@@ -77,14 +80,17 @@ class JsonFileKvStore(KvStore):
             json.dump(self._data, f)
 
     def get(self, key: str) -> Value:
+        assert isinstance(key, str), f"Key must be a string, not {type(key)}"
         self._load()
         return self._data[key]
 
     def set(self, key: str, value: Value) -> None:
+        assert isinstance(key, str), f"Key must be a string, not {type(key)}"
         self._load()
         self._data[key] = value
 
     def delete(self, key: str) -> None:
+        assert isinstance(key, str), f"Key must be a string, not {type(key)}"
         self._load()
         del self._data[key]
 
@@ -99,13 +105,14 @@ class SerializingStore(Generic[T]):
     [databind.json] module.
     """
 
-    def __init__(self, value_type: type[T], store: KvStore) -> None:
+    def __init__(self, value_type: type[T] | Any, store: KvStore) -> None:
         self._value_type = value_type
         self._store = store
 
     def __enter__(self) -> "SerializingStore[T]":
         if hasattr(self._store, "__enter__"):
             getattr(self._store, "__enter__")()
+        return self
 
     def __exit__(self, *args: Any) -> None:
         if hasattr(self._store, "__exit__"):
@@ -113,10 +120,10 @@ class SerializingStore(Generic[T]):
 
     def get(self, key: str) -> T:
         value = self._store.get(key)
-        return deser(value, self._value_type)
+        return deser(value, self._value_type, filename=str(self._store))
 
     def set(self, key: str, value: T) -> None:
-        self._store.set(key, ser(value, self._value_type))
+        self._store.set(key, ser(value, self._value_type, filename=str(self._store)))
 
     def delete(self, key: str) -> None:
         self._store.delete(key)

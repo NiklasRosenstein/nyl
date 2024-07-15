@@ -23,9 +23,16 @@ class TunnelSpec:
         host: str
         port: int
 
-    locator: str
-    """ A unique string that identifies the source of the tunnel configuration, such as the `nyl-profiles.yaml`
-    configuration filename and profile alias. """
+    @dataclass
+    class Locator:
+        config_file: str
+        profile: str
+
+        def __str__(self) -> str:
+            return f"{self.config_file}:{self.profile}"
+
+    locator: Locator
+    " Locator for where the tunnel spec is defined."
 
     forwardings: dict[str, Forwarding]
     """ A map from forwarding alias to forwarding configuration. The local ports will be randomly assigned.
@@ -74,7 +81,7 @@ class TunnelManager:
         """
 
         state_dir = state_dir or self.DEFAULT_STATE_DIR
-        self._store = SerializingStore(
+        self._store = SerializingStore[tuple[TunnelSpec, TunnelStatus]](
             tuple[TunnelSpec, TunnelStatus],
             JsonFileKvStore(file=state_dir / "state.json", lockfile=state_dir / ".lock"),
         )
@@ -137,7 +144,7 @@ class TunnelManager:
 
         # Find the tunnel status for the given spec by the spec's locator string.
         try:
-            status = self._store.get(spec.locator)[1]
+            status = self._store.get(str(spec.locator))[1]
         except KeyError:
             status = None
 
@@ -162,7 +169,7 @@ class TunnelManager:
         )
 
         # Preliminary status update.
-        self._store.set(spec.locator, (spec, status))
+        self._store.set(str(spec.locator), (spec, status))
 
         # Allocate local ports. (TODO: This should be done in a more robust way.)
         status.local_ports = {alias: random.randint(10000, 20000) for alias in spec.forwardings}
@@ -188,18 +195,20 @@ class TunnelManager:
         status.status = "open"
         status.ssh_pid = proc.pid
 
-        self._store.set(spec.locator, (spec, status))
+        self._store.set(str(spec.locator), (spec, status))
 
-    def close_tunnel(self, locator: str) -> TunnelStatus:
+        return status
+
+    def close_tunnel(self, locator: TunnelSpec.Locator) -> TunnelStatus:
         """
         Close a tunnel by it's locator.
         """
 
         try:
-            spec, status = self._store.get(locator)
+            spec, status = self._store.get(str(locator))
         except KeyError:
             logger.warning("No tunnel found for '{}'.", locator)
-            return
+            return TunnelStatus("", "closed", None, {}, "")
 
         self._refresh_status(status)
         if status.status == "open":
@@ -208,7 +217,7 @@ class TunnelManager:
             logger.debug("Tunnel for '{}' is already closed.", locator)
         # Always call close_tunnel to ensure the tunnel to ensure the state is transitioned to "closed".
         self._close_tunnel(status)
-        self._store.set(locator, (spec, status))
+        self._store.set(str(locator), (spec, status))
         return status
 
 

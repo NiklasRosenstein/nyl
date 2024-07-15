@@ -61,7 +61,7 @@ def calculate_applyset_id(*, name: str, namespace: str = "", group: str) -> str:
     return f"applyset-{uid}-v1"
 
 
-def get_canonical_resource_kind_name(api_version: str, kind: str) -> list[str]:
+def get_canonical_resource_kind_name(api_version: str, kind: str) -> str:
     """
     Given the apiVersion and kind of a Kubernetes resource, return the canonical name of the resource. This name can
     be used to identify the resource in an ApplySet's `applyset.kubernetes.io/contains-group-kinds` annotation.
