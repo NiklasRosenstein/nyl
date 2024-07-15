@@ -62,6 +62,7 @@ class SshTunnel:
 class ProfileConfig:
     FILENAME = "nyl-profiles.yaml"
     FALLBACK_PATH = Path.home() / ".config" / "nyl" / FILENAME
+    STATE_DIRNAME = ".nyl"
 
     file: Path
     profiles: dict[str, Profile]
@@ -82,10 +83,10 @@ class ProfileConfig:
         for directory in [cwd] + list(cwd.parents) + [Path.home()]:
             config_file = directory / ProfileConfig.FILENAME
             if config_file.exists():
-                return config_file
+                return config_file.absolute()
 
         if ProfileConfig.FALLBACK_PATH.exists():
-            return ProfileConfig.FALLBACK_PATH
+            return ProfileConfig.FALLBACK_PATH.absolute()
 
         raise FileNotFoundError(
             f"Configuration file '{ProfileConfig.FILENAME}' not found in '{Path.cwd()}', any of its parent directories "

@@ -23,7 +23,7 @@ class TunnelSpec:
         host: str
         port: int
 
-    @dataclass
+    @dataclass(frozen=True)
     class Locator:
         config_file: str
         profile: str
@@ -63,6 +63,10 @@ class TunnelStatus:
 
     spec_hash: str
     """ Last known hash of the tunnel spec. Used to determine if the tunnel needs to be restarted. """
+
+    @staticmethod
+    def empty() -> "TunnelStatus":
+        return TunnelStatus("", "closed", None, {}, "")
 
 
 class TunnelManager:
@@ -130,6 +134,20 @@ class TunnelManager:
             self._refresh_status(status)
             self._store.set(key, (spec, status))
             yield spec, status
+
+    def get_tunnel(self, locator: TunnelSpec.Locator) -> tuple[TunnelSpec, TunnelStatus] | None:
+        """
+        Retrieve the last known tunnel status and spec based on the tunnel locator.
+        """
+
+        try:
+            spec, status = self._store.get(str(locator))
+        except KeyError:
+            return None
+
+        self._refresh_status(status)
+        self._store.set(str(locator), (spec, status))
+        return spec, status
 
     def open_tunnel(self, spec: TunnelSpec) -> TunnelStatus:
         """

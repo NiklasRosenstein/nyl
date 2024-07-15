@@ -1,5 +1,5 @@
 """
-Manage cluster tunnels configured in `nyl-profiles.yaml`.
+Access SSH tunnels globally managed by Nyl.
 """
 
 from typing import Optional
@@ -9,8 +9,9 @@ from typer import Argument
 from rich.console import Console
 from rich.table import Table
 
+from nyl.profiles import get_tunnel_spec
 from nyl.profiles.config import ProfileConfig
-from nyl.profiles.tunnelmanager import TunnelManager, TunnelSpec
+from nyl.profiles.tunnel import TunnelManager, TunnelSpec, TunnelStatus
 from nyl.utils import new_typer
 
 
@@ -33,19 +34,38 @@ def status(all: bool = False) -> None:
     table.add_column("Forwardings")
 
     with TunnelManager() as manager:
-        for spec, status in manager.get_tunnels():
+        tunnels = list(manager.get_tunnels())
+
+        # Group tunnels by profile which are in the current profile configuration file.
+        tunnel_by_profile = {
+            spec.locator.profile: (spec, status)
+            for spec, status in tunnels
+            if spec.locator.config_file == str(config.file)
+        }
+
+        # Backfill any tunnels that we could open from the current profile, but haven't yet. We can only
+        # add profiles which are defined in the current known profile configuration file and not any others
+        # on the system, while there may be tunnel information available for them from previous runs.
+        for profile_name, profile in config.profiles.items():
+            if profile_name not in tunnel_by_profile and profile.tunnel:
+                tunnels.append((get_tunnel_spec(config.file, profile_name, profile.tunnel), TunnelStatus.empty()))
+
+        tunnels.sort(key=lambda x: (x[0].locator.profile, x[0].locator.config_file))
+
+        for spec, status in tunnels:
+            # Unless we want to show all tunnels, only show the ones from the current profile configuration file.
             if not all and spec.locator.config_file != str(config.file):
                 continue
 
-            profile = spec.locator.profile
+            profile_name = spec.locator.profile
             if all:
-                profile = f"{profile} ({spec.locator.config_file})"
+                profile_name = f"{profile_name} ({spec.locator.config_file})"
 
             forwardings = ", ".join(
-                f"{status.local_ports.get(k, '?')}:{v.host}:{v.port}" for k, v in spec.forwardings.items()
+                f"localhost:{status.local_ports.get(k, '?')} → {v.host}:{v.port}" for k, v in spec.forwardings.items()
             )
             table.add_row(
-                profile,
+                profile_name,
                 status.id,
                 status.status,
                 f"{spec.user}@{spec.host}",
@@ -56,7 +76,7 @@ def status(all: bool = False) -> None:
 
 
 @app.command()
-def open(profile_name: str) -> None:
+def start(profile_name: str) -> None:
     """
     Open a tunnel to the cluster targeted by the profile.
     """
@@ -86,7 +106,7 @@ def open(profile_name: str) -> None:
 
 
 @app.command()
-def close(profile_name: Optional[str] = Argument(None)) -> None:
+def stop(profile_name: Optional[str] = Argument(None)) -> None:
     """
     Close all tunnels or the tunnel for a specific profile.
     """

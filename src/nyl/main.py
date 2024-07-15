@@ -12,7 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from nyl.appmanager.appmanager import ApplicationManager
 from nyl.appmanager.crd import generate_application_resource
 from nyl.kubectl import Kubectl
-from nyl.profiles.profilemanager import ProfileManager
+from nyl.profiles.kubeconfig import KubeconfigManager
 from nyl.tunnel import Tunnel
 import yaml
 from loguru import logger
@@ -43,7 +43,7 @@ class Nyl:
 
         # Caches
         self._profiles_config_file: Path | None = None
-        self._profile_manager: ProfileManager | None = None
+        self._profile_manager: KubeconfigManager | None = None
         self._tunnel: Tunnel | None = None
         self._kubectl_cache: Kubectl | None = None
         self._apps_cache: ApplicationManager | None = None
@@ -117,10 +117,10 @@ class Nyl:
 
         return profiles
 
-    def _get_profile_manager(self) -> ProfileManager:
+    def _get_profile_manager(self) -> KubeconfigManager:
         if self._profile_manager is None:
             profiles = self._get_profiles_config_file()
-            self._profile_manager = ProfileManager.from_config_file(profiles)
+            self._profile_manager = KubeconfigManager.from_config_file(profiles)
         return self._profile_manager
 
     @property

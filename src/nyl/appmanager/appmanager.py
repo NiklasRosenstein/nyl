@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
-from kubernetes.client import ApiClient, CustomObjectsApi
+from kubernetes.client import CustomObjectsApi
+from kubernetes.client.api_client import ApiClient
 from . import crd
 from nyl.kubectl import Kubectl
 
@@ -62,6 +63,7 @@ class ApplicationManager:
         )
 
         # TODO
+        return  # type: ignore[return-value]
 
     def get_application(self, name: str) -> Application:
         """
@@ -72,6 +74,7 @@ class ApplicationManager:
         obj = api.get_cluster_custom_object(group=crd.GROUP, version=crd.VERSION, plural=crd.PLURAL, name=name)
         print(obj)
         # TODO
+        return  # type: ignore[return-value]
 
     def delete_application(self, name: str, cascade: bool = True) -> None:
         """
