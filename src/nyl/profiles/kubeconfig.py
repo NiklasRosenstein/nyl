@@ -81,8 +81,7 @@ class KubeconfigManager:
                     kubeconfig_content = subprocess.check_output(command, text=True)
                     Path(raw_kubeconfig).write_text(kubeconfig_content)
                 else:
-                    logger.info("Reusing cached Kubeconfig.", raw_kubeconfig)
-                    logger.debug("Cached Kubeconfig at '{}'.", raw_kubeconfig)
+                    logger.debug("Reusing cached Kubeconfig ({}).", raw_kubeconfig)
             case _:
                 raise ValueError(f"Unsupported Kubeconfig type: {source.__class__.__name__}")
 

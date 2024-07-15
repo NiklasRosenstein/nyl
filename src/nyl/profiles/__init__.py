@@ -63,7 +63,7 @@ class ProfileManager:
             timeout = 2
 
         api_server = f"https://{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"
-        logger.info("Checking for API server connectivity ({}{})", api_server, tun_description)
+        logger.debug("Checking for API server connectivity ({}{})", api_server, tun_description)
         _wait_for_api_server(api_server, timeout)
 
         return ActivatedProfile(
