@@ -42,7 +42,7 @@ Tunnels can be managed manually using the `nyl tun` command. Tunnel state is sto
 system, the tunnel state is stored globally, and such is the interaction with `nyl tun`.
 
 ```
-nyl tun list                 List all known tunnels.
-nyl tun open <profile>       Open a tunnel to the cluster targeted by the profile.
-nyl tun close [<profile>]    Close all tunnels or the tunnel for a specific profile.
+nyl tun status               List all known tunnels.
+nyl tun start <profile>      Open a tunnel to the cluster targeted by the profile.
+nyl tun stop [<profile>]     Close all tunnels or the tunnel for a specific profile.
 ```
