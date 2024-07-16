@@ -60,16 +60,16 @@ class Reference:
 
         match value:
             case dict():
-                return {key: Reference.sub(item, callback) for key, item in value.items()}
+                return {key: Reference.sub(item, callback) for key, item in value.items()}  # type: ignore[return-value]
             case list():
-                return [Reference.sub(item, callback) for item in value]
+                return [Reference.sub(item, callback) for item in value]  # type: ignore[return-value]
             case str():
 
                 def repl(match: re.Match[str]) -> str:
                     ref = Reference.from_triplet(match.group(1), match.group(2), match.group(3))
                     return callback(ref)
 
-                return re.sub(r"\(\(NYL_REFERENCE (\S+) (\S+) (\S+)\)\)", repl, value)
+                return re.sub(r"\(\(NYL_REFERENCE (\S+) (\S+) (\S+)\)\)", repl, value)  # type: ignore[return-value]
 
         return value
 
