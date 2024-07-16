@@ -6,7 +6,7 @@ import shlex
 
 from typer import Argument
 from nyl.profiles import ProfileManager
-from nyl.utils import new_typer
+from nyl.tools.typer import new_typer
 
 
 app = new_typer(name="profile", help=__doc__)

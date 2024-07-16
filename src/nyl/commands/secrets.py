@@ -4,7 +4,7 @@ Interact with the secrets providers configured in `nyl-secrets.yaml`.
 
 import json
 from nyl.secrets.config import SecretsConfig
-from nyl.utils import new_typer
+from nyl.tools.typer import new_typer
 
 
 app = new_typer(name="secrets", help=__doc__)

@@ -3,7 +3,7 @@ from typing import Any
 from kubernetes.client import CustomObjectsApi
 from kubernetes.client.api_client import ApiClient
 from . import crd
-from nyl.kubectl import Kubectl
+from nyl.tools.kubectl import Kubectl
 
 
 @dataclass

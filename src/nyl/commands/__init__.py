@@ -3,7 +3,7 @@ Nyl is a flexible configuration management tool for Kubernetes resources that ca
 applications directly or integrate as an ArgoCD ConfigManagementPlugin.
 """
 
-from nyl.utils import new_typer
+from nyl.tools.typer import new_typer
 
 
 app = new_typer(help=__doc__)

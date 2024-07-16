@@ -12,7 +12,7 @@ from rich.table import Table
 from nyl.profiles import get_tunnel_spec
 from nyl.profiles.config import ProfileConfig
 from nyl.profiles.tunnel import TunnelManager, TunnelSpec, TunnelStatus
-from nyl.utils import new_typer
+from nyl.tools.typer import new_typer
 
 
 app = new_typer(name="tun", help=__doc__)
