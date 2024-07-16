@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Iterable
@@ -24,11 +25,20 @@ class SopsFile(SecretProvider):
     provider is defined in.
     """
 
+    do_not_use_in_prod_only_for_testing_sops_age_key: str | None = None
+    """
+    The key to use for the `--age` option of SOPS. This is useful for testing purposes only and should not be used
+    in production.
+    """
+
     _cache: SecretValue | None = field(init=False, repr=False, default=None)
 
     def _load(self) -> SecretValue:
         if self._cache is None:
             logger.info("Loading secrets with Sops from '{}'", self.path)
+            env = os.environ.copy()
+            if self.do_not_use_in_prod_only_for_testing_sops_age_key:
+                env["SOPS_AGE_KEY"] = self.do_not_use_in_prod_only_for_testing_sops_age_key
             try:
                 self._cache = json.loads(
                     subprocess.run(
@@ -36,6 +46,7 @@ class SopsFile(SecretProvider):
                         capture_output=True,
                         text=True,
                         check=True,
+                        env=env,
                     ).stdout
                 )
             except subprocess.CalledProcessError as exc:
