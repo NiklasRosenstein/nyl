@@ -20,6 +20,8 @@ from kubernetes.dynamic.exceptions import NotFoundError
 
 from nyl.resources import NylResource
 from nyl.resources.helmchart import HelmChart
+from nyl.resources.package import Package
+from nyl.resources.statefulsecret import StatefulSecret
 from . import app
 
 
@@ -44,68 +46,7 @@ def template(
             logger.info(f"Using profile '{profile}' with kubeconfig '{active.kubeconfig}'.")
             load_kube_config(str(active.kubeconfig))
 
-    k8s = DynamicClient(ApiClient())
-    templater = PackageTemplater()
-    manifests: list[dict[str, Any]] = []
-    for manifest in templater.render_directory(package):
-        # Check if the resource has any references and try to resolve them. If a reference cannot be resolved, the
-        # manifest must be skipped. We emit a warning and continue with the next manifest.
-        refs = list(Reference.collect(manifest))
-        if refs:
-            skip_resource = False
-            resolves = {}
-            for ref in refs:
-                # TODO: Determine the namespace to fall back to.
-                try:
-                    result = k8s.get(
-                        resource=k8s.resources.get(api_version="v1", kind=ref.kind, group=""),
-                        name=ref.name,
-                        namespace=ref.namespace,  # TODO: Determine the namespace to backfill to.
-                    )
-
-                    value = result["data"][ref.key]
-                    if value is None:
-                        raise KeyError
-                    assert isinstance(value, str)
-                    resolves[str(ref)] = base64.b64decode(value.encode("ascii")).decode("utf-8")
-                except NotFoundError:
-                    logger.warning(
-                        "Skipping resource {}/{} because its reference to {} could not be resolved.",
-                        manifest["apiVersion"],
-                        manifest["kind"],
-                        ref,
-                    )
-                    skip_resource = True
-                    break
-                except KeyError:
-                    logger.warning(
-                        "Skipping resource {}/{} because its reference to {} could not be resolved (does not contain key {}).",
-                        manifest["apiVersion"],
-                        manifest["kind"],
-                        ref,
-                        ref.key,
-                    )
-                    skip_resource = True
-                    break
-            if skip_resource:
-                continue
-            manifest = Reference.sub(manifest, lambda ref: resolves[str(ref)])
-
-        if manifest["apiVersion"] == NylResource.API_VERSION:
-            resource = NylResource.load(manifest)
-
-            match resource:
-                case HelmChart():
-                    if not resource.release.namespace:
-                        raise RuntimeError(
-                            "HelmChart must have a namespace set in release.namespace until we have a way to specify the default namespace in a package."
-                        )
-                    manifests.extend(template_helm_chart(resource, resource.release.namespace, Path(".nyl/repo-cache")))
-
-            # TODO: Expand the resource
-        else:
-            manifests.append(manifest)
-
+    manifests = template_package_dir(package, {})
     print(yaml.safe_dump_all(manifests))
 
 
@@ -226,3 +167,108 @@ def template_helm_chart(
         return manifests
 
     assert False
+
+
+def template_package_resource(self: Package, namespace: str | None = None) -> None:
+    # Find the package in the search path.
+    search_path = [Path("../../packages")]  # TODO
+    for path in search_path:
+        package_dir = path / self.package
+        if package_dir.exists():
+            break
+    else:
+        raise ValueError(f"Could not find package '{self.package}' in search path {search_path}.")
+
+    logger.info("Resolved package '{}' to directory '{}'", self.metadata.name, package_dir)
+
+    return template_package_dir(package_dir, self.parameters, self.metadata.namespace or namespace)
+
+
+def template_package_dir(
+    directory: Path, parameters: dict[str, Any], namespace: str | None = None
+) -> list[dict[str, Any]]:
+    package_metadata_file = directory / "nyl-package.yaml"
+    if package_metadata_file.exists():
+        package_metadata = yaml.safe_load(package_metadata_file.read_text())
+    else:
+        package_metadata = {}
+
+    # Fill in parameter defaults.
+    parameters = dict(parameters)
+    for key, value in package_metadata.get("parameters", {}).items():
+        if "default" in value and key not in parameters:
+            parameters[key] = value["default"]
+
+    k8s = DynamicClient(ApiClient())
+    templater = PackageTemplater(parameters)
+    manifests: list[dict[str, Any]] = []
+    for manifest in templater.render_directory(directory):
+        # Check if the resource has any references and try to resolve them. If a reference cannot be resolved, the
+        # manifest must be skipped. We emit a warning and continue with the next manifest.
+        refs = list(Reference.collect(manifest))
+        if refs:
+            skip_resource = False
+            resolves = {}
+            for ref in refs:
+                # TODO: Determine the namespace to fall back to.
+                try:
+                    result = k8s.get(
+                        resource=k8s.resources.get(api_version="v1", kind=ref.kind, group=""),
+                        name=ref.name,
+                        namespace=ref.namespace,  # TODO: Determine the namespace to backfill to.
+                    )
+
+                    value = result["data"][ref.key]
+                    if value is None:
+                        raise KeyError
+                    assert isinstance(value, str)
+                    resolves[str(ref)] = base64.b64decode(value.encode("ascii")).decode("utf-8")
+                except NotFoundError:
+                    logger.warning(
+                        "Skipping resource {}/{} because its reference to {} could not be resolved.",
+                        manifest["apiVersion"],
+                        manifest["kind"],
+                        ref,
+                    )
+                    skip_resource = True
+                    break
+                except KeyError:
+                    logger.warning(
+                        "Skipping resource {}/{} because its reference to {} could not be resolved (does not contain key {}).",
+                        manifest["apiVersion"],
+                        manifest["kind"],
+                        ref,
+                        ref.key,
+                    )
+                    skip_resource = True
+                    break
+            if skip_resource:
+                continue
+            manifest = Reference.sub(manifest, lambda ref: resolves[str(ref)])
+
+        if manifest["apiVersion"] == NylResource.API_VERSION:
+            resource = NylResource.load(manifest)
+
+            match resource:
+                case HelmChart():
+                    manifests.extend(
+                        template_helm_chart(resource, resource.release.namespace or namespace, Path(".nyl/repo-cache"))
+                    )
+                case Package():
+                    manifests.extend(template_package_resource(resource, namespace))
+                case StatefulSecret():
+                    logger.warning("StatefulSecret not currently supported")
+        else:
+            manifests.append(manifest)
+
+    for manifest in manifests:
+        if "namespace" not in manifest["metadata"]:
+            logger.warning(
+                "Manifest {}/{} does not have a namespace, injecting {}",
+                manifest["kind"],
+                manifest["metadata"]["name"],
+                namespace,
+            )
+            manifest["metadata"]["namespace"] = namespace
+
+    return manifests

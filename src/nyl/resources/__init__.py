@@ -11,6 +11,7 @@ from databind.json import load as deser
 REGISTRY = {
     "HelmChart",
     "StatefulSecret",
+    "Package",
 }
 """ Collection of custom resources that Nyl supports. This is used to lookup the corresponding resource class."""
 

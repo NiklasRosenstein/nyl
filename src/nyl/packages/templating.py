@@ -11,8 +11,9 @@ class PackageTemplater:
     Helper class to evaluate templates in a package.
     """
 
-    def __init__(self) -> None:
-        self._env = jinja2.Environment()
+    def __init__(self, parameters: dict[str, Any]) -> None:
+        self._env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        self._env.globals["Params"] = parameters
         self._globals = Globals()
 
         for key in dir(self._globals):
@@ -33,7 +34,7 @@ class PackageTemplater:
 
         manifests: list[dict[str, Any]] = []
         for item in directory.iterdir():
-            if item.name == "nyl-package.yaml" or item.suffix != ".yaml" or not item.is_file():
+            if item.name.startswith("nyl-") or item.suffix != ".yaml" or not item.is_file():
                 continue
             manifests.extend(yaml.safe_load_all(self.render(item.read_text())))
         return manifests
