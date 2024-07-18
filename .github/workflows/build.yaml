@@ -30,4 +30,4 @@ jobs:
         run: pdm install
 
       - name: Run ${{ matrix.step }}
-        run: ${{ matrix.step }}
+        run: pdm run -- ${{ matrix.step }}
