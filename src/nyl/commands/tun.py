@@ -24,7 +24,7 @@ def status(all: bool = False) -> None:
     Show the status of all tunnels.
     """
 
-    config = ProfileConfig.load(ProfileConfig.find_config_file())
+    config = ProfileConfig.load(ProfileConfig.find_config_file(not_found_ok=True))
 
     table = Table()
     table.add_column("Profile", justify="right", style="cyan")

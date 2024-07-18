@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, overload
 
 
 @dataclass
@@ -104,11 +104,19 @@ class ProfileConfig:
     FALLBACK_PATH = Path.home() / ".config" / "nyl" / FILENAME
     STATE_DIRNAME = ".nyl"
 
-    file: Path
+    file: Path | None
     profiles: dict[str, Profile]
 
+    @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None) -> Path:
+    def find_config_file(cwd: Path | None = None, not_found_ok: bool = Literal[False]) -> Path: ...
+
+    @overload
+    @staticmethod
+    def find_config_file(cwd: Path | None = None, not_found_ok: bool = Literal[True]) -> Path | None: ...
+
+    @staticmethod
+    def find_config_file(cwd: Path | None = None, not_found_ok: bool = False) -> Path | None:
         """
         Find the `nyl-profiles.yaml` in the given *cwd* or any of its parent directories, and ultimately fall back to
         `~/.nyl/nyl-profiles.yaml` in the user's home directory.
@@ -128,19 +136,25 @@ class ProfileConfig:
         if ProfileConfig.FALLBACK_PATH.exists():
             return ProfileConfig.FALLBACK_PATH.absolute()
 
+        if not_found_ok:
+            return None
+
         raise FileNotFoundError(
             f"Configuration file '{ProfileConfig.FILENAME}' not found in '{Path.cwd()}', any of its parent directories "
             f"or '{ProfileConfig.FALLBACK_PATH.parent}'"
         )
 
     @staticmethod
-    def load(file: Path) -> "ProfileConfig":
+    def load(file: Path | None) -> "ProfileConfig":
         """
         Load the profiles configuration from the given file.
         """
 
         from databind.json import load as deser
         from yaml import safe_load
+
+        if file is None:
+            return ProfileConfig(None, {})
 
         profiles = deser(safe_load(file.read_text()), dict[str, Profile], filename=str(file))
         return ProfileConfig(file, profiles)
