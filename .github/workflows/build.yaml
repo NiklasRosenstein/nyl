@@ -56,4 +56,4 @@ jobs:
         run: pdm build
 
       - name: Publish package
-        run: pdm publish --no-build -u __token__ -p ${{ secrets.PYPI_PASSWORD }}
+        run: pdm publish --no-build -u __token__ -P ${{ secrets.PYPI_PASSWORD }}
