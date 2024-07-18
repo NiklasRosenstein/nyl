@@ -96,7 +96,6 @@ def _wait_for_api_server(url: str, timeout: float) -> None:
     )
     session = requests.Session()
     session.adapters["https://"] = adapter
-    session.verify = False
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
@@ -104,7 +103,7 @@ def _wait_for_api_server(url: str, timeout: float) -> None:
         # Measure the time it takes for API server to respond. This is useful to clarify what took so long
         # for example for an SSH tunnel that has only just been created.
         tstart = time.time()
-        response = session.get(url, timeout=timeout)
+        response = session.get(url, timeout=timeout, verify=False)
         tdelta = time.time() - tstart
         logger.debug("{:.2f}s until successful API server connection.", tdelta)
 
