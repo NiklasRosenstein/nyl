@@ -8,4 +8,3 @@ Nyl is a flexible configuration management tool for Kubernetes resources that ca
 applications directly or integrate as an [ArgoCD ConfigManagementPlugin][CMP].
 
   [CMP]: https://argoproj.github.io/argo-cd/operator-manual/config-management-plugins/
-  

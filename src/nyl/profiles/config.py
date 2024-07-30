@@ -109,11 +109,11 @@ class ProfileConfig:
 
     @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: bool = Literal[False]) -> Path: ...
+    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[False] = False) -> Path: ...
 
     @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: bool = Literal[True]) -> Path | None: ...
+    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[True] = True) -> Path | None: ...
 
     @staticmethod
     def find_config_file(cwd: Path | None = None, not_found_ok: bool = False) -> Path | None:

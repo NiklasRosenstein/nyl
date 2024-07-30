@@ -48,6 +48,7 @@ def status(all: bool = False) -> None:
         # on the system, while there may be tunnel information available for them from previous runs.
         for profile_name, profile in config.profiles.items():
             if profile_name not in tunnel_by_profile and profile.tunnel:
+                assert config.file is not None, "Profile configuration file must be set."
                 tunnels.append((get_tunnel_spec(config.file, profile_name, profile.tunnel), TunnelStatus.empty()))
 
         tunnels.sort(key=lambda x: (x[0].locator.profile, x[0].locator.config_file))

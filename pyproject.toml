@@ -16,6 +16,7 @@ dependencies = [
     "stablehash>=0.2.0",
     "nr-stream>=1.1.5",
     "requests>=2.32.3",
+    "structured-templates @ file:///${PROJECT_ROOT}/../structured-templates",
 ]
 requires-python = ">=3.10"
 readme = "README.md"

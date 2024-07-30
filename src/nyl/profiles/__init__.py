@@ -49,6 +49,7 @@ class ProfileManager:
 
         if profile.tunnel:
             forwardings = {"kubernetes": f"{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"}
+            assert self.config.file is not None, "Profile configuration file must be set."
             tun_spec = get_tunnel_spec(self.config.file, profile_name, profile.tunnel)
             tun_status = Optional(self.tunnels.get_tunnel(tun_spec.locator)).map(lambda x: x[1]).or_else(None)
             is_restarted = tun_status is None or tun_status.status != "open"
@@ -85,6 +86,7 @@ class ProfileManager:
         """
 
         config = ProfileConfig.load(ProfileConfig.find_config_file())
+        assert config.file is not None, "Profile configuration file must be set."
         tunnels = TunnelManager()
         kubeconfig = KubeconfigManager(cwd=config.file.parent, state_dir=config.file.with_name(".nyl") / "profiles")
         return ProfileManager(config, tunnels, kubeconfig)

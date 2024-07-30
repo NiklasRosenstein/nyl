@@ -4,14 +4,15 @@ This package contains Nyl's own Kubernetes-esque resources.
 
 from abc import ABC
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import ClassVar
 from databind.json import load as deser
+
+from nyl.tools.types import Manifest
 
 
 REGISTRY = {
     "HelmChart",
     "StatefulSecret",
-    "Package",
 }
 """ Collection of custom resources that Nyl supports. This is used to lookup the corresponding resource class."""
 
@@ -29,7 +30,7 @@ class NylResource(ABC):
             cls.KIND = cls.__name__
 
     @staticmethod
-    def load(manifest: dict[str, Any]) -> "NylResource":
+    def load(manifest: Manifest) -> "NylResource":
         """
         Load a Nyl resource from a manifest.
         """
@@ -43,11 +44,31 @@ class NylResource(ABC):
         cls: type[NylResource] = getattr(module, kind)
         assert isinstance(cls, type) and issubclass(cls, NylResource), f"{cls} is not a NylResource"
 
-        manifest = dict(manifest)
+        manifest = Manifest(manifest)
         manifest.pop("apiVersion")
         manifest.pop("kind")
 
         return deser(manifest, cls)
+
+    @staticmethod
+    def maybe_load(manifest: Manifest) -> "NylResource | None":
+        """
+        Maybe load the manifest into a NylResource if the `apiVersion` matches. If the resource kind is not supported,
+        an error will be raised.
+        """
+
+        if manifest["apiVersion"] != NylResource.API_VERSION:
+            return None
+
+        return NylResource.load(manifest)
+
+    @staticmethod
+    def is_nyl_resource(manifest: Manifest) -> bool:
+        """
+        Check if a manifest is a Nyl resource.
+        """
+
+        return manifest.get("apiVersion") == NylResource.API_VERSION
 
 
 @dataclass
