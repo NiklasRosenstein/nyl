@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal, overload
 from pathlib import Path
 from databind.core import Union
 
@@ -50,8 +50,16 @@ class SecretsConfig:
 
     provider: SecretProvider
 
+    @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None) -> Path:
+    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[False] = False) -> Path: ...
+
+    @overload
+    @staticmethod
+    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[True] = True) -> Path | None: ...
+
+    @staticmethod
+    def find_config_file(cwd: Path | None = None, not_found_ok: bool = False) -> Path | None:
         """
         Find the `nyl-secrets.yaml` in the given *cwd* or any of its parent directories.
         """
@@ -64,17 +72,26 @@ class SecretsConfig:
             if file.exists():
                 return file
 
+        if not_found_ok:
+            return None
+
         raise FileNotFoundError(
             f"Could not find '{SecretsConfig.FILENAME}' in '{Path.cwd()}' or any of its parent directories."
         )
 
     @staticmethod
-    def load(file: Path) -> "SecretsConfig":
+    def load(file: Path | None) -> "SecretsConfig":
         """
         Load the secrets configuration from a file.
         """
 
         from databind.json import load as deser
         from yaml import safe_load
+        from nyl.secrets.null import NullSecretsProvider
 
-        return SecretsConfig(deser(safe_load(file.read_text()), SecretProvider, filename=str(file)))
+        if file is None:
+            return SecretsConfig(NullSecretsProvider())
+        else:
+            provider = deser(safe_load(file.read_text()), SecretProvider, filename=str(file))
+            provider.init(file)
+            return SecretsConfig(provider)

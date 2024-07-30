@@ -4,7 +4,6 @@ from pathlib import Path, PosixPath
 import shlex
 import subprocess
 from tempfile import TemporaryDirectory
-from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from loguru import logger

@@ -1,6 +1,5 @@
-import base64
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from loguru import logger
 from structured_templates import TemplateEngine
 from typer import Option
@@ -11,8 +10,7 @@ from nyl.profiles import ProfileManager
 from kubernetes.config.incluster_config import load_incluster_config
 from kubernetes.config.kube_config import load_kube_config
 from kubernetes.client.api_client import ApiClient
-from kubernetes.dynamic import DynamicClient
-from kubernetes.dynamic.exceptions import NotFoundError
+from nyl.secrets.config import SecretsConfig
 from nyl.tools.types import Manifest, Manifests
 
 # from nyl.resources import NylResource
@@ -49,7 +47,9 @@ def template(
         client=ApiClient(),
     )
 
-    template_engine = TemplateEngine(globals_={})
+    secrets = SecretsConfig.load(SecretsConfig.find_config_file(not_found_ok=True))
+
+    template_engine = TemplateEngine(globals_={"secrets": secrets.provider})
 
     manifests = load_manifests(package)
     manifests = cast(Manifests, template_engine.evaluate(manifests))

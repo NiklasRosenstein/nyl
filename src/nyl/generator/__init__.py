@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Generic, TypeVar
 
 from nyl.resources import NylResource
-from nyl.tools.types import Manifests, Manifest
+from nyl.tools.types import Manifests
 
 T = TypeVar("T")
 
