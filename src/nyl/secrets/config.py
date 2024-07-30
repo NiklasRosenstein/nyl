@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, overload
+from typing import Any, Iterable
 from pathlib import Path
 from databind.core import Union
+from loguru import logger
 
 from nyl.tools.fs import find_config_file
 
@@ -68,6 +69,7 @@ class SecretsConfig:
         if file is None:
             return SecretsConfig(NullSecretsProvider())
         else:
+            logger.debug("Loading secrets configuration from '{}'", file)
             provider = deser(safe_load(file.read_text()), SecretProvider, filename=str(file))
             provider.init(file)
             return SecretsConfig(provider)

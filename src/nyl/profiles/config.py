@@ -1,7 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, overload
+from typing import Literal
+
+from loguru import logger
 
 from nyl.tools.fs import find_config_file
 
@@ -133,5 +135,6 @@ class ProfileConfig:
                 )
             return ProfileConfig(None, {})
 
+        logger.debug("Loading profiles configuration from '{}'", file)
         profiles = deser(safe_load(file.read_text()), dict[str, Profile], filename=str(file))
         return ProfileConfig(file, profiles)

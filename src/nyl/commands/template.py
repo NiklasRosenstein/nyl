@@ -10,6 +10,7 @@ from nyl.profiles import ProfileManager
 from kubernetes.config.incluster_config import load_incluster_config
 from kubernetes.config.kube_config import load_kube_config
 from kubernetes.client.api_client import ApiClient
+from nyl.project.config import ProjectConfig
 from nyl.secrets.config import SecretsConfig
 from nyl.tools.types import Manifest, Manifests
 
@@ -40,16 +41,22 @@ def template(
             logger.info(f"Using profile '{profile}' with kubeconfig '{active.kubeconfig}'.")
             load_kube_config(str(active.kubeconfig))
 
-    generator = DispatchingGenerator.default(
-        git_repo_cache_dir=Path(".nyl/repo-cache"),
-        search_path=[Path.cwd().parent.parent],
-        working_dir=Path.cwd(),
-        client=ApiClient(),
-    )
+    project = ProjectConfig.load()
+    if project.file:
+        state_dir = project.file.parent / ".nyl"
+    else:
+        state_dir = Path(".nyl")
 
     secrets = SecretsConfig.load()
 
     template_engine = TemplateEngine(globals_={"secrets": secrets.provider})
+
+    generator = DispatchingGenerator.default(
+        git_repo_cache_dir=state_dir / "repo-cache",
+        search_path=project.config.search_path,
+        working_dir=Path.cwd(),
+        client=ApiClient(),
+    )
 
     manifests = load_manifests(package)
     manifests = cast(Manifests, template_engine.evaluate(manifests))
