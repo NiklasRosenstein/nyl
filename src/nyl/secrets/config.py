@@ -4,6 +4,8 @@ from typing import Any, Iterable, Literal, overload
 from pathlib import Path
 from databind.core import Union
 
+from nyl.tools.fs import find_config_file
+
 SecretValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 """
 A secret is a JSON-serializable value that can be stored in a secret provider.
@@ -50,45 +52,19 @@ class SecretsConfig:
 
     provider: SecretProvider
 
-    @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[False] = False) -> Path: ...
-
-    @overload
-    @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[True] = True) -> Path | None: ...
-
-    @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: bool = False) -> Path | None:
+    def load(file: Path | None = None, /) -> "SecretsConfig":
         """
-        Find the `nyl-secrets.yaml` in the given *cwd* or any of its parent directories.
-        """
-
-        if cwd is None:
-            cwd = Path.cwd()
-
-        for directory in [cwd] + list(cwd.parents):
-            file = directory / SecretsConfig.FILENAME
-            if file.exists():
-                return file
-
-        if not_found_ok:
-            return None
-
-        raise FileNotFoundError(
-            f"Could not find '{SecretsConfig.FILENAME}' in '{Path.cwd()}' or any of its parent directories."
-        )
-
-    @staticmethod
-    def load(file: Path | None) -> "SecretsConfig":
-        """
-        Load the secrets configuration from a file.
+        Load the secrets configuration from the given or the default configuration file. If the configuration file does
+        not exist, a [NullSecretsProvider] is used.
         """
 
         from databind.json import load as deser
         from yaml import safe_load
         from nyl.secrets.null import NullSecretsProvider
 
+        if file is None:
+            file = find_config_file(SecretsConfig.FILENAME, required=False)
         if file is None:
             return SecretsConfig(NullSecretsProvider())
         else:

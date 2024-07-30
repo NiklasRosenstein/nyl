@@ -24,7 +24,7 @@ def status(all: bool = False) -> None:
     Show the status of all tunnels.
     """
 
-    config = ProfileConfig.load(ProfileConfig.find_config_file(not_found_ok=True))
+    config = ProfileConfig.load(required=False)
 
     table = Table()
     table.add_column("Profile", justify="right", style="cyan")
@@ -82,7 +82,7 @@ def start(profile_name: str) -> None:
     Open a tunnel to the cluster targeted by the profile.
     """
 
-    config = ProfileConfig.load(ProfileConfig.find_config_file())
+    config = ProfileConfig.load()
 
     try:
         profile = config.profiles[profile_name]
@@ -118,6 +118,6 @@ def stop(profile_name: Optional[str] = Argument(None)) -> None:
                 manager.close_tunnel(spec.locator)
         return
 
-    config = ProfileConfig.load(ProfileConfig.find_config_file())
+    config = ProfileConfig.load()
     with TunnelManager() as manager:
         manager.close_tunnel(TunnelSpec.Locator(str(config.file), profile_name))

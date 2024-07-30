@@ -16,7 +16,7 @@ def list() -> None:
     List the keys for all secrets in the provider.
     """
 
-    secrets = SecretsConfig.load(SecretsConfig.find_config_file())
+    secrets = SecretsConfig.load()
     for key in secrets.provider.keys():
         print(key)
 
@@ -27,5 +27,5 @@ def get(key: str, pretty: bool = False) -> None:
     Get the value of a secret as JSON.
     """
 
-    secrets = SecretsConfig.load(SecretsConfig.find_config_file())
+    secrets = SecretsConfig.load()
     print(json.dumps(secrets.provider.get(key), indent=4 if pretty else None))

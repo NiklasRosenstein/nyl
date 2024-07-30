@@ -47,7 +47,7 @@ def template(
         client=ApiClient(),
     )
 
-    secrets = SecretsConfig.load(SecretsConfig.find_config_file(not_found_ok=True))
+    secrets = SecretsConfig.load()
 
     template_engine = TemplateEngine(globals_={"secrets": secrets.provider})
 

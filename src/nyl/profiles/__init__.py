@@ -85,7 +85,7 @@ class ProfileManager:
         Load the profile manager from the default configuration file.
         """
 
-        config = ProfileConfig.load(ProfileConfig.find_config_file())
+        config = ProfileConfig.load()
         assert config.file is not None, "Profile configuration file must be set."
         tunnels = TunnelManager()
         kubeconfig = KubeconfigManager(cwd=config.file.parent, state_dir=config.file.with_name(".nyl") / "profiles")

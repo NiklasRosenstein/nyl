@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, overload
 
+from nyl.tools.fs import find_config_file
+
 
 @dataclass
 class Profile:
@@ -107,53 +109,28 @@ class ProfileConfig:
     file: Path | None
     profiles: dict[str, Profile]
 
-    @overload
     @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[False] = False) -> Path: ...
-
-    @overload
-    @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: Literal[True] = True) -> Path | None: ...
-
-    @staticmethod
-    def find_config_file(cwd: Path | None = None, not_found_ok: bool = False) -> Path | None:
+    def load(file: Path | None = None, /, *, required: bool = True) -> "ProfileConfig":
         """
-        Find the `nyl-profiles.yaml` in the given *cwd* or any of its parent directories, and ultimately fall back to
-        `~/.nyl/nyl-profiles.yaml` in the user's home directory.
-
-        Raises:
-            FileNotFoundError: If the configuration file could not be found.
-        """
-
-        if cwd is None:
-            cwd = Path.cwd()
-
-        for directory in [cwd] + list(cwd.parents) + [Path.home()]:
-            config_file = directory / ProfileConfig.FILENAME
-            if config_file.exists():
-                return config_file.absolute()
-
-        if ProfileConfig.FALLBACK_PATH.exists():
-            return ProfileConfig.FALLBACK_PATH.absolute()
-
-        if not_found_ok:
-            return None
-
-        raise FileNotFoundError(
-            f"Configuration file '{ProfileConfig.FILENAME}' not found in '{Path.cwd()}', any of its parent directories "
-            f"or '{ProfileConfig.FALLBACK_PATH.parent}'"
-        )
-
-    @staticmethod
-    def load(file: Path | None) -> "ProfileConfig":
-        """
-        Load the profiles configuration from the given file.
+        Load the profiles configuration from the given file or the default file. If the configuration file does not
+        exist, an error is raised unless *required* is set to `False`, in which case an empty configuration is
+        returned.
         """
 
         from databind.json import load as deser
         from yaml import safe_load
 
         if file is None:
+            file = find_config_file(ProfileConfig.FILENAME, required=False)
+            if file is None and ProfileConfig.FALLBACK_PATH.exists():
+                file = ProfileConfig.FALLBACK_PATH.absolute()
+
+        if file is None:
+            if required:
+                raise FileNotFoundError(
+                    f"Configuration file '{ProfileConfig.FILENAME}' not found in '{Path.cwd()}', "
+                    f"any of its parent directories or '{ProfileConfig.FALLBACK_PATH.parent}'"
+                )
             return ProfileConfig(None, {})
 
         profiles = deser(safe_load(file.read_text()), dict[str, Profile], filename=str(file))
