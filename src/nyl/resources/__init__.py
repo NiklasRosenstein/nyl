@@ -9,12 +9,8 @@ from databind.json import load as deser
 
 from nyl.tools.types import Manifest
 
-
-REGISTRY = {
-    "HelmChart",
-    "StatefulSecret",
-}
-""" Collection of custom resources that Nyl supports. This is used to lookup the corresponding resource class."""
+API_VERSION_K8S = "nyl.io/v1"
+API_VERSION_INLINE = "inline.nyl.io/v1"
 
 
 class NylResource(ABC):
@@ -22,12 +18,22 @@ class NylResource(ABC):
     Base class for Nyl custom resources.
     """
 
-    API_VERSION: ClassVar[str] = "nyl.io/v1"
-    KIND: ClassVar[str]
+    API_VERSION: ClassVar[str]
+    """
+    The API version of the resource. This is usually `inline.nyl.io/v1` for resources that are inlined by Nyl at
+    templating time and are not present in the final manifest, or `nyl.io/v1` for resources that are actual Kubernetes
+    resources.
+    """
 
-    def __init_subclass__(cls) -> None:
-        if "KIND" not in vars(cls):
-            cls.KIND = cls.__name__
+    KIND: ClassVar[str]
+    """
+    The kind identifier of the resource. If not set, this will default to the class name.
+    """
+
+    def __init_subclass__(cls, api_version: str, kind: str | None = None) -> None:
+        cls.API_VERSION = api_version
+        if kind is not None or "KIND" not in vars(cls):
+            cls.KIND = kind or cls.__name__
 
     @staticmethod
     def load(manifest: Manifest) -> "NylResource":
@@ -35,14 +41,17 @@ class NylResource(ABC):
         Load a Nyl resource from a manifest.
         """
 
-        kind = manifest["kind"]
-        if kind not in REGISTRY:
-            raise ValueError(f"Unsupported Nyl resource kind: {kind}")
+        if manifest.get("apiVersion") not in (API_VERSION_K8S, API_VERSION_INLINE):
+            raise ValueError(f"Unsupported apiVersion: {manifest.get('apiVersion')!r}")
 
+        kind = manifest["kind"]
         module_name = __name__ + "." + kind.lower()
-        module = __import__(module_name, fromlist=[kind])
-        cls: type[NylResource] = getattr(module, kind)
-        assert isinstance(cls, type) and issubclass(cls, NylResource), f"{cls} is not a NylResource"
+        try:
+            module = __import__(module_name, fromlist=[kind])
+            cls: type[NylResource] = getattr(module, kind)
+            assert isinstance(cls, type) and issubclass(cls, NylResource), f"{cls} is not a NylResource"
+        except (ImportError, AttributeError, AssertionError):
+            raise ValueError(f"Unsupported resource kind: {kind}")
 
         manifest = Manifest(manifest)
         manifest.pop("apiVersion")
@@ -57,18 +66,9 @@ class NylResource(ABC):
         an error will be raised.
         """
 
-        if manifest["apiVersion"] != NylResource.API_VERSION:
-            return None
-
-        return NylResource.load(manifest)
-
-    @staticmethod
-    def is_nyl_resource(manifest: Manifest) -> bool:
-        """
-        Check if a manifest is a Nyl resource.
-        """
-
-        return manifest.get("apiVersion") == NylResource.API_VERSION
+        if manifest.get("apiVersion") in (API_VERSION_K8S, API_VERSION_INLINE):
+            return NylResource.load(manifest)
+        return None
 
 
 @dataclass

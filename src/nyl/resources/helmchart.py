@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from nyl.resources import NylResource
+from nyl.resources import API_VERSION_INLINE, NylResource
 
 
 @dataclass
@@ -40,7 +40,7 @@ class ReleaseMetadata:
 
 
 @dataclass(kw_only=True)
-class HelmChart(NylResource):
+class HelmChart(NylResource, api_version=API_VERSION_INLINE):
     """
     Represents a Helm chart.
     """
