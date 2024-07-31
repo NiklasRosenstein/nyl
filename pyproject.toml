@@ -32,6 +32,9 @@ build-backend = "pdm.backend"
 [tool.pdm]
 distribution = true
 
+[tool.pdm.scripts]
+lint = "bash -c 'ruff format && ruff check --fix && mypy src'"
+
 [tool.pdm.dev-dependencies]
 dev = [
     "ruff>=0.4.8",

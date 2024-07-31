@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import cast
 from loguru import logger
 from structured_templates import TemplateEngine
-from typer import Option
+from typer import Argument, Option
 import yaml
 from nyl.generator import reconcile_generator
 from nyl.generator.dispatch import DispatchingGenerator
@@ -22,7 +22,7 @@ from . import app
 
 @app.command()
 def template(
-    package: Path = Option(Path("."), help="The package to render."),
+    paths: list[Path] = Argument(..., help="The YAML file(s) to render. Can be a directory."),
     profile: str = Option("default", envvar="NYL_PROFILE", help="The Nyl profile to use."),
     in_cluster: bool = Option(
         False, help="Use the in-cluster Kubernetes configuration. The --profile option is ignored."
@@ -58,7 +58,7 @@ def template(
         client=ApiClient(),
     )
 
-    manifests = load_manifests(package)
+    manifests = load_manifests(paths)
     manifests = cast(Manifests, template_engine.evaluate(manifests))
     manifests = reconcile_generator(generator, manifests)
 
@@ -72,16 +72,29 @@ def template(
             logger.warning("Manifest {}/{} does not have a namespace", manifest["kind"], manifest["metadata"]["name"])
 
 
-def load_manifests(directory: Path) -> Manifests:
+def load_manifests(paths: list[Path]) -> Manifests:
     """
     Load all manifests from a directory.
     """
 
+    logger.trace("Loading manifests from paths: {}", paths)
+
+    files = []
+    for path in paths:
+        if path.is_dir():
+            for item in path.iterdir():
+                if item.name.startswith("nyl-") or item.suffix != ".yaml" or not item.is_file():
+                    continue
+                files.append(item)
+        else:
+            files.append(path)
+
+    logger.trace("Files to load: {}", files)
+
     result = Manifests([])
-    for item in directory.iterdir():
-        if item.name.startswith("nyl-") or item.suffix != ".yaml" or not item.is_file():
-            continue
-        result.extend(map(Manifest, yaml.safe_load_all(item.read_text())))
+    for file in files:
+        result.extend(map(Manifest, yaml.safe_load_all(file.read_text())))
+
     return result
 
     # package_metadata_file = directory / "nyl-package.yaml"
