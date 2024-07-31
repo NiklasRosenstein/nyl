@@ -19,7 +19,7 @@ class StatefulSecretGenerator(Generator[StatefulSecret], resource_type=StatefulS
                         "apiVersion": "v1",
                         "kind": "Secret",
                         "metadata": {"name": res.metadata.name},
-                        "stringData": {k: v.encode() for k, v in res.stringData.items()},
+                        "stringData": {k: v for k, v in res.stringData.items()},
                     }
                 )
             ]
