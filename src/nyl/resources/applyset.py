@@ -16,7 +16,7 @@ APPLYSET_LABEL_ID = "applyset.kubernetes.io/id"
 APPLYSET_ANNOTATION_TOOLING = "applyset.kubernetes.io/tooling"
 """ Annotation key to use on ApplySet resources to specify the tooling used to apply the ApplySet. """
 
-APPLYSET_ANNO_CONTAINS_GROUP_KINDS = "applyset.kubernetes.io/contains-group-kinds"
+APPLYSET_ANNOTATION_CONTAINS_GROUP_KINDS = "applyset.kubernetes.io/contains-group-kinds"
 """ Annotation key to use on ApplySet resources to specify the kinds of resources that are part of the ApplySet. """
 
 
@@ -73,10 +73,28 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
     }
 
     @property
-    def id(self) -> str:
+    def id(self) -> str | None:
         """
-        Returns the ID that must be used to associate objects with this ApplySet. This ID must be used as the value of
-        the `applyset.kubernetes.io/part-of` label on objects that are part of this ApplySet.
+        Returns the ID of the ApplySet as it is configured in the `applyset.kubernetes.io/id` label.
+        """
+
+        if self.metadata.labels is not None:
+            return self.metadata.labels.get(APPLYSET_LABEL_ID)
+        return None
+
+    @id.setter
+    def id(self, value: str) -> None:
+        """
+        Set the ID of the ApplySet.
+        """
+
+        if self.metadata.labels is None:
+            self.metadata.labels = {}
+        self.metadata.labels[APPLYSET_LABEL_ID] = value
+
+    def calculate_id(self) -> str:
+        """
+        Calculate the ID of the ApplySet based on the name and namespace of the ApplySet.
         """
 
         return calculate_applyset_id(
@@ -104,14 +122,16 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
         self.metadata.annotations[APPLYSET_ANNOTATION_TOOLING] = value
 
     @property
-    def contains_group_kinds(self) -> list[str]:
+    def contains_group_kinds(self) -> list[str] | None:
         """
         Returns the kinds of resources that are part of the ApplySet.
         """
 
         if self.metadata.annotations is not None:
-            return self.metadata.annotations.get(APPLYSET_ANNO_CONTAINS_GROUP_KINDS, "").split(",")
-        return []
+            value = self.metadata.annotations.get(APPLYSET_ANNOTATION_CONTAINS_GROUP_KINDS)
+            if value is not None:
+                return value.split(",")
+        return None
 
     @contains_group_kinds.setter
     def contains_group_kinds(self, value: list[str]) -> None:
@@ -121,7 +141,18 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
 
         if self.metadata.annotations is None:
             self.metadata.annotations = {}
-        self.metadata.annotations[APPLYSET_ANNO_CONTAINS_GROUP_KINDS] = ",".join(sorted(value))
+        self.metadata.annotations[APPLYSET_ANNOTATION_CONTAINS_GROUP_KINDS] = ",".join(sorted(value))
+
+    def set_group_kinds(self, manifests: Manifests) -> None:
+        """
+        Set the kinds of resources that are part of the ApplySet based on the specified manifests.
+        """
+
+        kinds = set()
+        for manifest in manifests:
+            if "kind" in manifest:
+                kinds.add(get_canonical_resource_kind_name(manifest["apiVersion"], manifest["kind"]))
+        self.contains_group_kinds = list(kinds)
 
     def validate(self) -> None:
         """
@@ -144,17 +175,16 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
         if self.metadata.labels is None:
             self.metadata.labels = {}
 
-        if APPLYSET_LABEL_ID not in self.metadata.labels:
-            self.metadata.labels[APPLYSET_LABEL_ID] = self.id
-        elif self.metadata.labels[APPLYSET_LABEL_ID] != self.id:
-            raise ValueError(f"Invalid {APPLYSET_LABEL_ID!r} label value: {self.metadata.labels[APPLYSET_LABEL_ID]!r}")
+        if self.id is None:
+            self.id = self.calculate_id()
+        elif self.id != self.calculate_id():
+            raise ValueError(f"Invalid {APPLYSET_LABEL_ID!r} label value: {self.id!r}")
 
-        annotations = self.metadata.annotations or {}
-        if APPLYSET_ANNOTATION_TOOLING not in annotations:
+        if self.tooling is None:
             raise ValueError(f"ApplySet resource must have a {APPLYSET_ANNOTATION_TOOLING!r} annotation")
 
-        if APPLYSET_ANNO_CONTAINS_GROUP_KINDS not in annotations:
-            raise ValueError(f"ApplySet resource must have a {APPLYSET_ANNO_CONTAINS_GROUP_KINDS!r} annotation")
+        if self.contains_group_kinds is None:
+            raise ValueError(f"ApplySet resource must have a {APPLYSET_ANNOTATION_CONTAINS_GROUP_KINDS!r} annotation")
 
 
 def calculate_applyset_id(*, name: str, namespace: str = "", group: str) -> str:
