@@ -3,6 +3,10 @@ Nyl is a flexible configuration management tool for Kubernetes resources that ca
 applications directly or integrate as an ArgoCD ConfigManagementPlugin.
 """
 
+from enum import Enum
+import sys
+from loguru import logger
+from typer import Option
 from nyl.tools.typer import new_typer
 
 
@@ -19,3 +23,20 @@ app.add_typer(new.app)
 app.add_typer(profile.app)
 app.add_typer(secrets.app)
 app.add_typer(tun.app)
+
+
+class LogLevel(str, Enum):
+    TRACE = "trace"
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+@app.callback()
+def _callback(
+    log_level: LogLevel = Option(LogLevel.INFO, "--log-level", help="The log level to use."),
+) -> None:
+    logger.remove()
+    logger.add(sys.stderr, level=log_level.name)
