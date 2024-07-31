@@ -24,6 +24,12 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
     working_dir: Path
     """ The working directory to consider relative paths relative to. """
 
+    kube_version: str
+    """
+    The Kubernetes API version to generate manifests for. This must be known for Helm cluster feature detection (such
+    as, for example, picking the right apiVersion for Ingress resources).
+    """
+
     def generate(self, /, res: HelmChart) -> Manifests:
         repository: str | None = None
         chart: str | None = None
@@ -96,7 +102,15 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             values_file = Path(tmp) / "values.yaml"
             values_file.write_text(yaml.safe_dump(res.values))
 
-            command = ["helm", "template", "--debug"]
+            command = [
+                "helm",
+                "template",
+                "--debug",
+                "--skip-tests",
+                "--include-crds",
+                "--kube-version",
+                self.kube_version,
+            ]
             if repository:
                 command.extend(["--repo", repository])
             if res.chart.version:
