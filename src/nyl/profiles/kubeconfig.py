@@ -107,7 +107,7 @@ class KubeconfigManager:
 
         final_kubeconfig = self._state_dir / profile_name / "kubeconfig.local"
         final_kubeconfig.parent.mkdir(parents=True, exist_ok=True)
-        final_kubeconfig.write_text(yaml.dump(kubeconfig_data))
+        final_kubeconfig.write_text(yaml.safe_dump(kubeconfig_data))
 
         return final_kubeconfig
 

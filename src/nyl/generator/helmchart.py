@@ -95,7 +95,7 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
 
         with TemporaryDirectory() as tmp:
             values_file = Path(tmp) / "values.yaml"
-            values_file.write_text(yaml.dump(res.values))
+            values_file.write_text(yaml.safe_dump(res.values))
 
             command = ["helm", "template", "--debug"]
             if repository:
