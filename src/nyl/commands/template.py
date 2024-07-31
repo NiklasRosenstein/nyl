@@ -66,7 +66,11 @@ def template(
 
     manifests = load_manifests(paths)
     manifests = cast(Manifests, template_engine.evaluate(manifests))
-    manifests = reconcile_generator(generator, manifests)
+    manifests = reconcile_generator(
+        generator,
+        manifests,
+        on_generated=lambda m: cast(Manifest, template_engine.evaluate(m)),
+    )
 
     print(yaml.safe_dump_all(manifests))
 
