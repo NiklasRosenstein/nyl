@@ -36,7 +36,7 @@ class LogLevel(str, Enum):
 
 @app.callback()
 def _callback(
-    log_level: LogLevel = Option(LogLevel.INFO, "--log-level", help="The log level to use."),
+    log_level: LogLevel = Option(LogLevel.INFO, "--log-level", "-l", help="The log level to use."),
 ) -> None:
     logger.remove()
     logger.add(sys.stderr, level=log_level.name)
