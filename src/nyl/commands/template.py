@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from loguru import logger
@@ -18,6 +19,16 @@ from nyl.tools.types import Manifest, Manifests
 # from nyl.resources.helmchart import HelmChart
 # from nyl.resources.statefulsecret import StatefulSecret
 from . import app
+
+
+@dataclass
+class ManifestsWithSource:
+    """
+    Represents a list of manifests loaded from a particular source file.
+    """
+
+    manifests: Manifests
+    file: Path
 
 
 @app.command()
@@ -64,25 +75,64 @@ def template(
         client=ApiClient(),
     )
 
-    manifests = load_manifests(paths)
-    manifests = cast(Manifests, template_engine.evaluate(manifests))
-    manifests = reconcile_generator(
-        generator,
-        manifests,
-        on_generated=lambda m: cast(Manifest, template_engine.evaluate(m)),
-    )
+    for source in load_manifests(paths):
+        logger.info("Rendering manifests from {}", source.file)
 
-    print(yaml.safe_dump_all(manifests))
+        source.manifests = cast(Manifests, template_engine.evaluate(source.manifests))
+        source.manifests = reconcile_generator(
+            generator,
+            source.manifests,
+            on_generated=lambda m: cast(Manifest, template_engine.evaluate(m)),
+        )
 
-    # Warn out if any of the manifests do not have a namespace.
-    for manifest in manifests:
-        if (manifest.get("apiVersion"), manifest.get("kind")) != ("v1", "Namespace") and "namespace" not in manifest[
-            "metadata"
-        ]:
-            logger.warning("Manifest {}/{} does not have a namespace", manifest["kind"], manifest["metadata"]["name"])
+        # Find the namespaces that are defined in the file. If we find any manifests without a namespace, we will
+        # inject that namespace name into them.
+        namespaces: set[str] = set()
+        for manifest in source.manifests:
+            if is_namespace_resource(manifest):
+                namespaces.add(manifest["metadata"]["name"])
+
+        # Find all manifests without a namespace and inject the namespace name into them.
+        for manifest in source.manifests:
+            if not is_namespace_resource(manifest) and "namespace" not in manifest["metadata"]:
+                if len(namespaces) > 1:
+                    logger.error(
+                        "Multiple namespaces defined in '{}', but manifest {}/{} does not have a namespace.",
+                        source.file,
+                        manifest["kind"],
+                        manifest["metadata"]["name"],
+                    )
+                    exit(1)
+                elif len(namespaces) == 0:
+                    logger.warning(
+                        "No namespaces defined in '{}', injecting 'default' into manifest {}/{}.",
+                        source.file,
+                        manifest["kind"],
+                        manifest["metadata"]["name"],
+                    )
+                    manifest["metadata"]["namespace"] = "default"
+                else:
+                    logger.trace(
+                        "Injecting namespace '{}' into manifest {}/{}.",
+                        next(iter(namespaces)),
+                        manifest["kind"],
+                        manifest["metadata"]["name"],
+                    )
+                    manifest["metadata"]["namespace"] = next(iter(namespaces))
+            elif not is_namespace_resource(manifest) and manifest["metadata"]["namespace"] not in namespaces:
+                logger.warning(
+                    "Resource '{}/{}' in '{}' references namespace '{}', which is not defined in the file.",
+                    manifest["kind"],
+                    manifest["metadata"]["name"],
+                    source.file,
+                    manifest["metadata"]["namespace"],
+                )
+
+            print("---")
+            print(yaml.safe_dump(manifest))
 
 
-def load_manifests(paths: list[Path]) -> Manifests:
+def load_manifests(paths: list[Path]) -> list[ManifestsWithSource]:
     """
     Load all manifests from a directory.
     """
@@ -101,9 +151,10 @@ def load_manifests(paths: list[Path]) -> Manifests:
 
     logger.trace("Files to load: {}", files)
 
-    result = Manifests([])
+    result = []
     for file in files:
-        result.extend(map(Manifest, yaml.safe_load_all(file.read_text())))
+        manifests = Manifests(list(map(Manifest, yaml.safe_load_all(file.read_text()))))
+        result.append(ManifestsWithSource(manifests, file))
 
     return result
 
@@ -211,3 +262,11 @@ def _bcrypt(password: str) -> str:
     import bcrypt
 
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def is_namespace_resource(manifest: Manifest) -> bool:
+    """
+    Check if a manifest is a namespace resource.
+    """
+
+    return manifest.get("apiVersion") == "v1" and manifest.get("kind") == "Namespace"
