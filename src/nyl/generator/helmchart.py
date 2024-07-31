@@ -49,11 +49,11 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             hashed = hashlib.md5(without_query_params.encode()).hexdigest()
             clone_dir = self.git_repo_cache_dir / f"{hashed}-{PosixPath(parsed.path).name}"
             if clone_dir.exists():
-                logger.info("Using cached clone of {} at {}", without_query_params, clone_dir)
+                logger.debug("Using cached clone of {} at {}", without_query_params, clone_dir)
                 command = ["git", "fetch", "--tags"]
                 cwd = clone_dir
             else:
-                logger.info("Cloning {} to {}", without_query_params, clone_dir)
+                logger.debug("Cloning {} to {}", without_query_params, clone_dir)
                 command = ["git", "clone", without_query_params, str(clone_dir)]
                 cwd = None
             subprocess.check_call(command, cwd=cwd)
@@ -62,7 +62,7 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             #       worktree per instance that refers to a ref of the repository.
             query = parse_qs(parsed.query)
             if "ref" in query:
-                logger.info("Checking out ref {}", query["ref"][0])
+                logger.debug("Checking out ref {}", query["ref"][0])
                 command = ["git", "checkout", query["ref"][0]]
                 subprocess.check_call(command, cwd=clone_dir)
 
@@ -85,7 +85,6 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             chart = str(chart_path)
 
         else:
-            print(self)
             raise ValueError("Either `chart.repository`, `chart.git` or `chart.path` must be set.")
 
         # if repository and repository.startswith("nyl://"):
@@ -111,7 +110,7 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             #     command.append("--set")
             #     command.append(f"{key}={json.dumps(value)}")
 
-            logger.info("Generating manifests with Helm: $ {}", " ".join(map(shlex.quote, command)))
+            logger.debug("Generating manifests with Helm: $ {}", " ".join(map(shlex.quote, command)))
             try:
                 result = subprocess.run(command, capture_output=True, check=True)
             except subprocess.CalledProcessError as e:
