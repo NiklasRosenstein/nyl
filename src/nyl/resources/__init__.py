@@ -4,8 +4,8 @@ This package contains Nyl's own Kubernetes-esque resources.
 
 from abc import ABC
 from dataclasses import dataclass
-from typing import ClassVar
-from databind.json import load as deser
+from typing import ClassVar, cast
+from databind.json import load as deser, dump as ser
 
 from nyl.tools.types import Manifest
 
@@ -69,6 +69,16 @@ class NylResource(ABC):
         if manifest.get("apiVersion") in (API_VERSION_K8S, API_VERSION_INLINE):
             return NylResource.load(manifest)
         return None
+
+    def dump(self) -> Manifest:
+        """
+        Dump the resource to a manifest.
+        """
+
+        manifest = cast(Manifest, ser(self, type(self)))
+        manifest["apiVersion"] = self.API_VERSION
+        manifest["kind"] = self.KIND
+        return Manifest(manifest)
 
 
 @dataclass

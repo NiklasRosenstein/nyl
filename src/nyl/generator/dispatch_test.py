@@ -6,7 +6,7 @@ from pathlib import Path
 from loguru import logger
 from nyl.generator import Generator
 from nyl.generator.dispatch import DispatchingGenerator
-from nyl.resources import NylResource
+from nyl.resources import API_VERSION_INLINE, NylResource
 
 
 def test__DispatchingGenerator__default__creates_generator_for_every_nyl_inline_resource_kind() -> None:
@@ -25,7 +25,7 @@ def test__DispatchingGenerator__default__creates_generator_for_every_nyl_inline_
                 and issubclass(value, NylResource)
                 and value != NylResource
                 and value.__module__ == info.name
-                and value.API_VERSION == module.API_VERSION_INLINE
+                and value.API_VERSION == API_VERSION_INLINE
             ):
                 resource_kinds.add(value.KIND)
 
