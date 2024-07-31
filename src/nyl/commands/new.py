@@ -18,7 +18,7 @@ def _write_file_dedent(dir: Path, name: str, content: str) -> None:
         return
     logger.info("Writing {}", path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(dedent(content))
+    path.write_text(dedent(content).lstrip())
 
 
 @app.command()
@@ -28,6 +28,16 @@ def chart(dir: Path) -> None:
     """
 
     dir.mkdir(parents=True, exist_ok=True)
+
+    _write_file_dedent(
+        dir,
+        "Chart.yaml",
+        f"""
+        apiVersion: v2
+        name: {dir.name}
+        version: '0.0.0'
+        """,
+    )
 
     _write_file_dedent(
         dir,
