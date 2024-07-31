@@ -4,7 +4,7 @@ This package contains Nyl's own Kubernetes-esque resources.
 
 from abc import ABC
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import ClassVar, Self, cast
 from databind.json import load as deser, dump as ser
 
 from nyl.tools.types import Manifest
@@ -35,40 +35,64 @@ class NylResource(ABC):
         if kind is not None or "KIND" not in vars(cls):
             cls.KIND = kind or cls.__name__
 
-    @staticmethod
-    def load(manifest: Manifest) -> "NylResource":
+    @classmethod
+    def load(cls, manifest: Manifest) -> "Self":
         """
-        Load a Nyl resource from a manifest.
+        Load a Nyl resource from a manifest. If called directly on `NylResource`, this will deserialize into the
+        appropriate subclass based on the `kind` field in the manifest. If the method is instead called on a subclass
+        directly, the subclass will be used to deserialize the manifest.
         """
 
         if manifest.get("apiVersion") not in (API_VERSION_K8S, API_VERSION_INLINE):
             raise ValueError(f"Unsupported apiVersion: {manifest.get('apiVersion')!r}")
 
-        kind = manifest["kind"]
-        module_name = __name__ + "." + kind.lower()
-        try:
-            module = __import__(module_name, fromlist=[kind])
-            cls: type[NylResource] = getattr(module, kind)
-            assert isinstance(cls, type) and issubclass(cls, NylResource), f"{cls} is not a NylResource"
-        except (ImportError, AttributeError, AssertionError):
-            raise ValueError(f"Unsupported resource kind: {kind}")
+        if cls is NylResource:
+            kind = manifest["kind"]
+            module_name = __name__ + "." + kind.lower()
+            try:
+                module = __import__(module_name, fromlist=[kind])
+                subcls: type[NylResource] = getattr(module, kind)
+                assert isinstance(subcls, type) and issubclass(cls, NylResource), f"{subcls} is not a NylResource"
+            except (ImportError, AttributeError, AssertionError):
+                raise ValueError(f"Unsupported resource kind: {kind}")
+
+        else:
+            if manifest["kind"] != cls.KIND:
+                raise ValueError(f"Expected kind {cls.KIND!r}, got {manifest['kind']!r}")
+            subcls = cls
 
         manifest = Manifest(manifest)
         manifest.pop("apiVersion")
         manifest.pop("kind")
 
-        return deser(manifest, cls)
+        return cast(Self, deser(manifest, subcls))
 
-    @staticmethod
-    def maybe_load(manifest: Manifest) -> "NylResource | None":
+    @classmethod
+    def maybe_load(cls, manifest: Manifest) -> "Self | None":
         """
         Maybe load the manifest into a NylResource if the `apiVersion` matches. If the resource kind is not supported,
-        an error will be raised.
+        an error will be raised. If this is called on a subclass of `NylResource`, the subclass's kind will also be
+        checked.
         """
 
-        if manifest.get("apiVersion") in (API_VERSION_K8S, API_VERSION_INLINE):
-            return NylResource.load(manifest)
+        if cls.matches(manifest):
+            return cls.load(manifest)
         return None
+
+    @classmethod
+    def matches(cls, manifest: Manifest) -> bool:
+        """
+        Check if the manifest is a NylResource of the correct `apiVersion` and possibly `kind` (if called on a
+        `NylResource` subclass).
+        """
+
+        if manifest.get("apiVersion") not in (API_VERSION_K8S, API_VERSION_INLINE):
+            return False
+
+        if cls is not NylResource and manifest["kind"] != cls.KIND:
+            return False
+
+        return True
 
     def dump(self) -> Manifest:
         """
