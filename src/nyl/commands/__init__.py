@@ -13,6 +13,7 @@ from nyl.tools.typer import new_typer
 app = new_typer(help=__doc__)
 
 
+from . import crds  # noqa: F401,E402
 from . import new  # noqa: E402
 from . import profile  # noqa: E402
 from . import secrets  # noqa: E402

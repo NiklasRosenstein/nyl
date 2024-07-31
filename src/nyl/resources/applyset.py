@@ -5,7 +5,9 @@ from typing import Annotated, ClassVar
 from nyl.resources import API_VERSION_K8S, NylResource, ObjectMetadata
 from databind.core import SerializeDefaults
 
-APPLYSET_LABEL_PORT_OF = "applyset.kubernetes.io/part-of"
+from nyl.tools.types import Manifests
+
+APPLYSET_LABEL_PART_OF = "applyset.kubernetes.io/part-of"
 """ Label key to use to associate objects with an ApplySet resource. """
 
 APPLYSET_LABEL_ID = "applyset.kubernetes.io/id"
@@ -43,7 +45,7 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
         "apiVersion": "apiextensions.k8s.io/v1",
         "kind": "CustomResourceDefinition",
         "metadata": {
-            "name": f"applications.{API_VERSION_K8S.split('/')[0]}",
+            "name": f"applysets.{API_VERSION_K8S.split('/')[0]}",
             "labels": {
                 "applyset.kubernetes.io/is-parent-type": "true",
             },
