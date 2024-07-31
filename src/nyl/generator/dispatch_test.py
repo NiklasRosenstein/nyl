@@ -31,6 +31,11 @@ def test__DispatchingGenerator__default__creates_generator_for_every_nyl_inline_
 
     logger.info("Detected Nyl inline resource kinds: {}", resource_kinds)
 
+    # Assert that a bunch of the ones we already know are contained. This way we don't accidentally
+    # end up testing for nothing after refactoring.
+    assert "HelmChart" in resource_kinds
+    assert "StatefulSecret" in resource_kinds
+
     generator = DispatchingGenerator.default(
         git_repo_cache_dir=Path("/tmp"), search_path=[], working_dir=Path("/tmp"), client=MagicMock()
     )
