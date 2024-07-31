@@ -1,5 +1,5 @@
 from nyl.resources import ObjectMetadata
-from nyl.resources.applyset import ApplySet, calculate_applyset_id
+from nyl.resources.applyset import ApplySet, calculate_applyset_id, get_canonical_resource_kind_name
 
 
 def test__ApplySet__dump() -> None:
@@ -31,3 +31,9 @@ def test__ApplySet__dump() -> None:
             },
         },
     }
+
+
+def test__get_canonical_resource_kind_name() -> None:
+    assert get_canonical_resource_kind_name("v1", "Pod") == "Pod"
+    assert get_canonical_resource_kind_name("apps/v1", "Deployment") == "Deployment.apps"
+    assert get_canonical_resource_kind_name("nyl.io/v1", "ApplySet") == "ApplySet.nyl.io"

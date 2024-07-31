@@ -164,3 +164,22 @@ def calculate_applyset_id(*, name: str, namespace: str = "", group: str) -> str:
     hash = hashlib.sha256(f"{name}.{namespace}.ApplySet.{group}".encode()).digest()
     uid = base64.b64encode(hash).decode().rstrip("=").replace("/", "_").replace("+", "-")
     return f"applyset-{uid}-v1"
+
+
+def get_canonical_resource_kind_name(api_version: str, kind: str) -> str:
+    """
+    Given the apiVersion and kind of a Kubernetes resource, return the canonical name of the resource. This name can
+    be used to identify the resource in an ApplySet's `applyset.kubernetes.io/contains-group-kinds` annotation.
+
+    Note that according to the [reference][1], the resource name should use the plural form, but it appears that the
+    resource kind name is also accepted. Deriving the plural form will be difficult without querying the Kubernetes
+    API.
+
+    [1]: https://kubernetes.io/docs/reference/labels-annotations-taints/#applyset-kubernetes-io-contains-group-kinds
+
+    Args:
+        api_version: The apiVersion of the resource.
+        kind: The kind of the resource.
+    """
+
+    return (f"{kind}." + (api_version.split("/")[0] if "/" in api_version else "")).rstrip(".")

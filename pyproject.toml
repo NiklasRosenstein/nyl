@@ -34,7 +34,7 @@ build-backend = "pdm.backend"
 distribution = true
 
 [tool.pdm.scripts]
-lint = "bash -c 'ruff format && ruff check --fix && mypy src'"
+lint = "bash -c 'ruff format && ruff check --fix && mypy src' && pytest"
 
 [tool.pdm.dev-dependencies]
 dev = [
