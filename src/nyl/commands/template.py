@@ -49,7 +49,13 @@ def template(
 
     secrets = SecretsConfig.load()
 
-    template_engine = TemplateEngine(globals_={"secrets": secrets.provider})
+    template_engine = TemplateEngine(
+        globals_={
+            "secrets": secrets.provider,
+            "random_password": _random_password,
+            "bcrypt": _bcrypt,
+        }
+    )
 
     generator = DispatchingGenerator.default(
         git_repo_cache_dir=state_dir / "repo-cache",
@@ -181,3 +187,23 @@ def load_manifests(paths: list[Path]) -> Manifests:
     #         manifest["metadata"]["namespace"] = namespace
 
     # return manifests
+
+
+def _random_password(length: int = 32) -> str:
+    """
+    Generate a random password.
+    """
+
+    import secrets
+
+    return secrets.token_urlsafe(length)
+
+
+def _bcrypt(password: str) -> str:
+    """
+    Hash a password using bcrypt.
+    """
+
+    import bcrypt
+
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
