@@ -12,12 +12,10 @@ from kubernetes.config.incluster_config import load_incluster_config
 from kubernetes.config.kube_config import load_kube_config
 from kubernetes.client.api_client import ApiClient
 from nyl.project.config import ProjectConfig
+from nyl.resources.applyset import ApplySet
 from nyl.secrets.config import SecretsConfig
 from nyl.tools.types import Manifest, Manifests
 
-# from nyl.resources import NylResource
-# from nyl.resources.helmchart import HelmChart
-# from nyl.resources.statefulsecret import StatefulSecret
 from . import app
 
 
@@ -87,13 +85,40 @@ def template(
 
         # Find the namespaces that are defined in the file. If we find any manifests without a namespace, we will
         # inject that namespace name into them.
+        # Also find the applyset defined in the file.
         namespaces: set[str] = set()
-        for manifest in source.manifests:
+        applyset: ApplySet | None = None
+        for manifest in list(source.manifests):
             if is_namespace_resource(manifest):
                 namespaces.add(manifest["metadata"]["name"])
+            elif ApplySet.matches(manifest):
+                if applyset is not None:
+                    logger.error(
+                        "Multiple ApplySet resources defined in '{}', there can only be one per source.",
+                        source.file,
+                    )
+                    exit(1)
+                applyset = ApplySet.load(manifest)
+                source.manifests.remove(manifest)
+
+        if applyset is not None:
+            applyset.set_group_kinds(source.manifests)
+            applyset.tooling = "kubectl/1.30"  # TODO: How can we infer the right tool?
+            # applyset.validate()
+            applyset.id = applyset.calculate_id()
+            print("---")
+            print(yaml.safe_dump(applyset.dump()))
 
         # Find all manifests without a namespace and inject the namespace name into them.
+        # If there is an applyset, ensure they are marked as part of the applyset.
         for manifest in source.manifests:
+            # Running with --applyset, kubectl will complain with
+            #
+            #   error: ApplySet label "applyset.kubernetes.io/part-of" already set in input data`
+            # if applyset is not None:
+            #     if APPLYSET_LABEL_PART_OF not in (labels := manifest["metadata"].setdefault("labels", {})):
+            #         labels[APPLYSET_LABEL_PART_OF] = applyset.id
+
             if not is_namespace_resource(manifest) and "namespace" not in manifest["metadata"]:
                 if len(namespaces) > 1:
                     logger.error(
