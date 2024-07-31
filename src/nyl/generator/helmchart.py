@@ -118,7 +118,7 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             command.extend(["--values", str(values_file)])
             if res.release.namespace:
                 command.extend(["--namespace", res.release.namespace])
-            command.extend([res.release.name or res.name, str(chart)])
+            command.extend([res.release.name, str(chart)])
 
             # for key, value in res.set.items():
             #     command.append("--set")

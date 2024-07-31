@@ -32,7 +32,7 @@ class ReleaseMetadata:
     Metadata for a Helm release.
     """
 
-    name: str | None = None
+    name: str
     """ The name of the release. If not set, the name of the Helm chart resource is used. """
 
     namespace: str | None = None
@@ -45,16 +45,10 @@ class HelmChart(NylResource):
     Represents a Helm chart.
     """
 
-    name: str
-    """
-    The name of the Helm chart resource. This is used to identify the chart in resources defined in a package. It
-    is also used as the release name when installing the chart, unless the `release.name` field is set.
-    """
-
     chart: ChartRef
     """ Reference to the Helm chart. """
 
-    release: ReleaseMetadata = field(default_factory=ReleaseMetadata)
+    release: ReleaseMetadata
     """ Metadata for the release. """
 
     values: dict[str, Any] = field(default_factory=dict)
