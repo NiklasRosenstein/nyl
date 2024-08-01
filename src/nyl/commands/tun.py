@@ -77,7 +77,7 @@ def status(all: bool = False) -> None:
 
 
 @app.command()
-def start(profile_name: str) -> None:
+def start(profile_name: str = Argument("default", envvar="NYL_PROFILE")) -> None:
     """
     Open a tunnel to the cluster targeted by the profile.
     """
@@ -107,12 +107,12 @@ def start(profile_name: str) -> None:
 
 
 @app.command()
-def stop(profile_name: Optional[str] = Argument(None)) -> None:
+def stop(profile_name: str = Argument("default", envvar="NYL_PROFILE"), all: bool = False) -> None:
     """
     Close all tunnels or the tunnel for a specific profile.
     """
 
-    if profile_name is None:
+    if all:
         with TunnelManager() as manager:
             for spec, _status in manager.get_tunnels():
                 manager.close_tunnel(spec.locator)
