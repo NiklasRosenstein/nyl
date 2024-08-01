@@ -20,6 +20,15 @@ from nr.stream import Optional
 class ActivatedProfile:
     kubeconfig: Path
 
+    @property
+    def env(self) -> dict[str, str]:
+        return {
+            # For standard tooling, like kubectl.
+            "KUBECONFIG": str(self.kubeconfig.absolute()),
+            # Used by Terraform providers.
+            "KUBE_CONFIG_PATH": str(self.kubeconfig.absolute()),
+        }
+
 
 @dataclass
 class ProfileManager:

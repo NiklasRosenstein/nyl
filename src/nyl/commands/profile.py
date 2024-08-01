@@ -23,8 +23,5 @@ def activate(profile_name: str = Argument("default", envvar="NYL_PROFILE")) -> N
     with ProfileManager.load() as manager:
         profile = manager.activate_profile(profile_name)
 
-    # For standard tooling, like kubectl.
-    print(f"export KUBECONFIG={shlex.quote(str(profile.kubeconfig.absolute()))}")
-
-    # Used by Terraform providers.
-    print(f"export KUBE_CONFIG_PATH={shlex.quote(str(profile.kubeconfig.absolute()))}")
+    for key, value in profile.env.items():
+        print(f"export {key}={shlex.quote(value)}")
