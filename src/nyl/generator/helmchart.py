@@ -50,8 +50,11 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
                 repository = res.chart.repository
 
         elif res.chart.git:
+            if res.chart.name:
+                raise ValueError("Cannot specify both `chart.git` and `chart.name`, did you mean `chart.path`?")
+
             # Clone the repository and find the chart in the repository.
-            parsed = urlparse(res.chart.git[len("git+") :])
+            parsed = urlparse(res.chart.git)
             without_query_params = parsed._replace(query="").geturl()
             hashed = hashlib.md5(without_query_params.encode()).hexdigest()
             clone_dir = self.git_repo_cache_dir / f"{hashed}-{PosixPath(parsed.path).name}"
