@@ -111,6 +111,16 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
                 "--include-crds",
                 "--kube-version",
                 self.kube_version,
+                # Similar to ArgoCD, we always consider all runs as upgrades. This does impact fresh installs in that
+                # some resources may not be created, but it's better to be consistent with ArgoCD and in general it's
+                # the better compromise.
+                "--is-upgrade",
+                # Permit server connections for Helm lookup.
+                "--dry-run=server",
+                # We cannot use --validate because we would like users to be able generate Nyl inline resources that
+                # are not actually installed Kubernetes CRDs, as well as generating custom resources before they are
+                # installed.
+                # "--validate",
             ]
             if repository:
                 command.extend(["--repo", repository])
