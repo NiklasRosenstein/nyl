@@ -144,7 +144,7 @@ def template(
                 if APPLYSET_LABEL_PART_OF not in (labels := manifest["metadata"].setdefault("labels", {})):
                     labels[APPLYSET_LABEL_PART_OF] = applyset.id
 
-            if not is_namespace_resource(manifest) and "namespace" not in manifest["metadata"]:
+            if not is_cluster_scoped_resource(manifest) and "namespace" not in manifest["metadata"]:
                 if len(namespaces) > 1:
                     logger.error(
                         "Multiple namespaces defined in '{}', but manifest {}/{} does not have a namespace.",
@@ -169,7 +169,7 @@ def template(
                         manifest["metadata"]["name"],
                     )
                     manifest["metadata"]["namespace"] = next(iter(namespaces))
-            elif not is_namespace_resource(manifest) and manifest["metadata"]["namespace"] not in namespaces:
+            elif not is_cluster_scoped_resource(manifest) and manifest["metadata"]["namespace"] not in namespaces:
                 logger.warning(
                     "Resource '{}/{}' in '{}' references namespace '{}', which is not defined in the file.",
                     manifest["kind"],
@@ -288,3 +288,21 @@ def is_namespace_resource(manifest: Manifest) -> bool:
     """
 
     return manifest.get("apiVersion") == "v1" and manifest.get("kind") == "Namespace"
+
+
+def is_cluster_scoped_resource(manifest: Manifest) -> bool:
+    """
+    Check if a manifest is a cluster scoped resource.
+    """
+
+    # HACK: We should probably just list the resources via the Kubectl API?
+    fqn = manifest.get("kind", "") + "." + manifest.get("apiVersion", "").split("/")[0]
+    return fqn in {
+        "ClusterRole.rbac.authorization.k8s.io",
+        "ClusterRoleBinding.rbac.authorization.k8s.io",
+        "CustomResourceDefinition.apiextensions.k8s.io",
+        "IngressClass.networking.k8s.io",
+        "Namespace.v1",
+        "StorageClass.storage.k8s.io",
+        "ValidatingWebhookConfiguration.admissionregistration.k8s.io",
+    }
