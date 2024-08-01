@@ -112,9 +112,11 @@ def template(
         # Find all manifests without a namespace and inject the namespace name into them.
         # If there is an applyset, ensure they are marked as part of the applyset.
         for manifest in source.manifests:
-            # Running with --applyset, kubectl will complain with
+            # Running with --applyset, kubectl will complain with the following error:
             #
             #   error: ApplySet label "applyset.kubernetes.io/part-of" already set in input data`
+            #
+            # Kubectl will add this label to resources automatically when using --applyset.
             # if applyset is not None:
             #     if APPLYSET_LABEL_PART_OF not in (labels := manifest["metadata"].setdefault("labels", {})):
             #         labels[APPLYSET_LABEL_PART_OF] = applyset.id
