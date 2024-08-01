@@ -4,6 +4,7 @@ from pathlib import Path, PosixPath
 import shlex
 import subprocess
 from tempfile import TemporaryDirectory
+from textwrap import indent
 from urllib.parse import parse_qs, urlparse
 
 from loguru import logger
@@ -128,7 +129,12 @@ class HelmChartGenerator(Generator[HelmChart], resource_type=HelmChart):
             try:
                 result = subprocess.run(command, capture_output=True, check=True)
             except subprocess.CalledProcessError as e:
-                raise ValueError(f"Failed to get manifests: {e}\n\nstdout: {e.stdout}\n\nstderr: {e.stderr}")
+                prefix = "    "
+                raise ValueError(
+                    f"Failed to generate manifests using Helm.\n{indent(str(e), prefix)}\n"
+                    f"stdout:\n{indent(e.stdout.decode(), prefix)}\n"
+                    f"stderr:\n{indent(e.stderr.decode(), prefix)}"
+                )
 
             manifests = Manifests(list(filter(None, yaml.safe_load_all(result.stdout.decode()))))
 
