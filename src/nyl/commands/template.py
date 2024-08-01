@@ -1,3 +1,4 @@
+import atexit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -12,8 +13,9 @@ from kubernetes.config.incluster_config import load_incluster_config
 from kubernetes.config.kube_config import load_kube_config
 from kubernetes.client.api_client import ApiClient
 from nyl.project.config import ProjectConfig
-from nyl.resources.applyset import ApplySet
+from nyl.resources.applyset import APPLYSET_LABEL_PART_OF, ApplySet
 from nyl.secrets.config import SecretsConfig
+from nyl.tools.kubectl import Kubectl
 from nyl.tools.types import Manifest, Manifests
 
 from . import app
@@ -36,10 +38,31 @@ def template(
     in_cluster: bool = Option(
         False, help="Use the in-cluster Kubernetes configuration. The --profile option is ignored."
     ),
+    apply: bool = Option(
+        False,
+        help="Run `kubectl apply` on the rendered manifests, once for each source file. "
+        "Implies `--no-applyset-part-of`. When an ApplySet is defined in the source file, it will be applied "
+        "separately. Note that this option implies `kubectl --prune`.",
+    ),
+    applyset_part_of: bool = Option(
+        True,
+        help="Add the 'applyset.kubernetes.io/part-of' label to all resources belonging to an ApplySet (if declared). "
+        "This option must be disabled when passing the generated manifests to `kubectl apply --applyset=...`, as it "
+        "would otherwise cause an error due to the label being present on the input data.",
+    ),
 ) -> None:
     """
     Render a package template into full Kubernetes resources.
     """
+
+    if apply:
+        # When running with --apply, we must ensure that the --applyset-part-of option is disabled, as it would cause
+        # an error when passing the generated manifests to `kubectl apply --applyset=...`.
+        applyset_part_of = False
+
+    kubectl = Kubectl()
+    kubectl.env["KUBECTL_APPLYSET"] = "true"
+    atexit.register(kubectl.cleanup)
 
     if in_cluster:
         logger.info("Using in-cluster configuration.")
@@ -49,6 +72,7 @@ def template(
             active = profiles.activate_profile(profile)
             logger.info(f"Using profile '{profile}' with kubeconfig '{active.kubeconfig}'.")
             load_kube_config(str(active.kubeconfig))
+            kubectl.set_kubeconfig(active.kubeconfig)
 
     project = ProjectConfig.load()
     if project.file:
@@ -104,22 +128,22 @@ def template(
         if applyset is not None:
             applyset.set_group_kinds(source.manifests)
             applyset.tooling = "kubectl/1.30"  # TODO: How can we infer the right tool?
-            # applyset.validate()
-            applyset.id = applyset.calculate_id()
-            print("---")
-            print(yaml.safe_dump(applyset.dump()))
+            applyset.validate()
+
+            if apply:
+                # We need to ensure that ApplySet parent object exists before invoking `kubectl apply --applyset=...`.
+                logger.info("Kubectl-apply ApplySet resource '{}' from '{}'", applyset.reference, source.file)
+                kubectl.apply(Manifests([applyset.dump()]), force_conflicts=True)
+            else:
+                print("---")
+                print(yaml.safe_dump(applyset.dump()))
 
         # Find all manifests without a namespace and inject the namespace name into them.
         # If there is an applyset, ensure they are marked as part of the applyset.
         for manifest in source.manifests:
-            # Running with --applyset, kubectl will complain with the following error:
-            #
-            #   error: ApplySet label "applyset.kubernetes.io/part-of" already set in input data`
-            #
-            # Kubectl will add this label to resources automatically when using --applyset.
-            # if applyset is not None:
-            #     if APPLYSET_LABEL_PART_OF not in (labels := manifest["metadata"].setdefault("labels", {})):
-            #         labels[APPLYSET_LABEL_PART_OF] = applyset.id
+            if applyset is not None and applyset_part_of:
+                if APPLYSET_LABEL_PART_OF not in (labels := manifest["metadata"].setdefault("labels", {})):
+                    labels[APPLYSET_LABEL_PART_OF] = applyset.id
 
             if not is_namespace_resource(manifest) and "namespace" not in manifest["metadata"]:
                 if len(namespaces) > 1:
@@ -155,8 +179,18 @@ def template(
                     manifest["metadata"]["namespace"],
                 )
 
-            print("---")
-            print(yaml.safe_dump(manifest))
+            if not apply:
+                print("---")
+                print(yaml.safe_dump(manifest))
+
+        if apply:
+            logger.info("Kubectl-apply {} manifest(s) from '{}'", len(source.manifests), source.file)
+            kubectl.apply(
+                manifests=source.manifests,
+                applyset=applyset.reference if applyset else None,
+                prune=True if applyset else False,
+                force_conflicts=True,
+            )
 
 
 def load_manifests(paths: list[Path]) -> list[ManifestsWithSource]:

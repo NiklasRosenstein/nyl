@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 from tempfile import TemporaryDirectory
@@ -9,6 +10,8 @@ from typing import Any, TypedDict
 
 import yaml
 from loguru import logger
+
+from nyl.tools.types import Manifests
 
 
 @dataclass
@@ -53,11 +56,14 @@ class Kubectl:
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
         if self.tempdir is not None:
             self.tempdir.cleanup()
             self.tempdir = None
 
-    def set_kubeconfig(self, kubeconfig: dict[str, Any] | str) -> None:
+    def set_kubeconfig(self, kubeconfig: dict[str, Any] | str | Path) -> None:
         """
         Set the kubeconfig to use for `kubectl` commands.
         """
@@ -65,18 +71,21 @@ class Kubectl:
         if self.tempdir is None:
             self.tempdir = TemporaryDirectory()
 
-        kubeconfig_path = os.path.join(self.tempdir.name, "kubeconfig")
-        with open(kubeconfig_path, "w") as f:
-            if isinstance(kubeconfig, str):
-                f.write(kubeconfig)
-            else:
-                yaml.safe_dump(kubeconfig, f)
+        if isinstance(kubeconfig, Path):
+            kubeconfig_path = kubeconfig
+        else:
+            kubeconfig_path = Path(self.tempdir.name) / "kubeconfig"
+            with open(kubeconfig_path, "w") as f:
+                if isinstance(kubeconfig, str):
+                    f.write(kubeconfig)
+                else:
+                    yaml.safe_dump(kubeconfig, f)
 
-        self.env["KUBECONFIG"] = kubeconfig_path
+        self.env["KUBECONFIG"] = str(kubeconfig_path)
 
     def apply(
         self,
-        manifests: list[dict[str, Any]],
+        manifests: Manifests,
         force_conflicts: bool = False,
         server_side: bool = True,
         applyset: str | None = None,
@@ -99,7 +108,7 @@ class Kubectl:
         if force_conflicts:
             command.append("--force-conflicts")
 
-        logger.info("Applying manifests with command: $ {command}", command=" ".join(map(shlex.quote, command)))
+        logger.debug("Applying manifests with command: $ {command}", command=" ".join(map(shlex.quote, command)))
         status = subprocess.run(command, input=yaml.safe_dump_all(manifests), text=True, env={**os.environ, **env})
         if status.returncode:
             raise KubectlError(status.returncode)

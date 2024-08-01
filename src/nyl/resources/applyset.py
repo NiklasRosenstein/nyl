@@ -73,6 +73,14 @@ class ApplySet(NylResource, api_version=API_VERSION_K8S):
     }
 
     @property
+    def reference(self) -> str:
+        """
+        Return the refernce to this ApplySet resource that can be given to the `--applyset` flag of `kubectl apply`.
+        """
+
+        return f"applysets.{self.API_VERSION.split('/')[0]}/{self.metadata.name}"
+
+    @property
     def id(self) -> str | None:
         """
         Returns the ID of the ApplySet as it is configured in the `applyset.kubernetes.io/id` label.
