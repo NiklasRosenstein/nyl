@@ -92,6 +92,7 @@ class KubeconfigManager:
         api_host = urlparse(server).hostname
         api_port = urlparse(server).port or 443
 
+        raw_kubeconfig.chmod(0o600)
         return GetRawKubeconfigResult(
             path=raw_kubeconfig, context=kubeconfig_data["current-context"], api_host=api_host, api_port=api_port
         )
@@ -108,6 +109,7 @@ class KubeconfigManager:
         final_kubeconfig = self._state_dir / profile_name / "kubeconfig.local"
         final_kubeconfig.parent.mkdir(parents=True, exist_ok=True)
         final_kubeconfig.write_text(yaml.safe_dump(kubeconfig_data))
+        final_kubeconfig.chmod(0o600)
 
         return final_kubeconfig
 
