@@ -185,21 +185,6 @@ def load_manifests(paths: list[Path]) -> list[ManifestsWithSource]:
 
     return result
 
-    # package_metadata_file = directory / "nyl-package.yaml"
-    # if package_metadata_file.exists():
-    #     package_metadata = yaml.safe_load(package_metadata_file.read_text())
-    # else:
-    #     package_metadata = {}
-
-    # # Fill in parameter defaults.
-    # parameters = dict(parameters)
-    # for key, value in package_metadata.get("parameters", {}).items():
-    #     if "default" in value and key not in parameters:
-    #         parameters[key] = value["default"]
-
-    # k8s = DynamicClient(ApiClient())
-    # templater = PackageTemplater(parameters)
-
     #     # Check if the resource has any references and try to resolve them. If a reference cannot be resolved, the
     #     # manifest must be skipped. We emit a warning and continue with the next manifest.
     #     refs = list(Reference.collect(manifest))
@@ -242,34 +227,6 @@ def load_manifests(paths: list[Path]) -> list[ManifestsWithSource]:
     #         if skip_resource:
     #             continue
     #         manifest = Reference.sub(manifest, lambda ref: resolves[str(ref)])
-
-    #     if manifest["apiVersion"] == NylResource.API_VERSION:
-    #         resource = NylResource.load(manifest)
-
-    #         match resource:
-    #             case HelmChart():
-    #                 manifests.extend(
-    #                     template_helm_chart(resource, resource.release.namespace or namespace, Path(".nyl/repo-cache"))
-    #                 )
-    #             case Package():
-    #                 manifests.extend(template_package_resource(resource, namespace))
-    #             case StatefulSecret():
-    #                 logger.warning("StatefulSecret not currently supported")
-    #     else:
-    #         manifests.append(manifest)
-
-    # for manifest in manifests:
-    #     if "namespace" not in manifest["metadata"]:
-    #         logger.warning(
-    #             "Manifest {}/{} does not have a namespace, injecting {}",
-    #             manifest["kind"],
-    #             manifest["metadata"]["name"],
-    #             namespace,
-    #         )
-    #         manifest["metadata"]["namespace"] = namespace
-
-    # return manifests
-
 
 def _random_password(length: int = 32) -> str:
     """
