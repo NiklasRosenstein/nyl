@@ -72,7 +72,6 @@ def template(
             active = profiles.activate_profile(profile)
             logger.info(f"Using profile '{profile}' with kubeconfig '{active.kubeconfig}'.")
             load_kube_config(str(active.kubeconfig))
-            kubectl.set_kubeconfig(active.kubeconfig)
 
     project = ProjectConfig.load()
     if project.file:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import time
 from typing import Any
@@ -48,9 +49,14 @@ class ProfileManager:
     def __exit__(self, *args: Any) -> None:
         self.tunnels.__exit__(*args)
 
-    def activate_profile(self, profile_name: str) -> ActivatedProfile:
+    def activate_profile(self, profile_name: str, update_process_env: bool = True) -> ActivatedProfile:
         """
         Ensure that the Kubernetes config and tunnel (if any) for the profile are available.
+
+        Args:
+            profile_name: The name of the profile to activate.
+            update_process_env: If `True`, update the `KUBECONFIG` environment variable of the current process to
+                                point to the activated profile's Kubeconfig file.
         """
 
         profile = self.config.profiles[profile_name]
@@ -78,7 +84,7 @@ class ProfileManager:
         logger.debug("Checking for API server connectivity ({}{})", api_server, tun_description)
         _wait_for_api_server(api_server, timeout)
 
-        return ActivatedProfile(
+        activated_profile = ActivatedProfile(
             kubeconfig=self.kubeconfig.get_updated_kubeconfig(
                 profile_name=profile_name,
                 path=raw_kubeconfig.path,
@@ -87,6 +93,12 @@ class ProfileManager:
                 api_port=raw_kubeconfig.api_port,
             )
         )
+
+        if update_process_env:
+            logger.trace("Updating process environment with activated profile: {}", activated_profile.env)
+            os.environ.update(activated_profile.env)
+
+        return activated_profile
 
     @staticmethod
     def load() -> "ProfileManager":
