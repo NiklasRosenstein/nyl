@@ -228,6 +228,7 @@ def load_manifests(paths: list[Path]) -> list[ManifestsWithSource]:
     #             continue
     #         manifest = Reference.sub(manifest, lambda ref: resolves[str(ref)])
 
+
 def _random_password(length: int = 32) -> str:
     """
     Generate a random password.
