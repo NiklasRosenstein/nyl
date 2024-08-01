@@ -4,7 +4,8 @@ This package contains Nyl's own Kubernetes-esque resources.
 
 from abc import ABC
 from dataclasses import dataclass
-from typing import ClassVar, Self, cast
+from typing import ClassVar, cast
+from typing_extensions import Self
 from databind.json import load as deser, dump as ser
 
 from nyl.tools.types import Manifest
