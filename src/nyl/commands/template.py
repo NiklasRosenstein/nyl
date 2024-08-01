@@ -126,7 +126,10 @@ def template(
 
         if applyset is not None:
             applyset.set_group_kinds(source.manifests)
-            applyset.tooling = "kubectl/1.30"  # TODO: How can we infer the right tool?
+            # HACK: Kubectl 1.30 can't create the custom resource, so we need to create it. But it will also reject
+            #       using the custom resource unless it has the tooling label set appropriately. For more details, see
+            #       https://github.com/NiklasRosenstein/nyl/issues/5.
+            applyset.tooling = "kubectl/1.30"
             applyset.validate()
 
             if apply:
