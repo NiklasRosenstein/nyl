@@ -2,7 +2,6 @@
 Access SSH tunnels globally managed by Nyl.
 """
 
-
 from loguru import logger
 from typer import Argument
 from rich.console import Console
