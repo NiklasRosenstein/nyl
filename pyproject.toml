@@ -36,6 +36,7 @@ distribution = true
 
 [tool.pdm.scripts]
 lint = "bash -c 'ruff format && ruff check --fix && mypy src' && pytest"
+docs = "bash -c 'cd docs && mkdocs serve'"
 
 [tool.pdm.dev-dependencies]
 dev = [
