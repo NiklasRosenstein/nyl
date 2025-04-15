@@ -1,0 +1,7 @@
+release-date = "2025-04-15"
+
+[[entries]]
+id = "a2772016-3dff-4da6-926d-1f47e509c63a"
+type = "feature"
+description = "Add ability to define and use local variables in manifests"
+author = "@NiklasRosenstein"
