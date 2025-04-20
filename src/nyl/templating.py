@@ -173,7 +173,7 @@ class NylTemplateEngine:
 
     secrets: SecretProvider
     client: ApiClient
-    locals: Namespace = field(default_factory=Namespace)
+    values: Namespace = field(default_factory=Namespace)
     on_lookup_failure: Literal["Error", "CreatePlaceholder", "SkipResource"] = "Error"
 
     def __post_init__(self) -> None:
@@ -196,7 +196,14 @@ class NylTemplateEngine:
                 NylTemplateEngine.current = prev
 
     def _new_engine(self) -> _TemplateEngine:
-        return _TemplateEngine({"secrets": self.secrets, "locals": self.locals, **registered_functions})
+        return _TemplateEngine(
+            {
+                "secrets": self.secrets,
+                "locals": self.values,  # TODO: Deprecate in 0.10.x
+                "values": self.values,
+                **registered_functions,
+            }
+        )
 
     def evaluate(self, value: Manifests, recursive: bool = True) -> Manifests:
         result = []

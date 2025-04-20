@@ -227,7 +227,7 @@ def template(
                 exit(1)
             for key, value in manifest.items():
                 assert key.startswith("$"), key
-                setattr(template_engine.locals, key[1:], value)
+                setattr(template_engine.values, key[1:], value)
             source.manifests.remove(manifest)
 
         # Begin populating the default namespace to resources.

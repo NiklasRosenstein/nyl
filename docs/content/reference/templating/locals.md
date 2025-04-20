@@ -2,10 +2,10 @@
 
 You may define a YAML object in your Kubernetes manifest that is used to define variables that can later be accessed
 in the same manifest to achieve some level of DRY-ness. This is done by not setting any `apiVersion` or `kind`, and
-instead just define variables prefixed with `$`. Variables can later be accessed using the `${{ locals.var }}`.
+instead just define variables prefixed with `$`. Variables can later be accessed using the `${{ values.var }}`.
 
 Note that expressions in values assigned to variables are not currently supported. This means that you cannot use e.g.
-`${{ secrets.get("my-secret") }}` in the value of a variable, nor can you use `${{ locals.var }}`.
+`${{ secrets.get("my-secret") }}` in the value of a variable, nor can you use `${{ values.var }}`.
 
 ## Example
 
@@ -17,7 +17,7 @@ $name: my-app
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ${{ locals.name }}
+  name: ${{ values.name }}
 # ...
 ```
 

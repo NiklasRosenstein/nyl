@@ -17,5 +17,6 @@ Currently, only the following names are available in the scope of the expression
 
 - `secrets`: A reference to the secrets provider. This is used to retrieve secrets from the configured secrets
   provider. See [Secrets](./secrets.md) for more information.
-- `locals`: A container for local variables defined in the same manifest. See [Local Variables](./locals.md) for more
-  information.
+- `values`: A container for values defined on the profile-level (see [Profiles](../configuration/profiles.md)) or in the
+  manifest (see [Local Variables](./locals.md)). (Note that the use of `locals` instead of `values` is deprecated and
+  will be removed in Nyl 0.10.x).

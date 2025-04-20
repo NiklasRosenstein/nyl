@@ -1,0 +1,5 @@
+[[entries]]
+id = "469033a3-ec4d-4a54-9294-b1608735bacb"
+type = "improvement"
+description = "Introduce new `values` object into templating evaluation namespace, replacing the `locals` object going forward. The `locals` name is still available but will be removed in an upcoming release."
+author = "@NiklasRosenstein"
