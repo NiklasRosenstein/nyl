@@ -1,0 +1,2 @@
+[release]
+pre-commit = "slap changelog format --all --markdown > docs/content/changelog.md && git add docs/content/changelog.md"
