@@ -3,3 +3,21 @@ id = "ee341cce-af19-447c-88af-a62248924ab6"
 type = "improvement"
 description = "`nyl new component` now includes `metadata.labels` and `metadata.annotations` defaults in the generated `values.yaml`"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3dc4e6b4-4a6d-4ed3-8e8b-5e9321cabb9a"
+type = "feature"
+description = "Add support for `NYL_ARGS` and `ARGOCD_ENV_NYL_ARGS` environment variables"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "71dada10-a681-47d6-8399-5769a8ecf455"
+type = "improvement"
+description = "Improve help text of `nyl new component` command"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3dc3cd0e-ad32-465b-b67c-0f18c8cb1b3e"
+type = "improvement"
+description = "`.metadata.labels` set on a `HelmChart` resource now propagate and overwrite labels on the resources it generates (note that this also applies to Nyl components using Helm charts)"
+author = "@NiklasRosenstein"
