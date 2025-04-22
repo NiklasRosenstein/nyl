@@ -1,0 +1,5 @@
+[[entries]]
+id = "296fd4bd-785e-4ca8-bebf-245b770bf1ef"
+type = "fix"
+description = "Fix previously breaking change that would cause a KeyError when the NYL_PROFILE environment variable was not set in the ArgoCD plugin when the project has no default profile."
+author = "@NiklasRosenstein"

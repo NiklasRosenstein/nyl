@@ -218,9 +218,17 @@ def template(
         )
 
         # Seed the template engine with the profile values.
-        vars(template_engine.values).update(
-            PROVIDER.get(ProfileManager).config.profiles[profile or DEFAULT_PROFILE].values
-        )
+        # If no profile was specified via --profile or ARGOCD_ENV_NYL_PROFILE, we fall back to the default profile.
+        # However, if the default profile does not exist, we don't want to raise an error, as this would be a
+        # breaking change for users who upgrade Nyl without having a default profile defined.
+        # If a profile *was* specified and it doesn't exist, we *do* want to raise an error.
+        profile_config = PROVIDER.get(ProfileManager).config.profiles.get(profile or DEFAULT_PROFILE)
+        if profile_config is not None:
+            vars(template_engine.values).update(profile_config.values)
+        elif profile is not None:
+            # A profile was explicitly requested, but it doesn't exist. Raise the error.
+            raise KeyError(f"Profile '{profile}' not found in nyl-profiles.yaml")
+        # else: No profile was requested, and the default profile doesn't exist. Do nothing.
 
         # Look for objects that contain local variables and feed them into the template engine.
         for manifest in source.manifests[:]:
