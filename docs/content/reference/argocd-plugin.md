@@ -71,6 +71,8 @@ spec:
     plugin:
       name: nyl-v1
       env:
+        - name: NYL_PROFILE
+          value: myprofile # Important when using ${{ values.VAR }} in manifests
         - name: NYL_CMP_TEMPLATE_INPUT
           value: '{{.path.filename}}'
 ```
@@ -108,6 +110,8 @@ spec:
         plugin:
           name: nyl-v1
           env:
+            - name: NYL_PROFILE
+              value: my-cluster
             - name: NYL_CMP_TEMPLATE_INPUT
               value: '{{.path.filename}}'
       destination:
