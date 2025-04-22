@@ -1,3 +1,11 @@
+## 0.9.4 (2025-04-22)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Fix</td><td>
+
+Fix previously breaking change that would cause a KeyError when the NYL_PROFILE environment variable was not set in the ArgoCD plugin when the project has no default profile.</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.9.3 (2025-04-22)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
