@@ -34,6 +34,10 @@ This page summarizes all environment variables that are used by Nyl.
 > ArgoCD permits passing environment variables to CustomManagementPlugins. These get prefixed with `ARGOCD_ENV` to
 > ensure that only specifically supported variables can be set. The following such variables are supported by Nyl:
 
+- `ARGOCD_ENV_NYL_PROFILE` &ndash; Same as `NYL_PROFILE`, only that the profile's connection details will be ignored.
+  This should be used to pass the profile name to the Nyl plugin, as there is no way for it to automatically understand
+  what profile to use if the `default` profile does not apply. This variable is only recognized by the `nyl template`
+  command. The `NYL_PROFILE` variable takes precedence.
 - `ARGOCD_ENV_NYL_ARGS` &ndash; Same as `NYL_ARGS`, but is taken into account after.
 - `ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT` &mdash; This variable is only recognized by `nyl template` when the only positional argument
   it receives is `.` (i.e. the current working directory). The variable should be a comma-separated list of filenames

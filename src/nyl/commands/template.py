@@ -16,7 +16,6 @@ from nyl.commands import PROVIDER, ApiClientConfig, app
 from nyl.generator import reconcile_generator
 from nyl.generator.dispatch import DispatchingGenerator
 from nyl.profiles import ProfileManager
-from nyl.profiles.config import Profile
 from nyl.project.config import ProjectConfig
 from nyl.resources import API_VERSION_INLINE, NylResource
 from nyl.resources.applyset import APPLYSET_LABEL_PART_OF, ApplySet
@@ -143,6 +142,11 @@ def template(
     Render a package template into full Kubernetes resources.
     """
 
+    connect_with_profile = True
+    if not profile and "ARGOCD_ENV_NYL_PROFILE" in os.environ:
+        profile = os.environ["ARGOCD_ENV_NYL_PROFILE"]
+        connect_with_profile = False
+
     if paths == [Path(".")] and (env_paths := os.getenv("ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT")) is not None:
         paths = [Path(p) for p in env_paths.split(",")]
         if not paths:
@@ -175,7 +179,9 @@ def template(
     #       plugin without granting it access to the Kubernetes API. Most relevant bits of information that Nyl requires
     #       about the cluster are passed via the environment variables.
     #       See https://argo-cd.readthedocs.io/en/stable/user-guide/build-environment/
-    PROVIDER.set(ApiClientConfig, ApiClientConfig(in_cluster=in_cluster, profile=profile))
+    PROVIDER.set(
+        ApiClientConfig, ApiClientConfig(in_cluster=in_cluster, profile=profile if connect_with_profile else None)
+    )
     client = PROVIDER.get(ApiClient)
 
     project = PROVIDER.get(ProjectConfig)
@@ -212,7 +218,9 @@ def template(
         )
 
         # Seed the template engine with the profile values.
-        vars(template_engine.values).update(PROVIDER.get(Profile).values)
+        vars(template_engine.values).update(
+            PROVIDER.get(ProfileManager).config.profiles[profile or DEFAULT_PROFILE].values
+        )
 
         # Look for objects that contain local variables and feed them into the template engine.
         for manifest in source.manifests[:]:

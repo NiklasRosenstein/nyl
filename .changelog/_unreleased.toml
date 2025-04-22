@@ -1,0 +1,5 @@
+[[entries]]
+id = "303ca2f7-5eab-4564-9d71-30b6d160fa05"
+type = "feature"
+description = "add support for `ARGOCD_ENV_NYL_PROFILE` environment variable"
+author = "@NiklasRosenstein"

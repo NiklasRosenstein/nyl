@@ -20,7 +20,6 @@ from typer import Option, Typer
 from kubernetes.client.api_client import ApiClient
 from nyl import __version__
 from nyl.profiles import ProfileManager
-from nyl.profiles.config import Profile
 from nyl.project.config import ProjectConfig
 from nyl.secrets.config import SecretsConfig
 from nyl.tools.di import DependenciesProvider
@@ -110,12 +109,6 @@ def _callback(
         else template.get_profile_kubernetes_client(
             PROVIDER.get(ProfileManager), PROVIDER.get(ApiClientConfig).profile
         ),
-    )
-    PROVIDER.set_lazy(
-        Profile,
-        lambda: PROVIDER.get(ProfileManager).config.profiles[
-            PROVIDER.get(ApiClientConfig).profile or template.DEFAULT_PROFILE
-        ],
     )
 
 
