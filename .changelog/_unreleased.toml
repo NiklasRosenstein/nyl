@@ -3,3 +3,9 @@ id = "469033a3-ec4d-4a54-9294-b1608735bacb"
 type = "improvement"
 description = "Introduce new `values` object into templating evaluation namespace, replacing the `locals` object going forward. The `locals` name is still available but will be removed in an upcoming release."
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "7cd10ee2-9c5a-4c23-8fe4-9f4d9291ceb4"
+type = "feature"
+description = "Allow defining parameters in the \"values\" of a profile, accessible via `${{ values.PARAM }}` throughout manifest rendering with the profile."
+author = "@NiklasRosenstein"

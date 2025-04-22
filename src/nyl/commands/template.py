@@ -16,6 +16,7 @@ from nyl.commands import PROVIDER, ApiClientConfig, app
 from nyl.generator import reconcile_generator
 from nyl.generator.dispatch import DispatchingGenerator
 from nyl.profiles import ProfileManager
+from nyl.profiles.config import Profile
 from nyl.project.config import ProjectConfig
 from nyl.resources import API_VERSION_INLINE, NylResource
 from nyl.resources.applyset import APPLYSET_LABEL_PART_OF, ApplySet
@@ -64,7 +65,7 @@ def get_profile_kubernetes_client(profiles: ProfileManager, profile: str | None)
 
     If no *profile* is specified, but the profile manager contains at least one profile, the *profile* argument will
     default to the value of :data:`DEFAULT_PROFILE` (which is `"default"`). Otherwise, if no profile is selected and
-    none is configured, the standard Kubernetes config load takes place (i.e. try `KUBECONFIG` and then
+    none is configured, the standard Kubernetes config loading is used (i.e. try `KUBECONFIG` and then
     `~/.kube/config`).
     """
 
@@ -209,6 +210,9 @@ def template(
             if on_lookup_failure
             else project.config.settings.on_lookup_failure,
         )
+
+        # Seed the template engine with the profile values.
+        vars(template_engine.values).update(PROVIDER.get(Profile).values)
 
         # Look for objects that contain local variables and feed them into the template engine.
         for manifest in source.manifests[:]:

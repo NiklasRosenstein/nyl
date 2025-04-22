@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -13,7 +13,14 @@ from nyl.tools.loads import loadf
 @dataclass
 class Profile:
     """
-    Represents a Kubernetes connection profile.
+    A profile embodies a set of configurations for a Kubernetes cluster that resources will be deployed to using Nyl.
+    It defines the Kubeconfig to use, whether to use an SSH tunnel to reach the cluster, as well as global values that
+    are accessible during rendering any manifest with the profile activated.
+    """
+
+    values: dict[str, Any] = field(default_factory=dict)
+    """
+    Global values that are accessible during manifest rendering under the `values` object.
     """
 
     kubeconfig: LocalKubeconfig | KubeconfigFromSsh = field(default_factory=lambda: LocalKubeconfig())
