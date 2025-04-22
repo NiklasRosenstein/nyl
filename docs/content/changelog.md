@@ -1,3 +1,14 @@
+## 0.9.2 (2025-04-22)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Improvement</td><td>
+
+Introduce new `values` object into templating evaluation namespace, replacing the `locals` object going forward. The `locals` name is still available but will be removed in an upcoming release.</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Feature</td><td>
+
+Allow defining parameters in the "values" of a profile, accessible via `${{ values.PARAM }}` throughout manifest rendering with the profile.</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.9.1 (2025-04-20)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
