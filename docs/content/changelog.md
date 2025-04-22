@@ -1,3 +1,11 @@
+## 0.9.3 (2025-04-22)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Feature</td><td>
+
+add support for `ARGOCD_ENV_NYL_PROFILE` environment variable</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.9.2 (2025-04-22)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
