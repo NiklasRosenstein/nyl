@@ -1,3 +1,23 @@
+## 0.10.0 (2025-05-07)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Improvement</td><td>
+
+Remove `nyl argocd discovery` command and use a simpler yet probably sufficient `find` command in the `ConfigManagementPlugin` manifest instead</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+The ArgoCD CMP no longer logs to a file, users should check the pod logs instead</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Feature</td><td>
+
+Add `nyl-daemon` command which can be used to launch and communicate with a Nyl daemon process to forego Python process launch times</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+Support implicit default profile</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+Disable waiting for API server connectivity for now when activating a profile as it seems to be more a hinderance than a useful feature</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.9.4 (2025-04-22)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
@@ -141,6 +161,6 @@ Refactor `PostProcessor` implementation for generating policy files and invoking
 `PostProcessor` log for invoking Kyverno now lists the policy file paths that are going to be applied</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
   <tr><td>Fix</td><td>
 
-`nyl new chart` now generates 2-space indented YAML and has a more complete template</td><td></td><td><a href="https://github.com/NiklasRosenstein/nyl/issues/47">NiklasRosenstein/nyl#47</a></td><td>@NiklasRosenstein</td></tr>
+`nyl new chart` now generates 2-space indented YAML and has a more complete template</td><td></td><td><a href="https://github.com/NiklasRosenstein/nyl/issues/47">47</a></td><td>@NiklasRosenstein</td></tr>
 </table>
 
