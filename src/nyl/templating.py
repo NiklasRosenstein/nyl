@@ -199,7 +199,6 @@ class NylTemplateEngine:
         return _TemplateEngine(
             {
                 "secrets": self.secrets,
-                "locals": self.values,  # TODO: Deprecate in 0.10.x
                 "values": self.values,
                 **registered_functions,
             }
