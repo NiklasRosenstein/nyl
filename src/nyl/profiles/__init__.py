@@ -82,22 +82,22 @@ class ProfileManager:
                 self.tunnels.__enter__()
                 self._tunnels_entered = True
 
-            forwardings = {"kubernetes": f"{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"}
+            # forwardings = {"kubernetes": f"{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"}
             assert self.config.file is not None, "Profile configuration file must be set."
             tun_spec = get_tunnel_spec(self.config.file, profile_name, profile.tunnel)
             tun_status = Optional(self.tunnels.get_tunnel(tun_spec.locator)).map(lambda x: x[1]).or_else(None)
-            is_restarted = tun_status is None or tun_status.status != "open"
+            # is_restarted = tun_status is None or tun_status.status != "open"
             tun_status = self.tunnels.open_tunnel(tun_spec)
-            tun_description = f" → {profile.tunnel.user}@{profile.tunnel.host} → {forwardings['kubernetes']}"
+            # tun_description = f" → {profile.tunnel.user}@{profile.tunnel.host} → {forwardings['kubernetes']}"
 
             raw_kubeconfig.api_host = "localhost"
             raw_kubeconfig.api_port = tun_status.local_ports["kubernetes"]
 
             # If the tunnel was only just started, it may need some time to connect.
-            timeout = 30 if is_restarted else 2
-        else:
-            tun_description = ""
-            timeout = 2
+            # timeout = 30 if is_restarted else 2
+        # else:
+        #     tun_description = ""
+        #     timeout = 2
 
         activated_profile = ActivatedProfile(
             kubeconfig=self.kubeconfig.get_updated_kubeconfig(
@@ -109,9 +109,9 @@ class ProfileManager:
             )
         )
 
-        api_server = f"https://{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"
-        logger.opt(colors=True).info("Waiting for API server connectivity (<blue>{}{}</>)", api_server, tun_description)
-        _wait_for_api_server(api_server, timeout)
+        # api_server = f"https://{raw_kubeconfig.api_host}:{raw_kubeconfig.api_port}"
+        # logger.opt(colors=True).info("Waiting for API server connectivity (<blue>{}{}</>)", api_server, tun_description)
+        # _wait_for_api_server(api_server, timeout)
 
         if update_process_env:
             logger.trace("Updating process environment with activated profile: {}", activated_profile.env)
