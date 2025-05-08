@@ -1,3 +1,14 @@
+## 0.10.3 (2025-05-08)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Improvement</td><td>
+
+Further improve filtering of env vars that start with ARGOCD_ but are Kubernetes-specific</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+Automatically drop empty `.metadata.labels` fields from resources generated with `nyl template` to prevent resources with such labels to immediately be `OutOfSync` after apply in ArgoCD</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.10.2 (2025-05-08)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
