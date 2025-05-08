@@ -1,3 +1,23 @@
+## 0.10.2 (2025-05-08)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Hygiene</td><td>
+
+Rename `Manifest` and `Manifests` to `Resource` and `ResourceList` in codebase, and variable names/members accordingly</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Deprecation</td><td>
+
+Remove `locals` from scope of template rendering, use `values` instead</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Feature</td><td>
+
+Add support for `NYL_PYROSCOPE_*` environment variables.</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+Switch to using `python:3.13-slim` as base image instead of `python:3.13-alpine` to allow installing `pyroscope-io`, imag size is only marginally impacted</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+  <tr><td>Improvement</td><td>
+
+Remove some Kubernetes-specific environment variables from log line that exposes Nyl-specific environment variables, and redact NYL_PYROSCOPE_URL</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.10.1 (2025-05-07)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
