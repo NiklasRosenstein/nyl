@@ -88,7 +88,10 @@ def _callback(
     for key, value in os.environ.items():
         if (
             # Keep ARGOCD_ environment variables but filter out those that are likely set by Kubernetes.
-            (key.startswith("ARGOCD_") and not (key.endswith("_PORT") or key.endswith("_TCP") or key.endswith("_ADDR")))
+            (
+                key.startswith("ARGOCD_")
+                and not any(x in key for x in ["_PORT", "_PROTO", "_SERVER", "_HOST", "_SERVICE", "_TCP", "_UDP"])
+            )
             or key.startswith("NYL_")
             or key.startswith("KUBE_")
         ):
