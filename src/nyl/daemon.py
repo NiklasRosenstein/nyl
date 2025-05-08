@@ -20,6 +20,8 @@ import time
 from typing import Any, Literal, Protocol
 import logging
 
+from nyl.tools.pyroscope import init_pyroscope, tag_wrapper
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -189,7 +191,7 @@ class NylDaemon:
         logger.info("Running command: %s", message)
 
         # Import the app here so that the fork can benefit from it being preloaded.
-        from nyl.commands import app
+        from nyl.commands import main
 
         r_out, w_out = os.pipe()
         r_err, w_err = os.pipe()
@@ -197,6 +199,10 @@ class NylDaemon:
 
         pid = os.fork()
         if pid == 0:
+            # Initialize pyroscope here already, and then prevent the main entrypoint from re-initializing it.
+            init_pyroscope()
+            os.environ.pop("NYL_PYROSCOPE_URL", None)
+
             os.close(r_out)
             os.close(r_err)
             os.close(r_error)
@@ -210,7 +216,7 @@ class NylDaemon:
             try:
                 os.environ.update(message.env)  # TODO: Maybe replace instead?
                 os.chdir(message.cwd)
-                app(message.args)
+                main(message.args)
                 w3.write("0\n")
             except BaseException as e:
                 if isinstance(e, SystemExit):
@@ -294,38 +300,44 @@ class NylDaemon:
 
 
 def main() -> None:
+    init_pyroscope()
+
     args = parser.parse_args()
     if args.foreground:
-        with PickleSocketTransport(args.socket, "server") as transport:
+        with (
+            tag_wrapper({"entrypoint": "nyl-daemon", "nyl-daemon": "server"}),
+            PickleSocketTransport(args.socket, "server") as transport,
+        ):
             daemon = NylDaemon(transport)
             daemon.server_forever()
 
     else:
-        client = PickleSocketTransport(args.socket, "client")
-        client.send(NylDaemon.Run(os.getcwd(), args.args, dict(os.environ)))
+        with tag_wrapper({"entrypoint": "nyl-daemon", "nyl-daemon": "client"}):
+            client = PickleSocketTransport(args.socket, "client")
+            client.send(NylDaemon.Run(os.getcwd(), args.args, dict(os.environ)))
 
-        while True:
-            message = client.recv()
-            if message is None:
-                continue
-            if isinstance(message, NylDaemon.Stdout):
-                sys.stdout.write(message.text)
-                sys.stdout.flush()
-            elif isinstance(message, NylDaemon.Stderr):
-                # If enabled, this means stderr output will show in the error message in the ArgoCD UI
-                # when the command fails.
-                if os.getenv("NYL_DAEMON_LOG_STDERR") == "1":
-                    sys.stderr.write(message.text)
-                    sys.stderr.flush()
-            elif isinstance(message, NylDaemon.RunResult):
-                if message.error:
-                    print(message.error + f" (status code {message.code})", file=sys.stderr)
-                elif message.code != 0:
-                    print(f"Command failed without error message (status code {message.code})", file=sys.stderr)
-                sys.exit(message.code)
-            else:
-                logger.error("Unknown message type:", message)
-                sys.exit(1)
+            while True:
+                message = client.recv()
+                if message is None:
+                    continue
+                if isinstance(message, NylDaemon.Stdout):
+                    sys.stdout.write(message.text)
+                    sys.stdout.flush()
+                elif isinstance(message, NylDaemon.Stderr):
+                    # If enabled, this means stderr output will show in the error message in the ArgoCD UI
+                    # when the command fails.
+                    if os.getenv("NYL_DAEMON_LOG_STDERR") == "1":
+                        sys.stderr.write(message.text)
+                        sys.stderr.flush()
+                elif isinstance(message, NylDaemon.RunResult):
+                    if message.error:
+                        print(message.error + f" (status code {message.code})", file=sys.stderr)
+                    elif message.code != 0:
+                        print(f"Command failed without error message (status code {message.code})", file=sys.stderr)
+                    sys.exit(message.code)
+                else:
+                    logger.error("Unknown message type:", message)
+                    sys.exit(1)
 
 
 if __name__ == "__main__":
