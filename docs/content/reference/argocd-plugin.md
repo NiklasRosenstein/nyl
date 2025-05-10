@@ -53,6 +53,10 @@ repoServer:
 
 ## Installation (Daemon)
 
+!!! warning
+
+    The daemon mode is currently in an experimental state and not recommended for production use.
+
 The above example will invoke the `nyl template` command again and again for each time an application's manifests are
 refreshed by ArgoCD. This carries a bit of a performance penalty, since a new Nyl process is spawned each time and
 loading its code from disk.
