@@ -203,6 +203,6 @@ Refactor `PostProcessor` implementation for generating policy files and invoking
 `PostProcessor` log for invoking Kyverno now lists the policy file paths that are going to be applied</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
   <tr><td>Fix</td><td>
 
-`nyl new chart` now generates 2-space indented YAML and has a more complete template</td><td></td><td><a href="https://github.com/NiklasRosenstein/nyl/issues/47">47</a></td><td>@NiklasRosenstein</td></tr>
+`nyl new chart` now generates 2-space indented YAML and has a more complete template</td><td></td><td><a href="https://github.com/NiklasRosenstein/nyl/issues/47">NiklasRosenstein/nyl#47</a></td><td>@NiklasRosenstein</td></tr>
 </table>
 
