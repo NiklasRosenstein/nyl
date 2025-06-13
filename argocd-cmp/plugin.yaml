@@ -16,7 +16,7 @@ spec:
         - -c
         - |
           cd $(git rev-parse --show-toplevel)
-          find -name 'nyl-secrets.*' || find -name 'nyl-project.*'
+          (find . -name 'nyl-secrets.*' | grep .) || (find . -name 'nyl-project.*' | grep .)
 
   # init:
   #   command:
