@@ -439,7 +439,7 @@ wheels = [
 
 [[package]]
 name = "nyl"
-version = "0.10.4"
+version = "0.10.5"
 source = { editable = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -450,7 +450,6 @@ dependencies = [
     { name = "loguru" },
     { name = "nr-stream" },
     { name = "pyroscope-io" },
-    { name = "pytest-xdist" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "stablehash" },
@@ -480,7 +479,6 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.2" },
     { name = "nr-stream", specifier = ">=1.1.5" },
     { name = "pyroscope-io", specifier = ">=0.8.11" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "stablehash", specifier = ">=0.2.1,<0.3.0" },

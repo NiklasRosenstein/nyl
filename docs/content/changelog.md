@@ -1,3 +1,11 @@
+## 0.10.5 (2025-08-04)
+
+<table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
+  <tr><td>Fix</td><td>
+
+Allow extra keys on `ObjectMetadata`</td><td></td><td></td><td>@NiklasRosenstein</td></tr>
+</table>
+
 ## 0.10.3 (2025-05-08)
 
 <table><tr><th>Type</th><th>Description</th><th>PR</th><th>Issues</th><th>Author</th></tr>
