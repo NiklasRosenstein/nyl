@@ -12,10 +12,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from kubernetes.client.api_client import ApiClient
 from loguru import logger
 from typer import Option, Typer
 
-from kubernetes.client.api_client import ApiClient
 from nyl import __version__
 from nyl.profiles import ProfileManager
 from nyl.project.config import ProjectConfig

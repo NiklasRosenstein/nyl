@@ -1,6 +1,6 @@
+from kubernetes.client.api_client import ApiClient
 from loguru import logger
 
-from kubernetes.client.api_client import ApiClient
 from kubernetes.dynamic import DynamicClient
 from nyl.tools.types import Resource
 

@@ -8,12 +8,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Iterator, Literal, Sequence, TypeVar, cast
 
+from kubernetes.client.api_client import ApiClient
+from kubernetes.client.exceptions import ApiException
 from loguru import logger
 from structured_templates import TemplateEngine as _TemplateEngine
 from structured_templates.exceptions import TemplateError
 
-from kubernetes.client.api_client import ApiClient
-from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.client import DynamicClient
 from kubernetes.dynamic.resource import ResourceField, ResourceInstance
 from nyl.secrets import SecretProvider

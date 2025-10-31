@@ -2,10 +2,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from kubernetes.client import VersionApi
 from kubernetes.client.api_client import ApiClient
+from loguru import logger
+
 from nyl.generator import Generator
 from nyl.generator.components import ComponentsGenerator
 from nyl.resources import API_VERSION_INLINE, NylResource

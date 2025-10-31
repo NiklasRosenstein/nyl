@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from kubernetes.client.api_client import ApiClient
+
 from nyl.generator import Generator
 from nyl.resources.statefulsecret import StatefulSecret
 from nyl.tools.types import Resource, ResourceList

@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Iterable
 
 from databind.core import Union
-from loguru import logger
-
 from kubernetes.client import CoreV1Api, V1ObjectMeta, V1Secret
 from kubernetes.client.api_client import ApiClient
 from kubernetes.client.exceptions import ApiException
+from loguru import logger
+
 from nyl.secrets import SecretProvider, SecretValue
 from nyl.tools.di import DependenciesProvider
 
