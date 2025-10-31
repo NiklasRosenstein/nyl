@@ -525,6 +525,7 @@ def get_default_namespace_for_manifest(source: ManifestsWithSource, fallback: st
     """
 
     namespace_resources = [x for x in source.resources if is_namespace_resource(x)]
+    use_namespace: str
 
     if len(namespace_resources) == 0:
         if fallback is not None:
