@@ -241,4 +241,4 @@ class NylTemplateEngine:
 
 def _get_resource_slug(api_version: str, kind: str, name: str, max_length: int = 63) -> str:
     suffix = f"{api_version.replace('/', '-').replace('.', '-')}-{kind}"
-    return f"{name}-{suffix[:max_length - len(name) - 1]}".lower()
+    return f"{name}-{suffix[: max_length - len(name) - 1]}".lower()

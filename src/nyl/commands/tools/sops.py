@@ -96,4 +96,4 @@ def export_dotenv(
             continue
         value = sops.get(key)
         if isinstance(value, str):
-            print(f"export {key[len(prefix):]}={quote(value)}")
+            print(f"export {key[len(prefix) :]}={quote(value)}")
