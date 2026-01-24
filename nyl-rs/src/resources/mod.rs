@@ -1,21 +1,7 @@
 /// Resource definitions (HelmChart, Component, etc.)
 ///
-/// This module will handle:
-/// - HelmChart resource type
-/// - Component definitions
-/// - Resource dependencies
-use serde::{Deserialize, Serialize};
+/// This module provides Kubernetes-style resource definitions for Nyl
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HelmChart {
-    pub name: String,
-    pub version: String,
-    pub repository: String,
-}
+mod helmchart;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Component {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub component_type: String,
-}
+pub use helmchart::{ChartRef, HelmChart, HelmChartSpec, ObjectMetadata, ReleaseMetadata};
