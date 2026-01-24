@@ -262,14 +262,49 @@ impl Profile {
         Self::default()
     }
 
-    /// Merge values from another profile
+    /// Merge values from another profile using deep merge
     ///
-    /// Phase 2: Simple HashMap merge (overwrite)
-    /// Phase 3: Deep merge for nested structures
+    /// Rules:
+    /// - Scalars: other overwrites self
+    /// - Arrays: other replaces self (no append)
+    /// - Objects: recursive merge
     pub fn merge(&mut self, other: &Profile) {
         for (key, value) in &other.values {
-            self.values.insert(key.clone(), value.clone());
+            self.values.insert(
+                key.clone(),
+                deep_merge_value(self.values.get(key).cloned(), value.clone()),
+            );
         }
+    }
+}
+
+/// Deep merge two JSON values (overlay wins over base)
+///
+/// Merge behavior:
+/// - If base doesn't exist, use overlay
+/// - Both objects: recursively merge keys
+/// - Arrays or scalars: overlay replaces base
+pub fn deep_merge_value(
+    base: Option<serde_json::Value>,
+    overlay: serde_json::Value,
+) -> serde_json::Value {
+    match (base, overlay) {
+        (None, overlay) => overlay,
+
+        // Both objects - recursive merge
+        (
+            Some(serde_json::Value::Object(mut base_map)),
+            serde_json::Value::Object(overlay_map),
+        ) => {
+            for (key, overlay_value) in overlay_map {
+                let base_value = base_map.remove(&key);
+                base_map.insert(key, deep_merge_value(base_value, overlay_value));
+            }
+            serde_json::Value::Object(base_map)
+        }
+
+        // Arrays or scalars - overlay replaces
+        (Some(_base), overlay) => overlay,
     }
 }
 
@@ -478,5 +513,186 @@ remote_port: 6443
         assert_eq!(tunnel.local_port, 6443);
         assert_eq!(tunnel.remote_host, "k8s-api.internal");
         assert_eq!(tunnel.remote_port, 6443);
+    }
+
+    #[test]
+    fn test_deep_merge_value_none_base() {
+        let overlay = serde_json::json!({"key": "value"});
+        let result = deep_merge_value(None, overlay);
+        assert_eq!(result, serde_json::json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_deep_merge_value_scalar_replace() {
+        let base = Some(serde_json::json!("old"));
+        let overlay = serde_json::json!("new");
+        let result = deep_merge_value(base, overlay);
+        assert_eq!(result, serde_json::json!("new"));
+    }
+
+    #[test]
+    fn test_deep_merge_value_array_replace() {
+        let base = Some(serde_json::json!([1, 2, 3]));
+        let overlay = serde_json::json!([4, 5]);
+        let result = deep_merge_value(base, overlay);
+        assert_eq!(result, serde_json::json!([4, 5]));
+    }
+
+    #[test]
+    fn test_deep_merge_value_object_merge() {
+        let base = Some(serde_json::json!({
+            "a": 1,
+            "b": 2,
+            "nested": {
+                "x": 10,
+                "y": 20
+            }
+        }));
+        let overlay = serde_json::json!({
+            "b": 99,
+            "c": 3,
+            "nested": {
+                "y": 99,
+                "z": 30
+            }
+        });
+        let result = deep_merge_value(base, overlay);
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "a": 1,
+                "b": 99,
+                "c": 3,
+                "nested": {
+                    "x": 10,
+                    "y": 99,
+                    "z": 30
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_deep_merge_value_deeply_nested() {
+        let base = Some(serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "a": 1,
+                        "b": 2
+                    }
+                }
+            }
+        }));
+        let overlay = serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "b": 99,
+                        "c": 3
+                    }
+                }
+            }
+        });
+        let result = deep_merge_value(base, overlay);
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "level1": {
+                    "level2": {
+                        "level3": {
+                            "a": 1,
+                            "b": 99,
+                            "c": 3
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_deep_merge_value_type_conflict() {
+        // When types differ, overlay wins
+        let base = Some(serde_json::json!({"key": "string"}));
+        let overlay = serde_json::json!({"key": 123});
+        let result = deep_merge_value(base, overlay);
+        assert_eq!(result, serde_json::json!({"key": 123}));
+    }
+
+    #[test]
+    fn test_profile_merge_shallow() {
+        let mut base = Profile::default();
+        base.values.insert("a".to_string(), serde_json::json!(1));
+        base.values.insert("b".to_string(), serde_json::json!(2));
+
+        let mut overlay = Profile::default();
+        overlay.values.insert("b".to_string(), serde_json::json!(99));
+        overlay.values.insert("c".to_string(), serde_json::json!(3));
+
+        base.merge(&overlay);
+
+        assert_eq!(base.values.get("a").unwrap(), &serde_json::json!(1));
+        assert_eq!(base.values.get("b").unwrap(), &serde_json::json!(99));
+        assert_eq!(base.values.get("c").unwrap(), &serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_profile_merge_deep() {
+        let mut base = Profile::default();
+        base.values.insert(
+            "config".to_string(),
+            serde_json::json!({
+                "replicas": 1,
+                "image": {
+                    "repository": "nginx",
+                    "tag": "1.20"
+                }
+            }),
+        );
+
+        let mut overlay = Profile::default();
+        overlay.values.insert(
+            "config".to_string(),
+            serde_json::json!({
+                "replicas": 3,
+                "image": {
+                    "tag": "1.21",
+                    "pullPolicy": "Always"
+                }
+            }),
+        );
+
+        base.merge(&overlay);
+
+        let expected = serde_json::json!({
+            "replicas": 3,
+            "image": {
+                "repository": "nginx",
+                "tag": "1.21",
+                "pullPolicy": "Always"
+            }
+        });
+
+        assert_eq!(base.values.get("config").unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_profile_merge_multiple() {
+        let mut base = Profile::default();
+        base.values.insert("a".to_string(), serde_json::json!(1));
+
+        let mut overlay1 = Profile::default();
+        overlay1.values.insert("b".to_string(), serde_json::json!(2));
+
+        let mut overlay2 = Profile::default();
+        overlay2.values.insert("c".to_string(), serde_json::json!(3));
+
+        base.merge(&overlay1);
+        base.merge(&overlay2);
+
+        assert_eq!(base.values.get("a").unwrap(), &serde_json::json!(1));
+        assert_eq!(base.values.get("b").unwrap(), &serde_json::json!(2));
+        assert_eq!(base.values.get("c").unwrap(), &serde_json::json!(3));
     }
 }

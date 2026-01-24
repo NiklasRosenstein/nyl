@@ -79,7 +79,7 @@ impl Default for Project {
 }
 
 /// Wrapper for project configuration file
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProjectConfig {
     /// Path to the configuration file (None if using defaults)
     pub file: Option<PathBuf>,

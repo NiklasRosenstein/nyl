@@ -1,6 +1,4 @@
-/// Helm template command building
-///
-/// Phase 2: Command building only (execution deferred to Phase 3)
+/// Helm template command building and execution
 
 use super::ResolvedChart;
 use crate::resources::ReleaseMetadata;
@@ -9,8 +7,7 @@ use std::process::Command;
 
 /// Helm template command executor
 ///
-/// Phase 2: Builds commands but doesn't execute them
-/// Phase 3: Will execute and parse YAML output
+/// Builds helm template commands and executes them to generate Kubernetes manifests
 pub struct HelmTemplateExecutor {
     /// Kubernetes version to pass to Helm
     kube_version: Option<String>,
@@ -42,8 +39,8 @@ impl HelmTemplateExecutor {
 
     /// Build a helm template command
     ///
-    /// Phase 2: Only builds the command
-    /// Phase 3: Will execute and parse output
+    /// Builds the helm template command with all necessary arguments.
+    /// Used internally by template() method.
     ///
     /// # Arguments
     /// * `resolved` - Resolved chart reference
@@ -51,7 +48,7 @@ impl HelmTemplateExecutor {
     /// * `values` - Values to pass to the chart
     ///
     /// # Returns
-    /// The built Command (not executed)
+    /// The built Command (not yet executed)
     pub fn build_command(
         &self,
         resolved: &ResolvedChart,
@@ -86,11 +83,9 @@ impl HelmTemplateExecutor {
             cmd.arg(api_version);
         }
 
-        // Add values as file (Phase 3: will write temp file)
-        // For now, we'll use --set-json for simple values
+        // Note: build_command uses --set-json for testing
+        // The template() method uses --values with a temp file for better handling
         if !values.is_null() && values.as_object().map_or(false, |o| !o.is_empty()) {
-            // Phase 2: Just note that values would be passed
-            // Phase 3: Write values to temp file and use --values
             cmd.arg("--set-json");
             cmd.arg(serde_json::to_string(values)?);
         }
@@ -98,20 +93,74 @@ impl HelmTemplateExecutor {
         Ok(cmd)
     }
 
-    /// Execute the helm template command (Phase 3)
+    /// Execute the helm template command
     ///
-    /// Phase 2: Stubbed - just returns empty list
-    /// Phase 3: Will execute command and parse YAML output
-    #[allow(unused_variables)]
+    /// Executes helm template with the given chart, release metadata, and values.
+    /// Returns a list of rendered Kubernetes manifests as JSON values.
     pub fn template(
         &self,
         resolved: &ResolvedChart,
         release: &ReleaseMetadata,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
-        // Phase 2: Stubbed
-        // Phase 3: Execute command, parse YAML, return manifests
-        Ok(Vec::new())
+        // Write values to temp file if not empty
+        let values_file = if !values.is_null() && values.as_object().map_or(false, |o| !o.is_empty()) {
+            Some(write_values_file(values)?)
+        } else {
+            None
+        };
+
+        // Build command (without --set-json, we'll use --values)
+        let mut cmd = Command::new("helm");
+        cmd.arg("template");
+        cmd.arg(&release.name);
+        cmd.arg(&resolved.path);
+
+        // Add namespace if specified
+        if let Some(ref namespace) = release.namespace {
+            cmd.arg("--namespace");
+            cmd.arg(namespace);
+        }
+
+        // Add create-namespace flag if set
+        if release.create_namespace {
+            cmd.arg("--create-namespace");
+        }
+
+        // Add kube-version if specified
+        if let Some(ref version) = self.kube_version {
+            cmd.arg("--kube-version");
+            cmd.arg(version);
+        }
+
+        // Add API versions
+        for api_version in &self.api_versions {
+            cmd.arg("--api-versions");
+            cmd.arg(api_version);
+        }
+
+        // Add values file if we have one
+        if let Some(ref file) = values_file {
+            cmd.arg("--values");
+            cmd.arg(file.path());
+        }
+
+        // Execute helm template
+        let output = cmd
+            .output()
+            .map_err(|e| NylError::Process(format!("Failed to execute helm: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NylError::HelmChart(format!(
+                "helm template failed: {}",
+                stderr
+            )));
+        }
+
+        // Parse YAML output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_yaml_documents(&stdout)
     }
 
     /// Check if helm is installed and available
@@ -154,8 +203,7 @@ impl std::fmt::Debug for HelmTemplateExecutor {
     }
 }
 
-/// Helper to write values to a temporary file (Phase 3)
-#[allow(dead_code)]
+/// Helper to write values to a temporary file
 fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFile> {
     use std::io::Write;
 
@@ -170,6 +218,36 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
         .map_err(|e| NylError::Config(format!("Failed to write values file: {}", e)))?;
 
     Ok(temp_file)
+}
+
+/// Parse YAML multi-document stream into JSON values
+///
+/// Handles Helm's output which can contain multiple YAML documents separated by "---".
+/// Filters out empty documents and comment-only documents.
+fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
+    let mut documents = Vec::new();
+
+    for doc in yaml_str.split("\n---\n") {
+        let trimmed = doc.trim();
+
+        // Skip empty or comment-only documents
+        if trimmed.is_empty()
+            || trimmed
+                .lines()
+                .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
+        {
+            continue;
+        }
+
+        let value: serde_json::Value = serde_norway::from_str(trimmed)
+            .map_err(|e| NylError::Yaml(e))?;
+
+        if !value.is_null() {
+            documents.push(value);
+        }
+    }
+
+    Ok(documents)
 }
 
 #[cfg(test)]
@@ -356,25 +434,89 @@ mod tests {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
 
-        // Phase 2: Using --set-json
+        // Using --set-json in build_command (template() uses --values)
         assert!(args.contains(&"--set-json".to_string()));
     }
 
     #[test]
-    fn test_template_stubbed() {
-        let executor = HelmTemplateExecutor::new();
+    fn test_parse_yaml_documents_single() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+"#;
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["kind"], "ConfigMap");
+    }
 
-        let resolved = ResolvedChart {
-            path: PathBuf::from("/charts/nginx"),
-            chart_ref: ChartRef::default(),
-        };
+    #[test]
+    fn test_parse_yaml_documents_multiple() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test2
+"#;
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["kind"], "ConfigMap");
+        assert_eq!(docs[1]["kind"], "Service");
+    }
 
-        let release = ReleaseMetadata::new("my-release");
-        let values = serde_json::json!({});
+    #[test]
+    fn test_parse_yaml_documents_with_empty() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test1
+---
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test2
+"#;
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["kind"], "ConfigMap");
+        assert_eq!(docs[1]["kind"], "Service");
+    }
 
-        // Phase 2: Should return empty list
-        let result = executor.template(&resolved, &release, &values).unwrap();
-        assert!(result.is_empty());
+    #[test]
+    fn test_parse_yaml_documents_with_comments() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test1
+---
+# This is a comment
+# Another comment
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test2
+"#;
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["kind"], "ConfigMap");
+        assert_eq!(docs[1]["kind"], "Service");
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_empty_string() {
+        let yaml = "";
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 0);
     }
 
     #[test]
