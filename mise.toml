@@ -14,3 +14,32 @@ run = "uv run mkdocs build"
 [tasks.serve-docs]
 dir = "docs"
 run = "uv run mkdocs serve"
+
+# Rust tasks
+[tasks.rust-fmt]
+dir = "nyl-rs"
+run = "cargo fmt"
+
+[tasks.rust-fmt-check]
+dir = "nyl-rs"
+run = "cargo fmt --check"
+
+[tasks.rust-lint]
+dir = "nyl-rs"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.rust-test]
+dir = "nyl-rs"
+run = "cargo test"
+
+[tasks.rust-build]
+dir = "nyl-rs"
+run = "cargo build --release"
+
+[tasks.rust-bench]
+dir = "nyl-rs"
+run = "cargo bench"
+
+[tasks.rust-check-all]
+dir = "nyl-rs"
+run = "cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test"

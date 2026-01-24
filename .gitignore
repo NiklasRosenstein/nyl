@@ -12,3 +12,9 @@ sdist/
 *.egg-info/
 *.egg
 .dmypy.json
+
+# Rust
+nyl-rs/target/
+nyl-rs/Cargo.lock
+**/*.rs.bk
+*.pdb
