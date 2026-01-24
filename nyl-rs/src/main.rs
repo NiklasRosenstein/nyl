@@ -3,13 +3,17 @@ use nyl::cli::Cli;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
-    // Initialize tracing
+    // Parse CLI first to get verbose flag
+    let cli = Cli::parse();
+
+    // Initialize tracing based on verbose flag
+    let log_level = if cli.verbose { "nyl=debug,info" } else { "nyl=info,warn" };
+
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))
         .init();
 
-    // Parse CLI and execute
-    let cli = Cli::parse();
+    // Execute command
     if let Err(e) = cli.execute() {
         eprintln!("Error: {e}");
         std::process::exit(1);

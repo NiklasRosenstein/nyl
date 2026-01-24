@@ -43,3 +43,11 @@ run = "cargo bench"
 [tasks.rust-check-all]
 dir = "nyl-rs"
 run = "cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test"
+
+[tasks.rust-docs-build]
+dir = "nyl-rs"
+run = "mdbook build book"
+
+[tasks.rust-docs-serve]
+dir = "nyl-rs"
+run = "mdbook serve book --open"

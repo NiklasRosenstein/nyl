@@ -12,6 +12,9 @@ pub enum NylError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Configuration file not found: {0}")]
+    ConfigNotFound(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -15,7 +15,7 @@ pub struct Cli {
 
     /// Enable verbose logging
     #[arg(short, long, global = true)]
-    verbose: bool,
+    pub verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]

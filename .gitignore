@@ -16,5 +16,6 @@ sdist/
 # Rust
 nyl-rs/target/
 nyl-rs/Cargo.lock
+nyl-rs/book/book/
 **/*.rs.bk
 *.pdb
