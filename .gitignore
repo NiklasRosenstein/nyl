@@ -14,3 +14,7 @@ nyl/book/book/
 # Development
 todo.txt
 .claude/
+
+# Added by cargo
+
+/target
