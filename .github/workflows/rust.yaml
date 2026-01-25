@@ -64,19 +64,21 @@ jobs:
     name: Build (x86_64-unknown-linux-gnu)
     runs-on: ubuntu-latest
     if: github.ref != 'refs/heads/develop' && !startsWith(github.ref, 'refs/tags/')
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: ${{ env.TARGET }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nyl-rs
       - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: cargo build --release --target ${{ env.TARGET }}
       - name: Check binary size
         run: |
-          size=$(stat -c%s target/x86_64-unknown-linux-gnu/release/nyl)
+          size=$(stat -c%s target/${{ env.TARGET }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB"
           if [ $size -gt 20971520 ]; then
             echo "::error::Binary size exceeds 20MB limit"
@@ -85,8 +87,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nyl-x86_64-unknown-linux-gnu
-          path: nyl-rs/target/x86_64-unknown-linux-gnu/release/nyl
+          name: nyl-${{ env.TARGET }}
+          path: nyl-rs/target/${{ env.TARGET }}/release/nyl
 
   # Full build matrix for develop branch and releases
   build:
