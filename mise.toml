@@ -14,10 +14,6 @@ sops = "3.11.0"
 helm = "3.19.5"
 kubectl = "1.35.0"
 
-# Python tools (legacy, for docs during transition)
-uv = "0.9.25"
-"pipx:slap-cli" = "1.15.0"
-
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
 description = "Format Rust code"
@@ -121,14 +117,3 @@ run = "ls -lh target/release/nyl && du -h target/release/nyl"
 description = "Clean build artifacts"
 dir = "nyl-rs"
 run = "cargo clean"
-
-# Legacy Python docs (marked for deprecation)
-[tasks.docs-python-build]
-description = "[DEPRECATED] Build Python docs"
-dir = "docs"
-run = "uv run mkdocs build"
-
-[tasks.docs-python-serve]
-description = "[DEPRECATED] Serve Python docs"
-dir = "docs"
-run = "uv run mkdocs serve"

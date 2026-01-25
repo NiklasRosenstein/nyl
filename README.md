@@ -7,21 +7,11 @@ reusable deployment configurations, project layouts and operational workflows.
 
 ## Installation
 
-### Rust Version (Recommended)
-
 Download the latest binary from [releases](https://github.com/helsing-ai/nyl/releases) or build from source:
 
     $ cd nyl-rs
     $ cargo build --release
     $ ./target/release/nyl --version
-
-### Python Version (Deprecated)
-
-Requires Python 3.11 or newer.
-
-    $ uvx nyl
-
-**Note**: The Python version is deprecated. Please migrate to the Rust version. See [MOVE_TO_RUST.md](MOVE_TO_RUST.md).
 
 For some features, additional programs must be available:
 
@@ -32,14 +22,12 @@ For some features, additional programs must be available:
 
 ## Local development
 
-### Rust Development (Primary)
-
 Install development tools with [Mise](https://mise.jdx.dev/):
 
     $ mise install
     $ eval "$(mise activate)"
 
-Build and test the Rust version:
+Build and test:
 
     $ mise run build      # Build release binary
     $ mise run test       # Run tests
@@ -47,26 +35,9 @@ Build and test the Rust version:
     $ mise run fmt        # Format code
     $ mise run pre-commit # Run all checks
 
-To live-preview the Rust documentation:
+To live-preview the documentation:
 
     $ mise run docs-serve
-
-### Python Development (Legacy)
-
-Install Python dependencies with [Uv](https://docs.astral.sh/uv/):
-
-    $ uv sync
-
-Use [Tire](https://github.com/NiklasRosenstein/tire/) for Python code quality:
-
-    $ tire fmt [--check]
-    $ tire lint
-    $ tire check
-    $ tire test
-
-To preview Python docs:
-
-    $ mise run docs-python-serve
 
 ## Tracking upstream information
 
