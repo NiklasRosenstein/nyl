@@ -36,18 +36,22 @@ enum Commands {
 
     /// Validate project configuration
     Validate(commands::validate::ValidateArgs),
+
+    /// Display Kubernetes cluster version information
+    ClusterInfo(commands::cluster_info::ClusterInfoArgs),
 }
 
 impl Cli {
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
         match self.command {
-            Commands::Render(args) => commands::render::execute(args),
+            Commands::Render(args) => commands::render::execute(args).await,
             Commands::Diff(args) => commands::diff::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::Generate(args) => commands::generate::execute(args),
             Commands::New(args) => commands::new::execute(args),
             Commands::Validate(args) => commands::validate::execute(args),
+            Commands::ClusterInfo(args) => commands::cluster_info::execute(args).await,
         }
     }
 }

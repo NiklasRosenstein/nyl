@@ -53,7 +53,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
-    )?;
+    )
+    .await?;
 
     if raw_manifests.is_empty() {
         tracing::info!("No manifests to diff");

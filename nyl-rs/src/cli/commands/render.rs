@@ -6,6 +6,7 @@ use crate::{
     config::ProjectConfig,
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
+    kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{extract_application_generators, extract_nyl_release, HelmChart, NylRelease, ReleaseMetadata},
     secrets::SecretsConfig,
@@ -50,7 +51,7 @@ enum OutputFormat {
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-pub fn render_manifests(
+pub async fn render_manifests(
     path: &str,
     component: Option<&str>,
     environment: Option<&str>,
@@ -104,7 +105,40 @@ pub fn render_manifests(
     let resources = load_resources(path)?;
     let filtered = filter_resources(resources, component)?;
 
-    // 7. Generate manifests
+    // 7. Check if any HelmChart resources exist (need cluster info)
+    let has_helm_charts = filtered.iter().any(|r| {
+        let kind = r.get("kind").and_then(|k| k.as_str());
+        let api_version = r.get("apiVersion").and_then(|a| a.as_str());
+        kind == Some("HelmChart") && api_version.map_or(false, |v| v.starts_with("v1."))
+    });
+
+    // 8. Determine kube_version and api_versions (only if needed)
+    let (kube_version, api_versions) = if !has_helm_charts {
+        // No HelmCharts, version info not needed
+        (String::new(), Vec::new())
+    } else if offline {
+        // In offline mode, use CLI arguments (required by clap)
+        (
+            cli_kube_version.unwrap_or_default().to_string(),
+            cli_api_versions.to_vec(),
+        )
+    } else {
+        // In non-offline mode, fetch from cluster unless CLI args override
+        let client = KubeRsClient::from_profile(&profile, None).await?;
+        let kube_version = if let Some(v) = cli_kube_version {
+            v.to_string()
+        } else {
+            client.get_server_version().await?
+        };
+        let api_versions = if cli_api_versions.is_empty() {
+            client.get_api_versions().await?
+        } else {
+            cli_api_versions.to_vec()
+        };
+        (kube_version, api_versions)
+    };
+
+    // 9. Generate manifests
     let mut all_manifests = Vec::new();
     for resource in filtered {
         let manifests = generate_resource(
@@ -112,8 +146,8 @@ pub fn render_manifests(
             &resource,
             &context,
             &project_config,
-            cli_kube_version,
-            cli_api_versions,
+            &kube_version,
+            &api_versions,
         )?;
         all_manifests.extend(manifests);
     }
@@ -121,7 +155,7 @@ pub fn render_manifests(
     Ok((all_manifests, profile, env_name))
 }
 
-pub fn execute(args: RenderArgs) -> Result<()> {
+pub async fn execute(args: RenderArgs) -> Result<()> {
     let (manifests, _, _) = render_manifests(
         &args.path,
         args.component.as_deref(),
@@ -129,7 +163,8 @@ pub fn execute(args: RenderArgs) -> Result<()> {
         args.offline,
         args.kube_version.as_deref(),
         &args.kube_api_versions,
-    )?;
+    )
+    .await?;
 
     // Extract ApplicationGenerator resources and filter them from output
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
@@ -225,8 +260,8 @@ fn generate_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
-    cli_kube_version: Option<&str>,
-    cli_api_versions: &[String],
+    kube_version: &str,
+    api_versions: &[String],
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -236,7 +271,7 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        render_helm_chart(&chart, context, config, cli_kube_version, cli_api_versions)
+        render_helm_chart(&chart, context, config, kube_version, api_versions)
     } else {
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
@@ -249,8 +284,8 @@ fn render_helm_chart(
     chart: &HelmChart,
     context: &TemplateContext,
     config: &ProjectConfig,
-    cli_kube_version: Option<&str>,
-    cli_api_versions: &[String],
+    kube_version: &str,
+    api_versions: &[String],
 ) -> Result<Vec<serde_json::Value>> {
     let working_dir = std::env::current_dir()
         .map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
@@ -270,21 +305,9 @@ fn render_helm_chart(
         .clone()
         .unwrap_or_else(|| ReleaseMetadata::new(chart.effective_release_name()));
 
-    // CLI values override chart spec values
-    let kube_version = cli_kube_version
-        .map(String::from)
-        .or(chart.spec.kube_version.clone())
-        .unwrap_or_default();
-
-    let api_versions = if cli_api_versions.is_empty() {
-        chart.spec.api_versions.clone()
-    } else {
-        cli_api_versions.to_vec()
-    };
-
     let executor = HelmTemplateExecutor::new()
-        .with_kube_version(kube_version)
-        .with_api_versions(api_versions);
+        .with_kube_version(kube_version.to_string())
+        .with_api_versions(api_versions.to_vec());
 
     executor.template(&resolved, &release, &merged_values)
 }

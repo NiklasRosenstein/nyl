@@ -31,6 +31,12 @@ pub trait KubeClient: Send + Sync {
         field_manager: &str,
         dry_run: bool,
     ) -> Result<ApplyOutcome>;
+
+    /// Get the Kubernetes server version string (e.g., "1.28.0")
+    async fn get_server_version(&self) -> Result<String>;
+
+    /// Get all available API versions from the cluster
+    async fn get_api_versions(&self) -> Result<Vec<String>>;
 }
 
 /// Production Kubernetes client using kube-rs
@@ -210,6 +216,37 @@ impl KubeClient for KubeRsClient {
             base_outcome
         })
     }
+
+    async fn get_server_version(&self) -> Result<String> {
+        let version = self.client.apiserver_version().await?;
+        // Format as "major.minor.patch" (e.g., "1.28.3")
+        let version_str = if version.git_version.starts_with('v') {
+            version.git_version[1..].to_string()
+        } else {
+            version.git_version
+        };
+        Ok(version_str)
+    }
+
+    async fn get_api_versions(&self) -> Result<Vec<String>> {
+        let mut api_versions = Vec::new();
+
+        // Get core API versions (v1, etc.)
+        let core_versions = self.client.list_core_api_versions().await?;
+        api_versions.extend(core_versions.versions);
+
+        // Get API group versions (apps/v1, batch/v1, etc.)
+        let groups = self.client.list_api_groups().await?;
+        for group in groups.groups {
+            for version in group.versions {
+                api_versions.push(version.group_version);
+            }
+        }
+
+        // Sort for consistent output
+        api_versions.sort();
+        Ok(api_versions)
+    }
 }
 
 /// Mock Kubernetes client for testing
@@ -308,6 +345,20 @@ impl KubeClient for MockKubeClient {
         } else {
             base_outcome
         })
+    }
+
+    async fn get_server_version(&self) -> Result<String> {
+        // Return a mock version for testing
+        Ok("1.28.0".to_string())
+    }
+
+    async fn get_api_versions(&self) -> Result<Vec<String>> {
+        // Return common API versions for testing
+        Ok(vec![
+            "v1".to_string(),
+            "apps/v1".to_string(),
+            "batch/v1".to_string(),
+        ])
     }
 }
 

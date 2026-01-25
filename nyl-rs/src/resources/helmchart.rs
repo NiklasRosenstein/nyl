@@ -106,14 +106,6 @@ pub struct HelmChartSpec {
     /// Values to pass to the chart
     #[serde(default)]
     pub values: serde_json::Value,
-
-    /// Kubernetes version to use for templating
-    #[serde(skip_serializing_if = "Option::is_none", rename = "kubeVersion")]
-    pub kube_version: Option<String>,
-
-    /// API versions to pass to Helm
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "apiVersions")]
-    pub api_versions: Vec<String>,
 }
 
 impl Default for HelmChartSpec {
@@ -122,8 +114,6 @@ impl Default for HelmChartSpec {
             chart: ChartRef::default(),
             release: None,
             values: serde_json::Value::Object(serde_json::Map::new()),
-            kube_version: None,
-            api_versions: Vec::new(),
         }
     }
 }
@@ -360,7 +350,5 @@ mod tests {
         let spec = HelmChartSpec::default();
         assert!(spec.release.is_none());
         assert!(spec.values.is_object());
-        assert!(spec.kube_version.is_none());
-        assert!(spec.api_versions.is_empty());
     }
 }

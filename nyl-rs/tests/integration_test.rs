@@ -150,7 +150,7 @@ fn test_new_project_legacy_syntax() {
     cmd.arg("new").arg("test-project");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Using legacy syntax"))
+        .stderr(predicate::str::contains("Using legacy syntax"))
         .stdout(predicate::str::contains("Project 'test-project' created successfully"));
 
     let project_dir = temp.path().join("test-project");
