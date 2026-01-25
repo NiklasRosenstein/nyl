@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, ValueEnum};
 use colored::Colorize;
 use kube::Client;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +12,17 @@ use crate::{
     resources::extract_nyl_release,
     NylError, Result,
 };
+
+/// Diff mode for comparing manifests
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum DiffMode {
+    /// Normalized mode: applies server defaults via dry-run (default, like kubectl diff)
+    #[default]
+    Normalized,
+
+    /// Raw mode: compares raw manifests without server normalization (may show server defaults)
+    Raw,
+}
 
 /// Show diff between rendered manifests and cluster state
 #[derive(Args, Debug)]
@@ -43,6 +54,11 @@ pub struct DiffArgs {
     /// Show summary only (counts, no detailed diff)
     #[arg(long)]
     pub summary: bool,
+
+    /// Diff mode: 'normalized' (default) uses server-side apply to filter defaults,
+    /// 'raw' compares manifests directly (may show server defaults)
+    #[arg(long, default_value = "normalized")]
+    pub mode: DiffMode,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
@@ -121,7 +137,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 7. Compute diff against LIVE cluster state
     let diff_result =
-        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref())
+        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode)
             .await?;
 
     // 8. Display diff
@@ -162,6 +178,7 @@ async fn compute_diff_from_live(
     client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
     previous_state: Option<&crate::kubernetes::ReleaseState>,
+    mode: DiffMode,
 ) -> Result<DiffResult> {
     // Build set of desired resource keys
     let desired_keys: HashSet<ResourceKey> = desired_manifests
@@ -212,12 +229,46 @@ async fn compute_diff_from_live(
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
         if let Some(live) = live_resources.get(&key) {
-            if DiffEngine::are_equivalent(manifest, live)? {
-                unchanged.push(key);
-            } else {
-                // Generate unified diff for this modified resource
-                let diff_text = DiffEngine::diff_yaml(manifest, live)?;
-                modified.push((key, diff_text));
+            match mode {
+                DiffMode::Normalized => {
+                    // Normalized mode: normalize via dry-run apply (default)
+                    // Fall back to raw mode if server normalization fails
+                    match DiffEngine::are_equivalent_with_server(manifest, live, client).await {
+                        Ok(true) => {
+                            unchanged.push(key);
+                        }
+                        Ok(false) => {
+                            match DiffEngine::diff_yaml_with_server(manifest, live, client).await {
+                                Ok(diff_text) => {
+                                    modified.push((key, diff_text));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Server-side diff failed for {}, falling back to raw: {}", key.to_string(), e);
+                                    let diff_text = DiffEngine::diff_yaml(manifest, live)?;
+                                    modified.push((key, diff_text));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Server-side normalization failed for {}, falling back to raw: {}", key.to_string(), e);
+                            if DiffEngine::are_equivalent(manifest, live)? {
+                                unchanged.push(key);
+                            } else {
+                                let diff_text = DiffEngine::diff_yaml(manifest, live)?;
+                                modified.push((key, diff_text));
+                            }
+                        }
+                    }
+                }
+                DiffMode::Raw => {
+                    // Raw mode: compare raw manifests (original behavior)
+                    if DiffEngine::are_equivalent(manifest, live)? {
+                        unchanged.push(key);
+                    } else {
+                        let diff_text = DiffEngine::diff_yaml(manifest, live)?;
+                        modified.push((key, diff_text));
+                    }
+                }
             }
         } else {
             added.push(key);

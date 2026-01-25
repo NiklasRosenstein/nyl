@@ -45,6 +45,18 @@ pub trait KubeClient: Send + Sync {
         namespace: Option<&str>,
         name: &str,
     ) -> Result<()>;
+
+    /// Get server-normalized version of a resource using dry-run apply
+    ///
+    /// Sends the resource to the server with dry-run enabled to:
+    /// - Apply server-side defaults
+    /// - Run validation and admission webhooks
+    /// - Return normalized resource without persisting
+    async fn get_normalized_resource(
+        &self,
+        resource: &DynamicObject,
+        field_manager: &str,
+    ) -> Result<DynamicObject>;
 }
 
 /// Production Kubernetes client using kube-rs
@@ -287,6 +299,38 @@ impl KubeClient for KubeRsClient {
         }
 
     }
+
+    async fn get_normalized_resource(
+        &self,
+        resource: &DynamicObject,
+        field_manager: &str,
+    ) -> Result<DynamicObject> {
+        // Extract metadata
+        let name = resource.name_any();
+        let namespace = resource.namespace();
+
+        // Extract GVK from resource
+        let resource_json = serde_json::to_value(resource)?;
+        let gvk = crate::kubernetes::resource::extract_gvk(&resource_json)?;
+        let (ar, caps) = self.discover_api_resource(&gvk).await?;
+
+        // Create API client
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace.as_deref().ok_or_else(|| {
+                NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind))
+            })?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+
+        // Apply with dry-run to get server-normalized version
+        let patch_params = PatchParams::apply(field_manager).force().dry_run();
+        let patch = Patch::Apply(resource);
+        let normalized = api.patch(&name, &patch_params, &patch).await?;
+
+        Ok(normalized)
+    }
 }
 
 /// Mock Kubernetes client for testing
@@ -420,6 +464,16 @@ impl KubeClient for MockKubeClient {
         store.remove(&key);
         Ok(())
 
+    }
+
+    async fn get_normalized_resource(
+        &self,
+        resource: &DynamicObject,
+        _field_manager: &str,
+    ) -> Result<DynamicObject> {
+        // For testing, simply return the resource as-is
+        // Tests can inject pre-normalized resources if needed
+        Ok(resource.clone())
     }
 }
 
