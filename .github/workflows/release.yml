@@ -282,7 +282,7 @@ jobs:
     needs:
       - plan
       - host
-    if: ${{ needs.plan.outputs.publishing == 'true' && !fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
     runs-on: "ubuntu-22.04"
     permissions:
       id-token: write  # Required for OIDC trusted publishing
@@ -293,9 +293,18 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish to crates.io
+      - name: Publish to crates.io (dry-run for prereleases)
+        if: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
         working-directory: nyl
-        run: cargo publish
+        run: |
+          echo "📦 Running dry-run for prerelease..."
+          cargo publish --dry-run
+      - name: Publish to crates.io
+        if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+        working-directory: nyl
+        run: |
+          echo "📦 Publishing to crates.io..."
+          cargo publish
 
   announce:
     needs:
