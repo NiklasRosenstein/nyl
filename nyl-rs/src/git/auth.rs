@@ -1,0 +1,263 @@
+//! Git authentication and credential management
+//!
+//! This module provides credential types and git2 callback builders for authenticating
+//! with private Git repositories.
+
+use git2::{Cred, CredentialType, RemoteCallbacks};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// Git credential types for authentication
+#[derive(Debug, Clone)]
+pub enum GitCredential {
+    /// SSH key authentication
+    SshKey {
+        username: String,
+        private_key: String,   // PEM format
+        public_key: Option<String>,
+        passphrase: Option<String>,
+    },
+    /// HTTPS token authentication
+    HttpsToken {
+        username: String,
+        token: String,  // Personal access token or password
+    },
+    /// SSH agent authentication (use SSH agent for key)
+    SshAgent {
+        username: String,
+    },
+}
+
+impl GitCredential {
+    /// Convert credential to git2::Cred for authentication
+    fn to_git2_cred(
+        &self,
+        _url: &str,
+        username_from_url: Option<&str>,
+    ) -> std::result::Result<Cred, git2::Error> {
+        match self {
+            GitCredential::SshKey {
+                username,
+                private_key,
+                public_key,
+                passphrase,
+            } => {
+                let username = username_from_url.unwrap_or(username);
+                Cred::ssh_key_from_memory(
+                    username,
+                    public_key.as_deref(),
+                    private_key,
+                    passphrase.as_deref(),
+                )
+            }
+            GitCredential::HttpsToken { username, token } => Cred::userpass_plaintext(username, token),
+            GitCredential::SshAgent { username } => {
+                let username = username_from_url.unwrap_or(username);
+                Cred::ssh_key_from_agent(username)
+            }
+        }
+    }
+}
+
+/// Provides credentials for Git operations
+pub struct CredentialProvider {
+    credentials: Arc<Mutex<HashMap<String, GitCredential>>>,
+}
+
+impl CredentialProvider {
+    /// Create a new credential provider
+    pub fn new() -> Self {
+        Self {
+            credentials: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Create a credential provider with pre-loaded credentials
+    pub fn with_credentials(credentials: HashMap<String, GitCredential>) -> Self {
+        Self {
+            credentials: Arc::new(Mutex::new(credentials)),
+        }
+    }
+
+    /// Add a credential for a specific URL
+    pub fn add_credential(&self, url: String, credential: GitCredential) {
+        let mut creds = self.credentials.lock().unwrap();
+        creds.insert(url, credential);
+    }
+
+    /// Get credential for a URL (exact match or hostname fallback)
+    pub fn get_credential(&self, url: &str) -> Option<GitCredential> {
+        let creds = self.credentials.lock().unwrap();
+
+        // Try exact match first
+        if let Some(cred) = creds.get(url) {
+            return Some(cred.clone());
+        }
+
+        // Try hostname-based fallback
+        let normalized_url = normalize_git_url(url);
+        if let Some(host) = extract_hostname(&normalized_url) {
+            for (stored_url, credential) in creds.iter() {
+                if let Some(stored_host) = extract_hostname(stored_url) {
+                    if host == stored_host {
+                        return Some(credential.clone());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Build git2 RemoteCallbacks with credential handling
+    pub fn build_callbacks<'a>(&self, url: &str) -> RemoteCallbacks<'a> {
+        let credential = self.get_credential(url);
+
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(move |url, username_from_url, allowed_types| {
+            // If we have a stored credential, use it
+            if let Some(ref cred) = credential {
+                return cred.to_git2_cred(url, username_from_url);
+            }
+
+            // Fallback: Try SSH agent for SSH URLs
+            if allowed_types.contains(CredentialType::SSH_KEY) {
+                let username = username_from_url.unwrap_or("git");
+                if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                    return Ok(cred);
+                }
+            }
+
+            // No credential available
+            Err(git2::Error::from_str("No credentials available"))
+        });
+
+        callbacks
+    }
+}
+
+impl Default for CredentialProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Normalize Git URL for comparison
+fn normalize_git_url(url: &str) -> String {
+    let mut normalized = url.to_lowercase();
+
+    // Remove .git suffix
+    if normalized.ends_with(".git") {
+        normalized = normalized[..normalized.len() - 4].to_string();
+    }
+
+    // Convert SSH shorthand to full URL
+    // git@github.com:org/repo -> ssh://git@github.com/org/repo
+    if let Some(at_pos) = normalized.find('@') {
+        if !normalized.starts_with("http") && !normalized.starts_with("ssh://") {
+            if let Some(colon_pos) = normalized[at_pos..].find(':') {
+                let username_host = &normalized[..at_pos + colon_pos];
+                let path = &normalized[at_pos + colon_pos + 1..];
+                normalized = format!("ssh://{}/{}", username_host, path);
+            }
+        }
+    }
+
+    // Ensure trailing slash for consistency
+    if !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+
+    normalized
+}
+
+/// Extract hostname from a Git URL
+fn extract_hostname(url: &str) -> Option<String> {
+    // Handle SSH shorthand: git@github.com:org/repo
+    if let Some(at_pos) = url.find('@') {
+        if !url.starts_with("http") && !url.starts_with("ssh://") {
+            if let Some(colon_pos) = url[at_pos..].find(':') {
+                let host = &url[at_pos + 1..at_pos + colon_pos];
+                return Some(host.to_lowercase());
+            }
+        }
+    }
+
+    // Handle full URLs: https://github.com/org/repo or ssh://git@github.com/org/repo
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        // Find the hostname (before next / or @)
+        let host_end = after_scheme
+            .find('/')
+            .or_else(|| after_scheme.find(':'))
+            .unwrap_or(after_scheme.len());
+        let host_part = &after_scheme[..host_end];
+
+        // Remove username if present (git@hostname -> hostname)
+        if let Some(at_pos) = host_part.rfind('@') {
+            return Some(host_part[at_pos + 1..].to_lowercase());
+        } else {
+            return Some(host_part.to_lowercase());
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_git_url() {
+        assert_eq!(
+            normalize_git_url("https://github.com/org/repo.git"),
+            "https://github.com/org/repo/"
+        );
+        assert_eq!(
+            normalize_git_url("git@github.com:org/repo.git"),
+            "ssh://git@github.com/org/repo/"
+        );
+        assert_eq!(
+            normalize_git_url("ssh://git@gitlab.com/org/repo"),
+            "ssh://git@gitlab.com/org/repo/"
+        );
+    }
+
+    #[test]
+    fn test_extract_hostname() {
+        assert_eq!(
+            extract_hostname("https://github.com/org/repo"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_hostname("git@github.com:org/repo"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_hostname("ssh://git@gitlab.com/org/repo"),
+            Some("gitlab.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_credential_provider() {
+        let provider = CredentialProvider::new();
+
+        // Add SSH key credential
+        provider.add_credential(
+            "https://github.com/org/repo".to_string(),
+            GitCredential::SshAgent {
+                username: "git".to_string(),
+            },
+        );
+
+        // Test exact match
+        assert!(provider.get_credential("https://github.com/org/repo").is_some());
+
+        // Test hostname fallback
+        assert!(provider
+            .get_credential("https://github.com/org/other-repo")
+            .is_some());
+    }
+}

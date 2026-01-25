@@ -171,21 +171,92 @@ Example disk usage for a 100MB repository with 3 refs:
 
 ## Authentication
 
-**Phase 2a (Current)**: Only public repositories are supported.
+Nyl supports both public and private Git repositories through multiple authentication methods.
 
-**Phase 2b (Planned)**: Will support:
-- SSH key authentication
-- HTTPS credentials
-- ArgoCD repository secrets integration
-- Credential helpers
+### Automatic Credential Discovery
+
+When running inside a Kubernetes cluster with access to ArgoCD secrets, Nyl automatically discovers repository credentials from ArgoCD repository secrets. No additional configuration required!
+
+**Example**: Using a private Helm chart
+
+```yaml
+apiVersion: v1.nyl.io
+kind: HelmChart
+metadata:
+  name: private-app
+spec:
+  chart:
+    git: git@github.com:myorg/private-charts.git
+    git_ref: main
+    path: charts/app
+  release:
+    name: private-app
+    namespace: default
+```
+
+If an ArgoCD repository secret exists for `github.com`, Nyl will automatically use those credentials.
+
+### Authentication Methods
+
+1. **ArgoCD Repository Secrets** (Recommended)
+   - Credentials automatically discovered from `argocd` namespace
+   - Supports both SSH keys and HTTPS tokens
+   - Zero configuration required
+   - See [Repository Secrets](./argocd/repository-secrets.md) for details
+
+2. **SSH Agent**
+   - Fallback for SSH URLs when no secret found
+   - Works with local development workflows
+   - Requires SSH agent running with key loaded
+
+3. **Public Repositories**
+   - No authentication needed
+   - Works out of the box
+
+### Supported Credential Types
+
+**SSH Key Authentication:**
+- Private key stored in ArgoCD secret
+- Recommended for production use
+- Better security than HTTPS tokens
+
+**HTTPS Token Authentication:**
+- Personal access tokens or passwords
+- Useful for HTTPS-only repositories
+- Stored in ArgoCD secret
+
+### Example: Creating Repository Secret
+
+```bash
+# SSH authentication
+kubectl create secret generic github-private \
+  -n argocd \
+  --from-literal=url=git@github.com:myorg/charts.git \
+  --from-file=sshPrivateKey=$HOME/.ssh/id_rsa
+
+kubectl label secret github-private \
+  -n argocd \
+  argocd.argoproj.io/secret-type=repository
+
+# HTTPS authentication
+kubectl create secret generic github-https \
+  -n argocd \
+  --from-literal=url=https://github.com/myorg/charts.git \
+  --from-literal=username=myuser \
+  --from-literal=password=ghp_token123
+
+kubectl label secret github-https \
+  -n argocd \
+  argocd.argoproj.io/secret-type=repository
+```
+
+For complete documentation on authentication, see [Repository Secrets](./argocd/repository-secrets.md).
 
 ## Limitations
 
 1. **Shallow clones not supported**: libgit2 (the underlying library) doesn't support shallow clones. Full repository history is fetched.
 
-2. **Public repositories only**: Authentication is not yet implemented (Phase 2a).
-
-3. **Force checkout**: When reusing worktrees, local changes are discarded. Worktrees are treated as read-only checkouts.
+2. **Force checkout**: When reusing worktrees, local changes are discarded. Worktrees are treated as read-only checkouts.
 
 ## Troubleshooting
 
@@ -230,21 +301,11 @@ rm -rf $NYL_CACHE_DIR/git/bare/{hash}-{repo-name}
 rm -rf $NYL_CACHE_DIR/git/worktrees/{hash}-*
 ```
 
-### Git command not found
+### Authentication failures
 
-**Problem**: Git operations fail with "command not found"
+**Problem**: Cannot access private repository
 
-**Solution**: Install Git:
-```bash
-# Ubuntu/Debian
-apt-get install git
-
-# macOS
-brew install git
-
-# Fedora/RHEL
-dnf install git
-```
+**Solution**: See [Repository Secrets](./argocd/repository-secrets.md) for authentication setup
 
 ## Examples
 

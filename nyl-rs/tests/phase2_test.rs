@@ -448,18 +448,8 @@ fn test_helm_chart_resolution_errors() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 
-    // Git not supported (Phase 2)
-    let git_ref = ChartRef {
-        git: Some("https://github.com/example/chart.git".to_string()),
-        ..Default::default()
-    };
-
-    let result = resolver.resolve_chart(&git_ref);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Git chart references not supported"));
+    // Note: Git chart references are now supported in Phase 2a/2b
+    // Testing actual Git operations requires integration tests with real repositories
 }
 
 #[test]

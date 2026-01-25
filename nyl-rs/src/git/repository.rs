@@ -1,32 +1,43 @@
-use git2::{Oid, Repository};
+use git2::{Oid, Repository, FetchOptions};
 use std::path::Path;
-use std::process::Command;
+use std::sync::Arc;
 
 use super::error::{GitError, Result};
+use super::auth::CredentialProvider;
 
 /// Manages a bare Git repository
 pub struct BareRepository {
     repo: Repository,
     url: String,
+    credential_provider: Option<Arc<CredentialProvider>>,
 }
 
 impl BareRepository {
     /// Get or create a bare repository at the specified path
-    pub fn get_or_create(url: &str, path: &Path) -> Result<Self> {
+    pub fn get_or_create(
+        url: &str,
+        path: &Path,
+        credential_provider: Option<Arc<CredentialProvider>>,
+    ) -> Result<Self> {
         let repo = if path.exists() {
             Repository::open(path)?
         } else {
-            Self::clone_bare(url, path)?
+            Self::clone_bare(url, path, credential_provider.as_ref().map(|v| &**v))?
         };
 
         Ok(Self {
             repo,
             url: url.to_string(),
+            credential_provider,
         })
     }
 
     /// Clone a bare repository with lazy fetching (refs only initially)
-    fn clone_bare(url: &str, path: &Path) -> Result<Repository> {
+    fn clone_bare(
+        url: &str,
+        path: &Path,
+        credential_provider: Option<&CredentialProvider>,
+    ) -> Result<Repository> {
         // Create parent directory
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -45,35 +56,55 @@ impl BareRepository {
         })?;
 
         // Fetch refs only (no objects yet - lazy loading)
-        Self::fetch_refs_cmd(path, url)?;
+        Self::fetch_refs_with_auth(&repo, url, credential_provider)?;
 
         Ok(repo)
     }
 
-    /// Fetch refs from the remote using git command
-    fn fetch_refs_cmd(repo_path: &Path, _url: &str) -> Result<()> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .arg("fetch")
-            .arg("origin")
-            .arg("refs/heads/*:refs/heads/*")
-            .arg("refs/tags/*:refs/tags/*")
-            .output()?;
+    /// Fetch refs from the remote using git2 API with authentication
+    fn fetch_refs_with_auth(
+        repo: &Repository,
+        url: &str,
+        credential_provider: Option<&CredentialProvider>,
+    ) -> Result<()> {
+        let callbacks = if let Some(provider) = credential_provider {
+            provider.build_callbacks(url)
+        } else {
+            Self::build_default_callbacks()
+        };
 
-        if !output.status.success() {
-            return Err(GitError::Command(format!(
-                "git fetch failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        let mut remote = repo.find_remote("origin").map_err(|e| GitError::Repository(e))?;
+        remote
+            .fetch(
+                &["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"],
+                Some(&mut fetch_options),
+                None,
+            )
+            .map_err(|e| GitError::Command(format!("git fetch failed: {}", e)))?;
 
         Ok(())
     }
 
+    /// Build default callbacks with SSH agent fallback
+    fn build_default_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
+        let mut callbacks = git2::RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, allowed_types| {
+            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+                let username = username_from_url.unwrap_or("git");
+                git2::Cred::ssh_key_from_agent(username)
+            } else {
+                Err(git2::Error::from_str("No credentials available"))
+            }
+        });
+        callbacks
+    }
+
     /// Update refs from the remote
     pub fn fetch_refs(&self) -> Result<()> {
-        Self::fetch_refs_cmd(self.repo.path(), &self.url)
+        Self::fetch_refs_with_auth(&self.repo, &self.url, self.credential_provider.as_deref())
     }
 
     /// Resolve a ref (branch, tag, or commit) to an OID
@@ -131,21 +162,20 @@ impl BareRepository {
     /// Fetch specific objects for a commit
     pub fn fetch_objects(&self, oid: Oid) -> Result<()> {
         let oid_str = oid.to_string();
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(self.repo.path())
-            .arg("fetch")
-            .arg("origin")
-            .arg(&oid_str)
-            .output()?;
 
-        if !output.status.success() {
-            return Err(GitError::Command(format!(
-                "git fetch {} failed: {}",
-                oid_str,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
+        let callbacks = if let Some(provider) = &self.credential_provider {
+            provider.build_callbacks(&self.url)
+        } else {
+            Self::build_default_callbacks()
+        };
+
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        let mut remote = self.repo.find_remote("origin").map_err(|e| GitError::Repository(e))?;
+        remote
+            .fetch(&[&oid_str], Some(&mut fetch_options), None)
+            .map_err(|e| GitError::Command(format!("git fetch {} failed: {}", oid_str, e)))?;
 
         Ok(())
     }

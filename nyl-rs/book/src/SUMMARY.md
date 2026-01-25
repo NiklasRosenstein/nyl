@@ -21,6 +21,7 @@
 - [Plugin Installation](./argocd/plugin.md)
 - [Bootstrapping](./argocd/bootstrapping.md)
 - [ApplicationGenerator](./argocd/application-generator.md)
+- [Repository Secrets](./argocd/repository-secrets.md)
 - [Best Practices](./argocd/best-practices.md)
 
 # Reference

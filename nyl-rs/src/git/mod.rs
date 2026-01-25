@@ -43,8 +43,12 @@ mod cache;
 mod error;
 mod repository;
 mod worktree;
+mod auth;
+pub mod argocd;  // Public for testing URL matching
 
 pub use error::{GitError, Result};
+pub use auth::{GitCredential, CredentialProvider};
+pub use argocd::ArgoCDCredentialDiscovery;
 
 use cache::CacheLayout;
 use repository::BareRepository;
@@ -58,14 +62,30 @@ use std::sync::{Arc, Mutex};
 pub struct GitManager {
     cache: CacheLayout,
     bare_repos: HashMap<String, Arc<Mutex<BareRepository>>>,
+    credential_provider: Option<Arc<CredentialProvider>>,
 }
 
 impl GitManager {
-    /// Create a new Git manager
+    /// Create a new Git manager (public repositories only)
     pub fn new() -> Result<Self> {
         Ok(Self {
             cache: CacheLayout::new()?,
             bare_repos: HashMap::new(),
+            credential_provider: None,
+        })
+    }
+
+    /// Create a Git manager with Kubernetes client for ArgoCD credential discovery
+    pub async fn with_kubernetes(client: kube::Client) -> Result<Self> {
+        let discovery = ArgoCDCredentialDiscovery::new(client).await?;
+        let credentials = discovery.discover_credentials().await?;
+
+        let provider = CredentialProvider::with_credentials(credentials);
+
+        Ok(Self {
+            cache: CacheLayout::new()?,
+            bare_repos: HashMap::new(),
+            credential_provider: Some(Arc::new(provider)),
         })
     }
 
@@ -166,7 +186,11 @@ impl GitManager {
 
         // Create or open the bare repository
         let bare_repo_path = self.cache.bare_repo_path(url);
-        let bare_repo = BareRepository::get_or_create(url, &bare_repo_path)?;
+        let bare_repo = BareRepository::get_or_create(
+            url,
+            &bare_repo_path,
+            self.credential_provider.clone(),
+        )?;
 
         let bare_repo = Arc::new(Mutex::new(bare_repo));
         self.bare_repos.insert(url_key, Arc::clone(&bare_repo));

@@ -30,6 +30,18 @@ pub enum GitError {
 
     #[error("Object {oid} not found in repository")]
     ObjectNotFound { oid: String },
+
+    #[error("Authentication failed for {url}: {reason}")]
+    AuthenticationFailed { url: String, reason: String },
+
+    #[error("No credentials found for repository: {url}")]
+    CredentialNotFound { url: String },
+
+    #[error("Failed to query ArgoCD secrets: {0}")]
+    ArgoCDSecretQueryFailed(String),
+
+    #[error("Invalid credential format in secret {secret_name}: {reason}")]
+    InvalidCredentialFormat { secret_name: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, GitError>;
