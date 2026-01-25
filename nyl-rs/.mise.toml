@@ -1,5 +1,10 @@
 # Mise configuration for nyl-rs
 # See: https://mise.jdx.dev/
+#
+# NOTE: Configuration has been merged into root /mise.toml
+# This file is kept for reference during transition period.
+# All tasks should now be run from the repository root with `mise run <task>`
+# instead of from this directory.
 
 [tools]
 # Rust toolchain
@@ -10,6 +15,7 @@ rust = "1.93.0"
 "cargo:cargo-tarpaulin" = "latest"
 "cargo:cargo-deny" = "latest"
 "cargo:cargo-audit" = "latest"
+mdbook = "0.4.52"
 
 [tasks.fmt]
 description = "Format code with rustfmt"

@@ -3,11 +3,25 @@
 Nyl is a versatile tool for generating Kubernetes manifests from a simple YAML configuration, encouraging consistent and
 reusable deployment configurations, project layouts and operational workflows.
 
+**🦀 Rust Rewrite Complete**: Nyl has been rewritten in Rust with 10x performance improvements. See [MOVE_TO_RUST.md](MOVE_TO_RUST.md) for migration details.
+
 ## Installation
+
+### Rust Version (Recommended)
+
+Download the latest binary from [releases](https://github.com/helsing-ai/nyl/releases) or build from source:
+
+    $ cd nyl-rs
+    $ cargo build --release
+    $ ./target/release/nyl --version
+
+### Python Version (Deprecated)
 
 Requires Python 3.11 or newer.
 
     $ uvx nyl
+
+**Note**: The Python version is deprecated. Please migrate to the Rust version. See [MOVE_TO_RUST.md](MOVE_TO_RUST.md).
 
 For some features, additional programs must be available:
 
@@ -18,25 +32,41 @@ For some features, additional programs must be available:
 
 ## Local development
 
-You can install the tools you need with [Mise](https://mise.jdx.dev/).
+### Rust Development (Primary)
+
+Install development tools with [Mise](https://mise.jdx.dev/):
 
     $ mise install
     $ eval "$(mise activate)"
 
-Install the project with [Uv](https://docs.astral.sh/uv/).
+Build and test the Rust version:
+
+    $ mise run build      # Build release binary
+    $ mise run test       # Run tests
+    $ mise run lint       # Run clippy
+    $ mise run fmt        # Format code
+    $ mise run pre-commit # Run all checks
+
+To live-preview the Rust documentation:
+
+    $ mise run docs-serve
+
+### Python Development (Legacy)
+
+Install Python dependencies with [Uv](https://docs.astral.sh/uv/):
 
     $ uv sync
 
-Use [Tire](https://github.com/NiklasRosenstein/tire/) tire for formatting, linting, type checking and unit tests.
+Use [Tire](https://github.com/NiklasRosenstein/tire/) for Python code quality:
 
     $ tire fmt [--check]
     $ tire lint
     $ tire check
     $ tire test
 
-To live-preview the documentation, use
+To preview Python docs:
 
-    $ mise run serve-docs
+    $ mise run docs-python-serve
 
 ## Tracking upstream information
 

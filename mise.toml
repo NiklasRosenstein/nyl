@@ -1,53 +1,134 @@
 [tools]
-"cargo:tire" = "0.1.2"
+# Rust toolchain (PRIMARY)
+rust = "1.93.0"
+
+# Cargo extensions for development and release
+"cargo:cargo-dist" = "latest"
+"cargo:cargo-tarpaulin" = "latest"
+"cargo:cargo-deny" = "latest"
+"cargo:cargo-audit" = "latest"
+
+# Kubernetes tools
 kyverno = "1.14.4"
-uv = "0.9.25"
 sops = "3.11.0"
 helm = "3.19.5"
 kubectl = "1.35.0"
+
+# Python tools (legacy, for docs during transition)
+uv = "0.9.25"
 "pipx:slap-cli" = "1.15.0"
 
-[tasks.build-docs]
-dir = "docs"
-run = "uv run mkdocs build"
-
-[tasks.serve-docs]
-dir = "docs"
-run = "uv run mkdocs serve"
-
-# Rust tasks
-[tasks.rust-fmt]
+# Primary Rust tasks (run from repository root)
+[tasks.fmt]
+description = "Format Rust code"
 dir = "nyl-rs"
 run = "cargo fmt"
 
-[tasks.rust-fmt-check]
+[tasks.fmt-check]
+description = "Check Rust formatting"
 dir = "nyl-rs"
 run = "cargo fmt --check"
 
-[tasks.rust-lint]
+[tasks.lint]
+description = "Run Rust clippy"
 dir = "nyl-rs"
 run = "cargo clippy --all-targets --all-features -- -D warnings"
 
-[tasks.rust-test]
+[tasks.test]
+description = "Run Rust tests"
 dir = "nyl-rs"
-run = "cargo test"
+run = "cargo test --all-features"
 
-[tasks.rust-build]
+[tasks.test-verbose]
+description = "Run Rust tests with output"
 dir = "nyl-rs"
-run = "cargo build --release"
+run = "cargo test --all-features -- --nocapture"
 
-[tasks.rust-bench]
+[tasks.bench]
+description = "Run Rust benchmarks"
 dir = "nyl-rs"
 run = "cargo bench"
 
-[tasks.rust-check-all]
+[tasks.build]
+description = "Build Rust release binary"
 dir = "nyl-rs"
-run = "cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test"
+run = "cargo build --release"
 
-[tasks.rust-docs-build]
+[tasks.build-dist]
+description = "Build with dist profile"
+dir = "nyl-rs"
+run = "cargo build --profile dist"
+
+[tasks.check-all]
+description = "Run all checks"
+dir = "nyl-rs"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+  "cargo test --all-features",
+]
+
+[tasks.pre-commit]
+description = "Run pre-commit checks"
+depends = ["fmt-check", "lint", "test"]
+
+[tasks.coverage]
+description = "Generate coverage report"
+dir = "nyl-rs"
+run = "cargo tarpaulin --out Html --output-dir coverage"
+
+[tasks.security-audit]
+description = "Run security audit"
+dir = "nyl-rs"
+run = "cargo audit"
+
+[tasks.dist-init]
+description = "Initialize cargo-dist"
+dir = "nyl-rs"
+run = "dist init"
+
+[tasks.dist-build]
+description = "Build release artifacts"
+dir = "nyl-rs"
+run = "dist build"
+
+[tasks.dist-plan]
+description = "Show dist plan"
+dir = "nyl-rs"
+run = "dist plan"
+
+[tasks.docs-build]
+description = "Build Rust mdbook docs"
 dir = "nyl-rs"
 run = "mdbook build book"
 
-[tasks.rust-docs-serve]
+[tasks.docs-serve]
+description = "Serve Rust mdbook docs"
 dir = "nyl-rs"
 run = "mdbook serve book --open"
+
+[tasks.docs-rustdoc]
+description = "Generate API docs"
+dir = "nyl-rs"
+run = "cargo doc --no-deps --open"
+
+[tasks.size-check]
+description = "Check binary size"
+dir = "nyl-rs"
+run = "ls -lh target/release/nyl && du -h target/release/nyl"
+
+[tasks.clean]
+description = "Clean build artifacts"
+dir = "nyl-rs"
+run = "cargo clean"
+
+# Legacy Python docs (marked for deprecation)
+[tasks.docs-python-build]
+description = "[DEPRECATED] Build Python docs"
+dir = "docs"
+run = "uv run mkdocs build"
+
+[tasks.docs-python-serve]
+description = "[DEPRECATED] Serve Python docs"
+dir = "docs"
+run = "uv run mkdocs serve"

@@ -34,7 +34,7 @@ spec:
       - sh
       - -c
       - |
-        nyl template --in-cluster .
+        nyl render --in-cluster .
 
   parameters: {}
 
