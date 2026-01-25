@@ -47,7 +47,7 @@ sudo mv nyl /usr/local/bin/
 ```bash
 # Clone repository
 git clone https://github.com/NiklasRosenstein/nyl.git
-cd nyl/nyl-rs
+cd nyl/nyl
 
 # Build and install
 cargo install --path .
@@ -102,7 +102,7 @@ Comprehensive documentation is available in mdbook format:
 
 ```bash
 # Serve documentation locally
-cd nyl-rs && mdbook serve book --open
+mdbook serve book --open
 
 # Or view online
 # https://niklasrosenstein.github.io/nyl/

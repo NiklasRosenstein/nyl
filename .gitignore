@@ -14,9 +14,9 @@ sdist/
 .dmypy.json
 
 # Rust
-nyl-rs/target/
-nyl-rs/Cargo.lock
-nyl-rs/book/book/
+nyl/target/
+nyl/Cargo.lock
+nyl/book/book/
 **/*.rs.bk
 *.pdb
 todo.txt

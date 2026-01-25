@@ -1,45 +1,90 @@
-# nyl
+# Nyl Repository
 
-Nyl is a versatile tool for generating Kubernetes manifests from a simple YAML configuration, encouraging consistent and
-reusable deployment configurations, project layouts and operational workflows.
+This repository contains the Nyl project and related components for Kubernetes manifest generation.
 
-**🦀 Rust Rewrite Complete**: Nyl has been rewritten in Rust with 10x performance improvements. See [MOVE_TO_RUST.md](MOVE_TO_RUST.md) for migration details.
+## 📦 Repository Contents
 
-## Installation
+### [`nyl/`](nyl/) - The Nyl Tool
+Fast, efficient Kubernetes manifest generator written in Rust. Complete rewrite with 10x performance improvements.
 
-Download the latest binary from [releases](https://github.com/helsing-ai/nyl/releases) or build from source:
+**Key features:**
+- 🚀 Blazing fast manifest generation
+- 💾 Memory efficient (<50MB RAM)
+- 📦 Single static binary (8.5MB)
+- 🔧 Helm integration
+- 🎨 Jinja2-compatible templating
 
-    $ cd nyl-rs
-    $ cargo build --release
-    $ ./target/release/nyl --version
+→ See [nyl/README.md](nyl/README.md) for installation and usage details.
 
-For some features, additional programs must be available:
+### [`argocd-cmp/`](argocd-cmp/) - ArgoCD Config Management Plugin
+Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
 
-- [kubectl](https://kubernetes.io/de/docs/reference/kubectl/) for applying
-- [helm](https://helm.sh/) for rendering Helm charts
-- [kyverno](https://kyverno.io/docs/kyverno-cli/) ^1.13.x when using the Nyl `PostProcessor` resource
-- [sops](https://github.com/getsops/sops) when using the SOPS secrets provider
+**Includes:**
+- Nyl (Rust binary)
+- ArgoCD CMP Server
+- Helm, SOPS, Kyverno
 
-## Local development
+→ See [argocd-cmp/README.md](argocd-cmp/README.md) for build instructions.
 
-Install development tools with [Mise](https://mise.jdx.dev/):
+### [`argocd-with-nyl/`](argocd-with-nyl/) - ArgoCD Bootstrap Example
+Example Kubernetes manifest to deploy ArgoCD with Nyl as a Config Management Plugin.
 
-    $ mise install
-    $ eval "$(mise activate)"
+→ See [argocd-with-nyl/README.md](argocd-with-nyl/README.md) for deployment guide.
 
-Build and test:
+## 🚀 Quick Start
 
-    $ mise run build      # Build release binary
-    $ mise run test       # Run tests
-    $ mise run lint       # Run clippy
-    $ mise run fmt        # Format code
-    $ mise run pre-commit # Run all checks
+```bash
+# Install Nyl from releases
+curl -LO https://github.com/helsing-ai/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
+tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
+sudo mv nyl /usr/local/bin/
 
-To live-preview the documentation:
+# Create a new project
+nyl new project my-app
+cd my-app
 
-    $ mise run docs-serve
+# Render manifests
+nyl render --environment dev
+```
 
-## Tracking upstream information
+## 🔧 Development
 
-- Discussion around ArgoCD supporting Helm lookups (maybe with Project-level service account?), see
-  https://github.com/argoproj/argo-cd/issues/5202#issuecomment-2088810772
+Install development tools with [mise](https://mise.jdx.dev/):
+
+```bash
+mise install
+eval "$(mise activate)"
+
+# Build and test
+mise run build       # Build release binary
+mise run test        # Run tests
+mise run lint        # Run clippy
+mise run fmt         # Format code
+mise run pre-commit  # Run all checks
+
+# Documentation
+mise run docs-serve  # Serve mdbook documentation
+```
+
+## 📚 Documentation
+
+- **[Nyl Tool Documentation](nyl/README.md)** - Installation, commands, examples
+- **[Migration Guide](MOVE_TO_RUST.md)** - Python to Rust migration details
+- **[Online Docs](https://helsing-ai.github.io/nyl/)** - Complete documentation (mdbook)
+
+## 🦀 Rust Rewrite
+
+Nyl has been completely rewritten in Rust with significant improvements:
+
+| Metric | Improvement |
+|--------|-------------|
+| Performance | 10x faster |
+| Memory | 75% reduction |
+| Binary size | 8.5MB (vs ~200MB+ image) |
+| Cold start | <50ms |
+
+See [MOVE_TO_RUST.md](MOVE_TO_RUST.md) for complete migration details.
+
+## 📄 License
+
+MIT License - see LICENSE for details.

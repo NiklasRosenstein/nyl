@@ -17,47 +17,47 @@ kubectl = "1.35.0"
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
 description = "Format Rust code"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo fmt"
 
 [tasks.fmt-check]
 description = "Check Rust formatting"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo fmt --check"
 
 [tasks.lint]
 description = "Run Rust clippy"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo clippy --all-targets --all-features -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo test --all-features"
 
 [tasks.test-verbose]
 description = "Run Rust tests with output"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo test --all-features -- --nocapture"
 
 [tasks.bench]
 description = "Run Rust benchmarks"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo bench"
 
 [tasks.build]
 description = "Build Rust release binary"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo build --release"
 
 [tasks.build-dist]
 description = "Build with dist profile"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo build --profile dist"
 
 [tasks.check-all]
 description = "Run all checks"
-dir = "nyl-rs"
+dir = "nyl"
 run = [
   "cargo fmt --check",
   "cargo clippy --all-targets --all-features -- -D warnings",
@@ -70,50 +70,50 @@ depends = ["fmt-check", "lint", "test"]
 
 [tasks.coverage]
 description = "Generate coverage report"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo tarpaulin --out Html --output-dir coverage"
 
 [tasks.security-audit]
 description = "Run security audit"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo audit"
 
 [tasks.dist-init]
 description = "Initialize cargo-dist"
-dir = "nyl-rs"
+dir = "nyl"
 run = "dist init"
 
 [tasks.dist-build]
 description = "Build release artifacts"
-dir = "nyl-rs"
+dir = "nyl"
 run = "dist build"
 
 [tasks.dist-plan]
 description = "Show dist plan"
-dir = "nyl-rs"
+dir = "nyl"
 run = "dist plan"
 
 [tasks.docs-build]
 description = "Build Rust mdbook docs"
-dir = "nyl-rs"
+dir = "nyl"
 run = "mdbook build book"
 
 [tasks.docs-serve]
 description = "Serve Rust mdbook docs"
-dir = "nyl-rs"
+dir = "nyl"
 run = "mdbook serve book --open"
 
 [tasks.docs-rustdoc]
 description = "Generate API docs"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo doc --no-deps --open"
 
 [tasks.size-check]
 description = "Check binary size"
-dir = "nyl-rs"
+dir = "nyl"
 run = "ls -lh target/release/nyl && du -h target/release/nyl"
 
 [tasks.clean]
 description = "Clean build artifacts"
-dir = "nyl-rs"
+dir = "nyl"
 run = "cargo clean"

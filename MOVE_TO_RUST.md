@@ -62,7 +62,7 @@ The Rust version has reached feature parity with Python for core workflows and i
 
 ## Rust Implementation Status
 
-The Rust implementation is documented in [`nyl-rs/PHASE_5_SUMMARY.md`](nyl-rs/PHASE_5_SUMMARY.md).
+The Rust implementation is documented in [`nyl/PHASE_5_SUMMARY.md`](nyl/PHASE_5_SUMMARY.md).
 
 **Key metrics**:
 - **233 passing tests** across all components
@@ -231,15 +231,15 @@ For production deployment:
 ## Getting Help
 
 For migration assistance:
-- Review `nyl-rs/PHASE_5_SUMMARY.md` for technical details
-- Check `nyl-rs/book/` for complete Rust documentation
-- Compare Python vs Rust behavior in `nyl-rs/tests/`
+- Review `nyl/PHASE_5_SUMMARY.md` for technical details
+- Check `nyl/book/` for complete Rust documentation
+- Compare Python vs Rust behavior in `nyl/tests/`
 - Open issues at repository for migration problems
 
 ## Additional Resources
 
-- [Rust implementation summary](nyl-rs/PHASE_5_SUMMARY.md)
-- [Rust documentation (mdbook)](nyl-rs/book/)
-- [API documentation](nyl-rs/target/doc/nyl/)
-- [Test coverage report](nyl-rs/coverage/)
-- [Performance benchmarks](nyl-rs/benches/)
+- [Rust implementation summary](nyl/PHASE_5_SUMMARY.md)
+- [Rust documentation (mdbook)](nyl/book/)
+- [API documentation](nyl/target/doc/nyl/)
+- [Test coverage report](nyl/coverage/)
+- [Performance benchmarks](nyl/benches/)
