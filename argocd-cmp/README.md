@@ -17,12 +17,12 @@ The Rust binary is built by CI and must be provided in the Docker build context 
 **Example** (for local testing):
 ```bash
 # Build the Rust binary first
-cd nyl-rs
+cd nyl
 cargo build --release
 cd ..
 
 # Copy binary to build context
-cp nyl-rs/target/release/nyl ./nyl-amd64
+cp nyl/target/release/nyl ./nyl-amd64
 
 # Build Docker image
 docker build -t nyl-cmp:test -f argocd-cmp/Dockerfile . --build-arg TARGETARCH=amd64

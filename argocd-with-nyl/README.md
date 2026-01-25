@@ -118,5 +118,5 @@ If you're upgrading from the Python version of Nyl, here's what you need to know
 ### Additional Resources
 
 - [Complete migration guide](../MOVE_TO_RUST.md)
-- [Rust implementation details](../nyl-rs/PHASE_5_SUMMARY.md)
+- [Rust implementation details](../nyl/IMPLEMENTATION.md)
 - [Feature comparison table](../MOVE_TO_RUST.md#feature-comparison)

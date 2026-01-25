@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Nyl has been completely rewritten in Rust (Phase 5 complete) and is production-ready. The Rust implementation delivers:
+Nyl has been completely rewritten in Rust and is production-ready. The Rust implementation delivers:
 
 - **10x faster** rendering performance
 - **75% less memory** usage
@@ -62,7 +62,7 @@ The Rust version has reached feature parity with Python for core workflows and i
 
 ## Rust Implementation Status
 
-The Rust implementation is documented in [`nyl/PHASE_5_SUMMARY.md`](nyl/PHASE_5_SUMMARY.md).
+The Rust implementation is documented in [`nyl/IMPLEMENTATION.md`](nyl/IMPLEMENTATION.md).
 
 **Key metrics**:
 - **233 passing tests** across all components
@@ -231,14 +231,14 @@ For production deployment:
 ## Getting Help
 
 For migration assistance:
-- Review `nyl/PHASE_5_SUMMARY.md` for technical details
+- Review `nyl/IMPLEMENTATION.md` for technical details
 - Check `nyl/book/` for complete Rust documentation
 - Compare Python vs Rust behavior in `nyl/tests/`
 - Open issues at repository for migration problems
 
 ## Additional Resources
 
-- [Rust implementation summary](nyl/PHASE_5_SUMMARY.md)
+- [Rust implementation summary](nyl/IMPLEMENTATION.md)
 - [Rust documentation (mdbook)](nyl/book/)
 - [API documentation](nyl/target/doc/nyl/)
 - [Test coverage report](nyl/coverage/)
