@@ -131,7 +131,13 @@ pub struct ProfileConfig {
 
 impl ProfileConfig {
     /// Profile configuration filenames searched in priority order
-    pub const FILENAMES: &'static [&'static str] = &["nyl-profiles.yaml", "nyl-profiles.json"];
+    /// Hidden files (starting with .) are checked first to avoid conflicts with ArgoCD
+    pub const FILENAMES: &'static [&'static str] = &[
+        ".nyl-profiles.yaml",
+        ".nyl-profiles.json",
+        "nyl-profiles.yaml",
+        "nyl-profiles.json",
+    ];
 
     /// Load profile configuration with precedence
     ///

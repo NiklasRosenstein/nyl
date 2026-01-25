@@ -217,12 +217,20 @@ fn create_argocd_application(
 }
 
 /// Find all YAML files in a directory (recursively)
+/// Skips hidden files (starting with .) to avoid processing config files
 fn find_yaml_files(dir: &str) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
     for entry in WalkDir::new(dir).follow_links(true).into_iter() {
         let entry = entry.map_err(|e| NylError::Config(format!("Failed to read directory: {}", e)))?;
         let path = entry.path();
+
+        // Skip hidden files and directories (starting with .)
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name.starts_with('.') {
+                continue;
+            }
+        }
 
         if path.is_file() {
             if let Some(ext) = path.extension() {
@@ -265,7 +273,6 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_parse_yaml_documents() {

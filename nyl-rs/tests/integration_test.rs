@@ -74,21 +74,21 @@ data:
 }
 
 #[test]
-fn test_diff_command_stub() {
+fn test_diff_command_requires_profile() {
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.arg("diff");
     cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicate::str::contains("Profile 'default' not found"));
 }
 
 #[test]
-fn test_apply_command_stub() {
+fn test_apply_command_requires_profile() {
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.arg("apply");
     cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicate::str::contains("Profile 'default' not found"));
 }
 
 #[test]
@@ -102,10 +102,10 @@ fn test_new_project_command() {
         .success()
         .stdout(predicate::str::contains("Project 'test-project' created successfully"));
 
-    // Verify project structure
+    // Verify project structure (defaults to TOML format with hidden file)
     let project_dir = temp.path().join("test-project");
     assert!(project_dir.exists());
-    assert!(project_dir.join("nyl-project.yaml").exists());
+    assert!(project_dir.join(".nyl-project.toml").exists());
     assert!(project_dir.join("components").exists());
 }
 

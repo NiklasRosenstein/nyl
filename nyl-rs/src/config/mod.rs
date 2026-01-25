@@ -75,7 +75,13 @@ pub struct ProjectConfig {
 
 impl ProjectConfig {
     /// Config file names searched in priority order
-    pub const FILENAMES: &'static [&'static str] = &["nyl-project.yaml", "nyl-project.json"];
+    /// Hidden files (starting with .) are checked first to avoid conflicts with ArgoCD
+    pub const FILENAMES: &'static [&'static str] = &[
+        ".nyl-project.yaml",
+        ".nyl-project.json",
+        "nyl-project.yaml",
+        "nyl-project.json",
+    ];
 
     /// Find the project configuration file
     ///

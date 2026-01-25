@@ -96,17 +96,17 @@ fn create_project(name: &str, base_path: &Path, format: ConfigFormat) -> Result<
     fs::create_dir(&components_dir)?;
     println!("✓ Created components directory: {}", components_dir.display());
 
-    // Create config file based on format
+    // Create config file based on format (hidden files with . prefix)
     let (config_filename, config_content) = match format {
         ConfigFormat::Toml => (
-            "nyl-project.toml",
+            ".nyl-project.toml",
             r#"[settings]
 components_path = "components"
 search_path = ["."]
 "#,
         ),
         ConfigFormat::Yaml => (
-            "nyl-project.yaml",
+            ".nyl-project.yaml",
             r#"settings:
   components_path: components
   search_path:
@@ -337,10 +337,10 @@ mod tests {
         let project_dir = temp.path().join("test-project");
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
-        assert!(project_dir.join("nyl-project.toml").exists());
+        assert!(project_dir.join(".nyl-project.toml").exists());
 
         // Verify config file content (TOML format)
-        let config_content = fs::read_to_string(project_dir.join("nyl-project.toml")).unwrap();
+        let config_content = fs::read_to_string(project_dir.join(".nyl-project.toml")).unwrap();
         assert!(config_content.contains(r#"components_path = "components""#));
         assert!(config_content.contains(r#"search_path = ["."]"#));
     }
@@ -355,10 +355,10 @@ mod tests {
         let project_dir = temp.path().join("test-project-yaml");
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
-        assert!(project_dir.join("nyl-project.yaml").exists());
+        assert!(project_dir.join(".nyl-project.yaml").exists());
 
         // Verify config file content (YAML format)
-        let config_content = fs::read_to_string(project_dir.join("nyl-project.yaml")).unwrap();
+        let config_content = fs::read_to_string(project_dir.join(".nyl-project.yaml")).unwrap();
         assert!(config_content.contains("components_path: components"));
         assert!(config_content.contains("search_path:"));
     }
@@ -391,8 +391,8 @@ mod tests {
 
         let result = create_component("v1.example.io", "MyApp");
 
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
+        // Restore original directory before assertions
+        std::env::set_current_dir(&original_dir).ok();
 
         assert!(result.is_ok());
 
@@ -421,8 +421,8 @@ mod tests {
 
         let result = create_component("v1.example.io", "MyApp");
 
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
+        // Restore original directory before assertions
+        std::env::set_current_dir(&original_dir).ok();
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
