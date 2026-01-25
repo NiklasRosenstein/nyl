@@ -124,13 +124,11 @@ impl From<kube::Error> for NylError {
                 }
                 _ => NylError::Kubernetes(format!("Kubernetes API error ({}): {}", api_err.code, api_err.message)),
             },
-            kube::Error::HyperError(_) | kube::Error::HttpError(_) => {
-                NylError::Kubernetes(format!(
-                    "Connection error: {}\nHint: Check if the cluster is reachable and your kubeconfig is correct. \
+            kube::Error::HyperError(_) | kube::Error::HttpError(_) => NylError::Kubernetes(format!(
+                "Connection error: {}\nHint: Check if the cluster is reachable and your kubeconfig is correct. \
                      Verify network connectivity and cluster availability.",
-                    err
-                ))
-            }
+                err
+            )),
             _ => NylError::Kubernetes(format!("Kubernetes error: {}", err)),
         }
     }

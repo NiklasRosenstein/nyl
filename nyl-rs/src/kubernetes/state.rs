@@ -53,19 +53,10 @@ pub trait ReleaseStorage: Send + Sync {
     async fn save_release(&self, release: &ReleaseState) -> Result<()>;
 
     /// Get the latest release for a release name and namespace
-    async fn get_latest_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-    ) -> Result<Option<ReleaseState>>;
+    async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>>;
 
     /// Get a specific release revision
-    async fn get_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-        revision: u32,
-    ) -> Result<Option<ReleaseState>>;
+    async fn get_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<Option<ReleaseState>>;
 
     /// List all revision numbers for a release
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>>;
@@ -111,8 +102,7 @@ impl KubernetesReleaseStorage {
 
     /// Decode ByteString to string
     fn decode_base64(encoded: &ByteString) -> Result<String> {
-        String::from_utf8(encoded.0.clone())
-            .map_err(|e| NylError::Config(format!("Invalid UTF-8 in data: {}", e)))
+        String::from_utf8(encoded.0.clone()).map_err(|e| NylError::Config(format!("Invalid UTF-8 in data: {}", e)))
     }
 
     /// Convert ReleaseState to Secret
@@ -125,10 +115,7 @@ impl KubernetesReleaseStorage {
             Self::encode_base64(&serde_json::to_string(&release.resource_keys)?),
         );
 
-        data.insert(
-            "manifest".to_string(),
-            Self::encode_base64(&release.manifest),
-        );
+        data.insert("manifest".to_string(), Self::encode_base64(&release.manifest));
 
         data.insert(
             "status".to_string(),
@@ -139,10 +126,7 @@ impl KubernetesReleaseStorage {
             Self::encode_base64(&release.rendered_at.to_rfc3339()),
         );
         if let Some(applied_at) = &release.applied_at {
-            data.insert(
-                "applied_at".to_string(),
-                Self::encode_base64(&applied_at.to_rfc3339()),
-            );
+            data.insert("applied_at".to_string(), Self::encode_base64(&applied_at.to_rfc3339()));
         }
         if let Some(error) = &release.error {
             data.insert("error".to_string(), Self::encode_base64(error));
@@ -275,27 +259,17 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         Ok(())
     }
 
-    async fn get_latest_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-    ) -> Result<Option<ReleaseState>> {
+    async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         if revisions.is_empty() {
             return Ok(None);
         }
 
         let latest_revision = revisions.iter().max().unwrap();
-        self.get_release(release_name, namespace, *latest_revision)
-            .await
+        self.get_release(release_name, namespace, *latest_revision).await
     }
 
-    async fn get_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-        revision: u32,
-    ) -> Result<Option<ReleaseState>> {
+    async fn get_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<Option<ReleaseState>> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
         let name = Self::secret_name(release_name, revision);
 
@@ -340,12 +314,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         let mut release = self
             .get_release(release_name, namespace, revision)
             .await?
-            .ok_or_else(|| {
-                NylError::Config(format!(
-                    "Release {} revision {} not found",
-                    release_name, revision
-                ))
-            })?;
+            .ok_or_else(|| NylError::Config(format!("Release {} revision {} not found", release_name, revision)))?;
 
         // Update status
         release.status = status;
@@ -393,11 +362,7 @@ mod tests {
             Ok(())
         }
 
-        async fn get_latest_release(
-            &self,
-            release_name: &str,
-            namespace: &str,
-        ) -> Result<Option<ReleaseState>> {
+        async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
             let revisions = self.list_revisions(release_name, namespace).await?;
             if revisions.is_empty() {
                 return Ok(None);
@@ -547,11 +512,7 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = storage
-            .get_release("myapp", "default", 1)
-            .await
-            .unwrap()
-            .unwrap();
+        let updated = storage.get_release("myapp", "default", 1).await.unwrap().unwrap();
         assert_eq!(updated.status, ReleaseStatus::Deployed);
         assert!(updated.applied_at.is_some());
     }
@@ -566,10 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_latest_no_releases() {
         let storage = MockReleaseStorage::new();
-        let result = storage
-            .get_latest_release("missing", "default")
-            .await
-            .unwrap();
+        let result = storage.get_latest_release("missing", "default").await.unwrap();
         assert!(result.is_none());
     }
 

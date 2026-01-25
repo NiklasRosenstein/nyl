@@ -49,8 +49,7 @@ profiles:
 
     c.bench_function("config_parsing_simple", |b| {
         b.iter(|| {
-            let _result: Result<serde_json::Value, _> =
-                serde_norway::from_str(black_box(yaml_content));
+            let _result: Result<serde_json::Value, _> = serde_norway::from_str(black_box(yaml_content));
         });
     });
 }

@@ -71,9 +71,7 @@ impl ArgoCDCredentialDiscovery {
                 .map(|s| s.as_str())
                 .unwrap_or("unknown");
 
-            if let Ok(Some((secret_url, credential))) =
-                self.extract_credential_from_secret(name, secret)
-            {
+            if let Ok(Some((secret_url, credential))) = self.extract_credential_from_secret(name, secret) {
                 match secret_type {
                     "repository" => {
                         // Check for exact match
@@ -82,17 +80,14 @@ impl ArgoCDCredentialDiscovery {
 
                         if normalized_secret == normalized_requested {
                             exact_match = Some(credential);
-                        } else if matches_repository_url(&secret_url, url)
-                            && hostname_match.is_none()
-                        {
+                        } else if matches_repository_url(&secret_url, url) && hostname_match.is_none() {
                             // Hostname fallback
                             hostname_match = Some(credential);
                         }
                     }
                     "repo-creds" => {
                         // Check for pattern match
-                        if matches_repo_creds_pattern(&secret_url, url) && pattern_match.is_none()
-                        {
+                        if matches_repo_creds_pattern(&secret_url, url) && pattern_match.is_none() {
                             pattern_match = Some(credential);
                         }
                     }
@@ -121,16 +116,14 @@ impl ArgoCDCredentialDiscovery {
         let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), "argocd");
 
         // Query repository secrets
-        let repo_lp = kube::api::ListParams::default()
-            .labels("argocd.argoproj.io/secret-type=repository");
+        let repo_lp = kube::api::ListParams::default().labels("argocd.argoproj.io/secret-type=repository");
         let repo_secrets = secrets_api
             .list(&repo_lp)
             .await
             .map_err(|e| GitError::ArgoCDSecretQueryFailed(e.to_string()))?;
 
         // Query repo-creds secrets
-        let creds_lp = kube::api::ListParams::default()
-            .labels("argocd.argoproj.io/secret-type=repo-creds");
+        let creds_lp = kube::api::ListParams::default().labels("argocd.argoproj.io/secret-type=repo-creds");
         let creds_secrets = secrets_api
             .list(&creds_lp)
             .await
@@ -138,11 +131,7 @@ impl ArgoCDCredentialDiscovery {
 
         // Combine both sets of secrets, filtering for type="git" only
         let mut secrets = HashMap::new();
-        for secret in repo_secrets
-            .items
-            .into_iter()
-            .chain(creds_secrets.items.into_iter())
-        {
+        for secret in repo_secrets.items.into_iter().chain(creds_secrets.items.into_iter()) {
             // Check if secret type is "git" (or not specified, which defaults to "git")
             let repo_type = secret
                 .data

@@ -1,9 +1,9 @@
-use git2::{Oid, Repository, FetchOptions};
+use git2::{FetchOptions, Oid, Repository};
 use std::path::Path;
 use std::sync::Arc;
 
-use super::error::{GitError, Result};
 use super::auth::CredentialProvider;
+use super::error::{GitError, Result};
 
 /// Manages a bare Git repository
 pub struct BareRepository {
@@ -14,11 +14,7 @@ pub struct BareRepository {
 
 impl BareRepository {
     /// Get or create a bare repository at the specified path
-    pub fn get_or_create(
-        url: &str,
-        path: &Path,
-        credential_provider: Option<Arc<CredentialProvider>>,
-    ) -> Result<Self> {
+    pub fn get_or_create(url: &str, path: &Path, credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
         let repo = if path.exists() {
             Repository::open(path)?
         } else {
@@ -33,11 +29,7 @@ impl BareRepository {
     }
 
     /// Clone a bare repository with lazy fetching (refs only initially)
-    fn clone_bare(
-        url: &str,
-        path: &Path,
-        credential_provider: Option<&CredentialProvider>,
-    ) -> Result<Repository> {
+    fn clone_bare(url: &str, path: &Path, credential_provider: Option<&CredentialProvider>) -> Result<Repository> {
         // Create parent directory
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

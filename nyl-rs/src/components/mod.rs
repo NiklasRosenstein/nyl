@@ -7,7 +7,6 @@
 ///
 /// Components are discovered in the directory structure:
 /// components/<apiVersion>/<kind>/Chart.yaml
-
 use crate::{NylError, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -109,10 +108,7 @@ impl ComponentRegistry {
     fn search_component(&self, api_version: &str, kind: &str) -> Result<Option<Component>> {
         for search_path in &self.search_paths {
             // Look for components/<apiVersion>/<kind>/Chart.yaml
-            let component_path = search_path
-                .join("components")
-                .join(api_version)
-                .join(kind);
+            let component_path = search_path.join("components").join(api_version).join(kind);
 
             let chart_path = component_path.join("Chart.yaml");
 
@@ -191,10 +187,9 @@ impl ComponentRegistry {
                                 };
 
                                 // Cache it
-                                self.cache.borrow_mut().insert(
-                                    (api_version.clone(), kind),
-                                    Some(Component::Helm(component.clone())),
-                                );
+                                self.cache
+                                    .borrow_mut()
+                                    .insert((api_version.clone(), kind), Some(Component::Helm(component.clone())));
 
                                 components.push(Component::Helm(component));
                             }
@@ -225,10 +220,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_component(base: &Path, api_version: &str, kind: &str) {
-        let component_dir = base
-            .join("components")
-            .join(api_version)
-            .join(kind);
+        let component_dir = base.join("components").join(api_version).join(kind);
         fs::create_dir_all(&component_dir).unwrap();
 
         let chart_yaml = component_dir.join("Chart.yaml");
@@ -247,10 +239,7 @@ mod tests {
             kind: "Test".to_string(),
         };
 
-        assert_eq!(
-            component.chart_yaml_path(),
-            PathBuf::from("/test/path/Chart.yaml")
-        );
+        assert_eq!(component.chart_yaml_path(), PathBuf::from("/test/path/Chart.yaml"));
     }
 
     #[test]
@@ -339,10 +328,7 @@ mod tests {
         create_test_component(temp1.path(), "v1.example.io", "App1");
         create_test_component(temp2.path(), "v2.example.io", "App2");
 
-        let registry = ComponentRegistry::new(vec![
-            temp1.path().to_path_buf(),
-            temp2.path().to_path_buf(),
-        ]);
+        let registry = ComponentRegistry::new(vec![temp1.path().to_path_buf(), temp2.path().to_path_buf()]);
 
         let app1 = registry.find_component("v1.example.io", "App1").unwrap();
         assert!(app1.is_some());

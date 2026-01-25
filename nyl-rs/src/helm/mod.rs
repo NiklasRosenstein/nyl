@@ -4,7 +4,6 @@
 /// - Chart resolution (local paths in Phase 2)
 /// - Template command building
 /// - Chart caching (stubbed for git/OCI in Phase 3)
-
 use crate::resources::ChartRef;
 use crate::{NylError, Result};
 use std::path::{Path, PathBuf};
@@ -161,11 +160,8 @@ impl HelmChartResolver {
     fn resolve_git(&self, git_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
         let mut git_manager = crate::git::GitManager::new()?;
 
-        let worktree_path = git_manager.resolve_ref(
-            git_url,
-            chart_ref.git_ref.as_deref(),
-            chart_ref.path.as_deref(),
-        )?;
+        let worktree_path =
+            git_manager.resolve_ref(git_url, chart_ref.git_ref.as_deref(), chart_ref.path.as_deref())?;
 
         // Verify Chart.yaml exists
         let chart_yaml = worktree_path.join("Chart.yaml");
@@ -280,10 +276,7 @@ mod tests {
         create_test_chart(&search1, "chart1");
         create_test_chart(&search2, "chart2");
 
-        let resolver = HelmChartResolver::new(
-            vec![search1.clone(), search2.clone()],
-            temp.path().to_path_buf(),
-        );
+        let resolver = HelmChartResolver::new(vec![search1.clone(), search2.clone()], temp.path().to_path_buf());
 
         // Chart1 from first path
         let chart1_ref = ChartRef {
@@ -314,10 +307,7 @@ mod tests {
 
         let result = resolver.resolve_chart(&chart_ref);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]
@@ -335,10 +325,7 @@ mod tests {
 
         let result = resolver.resolve_chart(&chart_ref);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not found in search paths"));
+        assert!(result.unwrap_err().to_string().contains("not found in search paths"));
     }
 
     #[test]
@@ -357,10 +344,7 @@ mod tests {
 
         let result = resolver.resolve_chart(&chart_ref);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Chart.yaml not found"));
+        assert!(result.unwrap_err().to_string().contains("Chart.yaml not found"));
     }
 
     // Git chart resolution test is now an integration test

@@ -25,7 +25,9 @@ pub enum GitError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Invalid Git URL: {0}\nHint: Use format 'https://github.com/user/repo.git' or 'git@github.com:user/repo.git'")]
+    #[error(
+        "Invalid Git URL: {0}\nHint: Use format 'https://github.com/user/repo.git' or 'git@github.com:user/repo.git'"
+    )]
     InvalidUrl(String),
 
     #[error("Object {oid} not found in repository\nHint: The commit may not have been fetched. Try fetching latest changes.")]
@@ -57,7 +59,10 @@ impl GitError {
 
     /// Returns true if this error is likely transient (network issues)
     pub fn is_transient(&self) -> bool {
-        matches!(self, GitError::CloneFailed { .. } | GitError::ArgoCDSecretQueryFailed(_))
+        matches!(
+            self,
+            GitError::CloneFailed { .. } | GitError::ArgoCDSecretQueryFailed(_)
+        )
     }
 }
 

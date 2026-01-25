@@ -39,16 +39,16 @@
 //! ).unwrap();
 //! ```
 
+pub mod argocd;
+mod auth;
 mod cache;
 mod error;
 mod repository;
-mod worktree;
-mod auth;
-pub mod argocd;  // Public for testing URL matching
+mod worktree; // Public for testing URL matching
 
-pub use error::{GitError, Result};
-pub use auth::{GitCredential, CredentialProvider};
 pub use argocd::ArgoCDCredentialDiscovery;
+pub use auth::{CredentialProvider, GitCredential};
+pub use error::{GitError, Result};
 
 use cache::CacheLayout;
 use repository::BareRepository;
@@ -121,12 +121,7 @@ impl GitManager {
     ///     Some("bitnami/nginx")
     /// ).unwrap();
     /// ```
-    pub fn resolve_ref(
-        &mut self,
-        url: &str,
-        git_ref: Option<&str>,
-        subpath: Option<&str>,
-    ) -> Result<PathBuf> {
+    pub fn resolve_ref(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
         let git_ref = git_ref.unwrap_or("HEAD");
 
         // Get or create bare repository
@@ -164,8 +159,7 @@ impl GitManager {
         };
 
         let worktree_path = self.cache.worktree_path(url, git_ref);
-        let worktree_path =
-            WorktreeManager::get_or_create_worktree(&bare_repo_path, git_ref, oid, &worktree_path)?;
+        let worktree_path = WorktreeManager::get_or_create_worktree(&bare_repo_path, git_ref, oid, &worktree_path)?;
 
         // Add subpath if specified
         if let Some(sub) = subpath {
@@ -186,11 +180,7 @@ impl GitManager {
 
         // Create or open the bare repository
         let bare_repo_path = self.cache.bare_repo_path(url);
-        let bare_repo = BareRepository::get_or_create(
-            url,
-            &bare_repo_path,
-            self.credential_provider.clone(),
-        )?;
+        let bare_repo = BareRepository::get_or_create(url, &bare_repo_path, self.credential_provider.clone())?;
 
         let bare_repo = Arc::new(Mutex::new(bare_repo));
         self.bare_repos.insert(url_key, Arc::clone(&bare_repo));

@@ -5,8 +5,8 @@ use kube::{api::DynamicObject, Client};
 use crate::{
     cli::commands::render::render_manifests,
     kubernetes::{
-        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
-        ResourceOrdering, ReleaseState, ReleaseStatus, ReleaseStorage,
+        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
+        ResourceKey, ResourceOrdering,
     },
     resources::extract_nyl_release,
     NylError, Result,
@@ -66,21 +66,14 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     // 3. Determine release name and namespace
     let (release_name, release_namespace) = match nyl_release {
-        Some(ref release) => (
-            release.metadata.name.clone(),
-            release.metadata.namespace.clone(),
-        ),
+        Some(ref release) => (release.metadata.name.clone(), release.metadata.namespace.clone()),
         None => {
             // Require CLI flags if no NylRelease
             let name = args.name.ok_or_else(|| {
-                NylError::Config(
-                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
-                )
+                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
             })?;
             let namespace = args.namespace.ok_or_else(|| {
-                NylError::Config(
-                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
-                )
+                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
             })?;
             (name, namespace)
         }
@@ -114,9 +107,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let storage = KubernetesReleaseStorage::new(client);
 
     // 6. Determine next revision number
-    let revisions = storage
-        .list_revisions(&release_name, &release_namespace)
-        .await?;
+    let revisions = storage.list_revisions(&release_name, &release_namespace).await?;
     let next_revision = revisions.iter().max().map(|r| r + 1).unwrap_or(1);
 
     // 7. Convert manifests to YAML string for storage
@@ -254,11 +245,7 @@ fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
 }
 
 /// Apply a single manifest
-async fn apply_manifest(
-    client: &KubeRsClient,
-    manifest: &serde_json::Value,
-    dry_run: bool,
-) -> Result<ApplyOutcome> {
+async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry_run: bool) -> Result<ApplyOutcome> {
     // Convert JSON to DynamicObject
     let resource: DynamicObject = serde_json::from_value(manifest.clone())?;
 
@@ -267,12 +254,7 @@ async fn apply_manifest(
 }
 
 /// Print apply summary
-fn print_apply_summary(
-    outcomes: &[ApplyOutcome],
-    errors: &[String],
-    release: &ReleaseState,
-    dry_run: bool,
-) {
+fn print_apply_summary(outcomes: &[ApplyOutcome], errors: &[String], release: &ReleaseState, dry_run: bool) {
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
     for outcome in outcomes {
@@ -313,10 +295,7 @@ fn print_apply_summary(
             release.release_name, release.revision, release.release_namespace
         );
     } else {
-        println!(
-            "Release: {} revision {} failed",
-            release.release_name, release.revision
-        );
+        println!("Release: {} revision {} failed", release.release_name, release.revision);
     }
 }
 
@@ -380,10 +359,7 @@ mod tests {
 
     #[test]
     fn test_format_namespace_name_with_namespace() {
-        assert_eq!(
-            format_namespace_name(Some("default"), "myapp"),
-            "default/myapp"
-        );
+        assert_eq!(format_namespace_name(Some("default"), "myapp"), "default/myapp");
     }
 
     #[test]
@@ -391,4 +367,3 @@ mod tests {
         assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
     }
 }
-

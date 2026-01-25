@@ -43,11 +43,7 @@ fn test_error_messages_have_context() {
 
     for error in errors {
         let msg = format!("{}", error);
-        assert!(
-            msg.contains("Hint:"),
-            "Error message should contain a hint: {}",
-            msg
-        );
+        assert!(msg.contains("Hint:"), "Error message should contain a hint: {}", msg);
     }
 }
 

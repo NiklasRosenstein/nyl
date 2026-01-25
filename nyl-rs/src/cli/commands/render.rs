@@ -184,11 +184,7 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
     let path = Path::new(path);
     let mut resources = Vec::new();
 
-    for entry in WalkDir::new(path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(path).follow_links(true).into_iter().filter_map(|e| e.ok()) {
         let file_path = entry.path();
         if !file_path.is_file() {
             continue;
@@ -199,8 +195,8 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
+        let content =
+            std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
         let docs = parse_yaml_documents(&content)?;
         resources.extend(docs);
     }
@@ -224,8 +220,7 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let value: serde_json::Value =
-            serde_norway::from_str(trimmed).map_err(|e| NylError::Yaml(e))?;
+        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(|e| NylError::Yaml(e))?;
 
         if !value.is_null() {
             documents.push(value);
@@ -287,13 +282,10 @@ fn render_helm_chart(
     kube_version: &str,
     api_versions: &[String],
 ) -> Result<Vec<serde_json::Value>> {
-    let working_dir = std::env::current_dir()
-        .map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
+    let working_dir =
+        std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
 
-    let resolver = HelmChartResolver::new(
-        config.config.settings.search_path.clone(),
-        working_dir,
-    );
+    let resolver = HelmChartResolver::new(config.config.settings.search_path.clone(), working_dir);
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
     // Merge context values into chart values
@@ -320,8 +312,7 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
                 if i > 0 {
                     println!("---");
                 }
-                let yaml = serde_norway::to_string(manifest)
-                    .map_err(|e| NylError::Yaml(e))?;
+                let yaml = serde_norway::to_string(manifest).map_err(|e| NylError::Yaml(e))?;
                 print!("{}", yaml);
             }
         }
@@ -359,9 +350,8 @@ fn process_application_generator(
 
     for file_path in yaml_files {
         // Read and parse file
-        let content = std::fs::read_to_string(&file_path).map_err(|e| {
-            NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(&file_path)
+            .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
         let docs = parse_yaml_documents(&content)?;
 
         // Extract NylRelease
@@ -369,12 +359,7 @@ fn process_application_generator(
 
         if let Some(release) = nyl_release {
             // Generate ArgoCD Application
-            let app = create_argocd_application_from_generator(
-                &release,
-                &file_path,
-                &source_path,
-                generator,
-            )?;
+            let app = create_argocd_application_from_generator(&release, &file_path, &source_path, generator)?;
             applications.push(app);
         }
         // Skip files without NylRelease (no warning to avoid noise)
@@ -384,11 +369,7 @@ fn process_application_generator(
 }
 
 /// Find YAML files matching include/exclude patterns
-fn find_yaml_files_filtered(
-    dir: &Path,
-    include: &[String],
-    exclude: &[String],
-) -> Result<Vec<std::path::PathBuf>> {
+fn find_yaml_files_filtered(dir: &Path, include: &[String], exclude: &[String]) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
 
     if !dir.exists() {
@@ -399,9 +380,7 @@ fn find_yaml_files_filtered(
     }
 
     for entry in WalkDir::new(dir).follow_links(true) {
-        let entry = entry.map_err(|e| {
-            NylError::Config(format!("Failed to walk directory: {}", e))
-        })?;
+        let entry = entry.map_err(|e| NylError::Config(format!("Failed to walk directory: {}", e)))?;
         let path = entry.path();
 
         // Skip if not a file
@@ -427,10 +406,7 @@ fn find_yaml_files_filtered(
 
 /// Check if path matches any glob pattern
 fn matches_glob_patterns(path: &Path, patterns: &[String]) -> Result<bool> {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     for pattern in patterns {
         // Simple glob matching (*.yaml, .*, _*, etc.)

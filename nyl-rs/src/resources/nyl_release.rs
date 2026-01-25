@@ -3,7 +3,6 @@
 /// This is an optional resource that can be included in YAML files to specify
 /// release metadata. When present, it provides the release name and namespace.
 /// When absent, these values must be provided via CLI flags.
-
 use serde::{Deserialize, Serialize};
 
 use crate::constants::API_VERSION;
@@ -38,10 +37,7 @@ pub struct NylReleaseSpec {
 impl NylRelease {
     /// Check if a manifest is a NylRelease resource
     pub fn is_nyl_release(manifest: &serde_json::Value) -> bool {
-        manifest
-            .get("apiVersion")
-            .and_then(|v| v.as_str())
-            == Some(API_VERSION)
+        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION)
             && manifest.get("kind").and_then(|v| v.as_str()) == Some("NylRelease")
     }
 
@@ -55,9 +51,7 @@ impl NylRelease {
 /// Extract NylRelease metadata and filter it from manifests
 ///
 /// Returns a tuple of (optional NylRelease, filtered manifests without NylRelease)
-pub fn extract_nyl_release(
-    manifests: &[serde_json::Value],
-) -> Result<(Option<NylRelease>, Vec<serde_json::Value>)> {
+pub fn extract_nyl_release(manifests: &[serde_json::Value]) -> Result<(Option<NylRelease>, Vec<serde_json::Value>)> {
     let mut nyl_release = None;
     let mut filtered = Vec::new();
 
@@ -240,9 +234,6 @@ mod tests {
 
         let result = extract_nyl_release(&manifests);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Multiple NylRelease"));
+        assert!(result.unwrap_err().to_string().contains("Multiple NylRelease"));
     }
 }

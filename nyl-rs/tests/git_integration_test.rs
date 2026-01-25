@@ -6,7 +6,6 @@
 /// - Resolving refs
 /// - HelmChart Git integration
 /// - ApplicationGenerator Git integration
-
 use nyl::git::GitManager;
 use std::env;
 use std::fs;
@@ -64,13 +63,11 @@ fn create_test_git_repo(repo_dir: &Path) {
         .expect("Failed to disable tag signing");
 
     // Create a test file
-    fs::write(repo_dir.join("test.txt"), "Hello, World!")
-        .expect("Failed to create test file");
+    fs::write(repo_dir.join("test.txt"), "Hello, World!").expect("Failed to create test file");
 
     // Create a subdirectory with a file
     fs::create_dir_all(repo_dir.join("subdir")).expect("Failed to create subdir");
-    fs::write(repo_dir.join("subdir/chart.yaml"), "name: test-chart")
-        .expect("Failed to create chart.yaml");
+    fs::write(repo_dir.join("subdir/chart.yaml"), "name: test-chart").expect("Failed to create chart.yaml");
 
     // Add and commit
     Command::new("git")
@@ -116,11 +113,7 @@ fn test_git_manager_resolve_ref_main_branch() {
     // Clone and resolve main branch
     let mut manager = GitManager::new().unwrap();
     let result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("main"),
-            None,
-        )
+        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
         .unwrap();
 
     // Verify the worktree exists
@@ -197,11 +190,7 @@ fn test_git_manager_resolve_ref_tag() {
 
     let mut manager = GitManager::new().unwrap();
     let result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("v1.0.0"),
-            None,
-        )
+        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("v1.0.0"), None)
         .unwrap();
 
     assert!(result.exists());
@@ -223,11 +212,7 @@ fn test_git_manager_multiple_refs_same_repo() {
 
     // Resolve main branch
     let main_result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("main"),
-            None,
-        )
+        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
         .unwrap();
 
     // Resolve test-branch
@@ -264,11 +249,7 @@ fn test_git_manager_cache_reuse() {
         std::env::set_var("NYL_CACHE_DIR", &cache_path);
         let mut manager = GitManager::new().unwrap();
         let _result = manager
-            .resolve_ref(
-                &format!("file://{}", temp_repo.path().display()),
-                Some("main"),
-                None,
-            )
+            .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
             .unwrap();
     }
 
@@ -278,11 +259,7 @@ fn test_git_manager_cache_reuse() {
         std::env::set_var("NYL_CACHE_DIR", &cache_path);
         let mut manager = GitManager::new().unwrap();
         let result = manager
-            .resolve_ref(
-                &format!("file://{}", temp_repo.path().display()),
-                Some("main"),
-                None,
-            )
+            .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
             .unwrap();
 
         assert!(result.exists());
@@ -303,11 +280,7 @@ fn test_cache_directory_structure() {
 
     let mut manager = GitManager::new().unwrap();
     let _result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("main"),
-            None,
-        )
+        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
         .unwrap();
 
     // Verify cache structure
@@ -321,16 +294,10 @@ fn test_cache_directory_structure() {
     assert!(worktrees_dir.exists());
 
     // Should have one bare repo
-    let bare_repos: Vec<_> = fs::read_dir(&bare_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    let bare_repos: Vec<_> = fs::read_dir(&bare_dir).unwrap().filter_map(|e| e.ok()).collect();
     assert_eq!(bare_repos.len(), 1);
 
     // Should have one worktree
-    let worktrees: Vec<_> = fs::read_dir(&worktrees_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    let worktrees: Vec<_> = fs::read_dir(&worktrees_dir).unwrap().filter_map(|e| e.ok()).collect();
     assert_eq!(worktrees.len(), 1);
 }

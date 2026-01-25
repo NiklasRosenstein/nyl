@@ -39,12 +39,7 @@ pub trait KubeClient: Send + Sync {
     async fn get_api_versions(&self) -> Result<Vec<String>>;
 
     /// Delete a resource from the cluster
-    async fn delete_resource(
-        &self,
-        gvk: &GroupVersionKind,
-        namespace: Option<&str>,
-        name: &str,
-    ) -> Result<()>;
+    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()>;
 
     /// Get server-normalized version of a resource using dry-run apply
     ///
@@ -52,11 +47,7 @@ pub trait KubeClient: Send + Sync {
     /// - Apply server-side defaults
     /// - Run validation and admission webhooks
     /// - Return normalized resource without persisting
-    async fn get_normalized_resource(
-        &self,
-        resource: &DynamicObject,
-        field_manager: &str,
-    ) -> Result<DynamicObject>;
+    async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject>;
 }
 
 /// Production Kubernetes client using kube-rs
@@ -84,11 +75,8 @@ impl KubeRsClient {
         };
 
         let mut config = if let Some(path) = path {
-            kube::Config::from_custom_kubeconfig(
-                kube::config::Kubeconfig::read_from(path)?,
-                &Default::default(),
-            )
-            .await?
+            kube::Config::from_custom_kubeconfig(kube::config::Kubeconfig::read_from(path)?, &Default::default())
+                .await?
         } else {
             kube::Config::infer().await?
         };
@@ -126,9 +114,7 @@ impl KubeRsClient {
                 if ar.kind == gvk.kind && ar.version == gvk.version {
                     // For core resources (empty group), ar.group is also empty
                     // For other resources, check group matches
-                    if (gvk.group.is_empty() && ar.group.is_empty())
-                        || ar.group == gvk.group
-                    {
+                    if (gvk.group.is_empty() && ar.group.is_empty()) || ar.group == gvk.group {
                         return Ok((ar, caps));
                     }
                 }
@@ -159,12 +145,8 @@ impl KubeClient for KubeRsClient {
         let (ar, caps) = self.discover_api_resource(gvk).await?;
 
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
-            let ns = namespace.ok_or_else(|| {
-                NylError::Config(format!(
-                    "Namespace required for namespaced resource {}",
-                    gvk.kind
-                ))
-            })?;
+            let ns = namespace
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
             Api::namespaced_with(self.client.clone(), ns, &ar)
         } else {
             Api::all_with(self.client.clone(), &ar)
@@ -194,9 +176,9 @@ impl KubeClient for KubeRsClient {
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
-            let ns = namespace.as_deref().ok_or_else(|| {
-                NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind))
-            })?;
+            let ns = namespace
+                .as_deref()
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
             Api::namespaced_with(self.client.clone(), ns, &ar)
         } else {
             Api::all_with(self.client.clone(), &ar)
@@ -219,12 +201,12 @@ impl KubeClient for KubeRsClient {
         let base_outcome = if !exists {
             ApplyOutcome::Created {
                 name: name.clone(),
-                namespace: namespace.clone()
+                namespace: namespace.clone(),
             }
         } else {
             ApplyOutcome::Updated {
                 name: name.clone(),
-                namespace: namespace.clone()
+                namespace: namespace.clone(),
             }
         };
 
@@ -267,22 +249,13 @@ impl KubeClient for KubeRsClient {
         Ok(result)
     }
 
-    async fn delete_resource(
-        &self,
-        gvk: &GroupVersionKind,
-        namespace: Option<&str>,
-        name: &str,
-    ) -> Result<()> {
+    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
         let (ar, caps) = self.discover_api_resource(gvk).await?;
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
-            let ns = namespace.ok_or_else(|| {
-                NylError::Config(format!(
-                    "Namespace required for namespaced resource {}",
-                    gvk.kind
-                ))
-            })?;
+            let ns = namespace
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
             Api::namespaced_with(self.client.clone(), ns, &ar)
         } else {
             Api::all_with(self.client.clone(), &ar)
@@ -297,14 +270,9 @@ impl KubeClient for KubeRsClient {
             }
             Err(e) => Err(e.into()),
         }
-
     }
 
-    async fn get_normalized_resource(
-        &self,
-        resource: &DynamicObject,
-        field_manager: &str,
-    ) -> Result<DynamicObject> {
+    async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject> {
         // Extract metadata
         let name = resource.name_any();
         let namespace = resource.namespace();
@@ -316,9 +284,9 @@ impl KubeClient for KubeRsClient {
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
-            let ns = namespace.as_deref().ok_or_else(|| {
-                NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind))
-            })?;
+            let ns = namespace
+                .as_deref()
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
             Api::namespaced_with(self.client.clone(), ns, &ar)
         } else {
             Api::all_with(self.client.clone(), &ar)
@@ -413,12 +381,12 @@ impl KubeClient for MockKubeClient {
         let base_outcome = if !exists {
             ApplyOutcome::Created {
                 name: name.clone(),
-                namespace: namespace.clone()
+                namespace: namespace.clone(),
             }
         } else {
             ApplyOutcome::Updated {
                 name: name.clone(),
-                namespace: namespace.clone()
+                namespace: namespace.clone(),
             }
         };
 
@@ -446,12 +414,7 @@ impl KubeClient for MockKubeClient {
         ])
     }
 
-    async fn delete_resource(
-        &self,
-        gvk: &GroupVersionKind,
-        namespace: Option<&str>,
-        name: &str,
-    ) -> Result<()> {
+    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
         let key = ResourceKey {
             gvk: gvk.clone(),
             namespace: namespace.map(|s| s.to_string()),
@@ -463,14 +426,9 @@ impl KubeClient for MockKubeClient {
         // Either way, we consider the operation successful
         store.remove(&key);
         Ok(())
-
     }
 
-    async fn get_normalized_resource(
-        &self,
-        resource: &DynamicObject,
-        _field_manager: &str,
-    ) -> Result<DynamicObject> {
+    async fn get_normalized_resource(&self, resource: &DynamicObject, _field_manager: &str) -> Result<DynamicObject> {
         // For testing, simply return the resource as-is
         // Tests can inject pre-normalized resources if needed
         Ok(resource.clone())
@@ -569,12 +527,10 @@ mod tests {
         let outcome = client.apply_resource(&resource, "nyl", true).await.unwrap();
 
         match outcome {
-            ApplyOutcome::DryRun { would_be } => {
-                match *would_be {
-                    ApplyOutcome::Created { .. } => {},
-                    _ => panic!("Expected Created in DryRun"),
-                }
-            }
+            ApplyOutcome::DryRun { would_be } => match *would_be {
+                ApplyOutcome::Created { .. } => {}
+                _ => panic!("Expected Created in DryRun"),
+            },
             _ => panic!("Expected DryRun outcome"),
         }
 

@@ -62,8 +62,7 @@ impl ResourceOrdering {
             "Service" | "Endpoints" | "EndpointSlice" => PRIORITY_SERVICE,
 
             // Workload resources
-            "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob" | "ReplicaSet"
-            | "Pod" => PRIORITY_WORKLOAD,
+            "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob" | "ReplicaSet" | "Pod" => PRIORITY_WORKLOAD,
 
             // Everything else
             _ => PRIORITY_OTHER,
@@ -174,10 +173,7 @@ mod tests {
 
         ResourceOrdering::sort_by_priority(&mut resources).unwrap();
 
-        let kinds: Vec<&str> = resources
-            .iter()
-            .map(|r| r["kind"].as_str().unwrap())
-            .collect();
+        let kinds: Vec<&str> = resources.iter().map(|r| r["kind"].as_str().unwrap()).collect();
 
         assert_eq!(
             kinds,
@@ -223,10 +219,7 @@ mod tests {
         assert_eq!(resources[2]["kind"], "Deployment");
 
         // ConfigMap and Secret order should be stable (original order preserved)
-        let first_two_kinds: Vec<&str> = resources[..2]
-            .iter()
-            .map(|r| r["kind"].as_str().unwrap())
-            .collect();
+        let first_two_kinds: Vec<&str> = resources[..2].iter().map(|r| r["kind"].as_str().unwrap()).collect();
         assert!(first_two_kinds.contains(&"Secret"));
         assert!(first_two_kinds.contains(&"ConfigMap"));
     }

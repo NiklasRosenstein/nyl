@@ -59,12 +59,7 @@ pub async fn execute(args: ClusterInfoArgs) -> Result<()> {
         return Err(NylError::Config(format!(
             "Profile '{}' not found. Available profiles: {}",
             env_name,
-            profile_config
-                .profiles
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     };
 
@@ -100,8 +95,8 @@ fn output_text(info: &ClusterInfo) {
 }
 
 fn output_json(info: &ClusterInfo) -> Result<()> {
-    let json = serde_json::to_string_pretty(info)
-        .map_err(|e| NylError::Config(format!("Failed to serialize JSON: {}", e)))?;
+    let json =
+        serde_json::to_string_pretty(info).map_err(|e| NylError::Config(format!("Failed to serialize JSON: {}", e)))?;
     println!("{}", json);
     Ok(())
 }

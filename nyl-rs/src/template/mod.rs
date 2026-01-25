@@ -47,11 +47,7 @@ pub struct TemplateContext {
 
 impl TemplateContext {
     /// Build a template context from profile, secrets, and environment name
-    pub fn build(
-        profile: &Profile,
-        secrets: &SecretsConfig,
-        env_name: &str,
-    ) -> Result<Self> {
+    pub fn build(profile: &Profile, secrets: &SecretsConfig, env_name: &str) -> Result<Self> {
         let values = serde_json::to_value(&profile.values)?;
 
         let secret_keys = secrets.keys()?;
@@ -83,10 +79,8 @@ fn secret_value_to_json(value: &crate::secrets::SecretValue) -> serde_json::Valu
     match value {
         crate::secrets::SecretValue::String(s) => serde_json::Value::String(s.clone()),
         crate::secrets::SecretValue::Object(obj) => {
-            let map: serde_json::Map<String, serde_json::Value> = obj
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let map: serde_json::Map<String, serde_json::Value> =
+                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             serde_json::Value::Object(map)
         }
         crate::secrets::SecretValue::Array(arr) => serde_json::Value::Array(arr.clone()),
@@ -105,14 +99,12 @@ mod filters {
 
     /// Base64 decode a string
     pub fn b64decode(value: String) -> Result<String, minijinja::Error> {
-        let decoded = general_purpose::STANDARD
-            .decode(value.as_bytes())
-            .map_err(|e| {
-                minijinja::Error::new(
-                    minijinja::ErrorKind::InvalidOperation,
-                    format!("Base64 decode failed: {}", e),
-                )
-            })?;
+        let decoded = general_purpose::STANDARD.decode(value.as_bytes()).map_err(|e| {
+            minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("Base64 decode failed: {}", e),
+            )
+        })?;
         String::from_utf8(decoded).map_err(|e| {
             minijinja::Error::new(
                 minijinja::ErrorKind::InvalidOperation,
@@ -132,9 +124,7 @@ mod tests {
         let context = serde_json::json!({
             "text": "hello world"
         });
-        let result = engine
-            .render("{{ text | b64encode }}", &context)
-            .unwrap();
+        let result = engine.render("{{ text | b64encode }}", &context).unwrap();
         assert_eq!(result, "aGVsbG8gd29ybGQ=");
     }
 
@@ -144,9 +134,7 @@ mod tests {
         let context = serde_json::json!({
             "encoded": "aGVsbG8gd29ybGQ="
         });
-        let result = engine
-            .render("{{ encoded | b64decode }}", &context)
-            .unwrap();
+        let result = engine.render("{{ encoded | b64decode }}", &context).unwrap();
         assert_eq!(result, "hello world");
     }
 
@@ -156,9 +144,7 @@ mod tests {
         let context = serde_json::json!({
             "text": "The quick brown fox"
         });
-        let result = engine
-            .render("{{ text | b64encode | b64decode }}", &context)
-            .unwrap();
+        let result = engine.render("{{ text | b64encode | b64decode }}", &context).unwrap();
         assert_eq!(result, "The quick brown fox");
     }
 
@@ -169,9 +155,7 @@ mod tests {
             "name": "world",
             "count": 42
         });
-        let result = engine
-            .render("Hello {{ name }}! Count: {{ count }}", &context)
-            .unwrap();
+        let result = engine.render("Hello {{ name }}! Count: {{ count }}", &context).unwrap();
         assert_eq!(result, "Hello world! Count: 42");
     }
 

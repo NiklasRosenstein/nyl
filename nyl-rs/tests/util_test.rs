@@ -9,8 +9,7 @@ fn test_find_config_file_in_current_dir() {
     let config_path = temp.path().join("config.yaml");
     fs::write(&config_path, "test").unwrap();
 
-    let result =
-        nyl::util::fs::find_config_file(&["config.yaml"], Some(temp.path()), false).unwrap();
+    let result = nyl::util::fs::find_config_file(&["config.yaml"], Some(temp.path()), false).unwrap();
 
     assert!(result.is_some());
     assert_eq!(result.unwrap(), config_path);
@@ -39,9 +38,7 @@ fn test_find_config_file_priority() {
     fs::write(&yaml_path, "yaml").unwrap();
     fs::write(&json_path, "json").unwrap();
 
-    let result =
-        nyl::util::fs::find_config_file(&["config.yaml", "config.json"], Some(temp.path()), false)
-            .unwrap();
+    let result = nyl::util::fs::find_config_file(&["config.yaml", "config.json"], Some(temp.path()), false).unwrap();
 
     assert!(result.is_some());
     // YAML should be found first due to priority
@@ -52,8 +49,7 @@ fn test_find_config_file_priority() {
 fn test_find_config_file_not_found_optional() {
     let temp = TempDir::new().unwrap();
 
-    let result =
-        nyl::util::fs::find_config_file(&["missing.yaml"], Some(temp.path()), false).unwrap();
+    let result = nyl::util::fs::find_config_file(&["missing.yaml"], Some(temp.path()), false).unwrap();
 
     assert!(result.is_none());
 }
@@ -62,8 +58,7 @@ fn test_find_config_file_not_found_optional() {
 fn test_find_config_file_not_found_required() {
     let temp = TempDir::new().unwrap();
 
-    let result =
-        nyl::util::fs::find_config_file(&["missing.yaml"], Some(temp.path()), true);
+    let result = nyl::util::fs::find_config_file(&["missing.yaml"], Some(temp.path()), true);
 
     assert!(result.is_err());
 }
@@ -89,11 +84,7 @@ fn test_resolve_path_relative() {
 #[test]
 fn test_resolve_paths_multiple() {
     let base = PathBuf::from("/base/dir");
-    let paths = vec![
-        PathBuf::from("rel1"),
-        PathBuf::from("/abs1"),
-        PathBuf::from("rel2"),
-    ];
+    let paths = vec![PathBuf::from("rel1"), PathBuf::from("/abs1"), PathBuf::from("rel2")];
 
     let results = nyl::util::fs::resolve_paths(&paths, &base);
 
@@ -125,8 +116,7 @@ fn test_find_config_multiple_levels() {
     fs::create_dir_all(&level3).unwrap();
 
     // Should find config from 3 levels up
-    let result =
-        nyl::util::fs::find_config_file(&["config.yaml"], Some(&level3), false).unwrap();
+    let result = nyl::util::fs::find_config_file(&["config.yaml"], Some(&level3), false).unwrap();
 
     assert!(result.is_some());
     assert_eq!(result.unwrap(), config_path);

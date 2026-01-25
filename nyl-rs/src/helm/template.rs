@@ -1,5 +1,4 @@
 /// Helm template command building and execution
-
 use super::ResolvedChart;
 use crate::resources::ReleaseMetadata;
 use crate::{NylError, Result};
@@ -152,10 +151,7 @@ impl HelmTemplateExecutor {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NylError::HelmChart(format!(
-                "helm template failed: {}",
-                stderr
-            )));
+            return Err(NylError::HelmChart(format!("helm template failed: {}", stderr)));
         }
 
         // Parse YAML output
@@ -207,11 +203,11 @@ impl std::fmt::Debug for HelmTemplateExecutor {
 fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFile> {
     use std::io::Write;
 
-    let mut temp_file = tempfile::NamedTempFile::new()
-        .map_err(|e| NylError::Config(format!("Failed to create temp file: {}", e)))?;
+    let mut temp_file =
+        tempfile::NamedTempFile::new().map_err(|e| NylError::Config(format!("Failed to create temp file: {}", e)))?;
 
-    let yaml = serde_norway::to_string(values)
-        .map_err(|e| NylError::Config(format!("Failed to serialize values: {}", e)))?;
+    let yaml =
+        serde_norway::to_string(values).map_err(|e| NylError::Config(format!("Failed to serialize values: {}", e)))?;
 
     temp_file
         .write_all(yaml.as_bytes())
@@ -239,8 +235,7 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let value: serde_json::Value = serde_norway::from_str(trimmed)
-            .map_err(|e| NylError::Yaml(e))?;
+        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(|e| NylError::Yaml(e))?;
 
         if !value.is_null() {
             documents.push(value);
@@ -271,8 +266,7 @@ mod tests {
 
     #[test]
     fn test_executor_with_api_versions() {
-        let executor = HelmTemplateExecutor::new()
-            .with_api_versions(vec!["apps/v1".to_string(), "v1".to_string()]);
+        let executor = HelmTemplateExecutor::new().with_api_versions(vec!["apps/v1".to_string(), "v1".to_string()]);
         assert_eq!(executor.api_versions, vec!["apps/v1", "v1"]);
     }
 
@@ -288,14 +282,9 @@ mod tests {
         let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"template".to_string()));
         assert!(args.contains(&"my-release".to_string()));
@@ -316,14 +305,9 @@ mod tests {
 
         let values = serde_json::json!({});
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"--namespace".to_string()));
         assert!(args.contains(&"production".to_string()));
@@ -343,14 +327,9 @@ mod tests {
 
         let values = serde_json::json!({});
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"--create-namespace".to_string()));
     }
@@ -367,14 +346,9 @@ mod tests {
         let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"--kube-version".to_string()));
         assert!(args.contains(&"1.28.0".to_string()));
@@ -382,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_build_command_with_api_versions() {
-        let executor = HelmTemplateExecutor::new()
-            .with_api_versions(vec!["apps/v1".to_string(), "v1".to_string()]);
+        let executor = HelmTemplateExecutor::new().with_api_versions(vec!["apps/v1".to_string(), "v1".to_string()]);
 
         let resolved = ResolvedChart {
             path: PathBuf::from("/charts/nginx"),
@@ -393,14 +366,9 @@ mod tests {
         let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"--api-versions".to_string()));
         assert!(args.contains(&"apps/v1".to_string()));
@@ -425,14 +393,9 @@ mod tests {
             }
         });
 
-        let cmd = executor
-            .build_command(&resolved, &release, &values)
-            .unwrap();
+        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
 
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         // Using --set-json in build_command (template() uses --values)
         assert!(args.contains(&"--set-json".to_string()));

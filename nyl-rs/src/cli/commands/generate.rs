@@ -82,9 +82,8 @@ fn generate_argocd_applications(
 
     for file_path in yaml_files {
         // Read and parse file
-        let content = std::fs::read_to_string(&file_path).map_err(|e| {
-            NylError::Config(format!("Failed to read {}: {}", file_path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(&file_path)
+            .map_err(|e| NylError::Config(format!("Failed to read {}: {}", file_path.display(), e)))?;
 
         // Parse YAML documents
         let manifests: Vec<serde_json::Value> = parse_yaml_documents(&content)?;
@@ -107,19 +106,14 @@ fn generate_argocd_applications(
             applications.push(app);
         } else {
             skipped += 1;
-            tracing::warn!(
-                "Skipping {} - no NylRelease resource found",
-                file_path.display()
-            );
+            tracing::warn!("Skipping {} - no NylRelease resource found", file_path.display());
         }
     }
 
     if applications.is_empty() {
         tracing::warn!("No ArgoCD Applications generated");
         tracing::info!("Files must contain a NylRelease resource to generate Applications");
-        return Err(NylError::Config(
-            "No valid NylRelease resources found".to_string(),
-        ));
+        return Err(NylError::Config("No valid NylRelease resources found".to_string()));
     }
 
     // Output applications

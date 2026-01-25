@@ -1,0 +1,2 @@
+- Commit at regular intervals.
+- Always run `mise pre-commit` before comitting. Run `cargo fmt` to format the code.

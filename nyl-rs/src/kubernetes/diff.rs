@@ -51,9 +51,8 @@ impl DiffEngine {
         Self::normalize(&mut normalized);
 
         // Convert to YAML with consistent formatting
-        serde_norway::to_string(&normalized).map_err(|e| {
-            crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e))
-        })
+        serde_norway::to_string(&normalized)
+            .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))
     }
 
     /// Compare two resources and return a unified diff (kubectl-style)
@@ -457,7 +456,10 @@ mod tests {
         let normalized = DiffEngine::normalize_with_server(&resource, None).await.unwrap();
 
         // Should not contain resourceVersion (client-side normalization applied)
-        assert!(!normalized["metadata"].as_object().unwrap().contains_key("resourceVersion"));
+        assert!(!normalized["metadata"]
+            .as_object()
+            .unwrap()
+            .contains_key("resourceVersion"));
         // Should contain name and data
         assert_eq!(normalized["metadata"]["name"], "test");
         assert_eq!(normalized["data"]["key"], "value");
@@ -482,10 +484,15 @@ mod tests {
             }
         });
 
-        let normalized = DiffEngine::normalize_with_server(&resource, Some(&client)).await.unwrap();
+        let normalized = DiffEngine::normalize_with_server(&resource, Some(&client))
+            .await
+            .unwrap();
 
         // Should not contain resourceVersion (client-side normalization applied)
-        assert!(!normalized["metadata"].as_object().unwrap().contains_key("resourceVersion"));
+        assert!(!normalized["metadata"]
+            .as_object()
+            .unwrap()
+            .contains_key("resourceVersion"));
         // Should contain name and data
         assert_eq!(normalized["metadata"]["name"], "test");
         assert_eq!(normalized["data"]["key"], "value");
@@ -524,7 +531,9 @@ mod tests {
         });
 
         // Should be equivalent despite different metadata
-        assert!(DiffEngine::are_equivalent_with_server(&desired, &live, &client).await.unwrap());
+        assert!(DiffEngine::are_equivalent_with_server(&desired, &live, &client)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -558,7 +567,9 @@ mod tests {
         });
 
         // Should NOT be equivalent
-        assert!(!DiffEngine::are_equivalent_with_server(&desired, &live, &client).await.unwrap());
+        assert!(!DiffEngine::are_equivalent_with_server(&desired, &live, &client)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -592,7 +603,9 @@ mod tests {
             }
         });
 
-        let diff = DiffEngine::diff_yaml_with_server(&desired, &live, &client).await.unwrap();
+        let diff = DiffEngine::diff_yaml_with_server(&desired, &live, &client)
+            .await
+            .unwrap();
 
         // Should contain diff markers and the actual change
         assert!(diff.contains("new-value") || diff.contains("old-value"));
@@ -632,7 +645,9 @@ mod tests {
             }
         });
 
-        let diff = DiffEngine::diff_yaml_with_server(&desired, &live, &client).await.unwrap();
+        let diff = DiffEngine::diff_yaml_with_server(&desired, &live, &client)
+            .await
+            .unwrap();
 
         // Should be empty (no differences in actual data)
         assert_eq!(diff, "");

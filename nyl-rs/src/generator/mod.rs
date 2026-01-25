@@ -7,7 +7,6 @@
 ///
 /// Phase 2: Component instantiation to HelmChart
 /// Phase 3: Template rendering and full generation pipeline
-
 use crate::components::{Component, ComponentRegistry, HelmComponent};
 use crate::config::ProjectConfig;
 use crate::resources::{ChartRef, HelmChart, ReleaseMetadata};
@@ -84,9 +83,7 @@ impl Generator {
         values: &serde_json::Value,
     ) -> Result<HelmChart> {
         match component {
-            Component::Helm(helm_component) => {
-                Self::instantiate_helm_component(helm_component, name, values)
-            }
+            Component::Helm(helm_component) => Self::instantiate_helm_component(helm_component, name, values),
         }
     }
 
@@ -165,24 +162,14 @@ impl std::fmt::Debug for Generator {
 /// Helper function for instantiating components
 ///
 /// Convenience function that doesn't require a Generator instance
-pub fn instantiate_component(
-    component: &Component,
-    name: &str,
-    values: &serde_json::Value,
-) -> Result<HelmChart> {
+pub fn instantiate_component(component: &Component, name: &str, values: &serde_json::Value) -> Result<HelmChart> {
     match component {
-        Component::Helm(helm_component) => {
-            instantiate_helm_component(helm_component, name, values)
-        }
+        Component::Helm(helm_component) => instantiate_helm_component(helm_component, name, values),
     }
 }
 
 /// Instantiate a Helm component to a HelmChart
-fn instantiate_helm_component(
-    component: &HelmComponent,
-    name: &str,
-    values: &serde_json::Value,
-) -> Result<HelmChart> {
+fn instantiate_helm_component(component: &HelmComponent, name: &str, values: &serde_json::Value) -> Result<HelmChart> {
     // Create ChartRef pointing to the component's chart
     let chart_ref = ChartRef {
         path: Some(component.path.to_string_lossy().to_string()),
@@ -220,10 +207,7 @@ mod tests {
     }
 
     fn create_test_component(base: &std::path::Path, api_version: &str, kind: &str) {
-        let component_dir = base
-            .join("components")
-            .join(api_version)
-            .join(kind);
+        let component_dir = base.join("components").join(api_version).join(kind);
         fs::create_dir_all(&component_dir).unwrap();
 
         let chart_yaml = component_dir.join("Chart.yaml");
@@ -263,10 +247,7 @@ mod tests {
         let config = create_test_config(temp.path());
         let generator = Generator::new(config);
 
-        let component = generator
-            .find_component("v1.example.io", "WebApp")
-            .unwrap()
-            .unwrap();
+        let component = generator.find_component("v1.example.io", "WebApp").unwrap().unwrap();
 
         let values = serde_json::json!({
             "replicas": 3,
@@ -337,10 +318,7 @@ mod tests {
         assert_eq!(helm_chart.metadata.name, "prod-app");
         assert_eq!(helm_chart.api_version, "v2.apps.io");
         assert_eq!(helm_chart.kind, "WebApplication");
-        assert_eq!(
-            helm_chart.spec.chart.path,
-            Some("/charts/webapp".to_string())
-        );
+        assert_eq!(helm_chart.spec.chart.path, Some("/charts/webapp".to_string()));
         assert_eq!(helm_chart.spec.values["port"], 8080);
         assert_eq!(helm_chart.spec.values["environment"], "production");
     }

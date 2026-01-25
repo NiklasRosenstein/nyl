@@ -2,7 +2,6 @@
 ///
 /// This provider stores secrets in memory only and provides no encryption.
 /// Useful for development and testing.
-
 use super::{SecretProvider, SecretValue};
 use crate::Result;
 use std::collections::HashMap;
@@ -74,12 +73,8 @@ mod tests {
     fn test_null_provider_set_get() {
         let mut provider = NullProvider::new();
 
-        provider
-            .set("key1", SecretValue::from("value1"))
-            .unwrap();
-        provider
-            .set("key2", SecretValue::from("value2"))
-            .unwrap();
+        provider.set("key1", SecretValue::from("value1")).unwrap();
+        provider.set("key2", SecretValue::from("value2")).unwrap();
 
         let value1 = provider.get("key1").unwrap();
         assert_eq!(value1, SecretValue::String("value1".to_string()));
@@ -101,12 +96,8 @@ mod tests {
         let mut provider = NullProvider::new();
         assert!(provider.keys().unwrap().is_empty());
 
-        provider
-            .set("key1", SecretValue::from("value1"))
-            .unwrap();
-        provider
-            .set("key2", SecretValue::from("value2"))
-            .unwrap();
+        provider.set("key1", SecretValue::from("value1")).unwrap();
+        provider.set("key2", SecretValue::from("value2")).unwrap();
 
         let mut keys = provider.keys().unwrap();
         keys.sort();
@@ -117,9 +108,7 @@ mod tests {
     fn test_null_provider_unset() {
         let mut provider = NullProvider::new();
 
-        provider
-            .set("key1", SecretValue::from("value1"))
-            .unwrap();
+        provider.set("key1", SecretValue::from("value1")).unwrap();
         assert_eq!(provider.keys().unwrap().len(), 1);
 
         provider.unset("key1").unwrap();
@@ -133,20 +122,10 @@ mod tests {
     fn test_null_provider_overwrite() {
         let mut provider = NullProvider::new();
 
-        provider
-            .set("key", SecretValue::from("value1"))
-            .unwrap();
-        assert_eq!(
-            provider.get("key").unwrap(),
-            SecretValue::String("value1".to_string())
-        );
+        provider.set("key", SecretValue::from("value1")).unwrap();
+        assert_eq!(provider.get("key").unwrap(), SecretValue::String("value1".to_string()));
 
-        provider
-            .set("key", SecretValue::from("value2"))
-            .unwrap();
-        assert_eq!(
-            provider.get("key").unwrap(),
-            SecretValue::String("value2".to_string())
-        );
+        provider.set("key", SecretValue::from("value2")).unwrap();
+        assert_eq!(provider.get("key").unwrap(), SecretValue::String("value2".to_string()));
     }
 }

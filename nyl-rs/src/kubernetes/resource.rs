@@ -70,11 +70,7 @@ impl ResourceKey {
         let name = extract_name(value)?;
         let namespace = extract_namespace(value);
 
-        Ok(Self {
-            gvk,
-            namespace,
-            name,
-        })
+        Ok(Self { gvk, namespace, name })
     }
 
     /// Convert to string representation (e.g., "ConfigMap default/myconfig")
@@ -92,24 +88,13 @@ impl ResourceKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// Resource was created
-    Created {
-        name: String,
-        namespace: Option<String>,
-    },
+    Created { name: String, namespace: Option<String> },
     /// Resource was updated
-    Updated {
-        name: String,
-        namespace: Option<String>,
-    },
+    Updated { name: String, namespace: Option<String> },
     /// Resource was unchanged
-    Unchanged {
-        name: String,
-        namespace: Option<String>,
-    },
+    Unchanged { name: String, namespace: Option<String> },
     /// Dry run mode - shows what would happen
-    DryRun {
-        would_be: Box<ApplyOutcome>,
-    },
+    DryRun { would_be: Box<ApplyOutcome> },
 }
 
 impl ApplyOutcome {

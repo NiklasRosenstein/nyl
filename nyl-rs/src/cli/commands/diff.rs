@@ -6,8 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     cli::commands::render::render_manifests,
     kubernetes::{
-        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
-        ReleaseStorage,
+        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStorage, ResourceKey,
     },
     resources::extract_nyl_release,
     NylError, Result,
@@ -83,21 +82,14 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 3. Determine release name and namespace
     let (release_name, release_namespace) = match nyl_release {
-        Some(ref release) => (
-            release.metadata.name.clone(),
-            release.metadata.namespace.clone(),
-        ),
+        Some(ref release) => (release.metadata.name.clone(), release.metadata.namespace.clone()),
         None => {
             // Require CLI flags if no NylRelease
             let name = args.name.ok_or_else(|| {
-                NylError::Config(
-                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
-                )
+                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
             })?;
             let namespace = args.namespace.ok_or_else(|| {
-                NylError::Config(
-                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
-                )
+                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
             })?;
             (name, namespace)
         }
@@ -131,14 +123,11 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     let storage = KubernetesReleaseStorage::new(client);
 
     // 6. Fetch previous release for tracking resource deletions
-    let previous_release = storage
-        .get_latest_release(&release_name, &release_namespace)
-        .await?;
+    let previous_release = storage.get_latest_release(&release_name, &release_namespace).await?;
 
     // 7. Compute diff against LIVE cluster state
     let diff_result =
-        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode)
-            .await?;
+        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode).await?;
 
     // 8. Display diff
     if args.summary {
@@ -237,20 +226,26 @@ async fn compute_diff_from_live(
                         Ok(true) => {
                             unchanged.push(key);
                         }
-                        Ok(false) => {
-                            match DiffEngine::diff_yaml_with_server(manifest, live, client).await {
-                                Ok(diff_text) => {
-                                    modified.push((key, diff_text));
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Server-side diff failed for {}, falling back to raw: {}", key.to_string(), e);
-                                    let diff_text = DiffEngine::diff_yaml(manifest, live)?;
-                                    modified.push((key, diff_text));
-                                }
+                        Ok(false) => match DiffEngine::diff_yaml_with_server(manifest, live, client).await {
+                            Ok(diff_text) => {
+                                modified.push((key, diff_text));
                             }
-                        }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Server-side diff failed for {}, falling back to raw: {}",
+                                    key.to_string(),
+                                    e
+                                );
+                                let diff_text = DiffEngine::diff_yaml(manifest, live)?;
+                                modified.push((key, diff_text));
+                            }
+                        },
                         Err(e) => {
-                            tracing::warn!("Server-side normalization failed for {}, falling back to raw: {}", key.to_string(), e);
+                            tracing::warn!(
+                                "Server-side normalization failed for {}, falling back to raw: {}",
+                                key.to_string(),
+                                e
+                            );
                             if DiffEngine::are_equivalent(manifest, live)? {
                                 unchanged.push(key);
                             } else {
@@ -353,4 +348,3 @@ mod tests {
     // with MockKubeClient or a real cluster. Unit tests moved to the DiffEngine
     // module in kubernetes/diff.rs.
 }
-

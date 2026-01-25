@@ -86,10 +86,7 @@ fn bench_template_with_filters(c: &mut Criterion) {
 
     c.bench_function("template_with_b64encode", |b| {
         b.iter(|| {
-            let result = engine.render(
-                black_box("encoded: {{ data | b64encode }}"),
-                black_box(&context),
-            );
+            let result = engine.render(black_box("encoded: {{ data | b64encode }}"), black_box(&context));
             black_box(result);
         });
     });
@@ -110,8 +107,7 @@ data:
 
     c.bench_function("yaml_parse_single_doc", |b| {
         b.iter(|| {
-            let result: Result<serde_json::Value, _> =
-                serde_norway::from_str(black_box(yaml_content));
+            let result: Result<serde_json::Value, _> = serde_norway::from_str(black_box(yaml_content));
             black_box(result);
         });
     });

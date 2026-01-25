@@ -5,7 +5,6 @@
 /// - Component discovery
 /// - Helm chart resolution
 /// - Component instantiation to HelmChart
-
 use nyl::components::ComponentRegistry;
 use nyl::config::ProjectConfig;
 use nyl::generator::{instantiate_component, Generator};
@@ -235,16 +234,10 @@ fn test_secrets_config_integration() {
 
     // Test secret operations
     config
-        .set(
-            "api_key",
-            nyl::secrets::SecretValue::from("secret-123"),
-        )
+        .set("api_key", nyl::secrets::SecretValue::from("secret-123"))
         .unwrap();
     config
-        .set(
-            "db_password",
-            nyl::secrets::SecretValue::from("pass456"),
-        )
+        .set("db_password", nyl::secrets::SecretValue::from("pass456"))
         .unwrap();
 
     let keys = config.keys().unwrap();
@@ -253,10 +246,7 @@ fn test_secrets_config_integration() {
     assert!(keys.contains(&"db_password".to_string()));
 
     let api_key = config.get("api_key").unwrap();
-    assert_eq!(
-        api_key,
-        nyl::secrets::SecretValue::String("secret-123".to_string())
-    );
+    assert_eq!(api_key, nyl::secrets::SecretValue::String("secret-123".to_string()));
 }
 
 #[test]
@@ -360,9 +350,7 @@ fn test_profile_merge() {
     base_profile
         .values
         .insert("key1".to_string(), serde_json::json!("value1"));
-    base_profile
-        .values
-        .insert("key2".to_string(), serde_json::json!(42));
+    base_profile.values.insert("key2".to_string(), serde_json::json!(42));
 
     let mut override_profile = Profile::default();
     override_profile
@@ -424,9 +412,7 @@ fn test_component_not_found() {
     let temp = TempDir::new().unwrap();
     let registry = ComponentRegistry::new(vec![temp.path().to_path_buf()]);
 
-    let result = registry
-        .find_component("v1.example.io", "NonExistent")
-        .unwrap();
+    let result = registry.find_component("v1.example.io", "NonExistent").unwrap();
     assert!(result.is_none());
 
     // Should be cached as "not found"

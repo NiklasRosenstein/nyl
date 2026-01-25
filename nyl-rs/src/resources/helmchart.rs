@@ -1,7 +1,6 @@
 /// HelmChart resource definition
 ///
 /// Represents a declarative Helm chart deployment
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -256,10 +255,7 @@ mod tests {
         assert_eq!(helm_chart.api_version, "nyl.niklasrosenstein.github.com/v1");
         assert_eq!(helm_chart.kind, "HelmChart");
         assert_eq!(helm_chart.metadata.name, "my-app");
-        assert_eq!(
-            helm_chart.spec.chart.path,
-            Some("./charts/app".to_string())
-        );
+        assert_eq!(helm_chart.spec.chart.path, Some("./charts/app".to_string()));
     }
 
     #[test]
@@ -311,8 +307,7 @@ mod tests {
         assert_eq!(chart1.effective_release_name(), "my-app");
 
         // With release metadata
-        let chart2 = HelmChart::new("my-app", chart_ref)
-            .with_release(ReleaseMetadata::new("custom-release"));
+        let chart2 = HelmChart::new("my-app", chart_ref).with_release(ReleaseMetadata::new("custom-release"));
         assert_eq!(chart2.effective_release_name(), "custom-release");
     }
 

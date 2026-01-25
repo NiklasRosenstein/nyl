@@ -3,7 +3,6 @@
 /// This resource enables ArgoCD to automatically generate Application manifests
 /// from Nyl YAML files by scanning directories and creating Applications for
 /// each discovered NylRelease.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -44,10 +43,7 @@ pub struct ApplicationGeneratorSpec {
     #[serde(skip_serializing_if = "Option::is_none", rename = "syncPolicy")]
     pub sync_policy: Option<SyncPolicy>,
     /// Template for Application names
-    #[serde(
-        default = "default_application_name_template",
-        rename = "applicationNameTemplate"
-    )]
+    #[serde(default = "default_application_name_template", rename = "applicationNameTemplate")]
     pub application_name_template: String,
     /// Labels to add to generated Applications
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -92,11 +88,7 @@ pub struct SyncPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automated: Option<AutomatedSyncPolicy>,
     /// Sync options
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        rename = "syncOptions"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "syncOptions")]
     pub sync_options: Vec<String>,
 }
 
@@ -135,40 +127,30 @@ fn default_application_name_template() -> String {
 impl ApplicationGenerator {
     /// Check if a manifest is an ApplicationGenerator resource
     pub fn is_application_generator(manifest: &serde_json::Value) -> bool {
-        manifest
-            .get("apiVersion")
-            .and_then(|v| v.as_str())
-            == Some(API_VERSION_ARGOCD)
+        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_ARGOCD)
             && manifest.get("kind").and_then(|v| v.as_str()) == Some("ApplicationGenerator")
     }
 
     /// Parse ApplicationGenerator from JSON value
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone()).map_err(|e| {
-            NylError::Config(format!("Invalid ApplicationGenerator resource: {}", e))
-        })
+        serde_json::from_value(value.clone())
+            .map_err(|e| NylError::Config(format!("Invalid ApplicationGenerator resource: {}", e)))
     }
 
     /// Validate the ApplicationGenerator configuration
     pub fn validate(&self) -> Result<()> {
         // Validate required fields
         if self.spec.source.repo_url.is_empty() {
-            return Err(NylError::Config(
-                "spec.source.repoURL is required".to_string(),
-            ));
+            return Err(NylError::Config("spec.source.repoURL is required".to_string()));
         }
         if self.spec.source.path.is_empty() {
             return Err(NylError::Config("spec.source.path is required".to_string()));
         }
         if self.spec.destination.server.is_empty() {
-            return Err(NylError::Config(
-                "spec.destination.server is required".to_string(),
-            ));
+            return Err(NylError::Config("spec.destination.server is required".to_string()));
         }
         if self.spec.destination.namespace.is_empty() {
-            return Err(NylError::Config(
-                "spec.destination.namespace is required".to_string(),
-            ));
+            return Err(NylError::Config("spec.destination.namespace is required".to_string()));
         }
         Ok(())
     }
@@ -323,7 +305,10 @@ mod tests {
         assert_eq!(gen.spec.source.target_revision, "main");
         assert_eq!(gen.spec.source.include, vec!["*.yaml"]);
         assert_eq!(gen.spec.source.exclude, vec!["test_*"]);
-        assert_eq!(gen.spec.application_name_template, "{{ .release.namespace }}-{{ .release.name }}");
+        assert_eq!(
+            gen.spec.application_name_template,
+            "{{ .release.namespace }}-{{ .release.name }}"
+        );
         assert_eq!(gen.spec.labels.get("managed-by").unwrap(), "nyl");
         assert_eq!(gen.spec.annotations.get("example.com/key").unwrap(), "value");
 

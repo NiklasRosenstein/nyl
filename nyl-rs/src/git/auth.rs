@@ -13,28 +13,22 @@ pub enum GitCredential {
     /// SSH key authentication
     SshKey {
         username: String,
-        private_key: String,   // PEM format
+        private_key: String, // PEM format
         public_key: Option<String>,
         passphrase: Option<String>,
     },
     /// HTTPS token authentication
     HttpsToken {
         username: String,
-        token: String,  // Personal access token or password
+        token: String, // Personal access token or password
     },
     /// SSH agent authentication (use SSH agent for key)
-    SshAgent {
-        username: String,
-    },
+    SshAgent { username: String },
 }
 
 impl GitCredential {
     /// Convert credential to git2::Cred for authentication
-    fn to_git2_cred(
-        &self,
-        _url: &str,
-        username_from_url: Option<&str>,
-    ) -> std::result::Result<Cred, git2::Error> {
+    fn to_git2_cred(&self, _url: &str, username_from_url: Option<&str>) -> std::result::Result<Cred, git2::Error> {
         match self {
             GitCredential::SshKey {
                 username,
@@ -43,12 +37,7 @@ impl GitCredential {
                 passphrase,
             } => {
                 let username = username_from_url.unwrap_or(username);
-                Cred::ssh_key_from_memory(
-                    username,
-                    public_key.as_deref(),
-                    private_key,
-                    passphrase.as_deref(),
-                )
+                Cred::ssh_key_from_memory(username, public_key.as_deref(), private_key, passphrase.as_deref())
             }
             GitCredential::HttpsToken { username, token } => Cred::userpass_plaintext(username, token),
             GitCredential::SshAgent { username } => {
@@ -256,8 +245,6 @@ mod tests {
         assert!(provider.get_credential("https://github.com/org/repo").is_some());
 
         // Test hostname fallback
-        assert!(provider
-            .get_credential("https://github.com/org/other-repo")
-            .is_some());
+        assert!(provider.get_credential("https://github.com/org/other-repo").is_some());
     }
 }

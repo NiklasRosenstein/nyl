@@ -5,7 +5,6 @@
 ///
 /// Phase 2: NullProvider only
 /// Phase 3: SOPS and Kubernetes providers
-
 use crate::{NylError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -82,7 +81,6 @@ pub trait SecretProvider: Send + Sync {
 pub enum SecretProviderConfig {
     /// Null provider (no encryption, in-memory only)
     Null(NullProviderConfig),
-
     // Phase 3: Additional providers
     // Sops(SopsProviderConfig),
     // Kubernetes(KubernetesProviderConfig),
@@ -164,16 +162,13 @@ impl SecretsConfig {
 
         let contents = std::fs::read_to_string(path)?;
 
-        let config: SecretProviderConfig =
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                serde_json::from_str(&contents).map_err(|e| {
-                    NylError::Config(format!("Failed to parse secrets JSON: {}", e))
-                })?
-            } else {
-                serde_norway::from_str(&contents).map_err(|e| {
-                    NylError::Config(format!("Failed to parse secrets YAML: {}", e))
-                })?
-            };
+        let config: SecretProviderConfig = if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            serde_json::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse secrets JSON: {}", e)))?
+        } else {
+            serde_norway::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse secrets YAML: {}", e)))?
+        };
 
         let mut provider = Self::create_provider(&config)?;
         provider.init(path)?;
@@ -276,9 +271,7 @@ mod tests {
         };
 
         // Set a secret
-        config
-            .set("api_key", SecretValue::from("secret-123"))
-            .unwrap();
+        config.set("api_key", SecretValue::from("secret-123")).unwrap();
 
         // Get the secret
         let value = config.get("api_key").unwrap();

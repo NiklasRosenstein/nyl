@@ -5,7 +5,6 @@
 /// - Precedence-based loading from multiple sources
 /// - Kubeconfig sources (local files, SSH remote)
 /// - Profile value merging
-
 use crate::config::ProjectConfig;
 use crate::{NylError, Result};
 use serde::{Deserialize, Serialize};
@@ -190,16 +189,13 @@ impl ProfileConfig {
 
         let contents = std::fs::read_to_string(path)?;
 
-        let profiles: HashMap<String, Profile> =
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                serde_json::from_str(&contents).map_err(|e| {
-                    NylError::Config(format!("Failed to parse profile JSON: {}", e))
-                })?
-            } else {
-                serde_norway::from_str(&contents).map_err(|e| {
-                    NylError::Config(format!("Failed to parse profile YAML: {}", e))
-                })?
-            };
+        let profiles: HashMap<String, Profile> = if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            serde_json::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse profile JSON: {}", e)))?
+        } else {
+            serde_norway::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse profile YAML: {}", e)))?
+        };
 
         Ok(Self {
             file: Some(path.to_path_buf()),
@@ -223,8 +219,8 @@ impl ProfileConfig {
 
     /// Load profiles from global config directory (~/.config/nyl/profiles.yaml)
     fn load_from_global() -> Result<Option<Self>> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| NylError::Config("Could not determine config directory".to_string()))?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| NylError::Config("Could not determine config directory".to_string()))?;
 
         let nyl_dir = config_dir.join("nyl");
         if !nyl_dir.exists() {
@@ -290,18 +286,12 @@ impl Profile {
 /// - If base doesn't exist, use overlay
 /// - Both objects: recursively merge keys
 /// - Arrays or scalars: overlay replaces base
-pub fn deep_merge_value(
-    base: Option<serde_json::Value>,
-    overlay: serde_json::Value,
-) -> serde_json::Value {
+pub fn deep_merge_value(base: Option<serde_json::Value>, overlay: serde_json::Value) -> serde_json::Value {
     match (base, overlay) {
         (None, overlay) => overlay,
 
         // Both objects - recursive merge
-        (
-            Some(serde_json::Value::Object(mut base_map)),
-            serde_json::Value::Object(overlay_map),
-        ) => {
+        (Some(serde_json::Value::Object(mut base_map)), serde_json::Value::Object(overlay_map)) => {
             for (key, overlay_value) in overlay_map {
                 let base_value = base_map.remove(&key);
                 base_map.insert(key, deep_merge_value(base_value, overlay_value));
@@ -441,10 +431,7 @@ prod:
 
         let result = ProfileConfig::load_from_file(&missing);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]
@@ -494,10 +481,11 @@ prod:
         let profile = config.get("dev").unwrap();
         assert_eq!(profile.values["env"], "dev");
 
-        config.get_mut("dev").unwrap().values.insert(
-            "modified".to_string(),
-            serde_json::json!(true),
-        );
+        config
+            .get_mut("dev")
+            .unwrap()
+            .values
+            .insert("modified".to_string(), serde_json::json!(true));
 
         assert_eq!(config.get("dev").unwrap().values["modified"], true);
     }
