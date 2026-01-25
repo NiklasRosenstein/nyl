@@ -9,6 +9,9 @@ on:
     paths:
       - "nyl/**"
       - ".github/workflows/rust.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dist-workspace.toml"
 
 env:
   CARGO_TERM_COLOR: always
