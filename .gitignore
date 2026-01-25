@@ -19,3 +19,4 @@ nyl-rs/Cargo.lock
 nyl-rs/book/book/
 **/*.rs.bk
 *.pdb
+todo.txt
