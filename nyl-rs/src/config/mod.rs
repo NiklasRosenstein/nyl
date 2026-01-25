@@ -16,10 +16,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectSettings {
-    /// If enabled, automatically generate an ApplySet for every template file
-    #[serde(default)]
-    pub generate_applysets: bool,
-
     /// Path to the directory that contains Nyl components
     pub components_path: Option<PathBuf>,
 
@@ -35,7 +31,6 @@ fn default_search_path() -> Vec<PathBuf> {
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
-            generate_applysets: false,
             components_path: None,
             search_path: default_search_path(),
         }
@@ -212,7 +207,6 @@ mod tests {
     #[test]
     fn test_default_project_settings() {
         let settings = ProjectSettings::default();
-        assert!(!settings.generate_applysets);
         assert!(settings.components_path.is_none());
         assert_eq!(settings.search_path, vec![PathBuf::from(".")]);
     }
@@ -224,7 +218,6 @@ mod tests {
 
         let yaml_content = r#"
 settings:
-  generate_applysets: true
   components_path: my-components
   search_path:
     - lib
@@ -234,7 +227,6 @@ settings:
 
         let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
         assert_eq!(config.file, Some(config_path.clone()));
-        assert!(config.config.settings.generate_applysets);
 
         // Check that paths were resolved to absolute
         let expected_components = temp.path().join("my-components");
@@ -252,7 +244,6 @@ settings:
 
         let json_content = r#"{
   "settings": {
-    "generate_applysets": false,
     "search_path": ["."]
   }
 }"#;
@@ -260,7 +251,6 @@ settings:
 
         let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
         assert_eq!(config.file, Some(config_path));
-        assert!(!config.config.settings.generate_applysets);
     }
 
     #[test]
@@ -270,7 +260,7 @@ settings:
 
         let config = ProjectConfig::load(None).unwrap();
         assert!(config.file.is_none());
-        assert!(!config.config.settings.generate_applysets);
+        assert!(config.config.settings.components_path.is_none());
     }
 
     #[test]
