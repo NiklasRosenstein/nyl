@@ -62,6 +62,12 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # On feature branches, only build x86_64-unknown-linux-gnu for validation
+    # On develop/tags, build all targets
+    if: >-
+      github.ref == 'refs/heads/develop' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      matrix.target == 'x86_64-unknown-linux-gnu'
     strategy:
       matrix:
         include:
@@ -81,36 +87,33 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
-        if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
       - uses: dtolnay/rust-toolchain@stable
-        if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-        if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
         with:
           workspaces: nyl-rs
       - name: Install cross-compilation tools
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Install musl tools
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && contains(matrix.target, 'musl')
+        if: contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
       - name: Install cross for aarch64-musl
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build release binary (cross)
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cross build --release --target ${{ matrix.target }}
       - name: Build release binary
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && matrix.target != 'aarch64-unknown-linux-musl'
+        if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }}
       - name: Check binary size (Unix)
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && runner.os != 'Windows'
+        if: runner.os != 'Windows'
         run: |
           size=$(stat -f%z target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s target/${{ matrix.target }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB"
@@ -119,7 +122,7 @@ jobs:
             exit 1
           fi
       - name: Verify static linking (musl)
-        if: (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')) && contains(matrix.target, 'musl')
+        if: contains(matrix.target, 'musl')
         run: |
           binary="target/${{ matrix.target }}/release/nyl"
           if ldd "$binary" 2>&1 | grep -q "not a dynamic executable"; then
@@ -130,7 +133,6 @@ jobs:
             exit 1
           fi
       - name: Upload artifact
-        if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: nyl-${{ matrix.target }}
