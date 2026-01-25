@@ -239,6 +239,17 @@ async fn compute_diff_from_live(
     })
 }
 
+/// Display summary line with colored counts
+fn print_summary(diff: &DiffResult) {
+    println!(
+        "Summary: {} added, {} modified, {} deleted, {} unchanged",
+        diff.added.len().to_string().green(),
+        diff.modified.len().to_string().yellow(),
+        diff.deleted.len().to_string().red(),
+        diff.unchanged.len()
+    );
+}
+
 /// Display diff results with kubectl-style unified diff output
 fn display_diff(diff: &DiffResult) {
     // Show added resources
@@ -277,24 +288,12 @@ fn display_diff(diff: &DiffResult) {
     }
 
     // Summary with colors
-    println!(
-        "Summary: {} added, {} modified, {} deleted, {} unchanged",
-        diff.added.len().to_string().green(),
-        diff.modified.len().to_string().yellow(),
-        diff.deleted.len().to_string().red(),
-        diff.unchanged.len()
-    );
+    print_summary(diff);
 }
 
 /// Display summary only (counts, no detailed diff)
 fn display_summary(diff: &DiffResult) {
-    println!(
-        "Summary: {} added, {} modified, {} deleted, {} unchanged",
-        diff.added.len(),
-        diff.modified.len(),
-        diff.deleted.len(),
-        diff.unchanged.len()
-    );
+    print_summary(diff);
 }
 
 #[cfg(test)]
