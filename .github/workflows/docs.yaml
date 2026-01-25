@@ -7,7 +7,6 @@ on:
       - "nyl/book/**"
       - ".github/workflows/docs.yaml"
   pull_request:
-    branches: [develop]
     paths:
       - "nyl/book/**"
       - ".github/workflows/docs.yaml"
@@ -47,12 +46,12 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push'
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
