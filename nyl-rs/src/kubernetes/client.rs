@@ -237,23 +237,22 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn get_api_versions(&self) -> Result<Vec<String>> {
-        let mut api_versions = Vec::new();
+        use std::collections::HashSet;
 
-        // Get core API versions (v1, etc.)
-        let core_versions = self.client.list_core_api_versions().await?;
-        api_versions.extend(core_versions.versions);
+        let mut api_versions = HashSet::new();
 
-        // Get API group versions (apps/v1, batch/v1, etc.)
-        let groups = self.client.list_api_groups().await?;
-        for group in groups.groups {
-            for version in group.versions {
-                api_versions.push(version.group_version);
+        // Iterate through all discovered API groups and resources
+        for group in self.discovery.groups() {
+            for (ar, _caps) in group.recommended_resources() {
+                // Format as {api_version}/{kind} (e.g., "apps/v1/Deployment", "v1/Pod")
+                api_versions.insert(format!("{}/{}", ar.api_version, ar.kind));
             }
         }
 
-        // Sort for consistent output
-        api_versions.sort();
-        Ok(api_versions)
+        // Convert to sorted Vec for consistent output
+        let mut result: Vec<String> = api_versions.into_iter().collect();
+        result.sort();
+        Ok(result)
     }
 
     async fn delete_resource(
@@ -394,11 +393,12 @@ impl KubeClient for MockKubeClient {
     }
 
     async fn get_api_versions(&self) -> Result<Vec<String>> {
-        // Return common API versions for testing
+        // Return common API versions with kinds for testing
         Ok(vec![
-            "v1".to_string(),
-            "apps/v1".to_string(),
-            "batch/v1".to_string(),
+            "apps/v1/Deployment".to_string(),
+            "batch/v1/Job".to_string(),
+            "v1/Pod".to_string(),
+            "v1/Service".to_string(),
         ])
     }
 
