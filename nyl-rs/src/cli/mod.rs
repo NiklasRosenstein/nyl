@@ -29,6 +29,9 @@ enum Commands {
     /// Apply rendered manifests to the cluster
     Apply(commands::apply::ApplyArgs),
 
+    /// Generate configurations (ArgoCD, etc.)
+    Generate(commands::generate::GenerateArgs),
+
     /// Create a new nyl project
     New(commands::new::NewArgs),
 
@@ -43,6 +46,7 @@ impl Cli {
             Commands::Render(args) => commands::render::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
+            Commands::Generate(args) => commands::generate::execute(args),
             Commands::New(args) => commands::new::execute(args),
             Commands::Validate(args) => commands::validate::execute(args),
         }

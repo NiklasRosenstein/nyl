@@ -117,6 +117,34 @@ impl ProjectConfig {
         }
     }
 
+    /// Load project configuration with warning if no config file found
+    ///
+    /// This is the recommended method for commands that operate on Kubernetes
+    /// resources, as it warns users when no project configuration is present.
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_with_warning(file: Option<PathBuf>) -> Result<Self> {
+        let file = match file {
+            Some(f) => Some(f),
+            None => Self::find(None)?,
+        };
+
+        if let Some(ref path) = file {
+            Self::load_from_file(path)
+        } else {
+            eprintln!("⚠️  No project configuration file found.");
+            eprintln!("   Using default settings. Initialize with 'nyl new project' to create one.");
+            Ok(Self {
+                file: None,
+                config: Project::default(),
+            })
+        }
+    }
+
     /// Load configuration from a specific file
     fn load_from_file(path: &Path) -> Result<Self> {
         if !path.exists() {

@@ -43,8 +43,8 @@ pub fn render_manifests(
     component: Option<&str>,
     environment: Option<&str>,
 ) -> Result<(Vec<serde_json::Value>, Profile, String)> {
-    // 1. Load project configuration
-    let project_config = ProjectConfig::load(None)?;
+    // 1. Load project configuration (with warning if not found)
+    let project_config = ProjectConfig::load_with_warning(None)?;
 
     // 2. Load profile configuration
     let profile_config = ProfileConfig::load(None)?;
