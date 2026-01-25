@@ -89,6 +89,7 @@ impl KubernetesReleaseStorage {
     }
 
     /// Parse revision number from secret name
+    #[allow(dead_code)]
     fn parse_revision(name: &str) -> Option<u32> {
         // Format: nyl.release.v1.<component>.<revision>
         name.split('.').last()?.parse().ok()

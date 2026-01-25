@@ -31,6 +31,10 @@ enum NewSubcommand {
         /// Path where to create the project
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
+
+        /// Configuration format (toml or yaml)
+        #[arg(short, long, default_value = "toml")]
+        format: ConfigFormat,
     },
     /// Create a new component
     Component {
@@ -42,17 +46,23 @@ enum NewSubcommand {
     },
 }
 
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum ConfigFormat {
+    Toml,
+    Yaml,
+}
+
 pub fn execute(args: NewArgs) -> Result<()> {
     match args.command {
-        Some(NewSubcommand::Project { name, path }) => create_project(&name, &path),
+        Some(NewSubcommand::Project { name, path, format }) => create_project(&name, &path, format),
         Some(NewSubcommand::Component { api_version, kind }) => create_component(&api_version, &kind),
         None => {
-            // Legacy mode: treat as project creation
+            // Legacy mode: treat as project creation (default to TOML)
             if let Some(name) = args.name {
                 warn!("Using legacy syntax. Please use 'nyl new project <name>' instead.");
                 println!("⚠ Using legacy syntax. Please use 'nyl new project <name>' instead.");
                 let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-                create_project(&name, &path)
+                create_project(&name, &path, ConfigFormat::Toml)
             } else {
                 Err(NylError::Config(
                     "Please specify either 'project <name>' or 'component <api-version> <kind>'".to_string(),
@@ -63,7 +73,7 @@ pub fn execute(args: NewArgs) -> Result<()> {
 }
 
 /// Create a new nyl project
-fn create_project(name: &str, base_path: &Path) -> Result<()> {
+fn create_project(name: &str, base_path: &Path, format: ConfigFormat) -> Result<()> {
     info!("Creating new project: {}", name);
     debug!("Base path: {}", base_path.display());
 
@@ -86,16 +96,30 @@ fn create_project(name: &str, base_path: &Path) -> Result<()> {
     fs::create_dir(&components_dir)?;
     println!("✓ Created components directory: {}", components_dir.display());
 
-    // Create nyl-project.yaml config file
-    let config_path = project_path.join("nyl-project.yaml");
-    #[allow(clippy::needless_raw_string_hashes)]
-    let config_content = r#"settings:
+    // Create config file based on format
+    let (config_filename, config_content) = match format {
+        ConfigFormat::Toml => (
+            "nyl-project.toml",
+            r#"[settings]
+generate_applysets = false
+on_lookup_failure = "Error"
+components_path = "components"
+search_path = ["."]
+"#,
+        ),
+        ConfigFormat::Yaml => (
+            "nyl-project.yaml",
+            r#"settings:
   generate_applysets: false
   on_lookup_failure: Error
   components_path: components
   search_path:
     - .
-"#;
+"#,
+        ),
+    };
+
+    let config_path = project_path.join(config_filename);
     fs::write(&config_path, config_content)?;
     println!("✓ Created configuration file: {}", config_path.display());
 
@@ -311,15 +335,33 @@ mod tests {
     fn test_create_project() {
         let temp = TempDir::new().unwrap();
 
-        let result = create_project("test-project", temp.path());
+        let result = create_project("test-project", temp.path(), ConfigFormat::Toml);
         assert!(result.is_ok());
 
         let project_dir = temp.path().join("test-project");
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
+        assert!(project_dir.join("nyl-project.toml").exists());
+
+        // Verify config file content (TOML format)
+        let config_content = fs::read_to_string(project_dir.join("nyl-project.toml")).unwrap();
+        assert!(config_content.contains("generate_applysets = false"));
+        assert!(config_content.contains(r#"on_lookup_failure = "Error""#));
+    }
+
+    #[test]
+    fn test_create_project_yaml() {
+        let temp = TempDir::new().unwrap();
+
+        let result = create_project("test-project-yaml", temp.path(), ConfigFormat::Yaml);
+        assert!(result.is_ok());
+
+        let project_dir = temp.path().join("test-project-yaml");
+        assert!(project_dir.exists());
+        assert!(project_dir.join("components").exists());
         assert!(project_dir.join("nyl-project.yaml").exists());
 
-        // Verify config file content
+        // Verify config file content (YAML format)
         let config_content = fs::read_to_string(project_dir.join("nyl-project.yaml")).unwrap();
         assert!(config_content.contains("generate_applysets: false"));
         assert!(config_content.contains("on_lookup_failure: Error"));
@@ -331,7 +373,7 @@ mod tests {
         let project_dir = temp.path().join("test-project");
         fs::create_dir(&project_dir).unwrap();
 
-        let result = create_project("test-project", temp.path());
+        let result = create_project("test-project", temp.path(), ConfigFormat::Toml);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
