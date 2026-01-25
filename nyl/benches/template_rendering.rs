@@ -25,7 +25,7 @@ fn bench_simple_template(c: &mut Criterion) {
                 black_box("name: {{ name }}, namespace: {{ namespace }}"),
                 black_box(&context),
             );
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 }
@@ -73,7 +73,7 @@ spec:
     c.bench_function("complex_template_render", |b| {
         b.iter(|| {
             let result = engine.render(black_box(template), black_box(&context));
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 }
@@ -87,7 +87,7 @@ fn bench_template_with_filters(c: &mut Criterion) {
     c.bench_function("template_with_b64encode", |b| {
         b.iter(|| {
             let result = engine.render(black_box("encoded: {{ data | b64encode }}"), black_box(&context));
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 }
@@ -108,7 +108,7 @@ data:
     c.bench_function("yaml_parse_single_doc", |b| {
         b.iter(|| {
             let result: Result<serde_json::Value, _> = serde_norway::from_str(black_box(yaml_content));
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 }
@@ -178,20 +178,20 @@ fn bench_scaling(c: &mut Criterion) {
         // Create context with many keys
         let mut context_map = serde_json::Map::new();
         for i in 0..*size {
-            context_map.insert(format!("key{}", i), json!(format!("value{}", i)));
+            context_map.insert(format!("key{i}"), json!(format!("value{i}")));
         }
         let context = json!(context_map);
 
         // Create template with many variables
         let mut template = String::new();
         for i in 0..*size {
-            template.push_str(&format!("key{}: {{{{ key{} }}}}\n", i, i));
+            template.push_str(&format!("key{i}: {{{{ key{i} }}}}\n"));
         }
 
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| {
                 let result = engine.render(black_box(&template), black_box(&context));
-                black_box(result);
+                let _ = black_box(result);
             });
         });
     }

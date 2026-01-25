@@ -81,18 +81,17 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
 
     // 3. Determine release name and namespace
-    let (release_name, release_namespace) = match nyl_release {
-        Some(ref release) => (release.metadata.name.clone(), release.metadata.namespace.clone()),
-        None => {
-            // Require CLI flags if no NylRelease
-            let name = args.name.ok_or_else(|| {
-                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-            })?;
-            let namespace = args.namespace.ok_or_else(|| {
-                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-            })?;
-            (name, namespace)
-        }
+    let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
+        (release.metadata.name.clone(), release.metadata.namespace.clone())
+    } else {
+        // Require CLI flags if no NylRelease
+        let name = args.name.ok_or_else(|| {
+            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
+        })?;
+        let namespace = args.namespace.ok_or_else(|| {
+            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
+        })?;
+        (name, namespace)
     };
 
     if desired_manifests.is_empty() {
@@ -172,7 +171,7 @@ async fn compute_diff_from_live(
     // Build set of desired resource keys
     let desired_keys: HashSet<ResourceKey> = desired_manifests
         .iter()
-        .map(|m| ResourceKey::from_json_value(m))
+        .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
 
     // Fetch live resources for desired manifests
@@ -190,9 +189,8 @@ async fn compute_diff_from_live(
     }
 
     // Get previous resource keys for deletion tracking
-    let previous_keys = previous_state
-        .map(|s| s.resource_keys.iter().cloned().collect())
-        .unwrap_or_else(HashSet::new);
+    let previous_keys: HashSet<ResourceKey> = previous_state
+        .map_or_else(HashSet::new, |s| s.resource_keys.iter().cloned().collect());
 
     // Also fetch resources from previous state that aren't in desired
     for key in &previous_keys {
@@ -233,7 +231,7 @@ async fn compute_diff_from_live(
                             Err(e) => {
                                 tracing::warn!(
                                     "Server-side diff failed for {}, falling back to raw: {}",
-                                    key.to_string(),
+                                    key,
                                     e
                                 );
                                 let diff_text = DiffEngine::diff_yaml(manifest, live)?;
@@ -243,7 +241,7 @@ async fn compute_diff_from_live(
                         Err(e) => {
                             tracing::warn!(
                                 "Server-side normalization failed for {}, falling back to raw: {}",
-                                key.to_string(),
+                                key,
                                 e
                             );
                             if DiffEngine::are_equivalent(manifest, live)? {
@@ -300,7 +298,7 @@ fn print_summary(diff: &DiffResult) {
 fn display_diff(diff: &DiffResult) {
     // Show added resources
     for key in &diff.added {
-        println!("{} {}", "+".green().bold(), key.to_string());
+        println!("{} {}", "+".green().bold(), key);
     }
     if !diff.added.is_empty() {
         println!();
@@ -308,7 +306,7 @@ fn display_diff(diff: &DiffResult) {
 
     // Show modified resources with unified diff (kubectl-style)
     for (key, unified_diff) in &diff.modified {
-        println!("{} {}", "~".yellow().bold(), key.to_string());
+        println!("{} {}", "~".yellow().bold(), key);
 
         // Print unified diff with colors
         for line in unified_diff.lines() {
@@ -327,7 +325,7 @@ fn display_diff(diff: &DiffResult) {
 
     // Show deleted resources
     for key in &diff.deleted {
-        println!("{} {}", "-".red().bold(), key.to_string());
+        println!("{} {}", "-".red().bold(), key);
     }
     if !diff.deleted.is_empty() {
         println!();

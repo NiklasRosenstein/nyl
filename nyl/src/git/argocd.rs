@@ -19,7 +19,7 @@ pub struct ArgoCDCredentialDiscovery {
 
 impl ArgoCDCredentialDiscovery {
     /// Create a new ArgoCD credential discovery client
-    pub async fn new(client: Client) -> Result<Self> {
+    pub fn new(client: Client) -> Result<Self> {
         Ok(Self {
             client,
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -32,7 +32,7 @@ impl ArgoCDCredentialDiscovery {
         let mut credentials = HashMap::new();
 
         for (name, secret) in secrets {
-            match self.extract_credential_from_secret(&name, &secret) {
+            match Self::extract_credential_from_secret(&name, &secret) {
                 Ok(Some((url, credential))) => {
                     credentials.insert(url, credential);
                 }
@@ -61,17 +61,16 @@ impl ArgoCDCredentialDiscovery {
         let mut pattern_match: Option<GitCredential> = None;
         let mut hostname_match: Option<GitCredential> = None;
 
-        for (name, secret) in secrets.iter() {
+        for (name, secret) in &secrets {
             // Get secret type from label
             let secret_type = secret
                 .metadata
                 .labels
                 .as_ref()
                 .and_then(|labels| labels.get("argocd.argoproj.io/secret-type"))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
+                .map_or("unknown", |s| s.as_str());
 
-            if let Ok(Some((secret_url, credential))) = self.extract_credential_from_secret(name, secret) {
+            if let Ok(Some((secret_url, credential))) = Self::extract_credential_from_secret(name, secret) {
                 match secret_type {
                     "repository" => {
                         // Check for exact match
@@ -156,7 +155,7 @@ impl ArgoCDCredentialDiscovery {
         // Update cache
         {
             let mut cache = self.secret_cache.lock().unwrap();
-            *cache = secrets.clone();
+            (*cache).clone_from(&secrets);
         }
 
         Ok(secrets)
@@ -164,14 +163,10 @@ impl ArgoCDCredentialDiscovery {
 
     /// Extract credential from ArgoCD secret
     fn extract_credential_from_secret(
-        &self,
         secret_name: &str,
         secret: &Secret,
     ) -> Result<Option<(String, GitCredential)>> {
-        let data = match &secret.data {
-            Some(data) => data,
-            None => return Ok(None),
-        };
+        let Some(data) = &secret.data else { return Ok(None) };
 
         // Get repository URL
         let url = match data.get("url") {
@@ -240,8 +235,7 @@ pub fn matches_repository_url(secret_url: &str, requested_url: &str) -> bool {
     // Hostname match as fallback
     extract_hostname_for_matching(&normalized_secret)
         .zip(extract_hostname_for_matching(&normalized_requested))
-        .map(|(h1, h2)| h1 == h2)
-        .unwrap_or(false)
+        .is_some_and(|(h1, h2)| h1 == h2)
 }
 
 /// Check if a repository URL matches a repo-creds pattern
@@ -257,7 +251,7 @@ pub fn matches_repo_creds_pattern(pattern: &str, url: &str) -> bool {
 
     // Escape regex special chars except *
     // Use placeholder \x00 for * during escaping, then replace with .*
-    let escaped = regex::escape(&normalized_pattern.replace("*", "\x00")).replace("\x00", ".*");
+    let escaped = regex::escape(&normalized_pattern.replace('*', "\x00")).replace('\x00', ".*");
 
     let regex_pattern = format!("^{}$", escaped);
 
@@ -273,8 +267,11 @@ pub fn matches_repo_creds_pattern(pattern: &str, url: &str) -> bool {
 fn normalize_url_for_matching(url: &str) -> String {
     let mut normalized = url.to_lowercase();
 
-    // Remove .git suffix
-    if normalized.ends_with(".git") {
+    // Remove .git suffix (case-insensitive check)
+    if std::path::Path::new(&normalized)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("git"))
+    {
         normalized = normalized[..normalized.len() - 4].to_string();
     }
 

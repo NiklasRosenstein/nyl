@@ -320,14 +320,14 @@ mod tests {
 
     #[test]
     fn test_profile_deserialization_local_kubeconfig() {
-        let yaml = r#"
+        let yaml = r"
 values:
   environment: development
   replicas: 3
 kubeconfig:
   type: local
   context: minikube
-"#;
+";
         let profile: Profile = serde_norway::from_str(yaml).unwrap();
         assert_eq!(profile.values.len(), 2);
         assert_eq!(profile.values["environment"], "development");
@@ -337,13 +337,13 @@ kubeconfig:
             KubeconfigSource::Local { context, .. } => {
                 assert_eq!(context.unwrap(), "minikube");
             }
-            _ => panic!("Expected Local kubeconfig"),
+            KubeconfigSource::Ssh{ .. } => panic!("Expected Local kubeconfig"),
         }
     }
 
     #[test]
     fn test_profile_deserialization_ssh_kubeconfig() {
-        let yaml = r#"
+        let yaml = r"
 values:
   environment: production
 kubeconfig:
@@ -353,7 +353,7 @@ kubeconfig:
   port: 2222
   path: /etc/kubernetes/admin.conf
   context: prod-cluster
-"#;
+";
         let profile: Profile = serde_norway::from_str(yaml).unwrap();
 
         match profile.kubeconfig {
@@ -371,7 +371,7 @@ kubeconfig:
                 assert_eq!(path, "/etc/kubernetes/admin.conf");
                 assert_eq!(context.unwrap(), "prod-cluster");
             }
-            _ => panic!("Expected SSH kubeconfig"),
+            KubeconfigSource::Local{ .. } => panic!("Expected SSH kubeconfig"),
         }
     }
 
@@ -380,7 +380,7 @@ kubeconfig:
         let temp = TempDir::new().unwrap();
         let profiles_path = temp.path().join("nyl-profiles.yaml");
 
-        let yaml = r#"
+        let yaml = r"
 dev:
   values:
     environment: development
@@ -389,7 +389,7 @@ prod:
   values:
     environment: production
     debug: false
-"#;
+";
         fs::write(&profiles_path, yaml).unwrap();
 
         let config = ProfileConfig::load_from_file(&profiles_path).unwrap();
@@ -492,14 +492,14 @@ prod:
 
     #[test]
     fn test_ssh_tunnel_deserialization() {
-        let yaml = r#"
+        let yaml = r"
 user: tunneler
 host: bastion.example.com
 port: 22
 local_port: 6443
 remote_host: k8s-api.internal
 remote_port: 6443
-"#;
+";
         let tunnel: SshTunnel = serde_norway::from_str(yaml).unwrap();
         assert_eq!(tunnel.user, "tunneler");
         assert_eq!(tunnel.host, "bastion.example.com");

@@ -153,18 +153,21 @@ impl HelmChart {
     }
 
     /// Set the release metadata
+    #[must_use]
     pub fn with_release(mut self, release: ReleaseMetadata) -> Self {
         self.spec.release = Some(release);
         self
     }
 
     /// Set the values
+    #[must_use]
     pub fn with_values(mut self, values: serde_json::Value) -> Self {
         self.spec.values = values;
         self
     }
 
     /// Set the namespace
+    #[must_use]
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
         self.metadata.namespace = Some(namespace.into());
         self
@@ -184,8 +187,7 @@ impl HelmChart {
         self.spec
             .release
             .as_ref()
-            .map(|r| r.name.as_str())
-            .unwrap_or(&self.metadata.name)
+            .map_or(&self.metadata.name, |r| r.name.as_str())
     }
 }
 

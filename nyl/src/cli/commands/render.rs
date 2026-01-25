@@ -109,7 +109,7 @@ pub async fn render_manifests(
     let has_helm_charts = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        kind == Some("HelmChart") && api_version.map_or(false, |v| v.starts_with("v1."))
+        kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1."))
     });
 
     // 8. Determine kube_version and api_versions (only if needed)
@@ -191,7 +191,7 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
         }
 
         let ext = file_path.extension().and_then(|s| s.to_str());
-        if !matches!(ext, Some("yaml") | Some("yml") | Some("json")) {
+        if !matches!(ext, Some("yaml" | "yml" | "json")) {
             continue;
         }
 
@@ -220,7 +220,7 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(|e| NylError::Yaml(e))?;
+        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(NylError::Yaml)?;
 
         if !value.is_null() {
             documents.push(value);
@@ -262,7 +262,7 @@ fn generate_resource(
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
 
-    if kind == Some("HelmChart") && api_version.map_or(false, |v| v.starts_with("v1.")) {
+    if kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")) {
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
@@ -312,7 +312,7 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
                 if i > 0 {
                     println!("---");
                 }
-                let yaml = serde_norway::to_string(manifest).map_err(|e| NylError::Yaml(e))?;
+                let yaml = serde_norway::to_string(manifest).map_err(NylError::Yaml)?;
                 print!("{}", yaml);
             }
         }
@@ -410,9 +410,8 @@ fn matches_glob_patterns(path: &Path, patterns: &[String]) -> Result<bool> {
 
     for pattern in patterns {
         // Simple glob matching (*.yaml, .*, _*, etc.)
-        if pattern.starts_with("*.") {
+        if let Some(ext) = pattern.strip_prefix("*.") {
             // Extension match: *.yaml
-            let ext = &pattern[2..];
             if file_name.ends_with(ext) {
                 return Ok(true);
             }
@@ -514,12 +513,12 @@ mod tests {
 
     #[test]
     fn test_parse_yaml_documents_single() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: test
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["kind"], "ConfigMap");
@@ -527,7 +526,7 @@ metadata:
 
     #[test]
     fn test_parse_yaml_documents_multiple() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -537,7 +536,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: test2
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");

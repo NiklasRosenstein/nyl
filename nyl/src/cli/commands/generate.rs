@@ -215,7 +215,7 @@ fn create_argocd_application(
 fn find_yaml_files(dir: &str) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(dir).follow_links(true).into_iter() {
+    for entry in WalkDir::new(dir).follow_links(true) {
         let entry = entry.map_err(|e| NylError::Config(format!("Failed to read directory: {}", e)))?;
         let path = entry.path();
 
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_parse_yaml_documents() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
@@ -281,7 +281,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: config
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "NylRelease");

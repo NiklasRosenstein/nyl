@@ -77,7 +77,7 @@ impl GitManager {
 
     /// Create a Git manager with Kubernetes client for ArgoCD credential discovery
     pub async fn with_kubernetes(client: kube::Client) -> Result<Self> {
-        let discovery = ArgoCDCredentialDiscovery::new(client).await?;
+        let discovery = ArgoCDCredentialDiscovery::new(client)?;
         let credentials = discovery.discover_credentials().await?;
 
         let provider = CredentialProvider::with_credentials(credentials);

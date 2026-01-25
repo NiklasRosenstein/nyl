@@ -44,6 +44,7 @@ pub struct ApplyArgs {
     pub dry_run: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 1. Render desired manifests
     let (raw_manifests, profile, _env_name) = render_manifests(
@@ -65,18 +66,17 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
 
     // 3. Determine release name and namespace
-    let (release_name, release_namespace) = match nyl_release {
-        Some(ref release) => (release.metadata.name.clone(), release.metadata.namespace.clone()),
-        None => {
-            // Require CLI flags if no NylRelease
-            let name = args.name.ok_or_else(|| {
-                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-            })?;
-            let namespace = args.namespace.ok_or_else(|| {
-                NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-            })?;
-            (name, namespace)
-        }
+    let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
+        (release.metadata.name.clone(), release.metadata.namespace.clone())
+    } else {
+        // Require CLI flags if no NylRelease
+        let name = args.name.ok_or_else(|| {
+            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
+        })?;
+        let namespace = args.namespace.ok_or_else(|| {
+            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
+        })?;
+        (name, namespace)
     };
 
     if desired_manifests.is_empty() {
@@ -108,7 +108,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     // 6. Determine next revision number
     let revisions = storage.list_revisions(&release_name, &release_namespace).await?;
-    let next_revision = revisions.iter().max().map(|r| r + 1).unwrap_or(1);
+    let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
 
     // 7. Convert manifests to YAML string for storage
     let manifest_yaml = manifests_to_yaml(&desired_manifests)?;
@@ -206,11 +206,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                         .await
                     {
                         Ok(()) => {
-                            println!("  ✓ Deleted {}", key.to_string());
+                            println!("  ✓ Deleted {}", key);
                             pruned_keys.push(key.clone());
                         }
                         Err(e) => {
-                            println!("  ✗ Failed to delete {}: {}", key.to_string(), e);
+                            println!("  ✗ Failed to delete {}: {}", key, e);
                         }
                     }
                 }

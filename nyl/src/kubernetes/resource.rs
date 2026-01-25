@@ -19,7 +19,7 @@ impl GroupVersionKind {
             let parts: Vec<&str> = api_version.splitn(2, '/').collect();
             (parts[0].to_string(), parts[1].to_string())
         } else {
-            ("".to_string(), api_version.to_string())
+            (String::new(), api_version.to_string())
         };
 
         Ok(Self {
@@ -39,8 +39,14 @@ impl GroupVersionKind {
     }
 
     /// Convert to full string representation (e.g., "v1/ConfigMap" or "apps/v1/Deployment")
-    pub fn to_string(&self) -> String {
+    pub fn format(&self) -> String {
         format!("{}/{}", self.to_api_version(), self.kind)
+    }
+}
+
+impl std::fmt::Display for GroupVersionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.to_api_version(), self.kind)
     }
 }
 
@@ -74,13 +80,24 @@ impl ResourceKey {
     }
 
     /// Convert to string representation (e.g., "ConfigMap default/myconfig")
-    pub fn to_string(&self) -> String {
+    pub fn format(&self) -> String {
         let ns_name = if let Some(ns) = &self.namespace {
             format!("{}/{}", ns, self.name)
         } else {
             self.name.clone()
         };
         format!("{} {}", self.gvk.kind, ns_name)
+    }
+}
+
+impl std::fmt::Display for ResourceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ns_name = if let Some(ns) = &self.namespace {
+            format!("{}/{}", ns, self.name)
+        } else {
+            self.name.clone()
+        };
+        write!(f, "{} {}", self.gvk.kind, ns_name)
     }
 }
 
@@ -101,9 +118,9 @@ impl ApplyOutcome {
     /// Get the resource name
     pub fn name(&self) -> &str {
         match self {
-            ApplyOutcome::Created { name, .. } => name,
-            ApplyOutcome::Updated { name, .. } => name,
-            ApplyOutcome::Unchanged { name, .. } => name,
+            ApplyOutcome::Created { name, .. }
+            | ApplyOutcome::Updated { name, .. }
+            | ApplyOutcome::Unchanged { name, .. } => name,
             ApplyOutcome::DryRun { would_be } => would_be.name(),
         }
     }
@@ -111,9 +128,9 @@ impl ApplyOutcome {
     /// Get the resource namespace
     pub fn namespace(&self) -> Option<&str> {
         match self {
-            ApplyOutcome::Created { namespace, .. } => namespace.as_deref(),
-            ApplyOutcome::Updated { namespace, .. } => namespace.as_deref(),
-            ApplyOutcome::Unchanged { namespace, .. } => namespace.as_deref(),
+            ApplyOutcome::Created { namespace, .. }
+            | ApplyOutcome::Updated { namespace, .. }
+            | ApplyOutcome::Unchanged { namespace, .. } => namespace.as_deref(),
             ApplyOutcome::DryRun { would_be } => would_be.namespace(),
         }
     }
@@ -194,7 +211,7 @@ mod tests {
     #[test]
     fn test_gvk_to_api_version_core() {
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "ConfigMap".to_string(),
         };
@@ -301,7 +318,7 @@ mod tests {
     fn test_resource_key_to_string_namespaced() {
         let key = ResourceKey {
             gvk: GroupVersionKind {
-                group: "".to_string(),
+                group: String::new(),
                 version: "v1".to_string(),
                 kind: "ConfigMap".to_string(),
             },
@@ -315,7 +332,7 @@ mod tests {
     fn test_resource_key_to_string_cluster_scoped() {
         let key = ResourceKey {
             gvk: GroupVersionKind {
-                group: "".to_string(),
+                group: String::new(),
                 version: "v1".to_string(),
                 kind: "Namespace".to_string(),
             },

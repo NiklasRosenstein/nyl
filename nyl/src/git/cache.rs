@@ -69,8 +69,11 @@ impl CacheLayout {
             normalized.truncate(normalized.len() - 1);
         }
 
-        // Then remove .git suffix
-        if normalized.ends_with(".git") {
+        // Then remove .git suffix (case-insensitive check)
+        if std::path::Path::new(&normalized)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("git"))
+        {
             normalized.truncate(normalized.len() - 4);
         }
 
@@ -80,7 +83,7 @@ impl CacheLayout {
     /// Extract repository name from URL for human-readable directory names
     fn extract_repo_name(url: &str) -> String {
         url.split('/')
-            .last()
+            .next_back()
             .unwrap_or("repo")
             .to_string()
             .chars()

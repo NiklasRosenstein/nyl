@@ -61,7 +61,7 @@ impl HelmChartResolver {
     pub fn resolve_chart(&self, chart_ref: &ChartRef) -> Result<ResolvedChart> {
         // Handle Git chart references
         if let Some(ref git_url) = chart_ref.git {
-            return self.resolve_git(git_url, chart_ref);
+            return Self::resolve_git(git_url, chart_ref);
         }
 
         if chart_ref.repository.is_some() {
@@ -157,7 +157,7 @@ impl HelmChartResolver {
     }
 
     /// Resolve a Git chart reference
-    fn resolve_git(&self, git_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+    fn resolve_git(git_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
         let mut git_manager = crate::git::GitManager::new()?;
 
         let worktree_path =

@@ -33,8 +33,7 @@ impl ResourceOrdering {
             // Extract GVK and get priority
             extract_gvk(resource)
                 .ok()
-                .map(|gvk| Self::get_priority(&gvk))
-                .unwrap_or(PRIORITY_OTHER)
+                .map_or(PRIORITY_OTHER, |gvk| Self::get_priority(&gvk))
         });
 
         Ok(())
@@ -227,7 +226,7 @@ mod tests {
     #[test]
     fn test_get_priority_namespace() {
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "Namespace".to_string(),
         };

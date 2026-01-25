@@ -34,7 +34,7 @@ fn create_test_chart(base: &std::path::Path, name: &str) {
     fs::create_dir_all(&chart_dir).unwrap();
     fs::write(
         chart_dir.join("Chart.yaml"),
-        format!("apiVersion: v2\nname: {}\nversion: 1.0.0\n", name),
+        format!("apiVersion: v2\nname: {name}\nversion: 1.0.0\n"),
     )
     .unwrap();
 }

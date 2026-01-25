@@ -18,7 +18,7 @@ impl BareRepository {
         let repo = if path.exists() {
             Repository::open(path)?
         } else {
-            Self::clone_bare(url, path, credential_provider.as_ref().map(|v| &**v))?
+            Self::clone_bare(url, path, credential_provider.as_deref())?
         };
 
         Ok(Self {
@@ -68,7 +68,7 @@ impl BareRepository {
         let mut fetch_options = FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
 
-        let mut remote = repo.find_remote("origin").map_err(|e| GitError::Repository(e))?;
+        let mut remote = repo.find_remote("origin").map_err(GitError::Repository)?;
         remote
             .fetch(
                 &["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"],
@@ -164,7 +164,7 @@ impl BareRepository {
         let mut fetch_options = FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
 
-        let mut remote = self.repo.find_remote("origin").map_err(|e| GitError::Repository(e))?;
+        let mut remote = self.repo.find_remote("origin").map_err(GitError::Repository)?;
         remote
             .fetch(&[&oid_str], Some(&mut fetch_options), None)
             .map_err(|e| GitError::Command(format!("git fetch {} failed: {}", oid_str, e)))?;

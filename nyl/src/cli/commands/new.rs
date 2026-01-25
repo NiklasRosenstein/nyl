@@ -53,10 +53,7 @@ fn create_project(project_path: &Path, format: ConfigFormat) -> Result<()> {
     info!("Creating new project at: {}", project_path.display());
 
     // Create project directory if it doesn't exist
-    if !project_path.exists() {
-        fs::create_dir_all(&project_path)?;
-        println!("✓ Created project directory: {}", project_path.display());
-    } else {
+    if project_path.exists() {
         // Check if a nyl project already exists in this directory
         let toml_config = project_path.join(".nyl-project.toml");
         let yaml_config = project_path.join(".nyl-project.yaml");
@@ -67,6 +64,9 @@ fn create_project(project_path: &Path, format: ConfigFormat) -> Result<()> {
             )));
         }
         println!("✓ Using existing directory: {}", project_path.display());
+    } else {
+        fs::create_dir_all(project_path)?;
+        println!("✓ Created project directory: {}", project_path.display());
     }
 
     // Create components directory
@@ -85,11 +85,11 @@ search_path = ["."]
         ),
         ConfigFormat::Yaml => (
             ".nyl-project.yaml",
-            r#"settings:
+            r"settings:
   components_path: components
   search_path:
     - .
-"#,
+",
         ),
     };
 

@@ -135,8 +135,11 @@ impl Default for CredentialProvider {
 fn normalize_git_url(url: &str) -> String {
     let mut normalized = url.to_lowercase();
 
-    // Remove .git suffix
-    if normalized.ends_with(".git") {
+    // Remove .git suffix (case-insensitive check)
+    if std::path::Path::new(&normalized)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("git"))
+    {
         normalized = normalized[..normalized.len() - 4].to_string();
     }
 

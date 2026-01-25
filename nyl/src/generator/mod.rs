@@ -103,8 +103,8 @@ impl Generator {
         let mut helm_chart = HelmChart::new(name, chart_ref);
 
         // Set API version and kind from component
-        helm_chart.api_version = component.api_version.clone();
-        helm_chart.kind = component.kind.clone();
+        helm_chart.api_version.clone_from(&component.api_version);
+        helm_chart.kind.clone_from(&component.kind);
 
         // Set values
         helm_chart = helm_chart.with_values(values.clone());
@@ -180,8 +180,8 @@ fn instantiate_helm_component(component: &HelmComponent, name: &str, values: &se
     let mut helm_chart = HelmChart::new(name, chart_ref);
 
     // Set API version and kind from component
-    helm_chart.api_version = component.api_version.clone();
-    helm_chart.kind = component.kind.clone();
+    helm_chart.api_version.clone_from(&component.api_version);
+    helm_chart.kind.clone_from(&component.kind);
 
     // Set values
     helm_chart = helm_chart.with_values(values.clone());
@@ -335,13 +335,13 @@ mod tests {
         let config_path = temp.path().join("nyl-project.yaml");
 
         let yaml = format!(
-            r#"
+            r"
 settings:
   components_path: custom-components
   search_path:
     - {}
     - {}
-"#,
+",
             temp.path().join("lib").display(),
             temp.path().join("vendor").display()
         );

@@ -25,12 +25,14 @@ impl HelmTemplateExecutor {
     }
 
     /// Set the Kubernetes version
+    #[must_use]
     pub fn with_kube_version(mut self, version: impl Into<String>) -> Self {
         self.kube_version = Some(version.into());
         self
     }
 
     /// Set the API versions
+    #[must_use]
     pub fn with_api_versions(mut self, versions: Vec<String>) -> Self {
         self.api_versions = versions;
         self
@@ -84,7 +86,7 @@ impl HelmTemplateExecutor {
 
         // Note: build_command uses --set-json for testing
         // The template() method uses --values with a temp file for better handling
-        if !values.is_null() && values.as_object().map_or(false, |o| !o.is_empty()) {
+        if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
             cmd.arg("--set-json");
             cmd.arg(serde_json::to_string(values)?);
         }
@@ -103,7 +105,7 @@ impl HelmTemplateExecutor {
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
         // Write values to temp file if not empty
-        let values_file = if !values.is_null() && values.as_object().map_or(false, |o| !o.is_empty()) {
+        let values_file = if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
             Some(write_values_file(values)?)
         } else {
             None
@@ -235,7 +237,7 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(|e| NylError::Yaml(e))?;
+        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(NylError::Yaml)?;
 
         if !value.is_null() {
             documents.push(value);
@@ -403,12 +405,12 @@ mod tests {
 
     #[test]
     fn test_parse_yaml_documents_single() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: test
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["kind"], "ConfigMap");
@@ -416,7 +418,7 @@ metadata:
 
     #[test]
     fn test_parse_yaml_documents_multiple() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -426,7 +428,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: test2
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");
@@ -435,7 +437,7 @@ metadata:
 
     #[test]
     fn test_parse_yaml_documents_with_empty() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -446,7 +448,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: test2
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");
@@ -455,7 +457,7 @@ metadata:
 
     #[test]
     fn test_parse_yaml_documents_with_comments() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -468,7 +470,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: test2
-"#;
+";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");
@@ -483,15 +485,14 @@ metadata:
     }
 
     #[test]
-    #[ignore] // Only run if helm is installed
+    #[ignore = "Only run if helm is installed"]
     fn test_check_helm_installed() {
-        let result = HelmTemplateExecutor::check_helm_installed().unwrap();
-        // This will be true if helm is installed, false otherwise
-        assert!(result || !result); // Always passes, just tests it doesn't panic
+        // This test just verifies the function doesn't panic
+        let _ = HelmTemplateExecutor::check_helm_installed().unwrap();
     }
 
     #[test]
-    #[ignore] // Only run if helm is installed
+    #[ignore = "Only run if helm is installed"]
     fn test_helm_version() {
         if HelmTemplateExecutor::check_helm_installed().unwrap() {
             let version = HelmTemplateExecutor::helm_version().unwrap();

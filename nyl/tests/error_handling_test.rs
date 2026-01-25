@@ -6,13 +6,13 @@ fn test_error_variants() {
     // Test all error constructor methods
     let config_err = NylError::config("test config error");
     assert!(config_err.is_config_error());
-    assert!(format!("{}", config_err).contains("Hint:"));
+    assert!(format!("{config_err}").contains("Hint:"));
 
     let helm_err = NylError::helm_chart("test helm error");
-    assert!(format!("{}", helm_err).contains("helm version"));
+    assert!(format!("{helm_err}").contains("helm version"));
 
     let validation_err = NylError::validation("test validation");
-    assert!(format!("{}", validation_err).contains("nyl validate"));
+    assert!(format!("{validation_err}").contains("nyl validate"));
 
     let k8s_err = NylError::kubernetes("test k8s error");
     assert!(k8s_err.is_kubernetes_error());
@@ -42,8 +42,8 @@ fn test_error_messages_have_context() {
     ];
 
     for error in errors {
-        let msg = format!("{}", error);
-        assert!(msg.contains("Hint:"), "Error message should contain a hint: {}", msg);
+        let msg = format!("{error}");
+        assert!(msg.contains("Hint:"), "Error message should contain a hint: {msg}");
     }
 }
 

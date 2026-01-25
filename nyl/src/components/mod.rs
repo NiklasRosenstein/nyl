@@ -208,7 +208,7 @@ impl std::fmt::Debug for ComponentRegistry {
         f.debug_struct("ComponentRegistry")
             .field("search_paths", &self.search_paths)
             .field("cache_size", &self.cache_size())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

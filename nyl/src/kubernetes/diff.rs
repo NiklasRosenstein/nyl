@@ -75,7 +75,8 @@ impl DiffEngine {
 
         for hunk in diff.unified_diff().iter_hunks() {
             // Add hunk header (e.g., @@ -1,4 +1,4 @@)
-            output.push_str(&format!("{}", hunk.header()));
+            use std::fmt::Write;
+            write!(&mut output, "{}", hunk.header()).unwrap();
 
             // Add diff lines
             for change in hunk.iter_changes() {
@@ -164,7 +165,8 @@ impl DiffEngine {
         let mut output = String::new();
 
         for hunk in diff.unified_diff().iter_hunks() {
-            output.push_str(&format!("{}", hunk.header()));
+            use std::fmt::Write;
+            write!(&mut output, "{}", hunk.header()).unwrap();
 
             for change in hunk.iter_changes() {
                 match change.tag() {

@@ -92,7 +92,7 @@ impl KubernetesReleaseStorage {
     #[allow(dead_code)]
     fn parse_revision(name: &str) -> Option<u32> {
         // Format: nyl.release.v1.<component>.<revision>
-        name.split('.').last()?.parse().ok()
+        name.split('.').next_back()?.parse().ok()
     }
 
     /// Encode string to ByteString
@@ -106,7 +106,7 @@ impl KubernetesReleaseStorage {
     }
 
     /// Convert ReleaseState to Secret
-    fn to_secret(&self, release: &ReleaseState) -> Result<Secret> {
+    fn to_secret(release: &ReleaseState) -> Result<Secret> {
         let mut data: BTreeMap<String, ByteString> = BTreeMap::new();
 
         // Serialize resource keys
@@ -150,7 +150,7 @@ impl KubernetesReleaseStorage {
     }
 
     /// Convert Secret to ReleaseState
-    fn from_secret(&self, secret: &Secret) -> Result<ReleaseState> {
+    fn from_secret(secret: &Secret) -> Result<ReleaseState> {
         let data = secret
             .data
             .as_ref()
@@ -240,18 +240,18 @@ impl KubernetesReleaseStorage {
 impl ReleaseStorage for KubernetesReleaseStorage {
     async fn save_release(&self, release: &ReleaseState) -> Result<()> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), &release.release_namespace);
-        let secret = self.to_secret(release)?;
+        let secret = Self::to_secret(release)?;
         let name = Self::secret_name(&release.release_name, release.revision);
 
         // Try to get existing secret
         match api.get(&name).await {
             Ok(_) => {
                 // Update existing secret
-                api.replace(&name, &Default::default(), &secret).await?;
+                api.replace(&name, &kube::api::PostParams::default(), &secret).await?;
             }
             Err(kube::Error::Api(err)) if err.code == 404 => {
                 // Create new secret
-                api.create(&Default::default(), &secret).await?;
+                api.create(&kube::api::PostParams::default(), &secret).await?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -274,7 +274,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         let name = Self::secret_name(release_name, revision);
 
         match api.get(&name).await {
-            Ok(secret) => Ok(Some(self.from_secret(&secret)?)),
+            Ok(secret) => Ok(Some(Self::from_secret(&secret)?)),
             Err(kube::Error::Api(err)) if err.code == 404 => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -298,7 +298,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
             })
             .collect();
 
-        revisions.sort();
+        revisions.sort_unstable();
         Ok(revisions)
     }
 
@@ -391,7 +391,7 @@ mod tests {
                 .filter(|(c, _)| c == &key_prefix)
                 .map(|(_, r)| *r)
                 .collect();
-            revisions.sort();
+            revisions.sort_unstable();
             Ok(revisions)
         }
 

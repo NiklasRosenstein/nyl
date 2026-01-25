@@ -69,14 +69,16 @@ impl KubeRsClient {
         }
 
         // Use Local kubeconfig
-        let (path, context) = match kubeconfig {
-            KubeconfigSource::Local { path, context } => (path, context),
-            _ => unreachable!(),
+        let KubeconfigSource::Local { path, context } = kubeconfig else {
+            unreachable!()
         };
 
         let mut config = if let Some(path) = path {
-            kube::Config::from_custom_kubeconfig(kube::config::Kubeconfig::read_from(path)?, &Default::default())
-                .await?
+            kube::Config::from_custom_kubeconfig(
+                kube::config::Kubeconfig::read_from(path)?,
+                &kube::config::KubeConfigOptions::default(),
+            )
+            .await?
         } else {
             kube::Config::infer().await?
         };
@@ -106,7 +108,7 @@ impl KubeRsClient {
     }
 
     /// Discover the API resource for a given GVK
-    async fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
+    fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
         // Search through all groups for matching resource
         for group in self.discovery.groups() {
             for (ar, caps) in group.recommended_resources() {
@@ -142,7 +144,7 @@ impl KubeClient for KubeRsClient {
         namespace: Option<&str>,
         name: &str,
     ) -> Result<Option<DynamicObject>> {
-        let (ar, caps) = self.discover_api_resource(gvk).await?;
+        let (ar, caps) = self.discover_api_resource(gvk)?;
 
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
             let ns = namespace
@@ -172,7 +174,7 @@ impl KubeClient for KubeRsClient {
         // Extract GVK from resource - use data field which is a serde_json::Value
         let resource_json = serde_json::to_value(resource)?;
         let gvk = crate::kubernetes::resource::extract_gvk(&resource_json)?;
-        let (ar, caps) = self.discover_api_resource(&gvk).await?;
+        let (ar, caps) = self.discover_api_resource(&gvk)?;
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
@@ -198,13 +200,13 @@ impl KubeClient for KubeRsClient {
         api.patch(&name, &patch_params, &patch).await?;
 
         // Determine outcome
-        let base_outcome = if !exists {
-            ApplyOutcome::Created {
+        let base_outcome = if exists {
+            ApplyOutcome::Updated {
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
-            ApplyOutcome::Updated {
+            ApplyOutcome::Created {
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
@@ -250,7 +252,7 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
-        let (ar, caps) = self.discover_api_resource(gvk).await?;
+        let (ar, caps) = self.discover_api_resource(gvk)?;
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
@@ -262,7 +264,7 @@ impl KubeClient for KubeRsClient {
         };
 
         // Delete the resource
-        match api.delete(name, &Default::default()).await {
+        match api.delete(name, &kube::api::DeleteParams::default()).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => {
                 // Resource already deleted or doesn't exist - not an error
@@ -280,7 +282,7 @@ impl KubeClient for KubeRsClient {
         // Extract GVK from resource
         let resource_json = serde_json::to_value(resource)?;
         let gvk = crate::kubernetes::resource::extract_gvk(&resource_json)?;
-        let (ar, caps) = self.discover_api_resource(&gvk).await?;
+        let (ar, caps) = self.discover_api_resource(&gvk)?;
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
@@ -378,13 +380,13 @@ impl KubeClient for MockKubeClient {
             store.insert(key, resource.clone());
         }
 
-        let base_outcome = if !exists {
-            ApplyOutcome::Created {
+        let base_outcome = if exists {
+            ApplyOutcome::Updated {
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
-            ApplyOutcome::Updated {
+            ApplyOutcome::Created {
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
@@ -444,7 +446,7 @@ mod tests {
     async fn test_mock_client_get_missing() {
         let client = MockKubeClient::new();
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "ConfigMap".to_string(),
         };
@@ -536,7 +538,7 @@ mod tests {
 
         // Verify resource was not stored
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "ConfigMap".to_string(),
         };
@@ -564,7 +566,7 @@ mod tests {
 
         // Verify it exists
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "ConfigMap".to_string(),
         };
@@ -584,7 +586,7 @@ mod tests {
         let client = MockKubeClient::new();
 
         let gvk = GroupVersionKind {
-            group: "".to_string(),
+            group: String::new(),
             version: "v1".to_string(),
             kind: "ConfigMap".to_string(),
         };
