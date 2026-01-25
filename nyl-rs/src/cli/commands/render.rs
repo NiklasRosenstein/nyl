@@ -24,9 +24,21 @@ pub struct RenderArgs {
     #[arg(short, long)]
     pub component: Option<String>,
 
-    /// Environment to render for
-    #[arg(short, long)]
-    pub environment: Option<String>,
+    /// Profile to use for rendering
+    #[arg(short, long, conflicts_with = "offline")]
+    pub profile: Option<String>,
+
+    /// Offline mode: skip profile loading, use default profile
+    #[arg(long)]
+    pub offline: bool,
+
+    /// Kubernetes version for Helm templating (required with --offline)
+    #[arg(long, required_if_eq("offline", "true"))]
+    pub kube_version: Option<String>,
+
+    /// Kubernetes API versions for Helm (required with --offline, comma-separated or repeated)
+    #[arg(long, required_if_eq("offline", "true"), value_delimiter = ',')]
+    pub kube_api_versions: Vec<String>,
 }
 
 /// Output format for rendered manifests
@@ -42,62 +54,81 @@ pub fn render_manifests(
     path: &str,
     component: Option<&str>,
     environment: Option<&str>,
+    offline: bool,
+    cli_kube_version: Option<&str>,
+    cli_api_versions: &[String],
 ) -> Result<(Vec<serde_json::Value>, Profile, String)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
-    // 2. Load profile configuration
-    let profile_config = ProfileConfig::load(None)?;
-
-    // 3. Select environment/profile
-    // If user explicitly specified a profile, require it to exist.
-    // If no profile specified and no profiles configured, use default Profile (current kubecontext).
-    let env_name = environment.unwrap_or("default");
-    let profile: Profile = if let Some(p) = profile_config.get(env_name) {
-        p.clone()
-    } else if environment.is_some() {
-        // User explicitly requested a profile that doesn't exist
-        return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
-    } else if profile_config.profiles.is_empty() {
-        // No profiles configured at all - use default (current kubecontext)
-        Profile::default()
+    // 2. Select environment/profile
+    let (profile, env_name): (Profile, String) = if offline {
+        // Offline mode: skip profile loading, use default profile
+        (Profile::default(), "offline".to_string())
     } else {
-        // Profiles exist but "default" doesn't - user must specify which one
-        return Err(NylError::Config(format!(
-            "Profile '{}' not found. Available profiles: {}",
-            env_name,
-            profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
+        // Load profile configuration
+        let profile_config = ProfileConfig::load(None)?;
+
+        // If user explicitly specified a profile, require it to exist.
+        // If no profile specified and no profiles configured, use default Profile (current kubecontext).
+        let env_name = environment.unwrap_or("default");
+        let profile: Profile = if let Some(p) = profile_config.get(env_name) {
+            p.clone()
+        } else if environment.is_some() {
+            // User explicitly requested a profile that doesn't exist
+            return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
+        } else if profile_config.profiles.is_empty() {
+            // No profiles configured at all - use default (current kubecontext)
+            Profile::default()
+        } else {
+            // Profiles exist but "default" doesn't - user must specify which one
+            return Err(NylError::Config(format!(
+                "Profile '{}' not found. Available profiles: {}",
+                env_name,
+                profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        };
+        (profile, env_name.to_string())
     };
 
-    // 4. Load secrets
+    // 3. Load secrets
     let secrets_config = SecretsConfig::load(None)?;
 
-    // 5. Build template context
-    let context = TemplateContext::build(&profile, &secrets_config, env_name)?;
+    // 4. Build template context
+    let context = TemplateContext::build(&profile, &secrets_config, &env_name)?;
 
-    // 6. Create generator
+    // 5. Create generator
     let generator = Generator::new(project_config.clone());
 
-    // 7. Load and filter resources
+    // 6. Load and filter resources
     let resources = load_resources(path)?;
     let filtered = filter_resources(resources, component)?;
 
-    // 8. Generate manifests
+    // 7. Generate manifests
     let mut all_manifests = Vec::new();
     for resource in filtered {
-        let manifests = generate_resource(&generator, &resource, &context, &project_config)?;
+        let manifests = generate_resource(
+            &generator,
+            &resource,
+            &context,
+            &project_config,
+            cli_kube_version,
+            cli_api_versions,
+        )?;
         all_manifests.extend(manifests);
     }
 
-    Ok((all_manifests, profile, env_name.to_string()))
+    Ok((all_manifests, profile, env_name))
 }
 
 pub fn execute(args: RenderArgs) -> Result<()> {
     let (manifests, _, _) = render_manifests(
         &args.path,
         args.component.as_deref(),
-        args.environment.as_deref(),
+        args.profile.as_deref(),
+        args.offline,
+        args.kube_version.as_deref(),
+        &args.kube_api_versions,
     )?;
 
     // Extract ApplicationGenerator resources and filter them from output
@@ -194,6 +225,8 @@ fn generate_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
+    cli_kube_version: Option<&str>,
+    cli_api_versions: &[String],
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -203,7 +236,7 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        render_helm_chart(&chart, context, config)
+        render_helm_chart(&chart, context, config, cli_kube_version, cli_api_versions)
     } else {
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
@@ -216,6 +249,8 @@ fn render_helm_chart(
     chart: &HelmChart,
     context: &TemplateContext,
     config: &ProjectConfig,
+    cli_kube_version: Option<&str>,
+    cli_api_versions: &[String],
 ) -> Result<Vec<serde_json::Value>> {
     let working_dir = std::env::current_dir()
         .map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
@@ -235,9 +270,21 @@ fn render_helm_chart(
         .clone()
         .unwrap_or_else(|| ReleaseMetadata::new(chart.effective_release_name()));
 
+    // CLI values override chart spec values
+    let kube_version = cli_kube_version
+        .map(String::from)
+        .or(chart.spec.kube_version.clone())
+        .unwrap_or_default();
+
+    let api_versions = if cli_api_versions.is_empty() {
+        chart.spec.api_versions.clone()
+    } else {
+        cli_api_versions.to_vec()
+    };
+
     let executor = HelmTemplateExecutor::new()
-        .with_kube_version(chart.spec.kube_version.clone().unwrap_or_default())
-        .with_api_versions(chart.spec.api_versions.clone());
+        .with_kube_version(kube_version)
+        .with_api_versions(api_versions);
 
     executor.template(&resolved, &release, &merged_values)
 }

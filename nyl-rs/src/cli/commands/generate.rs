@@ -73,7 +73,7 @@ fn generate_argocd_applications(
     let yaml_files = find_yaml_files(manifests_dir)?;
 
     if yaml_files.is_empty() {
-        eprintln!("⚠️  No YAML files found in {}", manifests_dir);
+        tracing::warn!("No YAML files found in {}", manifests_dir);
         return Ok(());
     }
 
@@ -107,16 +107,16 @@ fn generate_argocd_applications(
             applications.push(app);
         } else {
             skipped += 1;
-            eprintln!(
-                "⚠️  Skipping {} - no NylRelease resource found",
+            tracing::warn!(
+                "Skipping {} - no NylRelease resource found",
                 file_path.display()
             );
         }
     }
 
     if applications.is_empty() {
-        eprintln!("\n❌ No ArgoCD Applications generated.");
-        eprintln!("   Files must contain a NylRelease resource to generate Applications.");
+        tracing::warn!("No ArgoCD Applications generated");
+        tracing::info!("Files must contain a NylRelease resource to generate Applications");
         return Err(NylError::Config(
             "No valid NylRelease resources found".to_string(),
         ));

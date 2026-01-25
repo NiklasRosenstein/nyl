@@ -144,8 +144,8 @@ impl ProjectConfig {
         if let Some(ref path) = file {
             Self::load_from_file(path)
         } else {
-            eprintln!("⚠️  No project configuration file found.");
-            eprintln!("   Using default settings. Initialize with 'nyl new project' to create one.");
+            tracing::warn!("No project configuration file found");
+            tracing::info!("Using default settings. Initialize with 'nyl new project' to create one.");
             Ok(Self {
                 file: None,
                 config: Project::default(),

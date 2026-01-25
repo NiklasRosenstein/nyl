@@ -60,7 +60,6 @@ pub fn execute(args: NewArgs) -> Result<()> {
             // Legacy mode: treat as project creation (default to TOML)
             if let Some(name) = args.name {
                 warn!("Using legacy syntax. Please use 'nyl new project <name>' instead.");
-                println!("⚠ Using legacy syntax. Please use 'nyl new project <name>' instead.");
                 let path = args.path.unwrap_or_else(|| PathBuf::from("."));
                 create_project(&name, &path, ConfigFormat::Toml)
             } else {

@@ -16,7 +16,7 @@ async fn main() {
 
     // Execute command
     if let Err(e) = cli.execute().await {
-        eprintln!("Error: {e}");
+        tracing::error!("{e}");
         std::process::exit(1);
     }
 }

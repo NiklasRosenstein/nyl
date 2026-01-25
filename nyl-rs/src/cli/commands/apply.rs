@@ -31,9 +31,9 @@ pub struct ApplyArgs {
     #[arg(short, long)]
     pub component: Option<String>,
 
-    /// Environment to apply to
+    /// Profile to use for applying
     #[arg(short, long)]
-    pub environment: Option<String>,
+    pub profile: Option<String>,
 
     /// Kubernetes context to use
     #[arg(long)]
@@ -49,11 +49,14 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let (raw_manifests, profile, _env_name) = render_manifests(
         &args.path,
         args.component.as_deref(),
-        args.environment.as_deref(),
+        args.profile.as_deref(),
+        false, // offline
+        None,  // cli_kube_version
+        &[],   // cli_api_versions
     )?;
 
     if raw_manifests.is_empty() {
-        println!("No manifests to apply");
+        tracing::info!("No manifests to apply");
         return Ok(());
     }
 
@@ -83,7 +86,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     };
 
     if desired_manifests.is_empty() {
-        println!("No Kubernetes resources to apply (only NylRelease found)");
+        tracing::info!("No Kubernetes resources to apply (only NylRelease found)");
         return Ok(());
     }
 
