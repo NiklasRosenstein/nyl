@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::constants::API_VERSION_ARGOCD;
 use crate::{NylError, Result};
 
 /// ApplicationGenerator resource for ArgoCD bootstrapping
@@ -137,7 +138,7 @@ impl ApplicationGenerator {
         manifest
             .get("apiVersion")
             .and_then(|v| v.as_str())
-            == Some("argocd.nyl.niklasrosenstein.github.com/v1")
+            == Some(API_VERSION_ARGOCD)
             && manifest.get("kind").and_then(|v| v.as_str()) == Some("ApplicationGenerator")
     }
 
@@ -562,7 +563,7 @@ mod tests {
     // Helper function for tests
     fn create_test_generator() -> ApplicationGenerator {
         ApplicationGenerator {
-            api_version: "argocd.nyl.niklasrosenstein.github.com/v1".to_string(),
+            api_version: API_VERSION_ARGOCD.to_string(),
             kind: "ApplicationGenerator".to_string(),
             metadata: ApplicationGeneratorMetadata {
                 name: "test".to_string(),

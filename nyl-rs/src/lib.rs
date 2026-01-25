@@ -23,6 +23,7 @@
 pub mod cli;
 pub mod components;
 pub mod config;
+pub mod constants;
 pub mod error;
 pub mod generator;
 pub mod git;

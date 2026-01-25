@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Migrated API version from `nyl.io/v1` and `inline.nyl.io/v1` to `nyl.niklasrosenstein.github.com/v1`
+  - All Nyl resources (NylRelease, HelmChart, StatefulSecret, PostProcessor, etc.) now use the new API version
+  - ArgoCD ApplicationGenerator continues to use `argocd.nyl.niklasrosenstein.github.com/v1` (unchanged)
+  - All API versions are now defined as constants in the codebase for consistency
+
+  **Migration Guide:**
+
+  Update all your Nyl manifests to use the new API version. You can do this automatically with:
+
+  ```bash
+  # Update main Nyl resources
+  find . -name "*.yaml" -exec sed -i 's/apiVersion: nyl\.io\/v1/apiVersion: nyl.niklasrosenstein.github.com\/v1/g' {} +
+
+  # Update inline resources (if you have any)
+  find . -name "*.yaml" -exec sed -i 's/apiVersion: inline\.nyl\.io\/v1/apiVersion: nyl.niklasrosenstein.github.com\/v1/g' {} +
+  ```
+
+  Or manually change:
+  - `apiVersion: nyl.io/v1` → `apiVersion: nyl.niklasrosenstein.github.com/v1`
+  - `apiVersion: inline.nyl.io/v1` → `apiVersion: nyl.niklasrosenstein.github.com/v1`
+  - ArgoCD resources (`argocd.nyl.niklasrosenstein.github.com/v1`) remain unchanged
+
 ## [0.1.0] - 2026-01-25
 
 ### Overview

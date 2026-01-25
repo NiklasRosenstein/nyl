@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_parse_yaml_documents() {
         let yaml = r#"
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: test
@@ -300,7 +300,7 @@ metadata:
         use std::env;
 
         let release = NylRelease {
-            api_version: "nyl.io/v1".to_string(),
+            api_version: "nyl.niklasrosenstein.github.com/v1".to_string(),
             kind: "NylRelease".to_string(),
             metadata: NylReleaseMetadata {
                 name: "myapp".to_string(),

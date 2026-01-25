@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::constants::API_VERSION;
+
 /// Reference to a Helm chart
 ///
 /// Phase 2: Only `path` is supported for local charts
@@ -123,7 +125,7 @@ impl Default for HelmChartSpec {
 /// This is a Kubernetes-style resource that represents a Helm chart deployment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelmChart {
-    /// API version (e.g., "nyl.io/v1")
+    /// API version (e.g., "nyl.niklasrosenstein.github.com/v1")
     #[serde(rename = "apiVersion")]
     pub api_version: String,
 
@@ -141,7 +143,7 @@ impl HelmChart {
     /// Create a new HelmChart resource
     pub fn new(name: impl Into<String>, chart_ref: ChartRef) -> Self {
         Self {
-            api_version: "nyl.io/v1".to_string(),
+            api_version: API_VERSION.to_string(),
             kind: "HelmChart".to_string(),
             metadata: ObjectMetadata::new(name),
             spec: HelmChartSpec {
@@ -251,7 +253,7 @@ mod tests {
 
         let helm_chart = HelmChart::new("my-app", chart_ref);
 
-        assert_eq!(helm_chart.api_version, "nyl.io/v1");
+        assert_eq!(helm_chart.api_version, "nyl.niklasrosenstein.github.com/v1");
         assert_eq!(helm_chart.kind, "HelmChart");
         assert_eq!(helm_chart.metadata.name, "my-app");
         assert_eq!(
@@ -334,7 +336,7 @@ mod tests {
             .with_values(values);
 
         let yaml = serde_norway::to_string(&helm_chart).unwrap();
-        assert!(yaml.contains("apiVersion: nyl.io/v1"));
+        assert!(yaml.contains("apiVersion: nyl.niklasrosenstein.github.com/v1"));
         assert!(yaml.contains("kind: HelmChart"));
         assert!(yaml.contains("name: nginx-app"));
         assert!(yaml.contains("replicaCount: 2"));

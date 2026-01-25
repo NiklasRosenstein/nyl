@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::constants::API_VERSION;
 use crate::{NylError, Result};
 
 /// NylRelease resource for specifying release metadata
@@ -40,7 +41,7 @@ impl NylRelease {
         manifest
             .get("apiVersion")
             .and_then(|v| v.as_str())
-            == Some("nyl.io/v1")
+            == Some(API_VERSION)
             && manifest.get("kind").and_then(|v| v.as_str()) == Some("NylRelease")
     }
 
@@ -84,7 +85,7 @@ mod tests {
     #[test]
     fn test_is_nyl_release_true() {
         let manifest = json!({
-            "apiVersion": "nyl.io/v1",
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "NylRelease",
             "metadata": {
                 "name": "test",
@@ -98,7 +99,7 @@ mod tests {
     #[test]
     fn test_is_nyl_release_false_wrong_kind() {
         let manifest = json!({
-            "apiVersion": "nyl.io/v1",
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "ConfigMap",
             "metadata": {
                 "name": "test"
@@ -124,7 +125,7 @@ mod tests {
     #[test]
     fn test_from_value_valid() {
         let value = json!({
-            "apiVersion": "nyl.io/v1",
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "NylRelease",
             "metadata": {
                 "name": "myapp",
@@ -133,7 +134,7 @@ mod tests {
         });
 
         let release = NylRelease::from_value(&value).unwrap();
-        assert_eq!(release.api_version, "nyl.io/v1");
+        assert_eq!(release.api_version, "nyl.niklasrosenstein.github.com/v1");
         assert_eq!(release.kind, "NylRelease");
         assert_eq!(release.metadata.name, "myapp");
         assert_eq!(release.metadata.namespace, "production");
@@ -142,7 +143,7 @@ mod tests {
     #[test]
     fn test_from_value_with_spec() {
         let value = json!({
-            "apiVersion": "nyl.io/v1",
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "NylRelease",
             "metadata": {
                 "name": "myapp",
@@ -158,7 +159,7 @@ mod tests {
     #[test]
     fn test_from_value_invalid_missing_metadata() {
         let value = json!({
-            "apiVersion": "nyl.io/v1",
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "NylRelease"
         });
 
@@ -169,7 +170,7 @@ mod tests {
     fn test_extract_nyl_release_with_release() {
         let manifests = vec![
             json!({
-                "apiVersion": "nyl.io/v1",
+                "apiVersion": "nyl.niklasrosenstein.github.com/v1",
                 "kind": "NylRelease",
                 "metadata": {
                     "name": "myapp",
@@ -220,7 +221,7 @@ mod tests {
     fn test_extract_nyl_release_multiple_error() {
         let manifests = vec![
             json!({
-                "apiVersion": "nyl.io/v1",
+                "apiVersion": "nyl.niklasrosenstein.github.com/v1",
                 "kind": "NylRelease",
                 "metadata": {
                     "name": "app1",
@@ -228,7 +229,7 @@ mod tests {
                 }
             }),
             json!({
-                "apiVersion": "nyl.io/v1",
+                "apiVersion": "nyl.niklasrosenstein.github.com/v1",
                 "kind": "NylRelease",
                 "metadata": {
                     "name": "app2",

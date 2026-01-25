@@ -3,7 +3,7 @@
 
 [tools]
 # Rust toolchain
-rust = "1.83"
+rust = "1.93.0"
 
 # Cargo extensions for development and release
 "cargo:cargo-dist" = "latest"
