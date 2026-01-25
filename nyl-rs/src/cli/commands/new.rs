@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::ProjectConfig;
 use crate::{NylError, Result};
@@ -10,27 +10,16 @@ use crate::{NylError, Result};
 #[derive(Args, Debug)]
 pub struct NewArgs {
     #[command(subcommand)]
-    command: Option<NewSubcommand>,
-
-    /// Legacy: project name (deprecated, use 'new project <name>' instead)
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-
-    /// Path where to create the project (legacy mode only)
-    #[arg(short, long)]
-    path: Option<PathBuf>,
+    command: NewSubcommand,
 }
 
 #[derive(Subcommand, Debug)]
 enum NewSubcommand {
     /// Create a new nyl project
     Project {
-        /// Name of the new project
-        name: String,
-
-        /// Path where to create the project
-        #[arg(short, long, default_value = ".")]
-        path: PathBuf,
+        /// Directory where to create the project
+        #[arg(value_name = "DIR")]
+        dir: PathBuf,
 
         /// Configuration format (toml or yaml)
         #[arg(short, long, default_value = "toml")]
@@ -54,41 +43,31 @@ enum ConfigFormat {
 
 pub fn execute(args: NewArgs) -> Result<()> {
     match args.command {
-        Some(NewSubcommand::Project { name, path, format }) => create_project(&name, &path, format),
-        Some(NewSubcommand::Component { api_version, kind }) => create_component(&api_version, &kind),
-        None => {
-            // Legacy mode: treat as project creation (default to TOML)
-            if let Some(name) = args.name {
-                warn!("Using legacy syntax. Please use 'nyl new project <name>' instead.");
-                let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-                create_project(&name, &path, ConfigFormat::Toml)
-            } else {
-                Err(NylError::Config(
-                    "Please specify either 'project <name>' or 'component <api-version> <kind>'".to_string(),
-                ))
-            }
-        }
+        NewSubcommand::Project { dir, format } => create_project(&dir, format),
+        NewSubcommand::Component { api_version, kind } => create_component(&api_version, &kind),
     }
 }
 
 /// Create a new nyl project
-fn create_project(name: &str, base_path: &Path, format: ConfigFormat) -> Result<()> {
-    info!("Creating new project: {}", name);
-    debug!("Base path: {}", base_path.display());
+fn create_project(project_path: &Path, format: ConfigFormat) -> Result<()> {
+    info!("Creating new project at: {}", project_path.display());
 
-    let project_path = base_path.join(name);
-
-    // Check if project directory already exists
-    if project_path.exists() {
-        return Err(NylError::Config(format!(
-            "Project directory already exists: {}",
-            project_path.display()
-        )));
+    // Create project directory if it doesn't exist
+    if !project_path.exists() {
+        fs::create_dir_all(&project_path)?;
+        println!("✓ Created project directory: {}", project_path.display());
+    } else {
+        // Check if a nyl project already exists in this directory
+        let toml_config = project_path.join(".nyl-project.toml");
+        let yaml_config = project_path.join(".nyl-project.yaml");
+        if toml_config.exists() || yaml_config.exists() {
+            return Err(NylError::Config(format!(
+                "Project already exists at: {}",
+                project_path.display()
+            )));
+        }
+        println!("✓ Using existing directory: {}", project_path.display());
     }
-
-    // Create project directory
-    fs::create_dir_all(&project_path)?;
-    println!("✓ Created project directory: {}", project_path.display());
 
     // Create components directory
     let components_dir = project_path.join("components");
@@ -118,9 +97,22 @@ search_path = ["."]
     fs::write(&config_path, config_content)?;
     println!("✓ Created configuration file: {}", config_path.display());
 
-    println!("\n✓ Project '{}' created successfully!", name);
+    println!("\n✓ Project created successfully at: {}", project_path.display());
     println!("\nNext steps:");
-    println!("  cd {}", name);
+
+    // Show relative path if possible, otherwise absolute path
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Ok(relative) = project_path.strip_prefix(&current_dir) {
+            if relative.as_os_str() != "." {
+                println!("  cd {}", relative.display());
+            }
+        } else {
+            println!("  cd {}", project_path.display());
+        }
+    } else {
+        println!("  cd {}", project_path.display());
+    }
+
     println!("  nyl new component <api-version> <kind>");
 
     Ok(())
@@ -329,11 +321,11 @@ mod tests {
     #[test]
     fn test_create_project() {
         let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("test-project");
 
-        let result = create_project("test-project", temp.path(), ConfigFormat::Toml);
+        let result = create_project(&project_dir, ConfigFormat::Toml);
         assert!(result.is_ok());
 
-        let project_dir = temp.path().join("test-project");
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
         assert!(project_dir.join(".nyl-project.toml").exists());
@@ -347,11 +339,11 @@ mod tests {
     #[test]
     fn test_create_project_yaml() {
         let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("test-project-yaml");
 
-        let result = create_project("test-project-yaml", temp.path(), ConfigFormat::Yaml);
+        let result = create_project(&project_dir, ConfigFormat::Yaml);
         assert!(result.is_ok());
 
-        let project_dir = temp.path().join("test-project-yaml");
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
         assert!(project_dir.join(".nyl-project.yaml").exists());
@@ -367,8 +359,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("test-project");
         fs::create_dir(&project_dir).unwrap();
+        // Create a config file to simulate an existing project
+        fs::write(project_dir.join(".nyl-project.toml"), "").unwrap();
 
-        let result = create_project("test-project", temp.path(), ConfigFormat::Toml);
+        let result = create_project(&project_dir, ConfigFormat::Toml);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -378,7 +372,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Create a project first
-        let config_path = temp.path().join("nyl-project.yaml");
+        let config_path = temp.path().join(".nyl-project.yaml");
         fs::write(&config_path, "settings: {}").unwrap();
 
         let components_dir = temp.path().join("components");
@@ -408,7 +402,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Create a project first
-        let config_path = temp.path().join("nyl-project.yaml");
+        let config_path = temp.path().join(".nyl-project.yaml");
         fs::write(&config_path, "settings: {}").unwrap();
 
         let component_dir = temp.path().join("components").join("v1.example.io").join("MyApp");
