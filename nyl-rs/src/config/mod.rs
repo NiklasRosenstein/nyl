@@ -77,8 +77,10 @@ impl ProjectConfig {
     /// Config file names searched in priority order
     /// Hidden files (starting with .) are checked first to avoid conflicts with ArgoCD
     pub const FILENAMES: &'static [&'static str] = &[
+        ".nyl-project.toml",
         ".nyl-project.yaml",
         ".nyl-project.json",
+        "nyl-project.toml",
         "nyl-project.yaml",
         "nyl-project.json",
     ];
@@ -162,13 +164,13 @@ impl ProjectConfig {
 
         let contents = std::fs::read_to_string(path)?;
 
-        let mut project: Project = if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            serde_json::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse JSON config: {}", e)))?
-        } else {
-            // Default to YAML for .yaml/.yml or unknown extensions
-            serde_norway::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse YAML config: {}", e)))?
+        let mut project: Project = match path.extension().and_then(|s| s.to_str()) {
+            Some("json") => serde_json::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse JSON config: {}", e)))?,
+            Some("toml") => toml::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?,
+            _ => serde_norway::from_str(&contents)
+                .map_err(|e| NylError::Config(format!("Failed to parse YAML config: {}", e)))?,
         };
 
         // Resolve search paths relative to config file parent directory
@@ -288,6 +290,30 @@ settings:
     }
 
     #[test]
+    fn test_load_toml_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".nyl-project.toml");
+
+        let toml_content = r#"
+[settings]
+components_path = "my-components"
+search_path = ["lib", "vendor"]
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
+        assert_eq!(config.file, Some(config_path.clone()));
+
+        // Check that paths were resolved to absolute
+        let expected_components = temp.path().join("my-components");
+        assert_eq!(config.config.settings.components_path, Some(expected_components));
+
+        assert_eq!(config.config.settings.search_path.len(), 2);
+        assert!(config.config.settings.search_path[0].is_absolute());
+        assert!(config.config.settings.search_path[1].is_absolute());
+    }
+
+    #[test]
     fn test_load_no_config_returns_defaults() {
         let temp = TempDir::new().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
@@ -381,5 +407,17 @@ settings:
         let result = ProjectConfig::load(Some(config_path));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to parse JSON"));
+    }
+
+    #[test]
+    fn test_malformed_toml() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl-project.toml");
+
+        fs::write(&config_path, "[settings\ninvalid toml").unwrap();
+
+        let result = ProjectConfig::load(Some(config_path));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse TOML"));
     }
 }
