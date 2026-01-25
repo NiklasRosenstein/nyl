@@ -129,8 +129,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl-project.yaml");
 
-        // Create config with invalid on_lookup_failure value
-        fs::write(&config_path, "settings:\n  on_lookup_failure: InvalidValue").unwrap();
+        // Create config (components dir won't exist, causing a warning)
+        fs::write(&config_path, "settings:\n  components_path: nonexistent").unwrap();
 
         let args = ValidateArgs {
             path: temp.path().to_str().unwrap().to_string(),

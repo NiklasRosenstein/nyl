@@ -102,7 +102,6 @@ fn create_project(name: &str, base_path: &Path, format: ConfigFormat) -> Result<
             "nyl-project.toml",
             r#"[settings]
 generate_applysets = false
-on_lookup_failure = "Error"
 components_path = "components"
 search_path = ["."]
 "#,
@@ -111,7 +110,6 @@ search_path = ["."]
             "nyl-project.yaml",
             r#"settings:
   generate_applysets: false
-  on_lookup_failure: Error
   components_path: components
   search_path:
     - .
@@ -346,7 +344,7 @@ mod tests {
         // Verify config file content (TOML format)
         let config_content = fs::read_to_string(project_dir.join("nyl-project.toml")).unwrap();
         assert!(config_content.contains("generate_applysets = false"));
-        assert!(config_content.contains(r#"on_lookup_failure = "Error""#));
+        assert!(config_content.contains(r#"components_path = "components""#));
     }
 
     #[test]
@@ -364,7 +362,7 @@ mod tests {
         // Verify config file content (YAML format)
         let config_content = fs::read_to_string(project_dir.join("nyl-project.yaml")).unwrap();
         assert!(config_content.contains("generate_applysets: false"));
-        assert!(config_content.contains("on_lookup_failure: Error"));
+        assert!(config_content.contains("components_path: components"));
     }
 
     #[test]

@@ -20,21 +20,12 @@ pub struct ProjectSettings {
     #[serde(default)]
     pub generate_applysets: bool,
 
-    /// Behavior when a lookup() call fails
-    /// Valid values: "Error", "CreatePlaceholder", "SkipResource"
-    #[serde(default = "default_on_lookup_failure")]
-    pub on_lookup_failure: String,
-
     /// Path to the directory that contains Nyl components
     pub components_path: Option<PathBuf>,
 
     /// Search path for additional resources used by the project
     #[serde(default = "default_search_path")]
     pub search_path: Vec<PathBuf>,
-}
-
-fn default_on_lookup_failure() -> String {
-    "Error".to_string()
 }
 
 fn default_search_path() -> Vec<PathBuf> {
@@ -45,7 +36,6 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             generate_applysets: false,
-            on_lookup_failure: default_on_lookup_failure(),
             components_path: None,
             search_path: default_search_path(),
         }
@@ -192,16 +182,6 @@ impl ProjectConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        // Validate on_lookup_failure value
-        let valid_values = ["Error", "CreatePlaceholder", "SkipResource"];
-        if !valid_values.contains(&self.config.settings.on_lookup_failure.as_str()) {
-            warnings.push(format!(
-                "Invalid on_lookup_failure value '{}'. Must be one of: {}",
-                self.config.settings.on_lookup_failure,
-                valid_values.join(", ")
-            ));
-        }
-
         // Check if components directory exists
         let components_path = self.get_components_path();
         if !components_path.exists() {
@@ -233,7 +213,6 @@ mod tests {
     fn test_default_project_settings() {
         let settings = ProjectSettings::default();
         assert!(!settings.generate_applysets);
-        assert_eq!(settings.on_lookup_failure, "Error");
         assert!(settings.components_path.is_none());
         assert_eq!(settings.search_path, vec![PathBuf::from(".")]);
     }
@@ -246,7 +225,6 @@ mod tests {
         let yaml_content = r#"
 settings:
   generate_applysets: true
-  on_lookup_failure: CreatePlaceholder
   components_path: my-components
   search_path:
     - lib
@@ -257,7 +235,6 @@ settings:
         let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
         assert_eq!(config.file, Some(config_path.clone()));
         assert!(config.config.settings.generate_applysets);
-        assert_eq!(config.config.settings.on_lookup_failure, "CreatePlaceholder");
 
         // Check that paths were resolved to absolute
         let expected_components = temp.path().join("my-components");
@@ -276,7 +253,6 @@ settings:
         let json_content = r#"{
   "settings": {
     "generate_applysets": false,
-    "on_lookup_failure": "Error",
     "search_path": ["."]
   }
 }"#;
@@ -321,24 +297,6 @@ settings:
         let components = config.get_components_path();
 
         assert_eq!(components, temp.path().join("components"));
-    }
-
-    #[test]
-    fn test_validate_invalid_on_lookup_failure() {
-        let config = ProjectConfig {
-            file: None,
-            config: Project {
-                settings: ProjectSettings {
-                    on_lookup_failure: "InvalidValue".to_string(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        let warnings = config.validate();
-        assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("Invalid on_lookup_failure"));
     }
 
     #[test]
