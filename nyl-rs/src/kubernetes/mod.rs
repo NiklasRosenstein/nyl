@@ -5,10 +5,14 @@
 /// - YAML serialization/deserialization with serde-norway
 /// - Resource validation
 mod client;
+mod diff;
+mod ordering;
 mod resource;
 mod state;
 
 pub use client::{KubeClient, KubeRsClient, MockKubeClient};
+pub use diff::DiffEngine;
+pub use ordering::ResourceOrdering;
 pub use resource::{ApplyOutcome, GroupVersionKind, ResourceKey};
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use state::{KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage};

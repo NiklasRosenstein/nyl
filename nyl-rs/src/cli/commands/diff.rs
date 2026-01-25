@@ -1,11 +1,12 @@
 use clap::Args;
+use colored::Colorize;
 use kube::Client;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     cli::commands::render::render_manifests,
     kubernetes::{
-        extract_name, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
+        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
         ReleaseStorage,
     },
     resources::extract_nyl_release,
@@ -151,7 +152,7 @@ pub fn extract_component_name(manifests: &[serde_json::Value]) -> Result<String>
 #[derive(Debug)]
 struct DiffResult {
     added: Vec<ResourceKey>,
-    modified: Vec<ResourceKey>,
+    modified: Vec<(ResourceKey, String)>, // (key, unified_diff_text)
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
 }
@@ -211,10 +212,12 @@ async fn compute_diff_from_live(
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
         if let Some(live) = live_resources.get(&key) {
-            if are_resources_equivalent(manifest, live) {
+            if DiffEngine::are_equivalent(manifest, live)? {
                 unchanged.push(key);
             } else {
-                modified.push(key);
+                // Generate unified diff for this modified resource
+                let diff_text = DiffEngine::diff_yaml(manifest, live)?;
+                modified.push((key, diff_text));
             }
         } else {
             added.push(key);
@@ -236,33 +239,49 @@ async fn compute_diff_from_live(
     })
 }
 
-/// Check if two resources are equivalent (deep equality)
-fn are_resources_equivalent(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    // For now, use simple JSON equality
-    // Could be enhanced to ignore certain fields like metadata.resourceVersion
-    a == b
-}
-
-/// Display diff results
+/// Display diff results with kubectl-style unified diff output
 fn display_diff(diff: &DiffResult) {
+    // Show added resources
     for key in &diff.added {
-        println!("+ {}", key.to_string());
+        println!("{} {}", "+".green().bold(), key.to_string());
+    }
+    if !diff.added.is_empty() {
+        println!();
     }
 
-    for key in &diff.modified {
-        println!("~ {}", key.to_string());
+    // Show modified resources with unified diff (kubectl-style)
+    for (key, unified_diff) in &diff.modified {
+        println!("{} {}", "~".yellow().bold(), key.to_string());
+
+        // Print unified diff with colors
+        for line in unified_diff.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                println!("{}", line.green());
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                println!("{}", line.red());
+            } else if line.starts_with("@@") {
+                println!("{}", line.cyan());
+            } else {
+                println!("{}", line);
+            }
+        }
+        println!();
     }
 
+    // Show deleted resources
     for key in &diff.deleted {
-        println!("- {}", key.to_string());
+        println!("{} {}", "-".red().bold(), key.to_string());
+    }
+    if !diff.deleted.is_empty() {
+        println!();
     }
 
-    println!();
+    // Summary with colors
     println!(
         "Summary: {} added, {} modified, {} deleted, {} unchanged",
-        diff.added.len(),
-        diff.modified.len(),
-        diff.deleted.len(),
+        diff.added.len().to_string().green(),
+        diff.modified.len().to_string().yellow(),
+        diff.deleted.len().to_string().red(),
         diff.unchanged.len()
     );
 }
@@ -280,29 +299,8 @@ fn display_summary(diff: &DiffResult) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_are_resources_equivalent() {
-        let a = json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "test"}
-        });
-        let b = a.clone();
-        assert!(are_resources_equivalent(&a, &b));
-
-        let c = json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "different"}
-        });
-        assert!(!are_resources_equivalent(&a, &c));
-    }
-
     // Note: Full diff testing with live cluster requires integration tests
-    // with MockKubeClient or a real cluster. Unit tests removed since
-    // compute_diff_from_live is async and requires a KubeClient.
+    // with MockKubeClient or a real cluster. Unit tests moved to the DiffEngine
+    // module in kubernetes/diff.rs.
 }
 

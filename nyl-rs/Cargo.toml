@@ -57,6 +57,10 @@ chrono = { version = "0.4", features = ["serde"] }
 git2 = "0.19"
 regex = "1.10"
 
+# Diff and output
+colored = "2.1"
+similar = "2.6"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

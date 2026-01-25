@@ -6,7 +6,7 @@ use crate::{
     cli::commands::render::render_manifests,
     kubernetes::{
         ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
-        ReleaseState, ReleaseStatus, ReleaseStorage,
+        ResourceOrdering, ReleaseState, ReleaseStatus, ReleaseStorage,
     },
     resources::extract_nyl_release,
     NylError, Result,
@@ -135,12 +135,16 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         error: None,
     };
 
-    // 9. Apply each resource and track resource keys
+    // 9. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
+    let mut sorted_manifests = desired_manifests.clone();
+    ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
+
+    // 10. Apply each resource and track resource keys
     let mut outcomes = Vec::new();
     let mut errors = Vec::new();
     let mut resource_keys = Vec::new();
 
-    for manifest in &desired_manifests {
+    for manifest in &sorted_manifests {
         // Extract resource key
         let key = ResourceKey::from_json_value(manifest)?;
 
@@ -187,7 +191,44 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // 11. Print summary
+    // 13. Prune resources from previous release that are no longer desired
+    let mut pruned_keys = Vec::new();
+    if !args.dry_run && release.status == ReleaseStatus::Deployed && next_revision > 1 {
+        // Get previous release's resource keys
+        if let Ok(Some(previous_release)) = storage
+            .get_release(&release_name, &release_namespace, next_revision - 1)
+            .await
+        {
+            // Find resources to prune (in previous but not in current)
+            let current_keys: std::collections::HashSet<_> = release.resource_keys.iter().collect();
+            let to_prune: Vec<_> = previous_release
+                .resource_keys
+                .iter()
+                .filter(|k| !current_keys.contains(k))
+                .collect();
+
+            if !to_prune.is_empty() {
+                println!("\nPruning {} resources...", to_prune.len());
+                for key in to_prune {
+                    match kube_client
+                        .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                        .await
+                    {
+                        Ok(()) => {
+                            println!("  ✓ Deleted {}", key.to_string());
+                            pruned_keys.push(key.clone());
+                        }
+                        Err(e) => {
+                            println!("  ✗ Failed to delete {}: {}", key.to_string(), e);
+                        }
+                    }
+                }
+                println!();
+            }
+        }
+    }
+
+    // 14. Print summary
     print_apply_summary(&outcomes, &errors, &release, args.dry_run);
 
     if !errors.is_empty() {

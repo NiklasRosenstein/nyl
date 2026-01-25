@@ -37,6 +37,14 @@ pub trait KubeClient: Send + Sync {
 
     /// Get all available API versions from the cluster
     async fn get_api_versions(&self) -> Result<Vec<String>>;
+
+    /// Delete a resource from the cluster
+    async fn delete_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<()>;
 }
 
 /// Production Kubernetes client using kube-rs
@@ -247,6 +255,39 @@ impl KubeClient for KubeRsClient {
         api_versions.sort();
         Ok(api_versions)
     }
+
+    async fn delete_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<()> {
+        let (ar, caps) = self.discover_api_resource(gvk).await?;
+
+        // Create API client
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace.ok_or_else(|| {
+                NylError::Config(format!(
+                    "Namespace required for namespaced resource {}",
+                    gvk.kind
+                ))
+            })?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+
+        // Delete the resource
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                // Resource already deleted or doesn't exist - not an error
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+
+    }
 }
 
 /// Mock Kubernetes client for testing
@@ -360,6 +401,26 @@ impl KubeClient for MockKubeClient {
             "batch/v1".to_string(),
         ])
     }
+
+    async fn delete_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<()> {
+        let key = ResourceKey {
+            gvk: gvk.clone(),
+            namespace: namespace.map(|s| s.to_string()),
+            name: name.to_string(),
+        };
+
+        let mut store = self.resources.lock().unwrap();
+        // Remove returns the old value if it existed, None if it didn't
+        // Either way, we consider the operation successful
+        store.remove(&key);
+        Ok(())
+
+    }
 }
 
 #[cfg(test)]
@@ -471,5 +532,55 @@ mod tests {
         };
         let result = client.get_resource(&gvk, Some("default"), "test").await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_delete() {
+        let client = MockKubeClient::new();
+
+        let json_data = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            }
+        });
+
+        let resource: DynamicObject = serde_json::from_value(json_data).unwrap();
+
+        // Apply resource first
+        client.apply_resource(&resource, "nyl", false).await.unwrap();
+
+        // Verify it exists
+        let gvk = GroupVersionKind {
+            group: "".to_string(),
+            version: "v1".to_string(),
+            kind: "ConfigMap".to_string(),
+        };
+        let result = client.get_resource(&gvk, Some("default"), "test").await.unwrap();
+        assert!(result.is_some());
+
+        // Delete the resource
+        client.delete_resource(&gvk, Some("default"), "test").await.unwrap();
+
+        // Verify it's gone
+        let result = client.get_resource(&gvk, Some("default"), "test").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_delete_nonexistent() {
+        let client = MockKubeClient::new();
+
+        let gvk = GroupVersionKind {
+            group: "".to_string(),
+            version: "v1".to_string(),
+            kind: "ConfigMap".to_string(),
+        };
+
+        // Delete a resource that doesn't exist - should not error
+        let result = client.delete_resource(&gvk, Some("default"), "test").await;
+        assert!(result.is_ok());
     }
 }
