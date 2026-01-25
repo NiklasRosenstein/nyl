@@ -3,11 +3,12 @@ use clap::Args;
 use kube::{api::DynamicObject, Client};
 
 use crate::{
-    cli::commands::{diff::extract_component_name, render::render_manifests},
+    cli::commands::render::render_manifests,
     kubernetes::{
-        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
-        ReleaseStatus, ReleaseStorage,
+        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
+        ReleaseState, ReleaseStatus, ReleaseStorage,
     },
+    resources::extract_nyl_release,
     NylError, Result,
 };
 
@@ -17,6 +18,14 @@ pub struct ApplyArgs {
     /// Path to the project directory
     #[arg(default_value = ".")]
     pub path: String,
+
+    /// Release name (required if no NylRelease in file)
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Release namespace (required if no NylRelease in file)
+    #[arg(long)]
+    pub namespace: Option<String>,
 
     /// Component to apply (if not specified, applies all)
     #[arg(short, long)]
@@ -37,21 +46,48 @@ pub struct ApplyArgs {
 
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 1. Render desired manifests
-    let (desired_manifests, profile, _env_name) = render_manifests(
+    let (raw_manifests, profile, _env_name) = render_manifests(
         &args.path,
         args.component.as_deref(),
         args.environment.as_deref(),
     )?;
 
-    if desired_manifests.is_empty() {
+    if raw_manifests.is_empty() {
         println!("No manifests to apply");
         return Ok(());
     }
 
-    // 2. Determine component name
-    let component_name = extract_component_name(&desired_manifests)?;
+    // 2. Extract NylRelease metadata and filter it from manifests
+    let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
 
-    // 3. Initialize Kubernetes client
+    // 3. Determine release name and namespace
+    let (release_name, release_namespace) = match nyl_release {
+        Some(ref release) => (
+            release.metadata.name.clone(),
+            release.metadata.namespace.clone(),
+        ),
+        None => {
+            // Require CLI flags if no NylRelease
+            let name = args.name.ok_or_else(|| {
+                NylError::Config(
+                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
+                )
+            })?;
+            let namespace = args.namespace.ok_or_else(|| {
+                NylError::Config(
+                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
+                )
+            })?;
+            (name, namespace)
+        }
+    };
+
+    if desired_manifests.is_empty() {
+        println!("No Kubernetes resources to apply (only NylRelease found)");
+        return Ok(());
+    }
+
+    // 4. Initialize Kubernetes client
     let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
 
     // Get underlying client for state storage
@@ -70,43 +106,55 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     };
     let client = Client::try_from(config)?;
 
-    // 4. Initialize state storage
-    let storage = KubernetesReleaseStorage::new(client, "nyl-state".to_string());
+    // 5. Initialize state storage
+    let storage = KubernetesReleaseStorage::new(client);
 
-    // 5. Determine next revision number
-    let revisions = storage.list_revisions(&component_name).await?;
+    // 6. Determine next revision number
+    let revisions = storage
+        .list_revisions(&release_name, &release_namespace)
+        .await?;
     let next_revision = revisions.iter().max().map(|r| r + 1).unwrap_or(1);
 
-    // 6. Convert manifests to YAML string for storage
+    // 7. Convert manifests to YAML string for storage
     let manifest_yaml = manifests_to_yaml(&desired_manifests)?;
 
-    // 7. Create initial release state
+    // 8. Create initial release state
     let mut release = ReleaseState {
-        component: component_name.clone(),
+        release_name: release_name.clone(),
+        release_namespace: release_namespace.clone(),
         revision: next_revision,
+        resource_keys: Vec::new(), // Will be populated during apply
         manifest: manifest_yaml,
-        values: serde_json::json!({}), // Could be populated with actual values
-        helmchart: None,                // Could be populated if using Helm
         status: ReleaseStatus::Rendered,
         rendered_at: Utc::now(),
         applied_at: None,
         error: None,
     };
 
-    // 8. Apply each resource
+    // 9. Apply each resource and track resource keys
     let mut outcomes = Vec::new();
     let mut errors = Vec::new();
+    let mut resource_keys = Vec::new();
 
     for manifest in &desired_manifests {
+        // Extract resource key
+        let key = ResourceKey::from_json_value(manifest)?;
+
         match apply_manifest(&kube_client, manifest, args.dry_run).await {
-            Ok(outcome) => outcomes.push(outcome),
+            Ok(outcome) => {
+                outcomes.push(outcome);
+                resource_keys.push(key);
+            }
             Err(e) => {
                 errors.push(format!("Failed to apply resource: {}", e));
             }
         }
     }
 
-    // 9. Update release status
+    // 10. Update release state with resource keys
+    release.resource_keys = resource_keys;
+
+    // 11. Update release status
     if errors.is_empty() {
         release.status = ReleaseStatus::Deployed;
         release.applied_at = Some(Utc::now());
@@ -115,7 +163,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         release.error = Some(errors.join("; "));
     }
 
-    // 10. Save release state (unless dry run)
+    // 12. Save release state (unless dry run)
     if !args.dry_run {
         storage.save_release(&release).await?;
 
@@ -124,7 +172,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             let prev_revision = next_revision - 1;
             storage
                 .update_release_status(
-                    &component_name,
+                    &release_name,
+                    &release_namespace,
                     prev_revision,
                     ReleaseStatus::Superseded,
                     None,
@@ -209,16 +258,19 @@ fn print_apply_summary(
     println!();
 
     if dry_run {
-        println!("[DRY RUN] Would create release {} revision {}", release.component, release.revision);
+        println!(
+            "[DRY RUN] Would create release {} revision {} in namespace {}",
+            release.release_name, release.revision, release.release_namespace
+        );
     } else if release.status == ReleaseStatus::Deployed {
         println!(
-            "Release: {} revision {} deployed successfully",
-            release.component, release.revision
+            "Release: {} revision {} deployed successfully to namespace {}",
+            release.release_name, release.revision, release.release_namespace
         );
     } else {
         println!(
             "Release: {} revision {} failed",
-            release.component, release.revision
+            release.release_name, release.revision
         );
     }
 }

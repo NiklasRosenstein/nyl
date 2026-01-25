@@ -1,12 +1,14 @@
 use clap::Args;
 use kube::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     cli::commands::render::render_manifests,
     kubernetes::{
-        extract_name, KubernetesReleaseStorage, ResourceKey, ReleaseStorage,
+        extract_name, KubeClient, KubeRsClient, KubernetesReleaseStorage, ResourceKey,
+        ReleaseStorage,
     },
+    resources::extract_nyl_release,
     NylError, Result,
 };
 
@@ -16,6 +18,14 @@ pub struct DiffArgs {
     /// Path to the project directory
     #[arg(default_value = ".")]
     pub path: String,
+
+    /// Release name (required if no NylRelease in file)
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Release namespace (required if no NylRelease in file)
+    #[arg(long)]
+    pub namespace: Option<String>,
 
     /// Component to diff (if not specified, diffs all)
     #[arg(short, long)]
@@ -28,25 +38,59 @@ pub struct DiffArgs {
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
+
+    /// Show summary only (counts, no detailed diff)
+    #[arg(long)]
+    pub summary: bool,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
-    // 1. Render desired state
-    let (desired_manifests, _profile, _env_name) = render_manifests(
+    // 1. Render desired manifests
+    let (raw_manifests, profile, _env_name) = render_manifests(
         &args.path,
         args.component.as_deref(),
         args.environment.as_deref(),
     )?;
 
-    if desired_manifests.is_empty() {
+    if raw_manifests.is_empty() {
         println!("No manifests to diff");
         return Ok(());
     }
 
-    // 2. Determine component name from first resource
-    let component_name = extract_component_name(&desired_manifests)?;
+    // 2. Extract NylRelease metadata and filter it from manifests
+    let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
 
-    // 3. Initialize Kubernetes client
+    // 3. Determine release name and namespace
+    let (release_name, release_namespace) = match nyl_release {
+        Some(ref release) => (
+            release.metadata.name.clone(),
+            release.metadata.namespace.clone(),
+        ),
+        None => {
+            // Require CLI flags if no NylRelease
+            let name = args.name.ok_or_else(|| {
+                NylError::Config(
+                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
+                )
+            })?;
+            let namespace = args.namespace.ok_or_else(|| {
+                NylError::Config(
+                    "No NylRelease resource found. Specify --name and --namespace".to_string(),
+                )
+            })?;
+            (name, namespace)
+        }
+    };
+
+    if desired_manifests.is_empty() {
+        println!("No Kubernetes resources to diff (only NylRelease found)");
+        return Ok(());
+    }
+
+    // 4. Initialize Kubernetes client
+    let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
+
+    // Also get raw client for state storage
     let config = if let Some(ctx) = &args.context {
         let kubeconfig = kube::config::Kubeconfig::read()?;
         kube::Config::from_custom_kubeconfig(
@@ -58,36 +102,29 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         )
         .await?
     } else {
-        // Use profile's kubeconfig
-        let kubeconfig = kube::config::Kubeconfig::read()?;
-        kube::Config::from_custom_kubeconfig(kubeconfig, &Default::default()).await?
+        kube::Config::infer().await?
     };
     let client = Client::try_from(config)?;
 
-    // 4. Initialize state storage
-    let storage = KubernetesReleaseStorage::new(client, "nyl-state".to_string());
+    // 5. Initialize state storage
+    let storage = KubernetesReleaseStorage::new(client);
 
-    // 5. Fetch previous release
-    let previous_release = storage.get_latest_release(&component_name).await?;
+    // 6. Fetch previous release for tracking resource deletions
+    let previous_release = storage
+        .get_latest_release(&release_name, &release_namespace)
+        .await?;
 
-    // 6. Compute diff
-    let diff_result = if let Some(prev) = previous_release {
-        compute_diff_from_state(&prev.manifest, &desired_manifests)?
+    // 7. Compute diff against LIVE cluster state
+    let diff_result =
+        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref())
+            .await?;
+
+    // 8. Display diff
+    if args.summary {
+        display_summary(&diff_result);
     } else {
-        // No previous state - all new
-        DiffResult {
-            added: desired_manifests
-                .iter()
-                .map(|m| ResourceKey::from_json_value(m))
-                .collect::<Result<Vec<_>>>()?,
-            modified: Vec::new(),
-            deleted: Vec::new(),
-            unchanged: Vec::new(),
-        }
-    };
-
-    // 7. Display diff
-    display_diff(&diff_result);
+        display_diff(&diff_result);
+    }
 
     Ok(())
 }
@@ -115,25 +152,49 @@ struct DiffResult {
     unchanged: Vec<ResourceKey>,
 }
 
-/// Compute diff between previous manifest and desired manifests
-fn compute_diff_from_state(
-    previous_manifest: &str,
+/// Compute diff between desired manifests and LIVE cluster state
+async fn compute_diff_from_live(
+    client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
+    previous_state: Option<&crate::kubernetes::ReleaseState>,
 ) -> Result<DiffResult> {
-    // Parse previous YAML into Vec<Value>
-    let previous_docs = parse_yaml_documents(previous_manifest)?;
+    // Build set of desired resource keys
+    let desired_keys: HashSet<ResourceKey> = desired_manifests
+        .iter()
+        .map(|m| ResourceKey::from_json_value(m))
+        .collect::<Result<_>>()?;
 
-    // Build HashMaps for comparison
-    let mut previous_map: HashMap<ResourceKey, serde_json::Value> = HashMap::new();
-    for doc in &previous_docs {
-        let key = ResourceKey::from_json_value(doc)?;
-        previous_map.insert(key, doc.clone());
+    // Fetch live resources for desired manifests
+    let mut live_resources = HashMap::new();
+    for manifest in desired_manifests {
+        let key = ResourceKey::from_json_value(manifest)?;
+        if let Some(resource) = client
+            .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+            .await?
+        {
+            // Convert DynamicObject to JSON for comparison
+            let live_json = serde_json::to_value(&resource)?;
+            live_resources.insert(key.clone(), live_json);
+        }
     }
 
-    let mut desired_map: HashMap<ResourceKey, serde_json::Value> = HashMap::new();
-    for doc in desired_manifests {
-        let key = ResourceKey::from_json_value(doc)?;
-        desired_map.insert(key, doc.clone());
+    // Get previous resource keys for deletion tracking
+    let previous_keys = previous_state
+        .map(|s| s.resource_keys.iter().cloned().collect())
+        .unwrap_or_else(HashSet::new);
+
+    // Also fetch resources from previous state that aren't in desired
+    for key in &previous_keys {
+        if !desired_keys.contains(key) {
+            // This resource is being deleted - check if it still exists in cluster
+            if let Some(resource) = client
+                .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                .await?
+            {
+                let live_json = serde_json::to_value(&resource)?;
+                live_resources.insert(key.clone(), live_json);
+            }
+        }
     }
 
     // Categorize changes
@@ -142,25 +203,24 @@ fn compute_diff_from_state(
     let mut deleted = Vec::new();
     let mut unchanged = Vec::new();
 
-    // Check desired resources
-    for (key, desired_value) in &desired_map {
-        if let Some(previous_value) = previous_map.get(key) {
-            // Resource exists in both
-            if are_resources_equivalent(previous_value, desired_value) {
-                unchanged.push(key.clone());
+    // Check desired vs live
+    for manifest in desired_manifests {
+        let key = ResourceKey::from_json_value(manifest)?;
+        if let Some(live) = live_resources.get(&key) {
+            if are_resources_equivalent(manifest, live) {
+                unchanged.push(key);
             } else {
-                modified.push(key.clone());
+                modified.push(key);
             }
         } else {
-            // Resource only in desired
-            added.push(key.clone());
+            added.push(key);
         }
     }
 
-    // Check for deleted resources (in previous but not desired)
-    for key in previous_map.keys() {
-        if !desired_map.contains_key(key) {
-            deleted.push(key.clone());
+    // Check for deletions (in previous state but not in desired)
+    for key in previous_keys {
+        if !desired_keys.contains(&key) {
+            deleted.push(key);
         }
     }
 
@@ -170,27 +230,6 @@ fn compute_diff_from_state(
         deleted,
         unchanged,
     })
-}
-
-/// Parse YAML documents from a string (supports multi-document YAML)
-fn parse_yaml_documents(yaml: &str) -> Result<Vec<serde_json::Value>> {
-    let mut documents = Vec::new();
-
-    for doc_str in yaml.split("\n---\n") {
-        let trimmed = doc_str.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let value: serde_json::Value = serde_norway::from_str(trimmed)?;
-
-        // Skip null/empty documents
-        if !value.is_null() {
-            documents.push(value);
-        }
-    }
-
-    Ok(documents)
 }
 
 /// Check if two resources are equivalent (deep equality)
@@ -224,39 +263,21 @@ fn display_diff(diff: &DiffResult) {
     );
 }
 
+/// Display summary only (counts, no detailed diff)
+fn display_summary(diff: &DiffResult) {
+    println!(
+        "Summary: {} added, {} modified, {} deleted, {} unchanged",
+        diff.added.len(),
+        diff.modified.len(),
+        diff.deleted.len(),
+        diff.unchanged.len()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn test_parse_yaml_documents_single() {
-        let yaml = r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test
-"#;
-        let docs = parse_yaml_documents(yaml).unwrap();
-        assert_eq!(docs.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_yaml_documents_multiple() {
-        let yaml = r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test1
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test2
-"#;
-        let docs = parse_yaml_documents(yaml).unwrap();
-        assert_eq!(docs.len(), 2);
-    }
 
     #[test]
     fn test_are_resources_equivalent() {
@@ -276,59 +297,8 @@ metadata:
         assert!(!are_resources_equivalent(&a, &c));
     }
 
-    #[test]
-    fn test_compute_diff_all_new() {
-        let previous = "";
-        let desired = vec![json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "test", "namespace": "default"}
-        })];
-
-        let result = compute_diff_from_state(previous, &desired).unwrap();
-        assert_eq!(result.added.len(), 1);
-        assert_eq!(result.modified.len(), 0);
-        assert_eq!(result.deleted.len(), 0);
-    }
-
-    #[test]
-    fn test_compute_diff_unchanged() {
-        let manifest = json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "test", "namespace": "default"}
-        });
-        let previous = serde_norway::to_string(&manifest).unwrap();
-        let desired = vec![manifest];
-
-        let result = compute_diff_from_state(&previous, &desired).unwrap();
-        assert_eq!(result.added.len(), 0);
-        assert_eq!(result.modified.len(), 0);
-        assert_eq!(result.deleted.len(), 0);
-        assert_eq!(result.unchanged.len(), 1);
-    }
-
-    #[test]
-    fn test_compute_diff_modified() {
-        let previous_manifest = json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "test", "namespace": "default"},
-            "data": {"key": "old_value"}
-        });
-        let previous = serde_norway::to_string(&previous_manifest).unwrap();
-
-        let desired = vec![json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "test", "namespace": "default"},
-            "data": {"key": "new_value"}
-        })];
-
-        let result = compute_diff_from_state(&previous, &desired).unwrap();
-        assert_eq!(result.added.len(), 0);
-        assert_eq!(result.modified.len(), 1);
-        assert_eq!(result.deleted.len(), 0);
-    }
+    // Note: Full diff testing with live cluster requires integration tests
+    // with MockKubeClient or a real cluster. Unit tests removed since
+    // compute_diff_from_live is async and requires a KubeClient.
 }
 

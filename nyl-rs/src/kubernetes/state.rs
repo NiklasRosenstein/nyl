@@ -7,7 +7,7 @@ use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{resources::HelmChart, NylError, Result};
+use crate::{kubernetes::ResourceKey, NylError, Result};
 
 /// Status of a release
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,16 +26,16 @@ pub enum ReleaseStatus {
 /// State of a release revision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseState {
-    /// Component name
-    pub component: String,
+    /// Release name
+    pub release_name: String,
+    /// Release namespace (target namespace for resources)
+    pub release_namespace: String,
     /// Revision number (starts at 1)
     pub revision: u32,
-    /// Full rendered YAML manifest
+    /// Resource keys for tracking applied resources
+    pub resource_keys: Vec<ResourceKey>,
+    /// Full rendered YAML manifest (for rollback)
     pub manifest: String,
-    /// Input values used for rendering
-    pub values: serde_json::Value,
-    /// Original HelmChart resource (if applicable)
-    pub helmchart: Option<HelmChart>,
     /// Current status
     pub status: ReleaseStatus,
     /// When the manifest was rendered
@@ -52,19 +52,29 @@ pub trait ReleaseStorage: Send + Sync {
     /// Save a release state
     async fn save_release(&self, release: &ReleaseState) -> Result<()>;
 
-    /// Get the latest release for a component
-    async fn get_latest_release(&self, component: &str) -> Result<Option<ReleaseState>>;
+    /// Get the latest release for a release name and namespace
+    async fn get_latest_release(
+        &self,
+        release_name: &str,
+        namespace: &str,
+    ) -> Result<Option<ReleaseState>>;
 
     /// Get a specific release revision
-    async fn get_release(&self, component: &str, revision: u32) -> Result<Option<ReleaseState>>;
+    async fn get_release(
+        &self,
+        release_name: &str,
+        namespace: &str,
+        revision: u32,
+    ) -> Result<Option<ReleaseState>>;
 
-    /// List all revision numbers for a component
-    async fn list_revisions(&self, component: &str) -> Result<Vec<u32>>;
+    /// List all revision numbers for a release
+    async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>>;
 
     /// Update the status of a release
     async fn update_release_status(
         &self,
-        component: &str,
+        release_name: &str,
+        namespace: &str,
         revision: u32,
         status: ReleaseStatus,
         error: Option<String>,
@@ -74,18 +84,17 @@ pub trait ReleaseStorage: Send + Sync {
 /// Kubernetes-based release storage using Secrets
 pub struct KubernetesReleaseStorage {
     client: Client,
-    namespace: String,
 }
 
 impl KubernetesReleaseStorage {
     /// Create a new Kubernetes release storage
-    pub fn new(client: Client, namespace: String) -> Self {
-        Self { client, namespace }
+    pub fn new(client: Client) -> Self {
+        Self { client }
     }
 
     /// Generate secret name for a release
-    fn secret_name(component: &str, revision: u32) -> String {
-        format!("nyl.release.v1.{}.{}", component, revision)
+    fn secret_name(release_name: &str, revision: u32) -> String {
+        format!("nyl.release.v1.{}.{}", release_name, revision)
     }
 
     /// Parse revision number from secret name
@@ -109,20 +118,18 @@ impl KubernetesReleaseStorage {
     /// Convert ReleaseState to Secret
     fn to_secret(&self, release: &ReleaseState) -> Result<Secret> {
         let mut data: BTreeMap<String, ByteString> = BTreeMap::new();
+
+        // Serialize resource keys
+        data.insert(
+            "resource_keys".to_string(),
+            Self::encode_base64(&serde_json::to_string(&release.resource_keys)?),
+        );
+
         data.insert(
             "manifest".to_string(),
             Self::encode_base64(&release.manifest),
         );
-        data.insert(
-            "values".to_string(),
-            Self::encode_base64(&serde_json::to_string(&release.values)?),
-        );
-        if let Some(helmchart) = &release.helmchart {
-            data.insert(
-                "helmchart".to_string(),
-                Self::encode_base64(&serde_json::to_string(helmchart)?),
-            );
-        }
+
         data.insert(
             "status".to_string(),
             Self::encode_base64(&serde_json::to_string(&release.status)?),
@@ -142,13 +149,13 @@ impl KubernetesReleaseStorage {
         }
 
         let mut labels = BTreeMap::new();
-        labels.insert("nyl.io/component".to_string(), release.component.clone());
+        labels.insert("nyl.io/release".to_string(), release.release_name.clone());
         labels.insert("nyl.io/revision".to_string(), release.revision.to_string());
 
         Ok(Secret {
             metadata: ObjectMeta {
-                name: Some(Self::secret_name(&release.component, release.revision)),
-                namespace: Some(self.namespace.clone()),
+                name: Some(Self::secret_name(&release.release_name, release.revision)),
+                namespace: Some(release.release_namespace.clone()),
                 labels: Some(labels),
                 ..Default::default()
             },
@@ -165,12 +172,19 @@ impl KubernetesReleaseStorage {
             .as_ref()
             .ok_or_else(|| NylError::Config("Secret missing data field".to_string()))?;
 
-        let component = secret
+        let release_name = secret
             .metadata
             .labels
             .as_ref()
-            .and_then(|l| l.get("nyl.io/component"))
-            .ok_or_else(|| NylError::Config("Secret missing component label".to_string()))?
+            .and_then(|l| l.get("nyl.io/release"))
+            .ok_or_else(|| NylError::Config("Secret missing release label".to_string()))?
+            .clone();
+
+        let release_namespace = secret
+            .metadata
+            .namespace
+            .as_ref()
+            .ok_or_else(|| NylError::Config("Secret missing namespace".to_string()))?
             .clone();
 
         let revision: u32 = secret
@@ -181,23 +195,17 @@ impl KubernetesReleaseStorage {
             .and_then(|r| r.parse().ok())
             .ok_or_else(|| NylError::Config("Secret missing or invalid revision label".to_string()))?;
 
+        // Deserialize resource keys
+        let resource_keys_str = Self::decode_base64(
+            data.get("resource_keys")
+                .ok_or_else(|| NylError::Config("Secret missing resource_keys field".to_string()))?,
+        )?;
+        let resource_keys: Vec<ResourceKey> = serde_json::from_str(&resource_keys_str)?;
+
         let manifest = Self::decode_base64(
             data.get("manifest")
                 .ok_or_else(|| NylError::Config("Secret missing manifest field".to_string()))?,
         )?;
-
-        let values_str = Self::decode_base64(
-            data.get("values")
-                .ok_or_else(|| NylError::Config("Secret missing values field".to_string()))?,
-        )?;
-        let values: serde_json::Value = serde_json::from_str(&values_str)?;
-
-        let helmchart = if let Some(helmchart_data) = data.get("helmchart") {
-            let helmchart_str = Self::decode_base64(helmchart_data)?;
-            Some(serde_json::from_str(&helmchart_str)?)
-        } else {
-            None
-        };
 
         let status_str = Self::decode_base64(
             data.get("status")
@@ -231,11 +239,11 @@ impl KubernetesReleaseStorage {
         };
 
         Ok(ReleaseState {
-            component,
+            release_name,
+            release_namespace,
             revision,
+            resource_keys,
             manifest,
-            values,
-            helmchart,
             status,
             rendered_at,
             applied_at,
@@ -247,9 +255,9 @@ impl KubernetesReleaseStorage {
 #[async_trait]
 impl ReleaseStorage for KubernetesReleaseStorage {
     async fn save_release(&self, release: &ReleaseState) -> Result<()> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), &release.release_namespace);
         let secret = self.to_secret(release)?;
-        let name = Self::secret_name(&release.component, release.revision);
+        let name = Self::secret_name(&release.release_name, release.revision);
 
         // Try to get existing secret
         match api.get(&name).await {
@@ -267,19 +275,29 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         Ok(())
     }
 
-    async fn get_latest_release(&self, component: &str) -> Result<Option<ReleaseState>> {
-        let revisions = self.list_revisions(component).await?;
+    async fn get_latest_release(
+        &self,
+        release_name: &str,
+        namespace: &str,
+    ) -> Result<Option<ReleaseState>> {
+        let revisions = self.list_revisions(release_name, namespace).await?;
         if revisions.is_empty() {
             return Ok(None);
         }
 
         let latest_revision = revisions.iter().max().unwrap();
-        self.get_release(component, *latest_revision).await
+        self.get_release(release_name, namespace, *latest_revision)
+            .await
     }
 
-    async fn get_release(&self, component: &str, revision: u32) -> Result<Option<ReleaseState>> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
-        let name = Self::secret_name(component, revision);
+    async fn get_release(
+        &self,
+        release_name: &str,
+        namespace: &str,
+        revision: u32,
+    ) -> Result<Option<ReleaseState>> {
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        let name = Self::secret_name(release_name, revision);
 
         match api.get(&name).await {
             Ok(secret) => Ok(Some(self.from_secret(&secret)?)),
@@ -288,9 +306,9 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         }
     }
 
-    async fn list_revisions(&self, component: &str) -> Result<Vec<u32>> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
-        let label_selector = format!("nyl.io/component={}", component);
+    async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>> {
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        let label_selector = format!("nyl.io/release={}", release_name);
         let lp = ListParams::default().labels(&label_selector);
 
         let secrets = api.list(&lp).await?;
@@ -312,19 +330,20 @@ impl ReleaseStorage for KubernetesReleaseStorage {
 
     async fn update_release_status(
         &self,
-        component: &str,
+        release_name: &str,
+        namespace: &str,
         revision: u32,
         status: ReleaseStatus,
         error: Option<String>,
     ) -> Result<()> {
         // Get existing release
         let mut release = self
-            .get_release(component, revision)
+            .get_release(release_name, namespace, revision)
             .await?
             .ok_or_else(|| {
                 NylError::Config(format!(
                     "Release {} revision {} not found",
-                    component, revision
+                    release_name, revision
                 ))
             })?;
 
@@ -365,30 +384,46 @@ mod tests {
     impl ReleaseStorage for MockReleaseStorage {
         async fn save_release(&self, release: &ReleaseState) -> Result<()> {
             let mut store = self.releases.lock().unwrap();
-            store.insert((release.component.clone(), release.revision), release.clone());
+            // Use compound key for storage
+            let key = (
+                format!("{}/{}", release.release_namespace, release.release_name),
+                release.revision,
+            );
+            store.insert(key, release.clone());
             Ok(())
         }
 
-        async fn get_latest_release(&self, component: &str) -> Result<Option<ReleaseState>> {
-            let revisions = self.list_revisions(component).await?;
+        async fn get_latest_release(
+            &self,
+            release_name: &str,
+            namespace: &str,
+        ) -> Result<Option<ReleaseState>> {
+            let revisions = self.list_revisions(release_name, namespace).await?;
             if revisions.is_empty() {
                 return Ok(None);
             }
 
             let latest = revisions.iter().max().unwrap();
-            self.get_release(component, *latest).await
+            self.get_release(release_name, namespace, *latest).await
         }
 
-        async fn get_release(&self, component: &str, revision: u32) -> Result<Option<ReleaseState>> {
+        async fn get_release(
+            &self,
+            release_name: &str,
+            namespace: &str,
+            revision: u32,
+        ) -> Result<Option<ReleaseState>> {
             let store = self.releases.lock().unwrap();
-            Ok(store.get(&(component.to_string(), revision)).cloned())
+            let key = format!("{}/{}", namespace, release_name);
+            Ok(store.get(&(key, revision)).cloned())
         }
 
-        async fn list_revisions(&self, component: &str) -> Result<Vec<u32>> {
+        async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>> {
             let store = self.releases.lock().unwrap();
+            let key_prefix = format!("{}/{}", namespace, release_name);
             let mut revisions: Vec<u32> = store
                 .keys()
-                .filter(|(c, _)| c == component)
+                .filter(|(c, _)| c == &key_prefix)
                 .map(|(_, r)| *r)
                 .collect();
             revisions.sort();
@@ -397,13 +432,15 @@ mod tests {
 
         async fn update_release_status(
             &self,
-            component: &str,
+            release_name: &str,
+            namespace: &str,
             revision: u32,
             status: ReleaseStatus,
             error: Option<String>,
         ) -> Result<()> {
             let mut store = self.releases.lock().unwrap();
-            if let Some(release) = store.get_mut(&(component.to_string(), revision)) {
+            let key = format!("{}/{}", namespace, release_name);
+            if let Some(release) = store.get_mut(&(key, revision)) {
                 release.status = status;
                 release.error = error;
                 if release.status == ReleaseStatus::Deployed && release.applied_at.is_none() {
@@ -418,11 +455,11 @@ mod tests {
     async fn test_save_and_get_release() {
         let storage = MockReleaseStorage::new();
         let release = ReleaseState {
-            component: "myapp".to_string(),
+            release_name: "myapp".to_string(),
+            release_namespace: "default".to_string(),
             revision: 1,
+            resource_keys: vec![],
             manifest: "apiVersion: v1\nkind: ConfigMap".to_string(),
-            values: serde_json::json!({"key": "value"}),
-            helmchart: None,
             status: ReleaseStatus::Rendered,
             rendered_at: Utc::now(),
             applied_at: None,
@@ -431,10 +468,11 @@ mod tests {
 
         storage.save_release(&release).await.unwrap();
 
-        let retrieved = storage.get_release("myapp", 1).await.unwrap();
+        let retrieved = storage.get_release("myapp", "default", 1).await.unwrap();
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.component, "myapp");
+        assert_eq!(retrieved.release_name, "myapp");
+        assert_eq!(retrieved.release_namespace, "default");
         assert_eq!(retrieved.revision, 1);
     }
 
@@ -445,11 +483,11 @@ mod tests {
         // Save multiple revisions
         for i in 1..=3 {
             let release = ReleaseState {
-                component: "myapp".to_string(),
+                release_name: "myapp".to_string(),
+                release_namespace: "default".to_string(),
                 revision: i,
+                resource_keys: vec![],
                 manifest: format!("revision {}", i),
-                values: serde_json::json!({}),
-                helmchart: None,
                 status: ReleaseStatus::Deployed,
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
@@ -458,7 +496,7 @@ mod tests {
             storage.save_release(&release).await.unwrap();
         }
 
-        let latest = storage.get_latest_release("myapp").await.unwrap();
+        let latest = storage.get_latest_release("myapp", "default").await.unwrap();
         assert!(latest.is_some());
         assert_eq!(latest.unwrap().revision, 3);
     }
@@ -470,11 +508,11 @@ mod tests {
         // Save revisions out of order
         for i in [3, 1, 2] {
             let release = ReleaseState {
-                component: "myapp".to_string(),
+                release_name: "myapp".to_string(),
+                release_namespace: "default".to_string(),
                 revision: i,
+                resource_keys: vec![],
                 manifest: format!("revision {}", i),
-                values: serde_json::json!({}),
-                helmchart: None,
                 status: ReleaseStatus::Deployed,
                 rendered_at: Utc::now(),
                 applied_at: Some(Utc::now()),
@@ -483,7 +521,7 @@ mod tests {
             storage.save_release(&release).await.unwrap();
         }
 
-        let revisions = storage.list_revisions("myapp").await.unwrap();
+        let revisions = storage.list_revisions("myapp", "default").await.unwrap();
         assert_eq!(revisions, vec![1, 2, 3]);
     }
 
@@ -491,11 +529,11 @@ mod tests {
     async fn test_update_release_status() {
         let storage = MockReleaseStorage::new();
         let release = ReleaseState {
-            component: "myapp".to_string(),
+            release_name: "myapp".to_string(),
+            release_namespace: "default".to_string(),
             revision: 1,
+            resource_keys: vec![],
             manifest: "test".to_string(),
-            values: serde_json::json!({}),
-            helmchart: None,
             status: ReleaseStatus::Rendered,
             rendered_at: Utc::now(),
             applied_at: None,
@@ -505,11 +543,15 @@ mod tests {
         storage.save_release(&release).await.unwrap();
 
         storage
-            .update_release_status("myapp", 1, ReleaseStatus::Deployed, None)
+            .update_release_status("myapp", "default", 1, ReleaseStatus::Deployed, None)
             .await
             .unwrap();
 
-        let updated = storage.get_release("myapp", 1).await.unwrap().unwrap();
+        let updated = storage
+            .get_release("myapp", "default", 1)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.status, ReleaseStatus::Deployed);
         assert!(updated.applied_at.is_some());
     }
@@ -517,14 +559,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_missing_release() {
         let storage = MockReleaseStorage::new();
-        let result = storage.get_release("missing", 1).await.unwrap();
+        let result = storage.get_release("missing", "default", 1).await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn test_get_latest_no_releases() {
         let storage = MockReleaseStorage::new();
-        let result = storage.get_latest_release("missing").await.unwrap();
+        let result = storage
+            .get_latest_release("missing", "default")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 

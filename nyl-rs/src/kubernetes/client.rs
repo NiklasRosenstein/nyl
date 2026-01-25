@@ -93,22 +93,27 @@ impl KubeRsClient {
 
     /// Discover the API resource for a given GVK
     async fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        // Try to find the resource in the discovery cache
-        let group_version = if gvk.group.is_empty() {
-            gvk.version.clone()
-        } else {
-            format!("{}/{}", gvk.group, gvk.version)
-        };
-
+        // Search through all groups for matching resource
         for group in self.discovery.groups() {
-            if group.name() == group_version {
-                for (ar, caps) in group.recommended_resources() {
-                    if ar.kind == gvk.kind {
+            for (ar, caps) in group.recommended_resources() {
+                // Match by kind and version
+                if ar.kind == gvk.kind && ar.version == gvk.version {
+                    // For core resources (empty group), ar.group is also empty
+                    // For other resources, check group matches
+                    if (gvk.group.is_empty() && ar.group.is_empty())
+                        || ar.group == gvk.group
+                    {
                         return Ok((ar, caps));
                     }
                 }
             }
         }
+
+        let group_version = if gvk.group.is_empty() {
+            gvk.version.clone()
+        } else {
+            format!("{}/{}", gvk.group, gvk.version)
+        };
 
         Err(NylError::Config(format!(
             "API resource not found for {}/{}",
@@ -175,7 +180,7 @@ impl KubeClient for KubeRsClient {
         let exists = self.get_resource(&gvk, namespace.as_deref(), &name).await?.is_some();
 
         // Setup patch parameters
-        let mut patch_params = PatchParams::apply(field_manager);
+        let mut patch_params = PatchParams::apply(field_manager).force();
         if dry_run {
             patch_params = patch_params.dry_run();
         }
