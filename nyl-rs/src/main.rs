@@ -2,7 +2,8 @@ use clap::Parser;
 use nyl::cli::Cli;
 use tracing_subscriber::EnvFilter;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Parse CLI first to get verbose flag
     let cli = Cli::parse();
 
@@ -14,7 +15,7 @@ fn main() {
         .init();
 
     // Execute command
-    if let Err(e) = cli.execute() {
+    if let Err(e) = cli.execute().await {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

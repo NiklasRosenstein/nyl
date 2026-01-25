@@ -4,6 +4,15 @@
 /// - Kubernetes resource type definitions
 /// - YAML serialization/deserialization with serde-norway
 /// - Resource validation
+mod client;
+mod resource;
+mod state;
+
+pub use client::{KubeClient, KubeRsClient, MockKubeClient};
+pub use resource::{ApplyOutcome, GroupVersionKind, ResourceKey};
+pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
+pub use state::{KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

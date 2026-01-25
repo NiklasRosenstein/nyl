@@ -38,11 +38,11 @@ enum Commands {
 
 impl Cli {
     /// Execute the CLI command
-    pub fn execute(self) -> Result<()> {
+    pub async fn execute(self) -> Result<()> {
         match self.command {
             Commands::Render(args) => commands::render::execute(args),
-            Commands::Diff(args) => commands::diff::execute(args),
-            Commands::Apply(args) => commands::apply::execute(args),
+            Commands::Diff(args) => commands::diff::execute(args).await,
+            Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::New(args) => commands::new::execute(args),
             Commands::Validate(args) => commands::validate::execute(args),
         }

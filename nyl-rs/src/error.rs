@@ -27,6 +27,12 @@ pub enum NylError {
     #[error("Kubernetes error: {0}")]
     Kubernetes(#[from] kube::Error),
 
+    #[error("Kubeconfig error: {0}")]
+    Kubeconfig(#[from] kube::config::KubeconfigError),
+
+    #[error("Kubeconfig inference error: {0}")]
+    InferConfig(#[from] kube::config::InferConfigError),
+
     #[error("Process execution error: {0}")]
     Process(String),
 

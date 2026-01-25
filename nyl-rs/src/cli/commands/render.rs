@@ -6,7 +6,7 @@ use crate::{
     config::ProjectConfig,
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
-    profiles::{deep_merge_value, ProfileConfig},
+    profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{HelmChart, ReleaseMetadata},
     secrets::SecretsConfig,
     template::TemplateContext,
@@ -37,7 +37,12 @@ enum OutputFormat {
     Json,
 }
 
-pub fn execute(args: RenderArgs) -> Result<()> {
+/// Shared manifest rendering logic used by render, diff, and apply
+pub fn render_manifests(
+    path: &str,
+    component: Option<&str>,
+    environment: Option<&str>,
+) -> Result<(Vec<serde_json::Value>, Profile, String)> {
     // 1. Load project configuration
     let project_config = ProjectConfig::load(None)?;
 
@@ -45,7 +50,7 @@ pub fn execute(args: RenderArgs) -> Result<()> {
     let profile_config = ProfileConfig::load(None)?;
 
     // 3. Select environment/profile
-    let env_name = args.environment.as_deref().unwrap_or("default");
+    let env_name = environment.unwrap_or("default");
     let profile = profile_config
         .get(env_name)
         .ok_or_else(|| NylError::Config(format!("Profile '{}' not found", env_name)))?;
@@ -60,8 +65,8 @@ pub fn execute(args: RenderArgs) -> Result<()> {
     let generator = Generator::new(project_config.clone());
 
     // 7. Load and filter resources
-    let resources = load_resources(&args.path)?;
-    let filtered = filter_resources(resources, args.component.as_deref())?;
+    let resources = load_resources(path)?;
+    let filtered = filter_resources(resources, component)?;
 
     // 8. Generate manifests
     let mut all_manifests = Vec::new();
@@ -70,9 +75,17 @@ pub fn execute(args: RenderArgs) -> Result<()> {
         all_manifests.extend(manifests);
     }
 
-    // 9. Output results
-    output_manifests(&all_manifests, OutputFormat::Yaml)?;
+    Ok((all_manifests, profile.clone(), env_name.to_string()))
+}
 
+pub fn execute(args: RenderArgs) -> Result<()> {
+    let (manifests, _, _) = render_manifests(
+        &args.path,
+        args.component.as_deref(),
+        args.environment.as_deref(),
+    )?;
+
+    output_manifests(&manifests, OutputFormat::Yaml)?;
     Ok(())
 }
 

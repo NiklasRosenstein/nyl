@@ -1,48 +1,39 @@
 # Introduction
 
-**nyl** (pronounced "nile") is a Kubernetes manifest generator with Helm integration, designed to simplify the management of Kubernetes resources through a powerful templating system.
-
-This is the Rust rewrite of the Python-based nyl tool, focusing on performance and clean architecture.
+**nyl** (pronounced like "nil") is a Kubernetes manifest generator with Helm integration, designed to simplify the management of Kubernetes resources through a powerful templating system.
 
 ## Goals
 
-The Rust rewrite aims to achieve:
+nyl aims to provide:
 
-- **5-10x performance improvement** over the Python implementation
-- **Binary size under 20MB** for easy distribution
-- **100% compatibility** with existing nyl projects
+- **High performance** manifest generation
+- **Lightweight binary** for easy distribution
 - **Clean, maintainable architecture** for future development
+- **Powerful templating** with Helm integration
 
-## Current Status
-
-### Phase 1: Configuration & CLI Foundation ✅ COMPLETE
+## Features
 
 - Configuration loading (YAML, JSON)
 - File discovery with upward directory traversal
 - `nyl validate` command with strict mode
 - `nyl new project` command for project scaffolding
 - `nyl new component` command for component scaffolding
-- Comprehensive test coverage
+- Helm integration and component discovery
+- Template rendering with Jinja2
+- Kubernetes operations (diff, apply)
+- Release state management with revision tracking
 
-### Coming Soon
-
-- **Phase 2**: Helm integration and component discovery
-- **Phase 3**: Template rendering with Jinja2
-- **Phase 4**: Kubernetes operations (diff, apply)
-
-## Why Rust?
-
-Rust provides:
+## Key Features
 
 - **Safety**: Memory safety without garbage collection
 - **Performance**: Compiled binaries with minimal runtime overhead
-- **Concurrency**: Fearless concurrent operations
+- **Concurrency**: Efficient concurrent operations
 - **Reliability**: Strong type system catches errors at compile time
-- **Ecosystem**: Rich library ecosystem with cargo
+- **Rich ecosystem**: Extensive library support
 
 ## Architecture
 
-nyl-rs is structured into several key modules:
+nyl is structured into several key modules:
 
 - `config`: Project configuration loading and validation
 - `cli`: Command-line interface and argument parsing
