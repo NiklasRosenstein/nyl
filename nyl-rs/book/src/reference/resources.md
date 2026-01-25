@@ -7,7 +7,7 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 ### Core Resources
 
 - **[NylRelease](./resources/nyl-release.md)**: Defines release metadata (name, namespace) for deployments
-- **HelmChart**: Declarative Helm chart deployment with templating support
+- **[HelmChart](./resources/helmchart.md)**: Declarative Helm chart deployment with templating support
 
 ### ArgoCD Resources
 

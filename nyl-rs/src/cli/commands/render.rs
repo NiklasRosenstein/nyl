@@ -252,17 +252,16 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
 /// Process ApplicationGenerator - scan directory and generate Applications
 fn process_application_generator(
     generator: &crate::resources::ApplicationGenerator,
-    base_dir: &str,
+    _base_dir: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    // Resolve source path relative to base directory
-    let base_path = Path::new(base_dir);
-    let parent_dir = if base_path.is_file() {
-        base_path.parent().unwrap_or(Path::new("."))
-    } else {
-        base_path
-    };
+    // Clone Git repository and resolve to local path
+    let mut git_manager = crate::git::GitManager::new()?;
 
-    let source_path = parent_dir.join(&generator.spec.source.path);
+    let source_path = git_manager.resolve_ref(
+        &generator.spec.source.repo_url,
+        Some(&generator.spec.source.target_revision),
+        Some(&generator.spec.source.path),
+    )?;
 
     // Find YAML files matching filters
     let yaml_files = find_yaml_files_filtered(

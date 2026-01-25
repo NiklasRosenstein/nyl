@@ -25,6 +25,7 @@ pub mod components;
 pub mod config;
 pub mod error;
 pub mod generator;
+pub mod git;
 pub mod helm;
 pub mod kubernetes;
 pub mod profiles;

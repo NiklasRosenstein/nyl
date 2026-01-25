@@ -53,6 +53,9 @@ base64 = "0.22"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Git
+git2 = "0.19"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

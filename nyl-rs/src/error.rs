@@ -39,6 +39,9 @@ pub enum NylError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("Git error: {0}")]
+    Git(#[from] crate::git::GitError),
+
     #[error("{0}")]
     Other(String),
 }

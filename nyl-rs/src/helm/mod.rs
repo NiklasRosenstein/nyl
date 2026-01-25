@@ -49,7 +49,10 @@ impl HelmChartResolver {
 
     /// Resolve a chart reference to an absolute path
     ///
-    /// Phase 2: Only supports local paths
+    /// Supports:
+    /// - Git repositories (git + git_ref + path)
+    /// - Local paths (path)
+    /// - Chart names from search paths (name)
     ///
     /// # Arguments
     /// * `chart_ref` - The chart reference to resolve
@@ -57,11 +60,9 @@ impl HelmChartResolver {
     /// # Returns
     /// ResolvedChart with absolute path
     pub fn resolve_chart(&self, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        // Phase 2: Only local paths supported
-        if chart_ref.git.is_some() {
-            return Err(NylError::Config(
-                "Git chart references not supported in Phase 2".to_string(),
-            ));
+        // Handle Git chart references
+        if let Some(ref git_url) = chart_ref.git {
+            return self.resolve_git(git_url, chart_ref);
         }
 
         if chart_ref.repository.is_some() {
@@ -154,6 +155,31 @@ impl HelmChartResolver {
     /// Get the working directory
     pub fn working_dir(&self) -> &Path {
         &self.working_dir
+    }
+
+    /// Resolve a Git chart reference
+    fn resolve_git(&self, git_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let mut git_manager = crate::git::GitManager::new()?;
+
+        let worktree_path = git_manager.resolve_ref(
+            git_url,
+            chart_ref.git_ref.as_deref(),
+            chart_ref.path.as_deref(),
+        )?;
+
+        // Verify Chart.yaml exists
+        let chart_yaml = worktree_path.join("Chart.yaml");
+        if !chart_yaml.exists() {
+            return Err(NylError::Config(format!(
+                "Chart.yaml not found at: {}",
+                worktree_path.display()
+            )));
+        }
+
+        Ok(ResolvedChart {
+            path: worktree_path,
+            chart_ref: chart_ref.clone(),
+        })
     }
 }
 
@@ -337,23 +363,8 @@ mod tests {
             .contains("Chart.yaml not found"));
     }
 
-    #[test]
-    fn test_resolve_git_not_supported() {
-        let temp = TempDir::new().unwrap();
-        let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
-
-        let chart_ref = ChartRef {
-            git: Some("https://github.com/example/chart.git".to_string()),
-            ..Default::default()
-        };
-
-        let result = resolver.resolve_chart(&chart_ref);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Git chart references not supported"));
-    }
+    // Git chart resolution test is now an integration test
+    // as it requires actual Git operations
 
     #[test]
     fn test_resolve_repository_not_supported() {

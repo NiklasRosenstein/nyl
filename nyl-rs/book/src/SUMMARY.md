@@ -6,6 +6,7 @@
 # User Guide
 
 - [Configuration](./configuration.md)
+- [Git Integration](./git-integration.md)
 - [Commands](./commands/README.md)
   - [new](./commands/new.md)
   - [validate](./commands/validate.md)

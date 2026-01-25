@@ -1,6 +1,8 @@
 # ApplicationGenerator Reference
 
-The ApplicationGenerator resource enables automatic discovery and generation of ArgoCD Applications from NylRelease files in a directory.
+The ApplicationGenerator resource enables automatic discovery and generation of ArgoCD Applications from NylRelease files in a Git repository directory.
+
+> **Note**: Git repositories are cloned automatically by Nyl. You don't need to manually clone repositories. See the [Git Integration](../git-integration.md) guide for cache management and configuration details.
 
 ## Resource Definition
 
