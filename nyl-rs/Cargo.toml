@@ -54,7 +54,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Git
-git2 = "0.19"
+git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 regex = "1.10"
 
 # Diff and output

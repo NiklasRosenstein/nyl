@@ -69,6 +69,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
@@ -88,7 +92,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Install cross for aarch64-musl
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build release binary (cross)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cross build --release --target ${{ matrix.target }}
       - name: Build release binary
+        if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }}
       - name: Check binary size (Unix)
         if: runner.os != 'Windows'
@@ -97,6 +113,17 @@ jobs:
           echo "Binary size: $((size / 1024 / 1024))MB"
           if [ $size -gt 20971520 ]; then
             echo "::error::Binary size exceeds 20MB limit"
+            exit 1
+          fi
+      - name: Verify static linking (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          binary="target/${{ matrix.target }}/release/nyl"
+          if ldd "$binary" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "✓ Binary is statically linked"
+          else
+            echo "✗ Binary has dynamic dependencies:"
+            ldd "$binary"
             exit 1
           fi
       - name: Upload artifact
@@ -139,23 +166,3 @@ jobs:
         with:
           name: benchmark-results
           path: nyl-rs/target/criterion
-
-  release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && endsWith(github.ref, '-rust')
-    needs: [fmt-check, clippy, test, build]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Create release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: artifacts/**/*
-          draft: false
-          prerelease: contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
