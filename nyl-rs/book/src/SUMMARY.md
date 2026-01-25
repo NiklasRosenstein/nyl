@@ -12,7 +12,19 @@
   - [render](./commands/render.md)
   - [diff](./commands/diff.md)
   - [apply](./commands/apply.md)
+  - [generate](./commands/generate.md)
+
+# ArgoCD Integration
+
+- [Overview](./argocd/overview.md)
+- [Plugin Installation](./argocd/plugin.md)
+- [Bootstrapping](./argocd/bootstrapping.md)
+- [ApplicationGenerator](./argocd/application-generator.md)
+- [Best Practices](./argocd/best-practices.md)
 
 # Reference
 
 - [Migration from Python](./migration.md)
+- [Resources](./reference/resources.md)
+  - [NylRelease](./reference/resources/nyl-release.md)
+  - [ApplicationGenerator](./reference/resources/application-generator.md)

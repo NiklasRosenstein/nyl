@@ -7,7 +7,7 @@ use crate::{
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     profiles::{deep_merge_value, Profile, ProfileConfig},
-    resources::{HelmChart, ReleaseMetadata},
+    resources::{extract_application_generators, extract_nyl_release, HelmChart, NylRelease, ReleaseMetadata},
     secrets::SecretsConfig,
     template::TemplateContext,
     NylError, Result,
@@ -85,7 +85,16 @@ pub fn execute(args: RenderArgs) -> Result<()> {
         args.environment.as_deref(),
     )?;
 
-    output_manifests(&manifests, OutputFormat::Yaml)?;
+    // Extract ApplicationGenerator resources and filter them from output
+    let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
+
+    // Process each ApplicationGenerator
+    for generator in generators {
+        let applications = process_application_generator(&generator, &args.path)?;
+        final_manifests.extend(applications);
+    }
+
+    output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())
 }
 
@@ -238,6 +247,205 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
         }
     }
     Ok(())
+}
+
+/// Process ApplicationGenerator - scan directory and generate Applications
+fn process_application_generator(
+    generator: &crate::resources::ApplicationGenerator,
+    base_dir: &str,
+) -> Result<Vec<serde_json::Value>> {
+    // Resolve source path relative to base directory
+    let base_path = Path::new(base_dir);
+    let parent_dir = if base_path.is_file() {
+        base_path.parent().unwrap_or(Path::new("."))
+    } else {
+        base_path
+    };
+
+    let source_path = parent_dir.join(&generator.spec.source.path);
+
+    // Find YAML files matching filters
+    let yaml_files = find_yaml_files_filtered(
+        &source_path,
+        &generator.spec.source.include,
+        &generator.spec.source.exclude,
+    )?;
+
+    let mut applications = Vec::new();
+
+    for file_path in yaml_files {
+        // Read and parse file
+        let content = std::fs::read_to_string(&file_path).map_err(|e| {
+            NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e))
+        })?;
+        let docs = parse_yaml_documents(&content)?;
+
+        // Extract NylRelease
+        let (nyl_release, _) = extract_nyl_release(&docs)?;
+
+        if let Some(release) = nyl_release {
+            // Generate ArgoCD Application
+            let app = create_argocd_application_from_generator(
+                &release,
+                &file_path,
+                &source_path,
+                generator,
+            )?;
+            applications.push(app);
+        }
+        // Skip files without NylRelease (no warning to avoid noise)
+    }
+
+    Ok(applications)
+}
+
+/// Find YAML files matching include/exclude patterns
+fn find_yaml_files_filtered(
+    dir: &Path,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+
+    if !dir.exists() {
+        return Err(NylError::Config(format!(
+            "Source path does not exist: {}",
+            dir.display()
+        )));
+    }
+
+    for entry in WalkDir::new(dir).follow_links(true) {
+        let entry = entry.map_err(|e| {
+            NylError::Config(format!("Failed to walk directory: {}", e))
+        })?;
+        let path = entry.path();
+
+        // Skip if not a file
+        if !path.is_file() {
+            continue;
+        }
+
+        // Skip if doesn't match include patterns
+        if !matches_glob_patterns(path, include)? {
+            continue;
+        }
+
+        // Skip if matches exclude patterns
+        if matches_glob_patterns(path, exclude)? {
+            continue;
+        }
+
+        files.push(path.to_path_buf());
+    }
+
+    Ok(files)
+}
+
+/// Check if path matches any glob pattern
+fn matches_glob_patterns(path: &Path, patterns: &[String]) -> Result<bool> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    for pattern in patterns {
+        // Simple glob matching (*.yaml, .*, _*, etc.)
+        if pattern.starts_with("*.") {
+            // Extension match: *.yaml
+            let ext = &pattern[2..];
+            if file_name.ends_with(ext) {
+                return Ok(true);
+            }
+        } else if pattern == ".*" {
+            // Hidden files: .*
+            if file_name.starts_with('.') {
+                return Ok(true);
+            }
+        } else if pattern.starts_with('_') && pattern.ends_with('*') {
+            // Prefix match: _*
+            let prefix = &pattern[..pattern.len() - 1];
+            if file_name.starts_with(prefix) {
+                return Ok(true);
+            }
+        } else if pattern.ends_with('*') {
+            // Generic prefix match: test*
+            let prefix = &pattern[..pattern.len() - 1];
+            if file_name.starts_with(prefix) {
+                return Ok(true);
+            }
+        } else if file_name == pattern {
+            // Exact match
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Create ArgoCD Application from generator config
+fn create_argocd_application_from_generator(
+    release: &NylRelease,
+    file_path: &Path,
+    base_path: &Path,
+    generator: &crate::resources::ApplicationGenerator,
+) -> Result<serde_json::Value> {
+    // Calculate relative path from base
+    let rel_path = file_path
+        .strip_prefix(base_path)
+        .unwrap_or(file_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_str()
+        .ok_or_else(|| NylError::Config("Invalid file path".to_string()))?;
+
+    // Use relative path or "." if empty
+    let path_str = if rel_path.is_empty() { "." } else { rel_path };
+
+    // Build the Application manifest
+    let mut app = serde_json::json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Application",
+        "metadata": {
+            "name": release.metadata.name,
+            "namespace": generator.spec.destination.namespace,
+        },
+        "spec": {
+            "project": generator.spec.project,
+            "source": {
+                "repoURL": generator.spec.source.repo_url,
+                "path": path_str,
+                "targetRevision": generator.spec.source.target_revision,
+                "plugin": {
+                    "name": "nyl",
+                    "env": [
+                        {"name": "NYL_RELEASE_NAME", "value": release.metadata.name},
+                        {"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace},
+                    ],
+                },
+            },
+            "destination": {
+                "server": generator.spec.destination.server,
+                "namespace": release.metadata.namespace,
+            },
+        },
+    });
+
+    // Add labels if present
+    if !generator.spec.labels.is_empty() {
+        app["metadata"]["labels"] = serde_json::to_value(&generator.spec.labels)?;
+    }
+
+    // Add annotations if present
+    if !generator.spec.annotations.is_empty() {
+        app["metadata"]["annotations"] = serde_json::to_value(&generator.spec.annotations)?;
+    }
+
+    // Add sync policy if present
+    if let Some(ref sync_policy) = generator.spec.sync_policy {
+        app["spec"]["syncPolicy"] = serde_json::to_value(sync_policy)?;
+    }
+
+    Ok(app)
 }
 
 #[cfg(test)]
