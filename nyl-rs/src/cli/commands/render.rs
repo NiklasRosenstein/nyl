@@ -50,16 +50,31 @@ pub fn render_manifests(
     let profile_config = ProfileConfig::load(None)?;
 
     // 3. Select environment/profile
+    // If user explicitly specified a profile, require it to exist.
+    // If no profile specified and no profiles configured, use default Profile (current kubecontext).
     let env_name = environment.unwrap_or("default");
-    let profile = profile_config
-        .get(env_name)
-        .ok_or_else(|| NylError::Config(format!("Profile '{}' not found", env_name)))?;
+    let profile: Profile = if let Some(p) = profile_config.get(env_name) {
+        p.clone()
+    } else if environment.is_some() {
+        // User explicitly requested a profile that doesn't exist
+        return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
+    } else if profile_config.profiles.is_empty() {
+        // No profiles configured at all - use default (current kubecontext)
+        Profile::default()
+    } else {
+        // Profiles exist but "default" doesn't - user must specify which one
+        return Err(NylError::Config(format!(
+            "Profile '{}' not found. Available profiles: {}",
+            env_name,
+            profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    };
 
     // 4. Load secrets
     let secrets_config = SecretsConfig::load(None)?;
 
     // 5. Build template context
-    let context = TemplateContext::build(profile, &secrets_config, env_name)?;
+    let context = TemplateContext::build(&profile, &secrets_config, env_name)?;
 
     // 6. Create generator
     let generator = Generator::new(project_config.clone());
@@ -75,7 +90,7 @@ pub fn render_manifests(
         all_manifests.extend(manifests);
     }
 
-    Ok((all_manifests, profile.clone(), env_name.to_string()))
+    Ok((all_manifests, profile, env_name.to_string()))
 }
 
 pub fn execute(args: RenderArgs) -> Result<()> {

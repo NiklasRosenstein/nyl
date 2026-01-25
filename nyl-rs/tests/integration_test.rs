@@ -74,21 +74,53 @@ data:
 }
 
 #[test]
-fn test_diff_command_requires_profile() {
+fn test_diff_command_requires_default_profile_when_profiles_exist() {
+    let temp = TempDir::new().unwrap();
+
+    // Create config with a profile that is NOT named "default"
+    fs::write(
+        temp.path().join("nyl-project.yaml"),
+        r#"
+profiles:
+  staging:
+    values:
+      environment: staging
+"#,
+    )
+    .unwrap();
+
     let mut cmd = Command::cargo_bin("nyl").unwrap();
+    cmd.current_dir(temp.path());
     cmd.arg("diff");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Profile 'default' not found"));
+        .stderr(predicate::str::contains("Profile 'default' not found"))
+        .stderr(predicate::str::contains("Available profiles: staging"));
 }
 
 #[test]
-fn test_apply_command_requires_profile() {
+fn test_apply_command_requires_default_profile_when_profiles_exist() {
+    let temp = TempDir::new().unwrap();
+
+    // Create config with a profile that is NOT named "default"
+    fs::write(
+        temp.path().join("nyl-project.yaml"),
+        r#"
+profiles:
+  production:
+    values:
+      environment: production
+"#,
+    )
+    .unwrap();
+
     let mut cmd = Command::cargo_bin("nyl").unwrap();
+    cmd.current_dir(temp.path());
     cmd.arg("apply");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Profile 'default' not found"));
+        .stderr(predicate::str::contains("Profile 'default' not found"))
+        .stderr(predicate::str::contains("Available profiles: production"));
 }
 
 #[test]
