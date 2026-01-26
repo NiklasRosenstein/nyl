@@ -173,7 +173,7 @@ jobs:
         with:
           workspaces: nyl
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --version 0.22.0
       - name: Run security audit
         run: |
           cargo audit \
