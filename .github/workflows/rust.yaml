@@ -80,13 +80,13 @@ jobs:
         run: cargo build --release --target ${{ env.TARGET }}
       - name: Check binary size
         run: |
-          size=$(stat -c%s target/${{ env.TARGET }}/release/nyl)
+          size=$(stat -c%s ../target/${{ env.TARGET }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB ($size bytes)"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nyl-${{ env.TARGET }}
-          path: nyl/target/${{ env.TARGET }}/release/nyl
+          path: target/${{ env.TARGET }}/release/nyl
 
   # Full build matrix for develop branch and releases
   build:
@@ -140,7 +140,7 @@ jobs:
       - name: Check binary size (Unix)
         if: runner.os != 'Windows'
         run: |
-          size=$(stat -f%z target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s target/${{ matrix.target }}/release/nyl)
+          size=$(stat -f%z ../target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s ../target/${{ matrix.target }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB"
           if [ $size -gt 20971520 ]; then
             echo "::error::Binary size exceeds 20MB limit"
@@ -149,7 +149,7 @@ jobs:
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
         run: |
-          binary="target/${{ matrix.target }}/release/nyl"
+          binary="../target/${{ matrix.target }}/release/nyl"
           if ldd "$binary" 2>&1 | grep -q "not a dynamic executable"; then
             echo "✓ Binary is statically linked"
           else
@@ -162,8 +162,8 @@ jobs:
         with:
           name: nyl-${{ matrix.target }}
           path: |
-            nyl/target/${{ matrix.target }}/release/nyl
-            nyl/target/${{ matrix.target }}/release/nyl.exe
+            target/${{ matrix.target }}/release/nyl
+            target/${{ matrix.target }}/release/nyl.exe
           if-no-files-found: ignore
 
   security-audit:
@@ -197,4 +197,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: nyl/target/criterion
+          path: target/criterion
