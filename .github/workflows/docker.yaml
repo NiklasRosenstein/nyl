@@ -110,6 +110,8 @@ jobs:
         with:
           context: .
           file: argocd-cmp/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # Multi-platform only when pushing; single platform for PR validation
+          platforms: ${{ github.event_name != 'pull_request' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
