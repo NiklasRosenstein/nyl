@@ -49,12 +49,10 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows tests are non-blocking until platform-specific issues are resolved
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -111,8 +109,6 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -140,8 +136,7 @@ jobs:
       - name: Build release binary
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }}
-      - name: Check binary size (Unix)
-        if: runner.os != 'Windows'
+      - name: Check binary size
         run: |
           size=$(stat -f%z ../target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s ../target/${{ matrix.target }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB"
@@ -164,10 +159,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nyl-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/nyl
-            target/${{ matrix.target }}/release/nyl.exe
-          if-no-files-found: ignore
+          path: target/${{ matrix.target }}/release/nyl
 
   security-audit:
     name: Security Audit
