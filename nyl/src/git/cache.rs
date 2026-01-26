@@ -32,6 +32,14 @@ impl CacheLayout {
         Ok(Self { root })
     }
 
+    /// Create a cache layout with an explicit path
+    ///
+    /// This is useful for testing where you want to avoid environment variable
+    /// race conditions between parallel tests.
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        Self { root: path.into() }
+    }
+
     /// Get the path to the bare repository for a given URL
     pub fn bare_repo_path(&self, url: &str) -> PathBuf {
         let normalized = Self::normalize_url(url);

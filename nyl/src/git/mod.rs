@@ -75,6 +75,18 @@ impl GitManager {
         })
     }
 
+    /// Create a Git manager with an explicit cache directory
+    ///
+    /// This is useful for testing where you want to avoid environment variable
+    /// race conditions between parallel tests.
+    pub fn with_cache_dir(cache_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            cache: CacheLayout::with_path(cache_dir),
+            bare_repos: HashMap::new(),
+            credential_provider: None,
+        }
+    }
+
     /// Create a Git manager with Kubernetes client for ArgoCD credential discovery
     pub async fn with_kubernetes(client: kube::Client) -> Result<Self> {
         let discovery = ArgoCDCredentialDiscovery::new(client)?;
@@ -203,14 +215,15 @@ mod tests {
     #[test]
     fn test_git_manager_creation() {
         let temp_cache = TempDir::new().unwrap();
-        std::env::set_var("NYL_CACHE_DIR", temp_cache.path());
 
-        let manager = GitManager::new();
-        assert!(manager.is_ok());
+        let manager = GitManager::with_cache_dir(temp_cache.path());
+        // Verify it was created (with_cache_dir doesn't return Result)
+        assert!(manager.bare_repos.is_empty());
     }
 
     #[test]
     fn test_default_git_manager() {
+        // Default uses env var or current dir, so set up temp cache first
         let temp_cache = TempDir::new().unwrap();
         std::env::set_var("NYL_CACHE_DIR", temp_cache.path());
 
