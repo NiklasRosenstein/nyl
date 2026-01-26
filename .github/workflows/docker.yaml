@@ -26,6 +26,11 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nyl
+
       - name: Install cross-compilation tools
         if: matrix.arch == 'arm64'
         run: |
@@ -39,7 +44,7 @@ jobs:
           cd nyl
           rustup target add ${{ matrix.target }}
           cargo build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/nyl ../nyl-${{ matrix.arch }}
+          cp ../target/${{ matrix.target }}/release/nyl ../nyl-${{ matrix.arch }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
