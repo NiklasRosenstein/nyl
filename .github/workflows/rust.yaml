@@ -60,7 +60,8 @@ jobs:
         with:
           workspaces: nyl
       - name: Run tests
-        run: cargo test --all-features
+        # Use single thread to avoid race conditions from tests that change global state (current directory)
+        run: cargo test --all-features -- --test-threads=1
 
   # Lightweight build for feature branches - just one target for validation
   build-quick:
