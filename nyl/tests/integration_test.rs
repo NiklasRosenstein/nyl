@@ -132,7 +132,7 @@ fn test_new_project_command() {
     cmd.arg("new").arg("project").arg("test-project");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Project 'test-project' created successfully"));
+        .stdout(predicate::str::contains("Project created successfully"));
 
     // Verify project structure (defaults to TOML format with hidden file)
     let project_dir = temp.path().join("test-project");
@@ -142,19 +142,15 @@ fn test_new_project_command() {
 }
 
 #[test]
-fn test_new_project_legacy_syntax() {
+fn test_new_without_subcommand_shows_error() {
     let temp = TempDir::new().unwrap();
 
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.current_dir(temp.path());
     cmd.arg("new").arg("test-project");
     cmd.assert()
-        .success()
-        .stderr(predicate::str::contains("Using legacy syntax"))
-        .stdout(predicate::str::contains("Project 'test-project' created successfully"));
-
-    let project_dir = temp.path().join("test-project");
-    assert!(project_dir.exists());
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
