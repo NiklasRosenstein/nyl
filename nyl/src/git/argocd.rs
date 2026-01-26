@@ -162,10 +162,7 @@ impl ArgoCDCredentialDiscovery {
     }
 
     /// Extract credential from ArgoCD secret
-    fn extract_credential_from_secret(
-        secret_name: &str,
-        secret: &Secret,
-    ) -> Result<Option<(String, GitCredential)>> {
+    fn extract_credential_from_secret(secret_name: &str, secret: &Secret) -> Result<Option<(String, GitCredential)>> {
         let Some(data) = &secret.data else { return Ok(None) };
 
         // Get repository URL

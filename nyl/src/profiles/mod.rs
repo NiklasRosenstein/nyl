@@ -337,7 +337,7 @@ kubeconfig:
             KubeconfigSource::Local { context, .. } => {
                 assert_eq!(context.unwrap(), "minikube");
             }
-            KubeconfigSource::Ssh{ .. } => panic!("Expected Local kubeconfig"),
+            KubeconfigSource::Ssh { .. } => panic!("Expected Local kubeconfig"),
         }
     }
 
@@ -371,7 +371,7 @@ kubeconfig:
                 assert_eq!(path, "/etc/kubernetes/admin.conf");
                 assert_eq!(context.unwrap(), "prod-cluster");
             }
-            KubeconfigSource::Local{ .. } => panic!("Expected SSH kubeconfig"),
+            KubeconfigSource::Local { .. } => panic!("Expected SSH kubeconfig"),
         }
     }
 

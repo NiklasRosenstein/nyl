@@ -189,8 +189,8 @@ async fn compute_diff_from_live(
     }
 
     // Get previous resource keys for deletion tracking
-    let previous_keys: HashSet<ResourceKey> = previous_state
-        .map_or_else(HashSet::new, |s| s.resource_keys.iter().cloned().collect());
+    let previous_keys: HashSet<ResourceKey> =
+        previous_state.map_or_else(HashSet::new, |s| s.resource_keys.iter().cloned().collect());
 
     // Also fetch resources from previous state that aren't in desired
     for key in &previous_keys {
@@ -229,11 +229,7 @@ async fn compute_diff_from_live(
                                 modified.push((key, diff_text));
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "Server-side diff failed for {}, falling back to raw: {}",
-                                    key,
-                                    e
-                                );
+                                tracing::warn!("Server-side diff failed for {}, falling back to raw: {}", key, e);
                                 let diff_text = DiffEngine::diff_yaml(manifest, live)?;
                                 modified.push((key, diff_text));
                             }
