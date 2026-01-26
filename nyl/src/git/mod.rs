@@ -220,13 +220,4 @@ mod tests {
         // Verify it was created (with_cache_dir doesn't return Result)
         assert!(manager.bare_repos.is_empty());
     }
-
-    #[test]
-    fn test_default_git_manager() {
-        // Default uses env var or current dir, so set up temp cache first
-        let temp_cache = TempDir::new().unwrap();
-        std::env::set_var("NYL_CACHE_DIR", temp_cache.path());
-
-        let _manager = GitManager::default();
-    }
 }

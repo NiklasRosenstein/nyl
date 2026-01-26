@@ -1,0 +1,13 @@
+# Ignore unmaintained crate warnings for transitive dependencies
+# These come from the kube crate and cannot be fixed directly
+[advisories]
+ignore = [
+    # backoff - transitive dep from kube-runtime
+    "RUSTSEC-2025-0012",
+    # derivative - transitive dep from kube-runtime
+    "RUSTSEC-2024-0388",
+    # instant - transitive dep from backoff -> kube-runtime
+    "RUSTSEC-2024-0384",
+    # rustls-pemfile - transitive dep from kube-client
+    "RUSTSEC-2025-0134",
+]
