@@ -1,8 +1,9 @@
 #: Build Nyl binary (Rust).
 #: ------------------------
 #: NOTE: Binary is built by CI and provided in build context as nyl-{amd64,arm64}
+#: Using debian for glibc compatibility with the pre-built binaries
 
-FROM alpine AS nyl-bin
+FROM debian:bookworm-slim AS nyl-bin
 ARG TARGETARCH=amd64
 COPY nyl-${TARGETARCH} /usr/local/bin/nyl
 RUN chmod +x /usr/local/bin/nyl && \
