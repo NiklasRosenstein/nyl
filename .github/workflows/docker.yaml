@@ -102,8 +102,6 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           context: .
           file: argocd-cmp/Dockerfile
           platforms: linux/amd64,linux/arm64
