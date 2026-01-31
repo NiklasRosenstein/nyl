@@ -7,7 +7,7 @@
 # Triggers:
 # - workflow_run: After ci-rust.yaml completes (on develop)
 # - push: Direct push to develop/tags (if ci-rust didn't run)
-# - pull_request: On PRs affecting Docker files (downloads artifacts)
+# - workflow_call: Called by ci-rust.yaml after artifacts are uploaded (eliminates race condition)
 #
 # Dependencies:
 # - Requires ci-rust.yaml to have run and uploaded artifacts
@@ -30,11 +30,8 @@ on:
       - "argocd-cmp/**"
       - ".github/workflows/ci-docker.yaml"
 
-  pull_request:
-    branches: [develop]
-    paths:
-      - "argocd-cmp/**"
-      - ".github/workflows/ci-docker.yaml"
+  # Called by ci-rust.yaml after artifacts are uploaded
+  workflow_call:
 
 jobs:
   build-and-push:
@@ -73,26 +70,26 @@ jobs:
           run_id: ${{ github.event.workflow_run.id }}
           if_no_artifact_found: fail
 
-      - name: Download x86_64 binary artifact (direct)
+      - name: Download x86_64 binary artifact (direct/workflow_call)
         if: github.event_name != 'workflow_run'
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
           name: nyl-x86_64-unknown-linux-gnu
           path: ./artifacts/amd64
-          # Use head_ref for PRs (actual branch name), ref_name for pushes/tags
-          branch: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          # For workflow_call (PRs), use the branch from the calling workflow
+          branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
 
-      - name: Download aarch64 binary artifact (direct)
+      - name: Download aarch64 binary artifact (direct/workflow_call)
         if: github.event_name != 'workflow_run'
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
           name: nyl-aarch64-unknown-linux-gnu
           path: ./artifacts/arm64
-          # Use head_ref for PRs (actual branch name), ref_name for pushes/tags
-          branch: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          # For workflow_call (PRs), use the branch from the calling workflow
+          branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
 
       # Prepare binaries for Docker build

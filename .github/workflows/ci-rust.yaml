@@ -2,7 +2,7 @@ name: Rust CI
 
 on:
   push:
-    branches: [develop, main, "nr/*"]
+    branches: [develop]
     tags: ["*-rust"]
     paths:
       - "nyl/**"
@@ -11,7 +11,7 @@ on:
       - ".github/workflows/ci-docker.yaml"  # Trigger if Docker workflow changes
       - ".github/workflows/_build-rust.yaml"
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
     paths:
       - "nyl/**"
       - "argocd-cmp/**"  # Trigger if Docker needs binaries
@@ -138,3 +138,12 @@ jobs:
         with:
           name: benchmark-results
           path: nyl/target/criterion
+
+  # Call Docker workflow after artifacts are ready
+  # This ensures Docker CI has artifacts available (eliminates race condition)
+  trigger-docker:
+    name: Trigger Docker Build
+    needs: [changes, build-all]
+    # Only trigger when Docker-related files changed
+    if: needs.changes.outputs.docker == 'true'
+    uses: ./.github/workflows/ci-docker.yaml
