@@ -87,7 +87,7 @@ jobs:
       - name: Check binary size (Unix)
         if: runner.os != 'Windows'
         run: |
-          size=$(stat -f%z target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s target/${{ matrix.target }}/release/nyl)
+          size=$(stat -f%z ../target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s ../target/${{ matrix.target }}/release/nyl)
           echo "Binary size: $((size / 1024 / 1024))MB"
           if [ $size -gt 20971520 ]; then
             echo "::error::Binary size exceeds 20MB limit"
@@ -98,7 +98,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $size = (Get-Item target/${{ matrix.target }}/release/nyl.exe).Length
+          $size = (Get-Item ../target/${{ matrix.target }}/release/nyl.exe).Length
           Write-Host "Binary size: $([math]::Round($size / 1MB, 2))MB"
           if ($size -gt 20971520) {
             Write-Error "Binary size exceeds 20MB limit"
@@ -109,7 +109,7 @@ jobs:
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
         run: |
-          binary="target/${{ matrix.target }}/release/nyl"
+          binary="../target/${{ matrix.target }}/release/nyl"
           if ldd "$binary" 2>&1 | grep -q "not a dynamic executable"; then
             echo "✓ Binary is statically linked"
           else
@@ -126,7 +126,7 @@ jobs:
         with:
           name: nyl-${{ matrix.target }}
           path: |
-            nyl/target/${{ matrix.target }}/release/nyl
-            nyl/target/${{ matrix.target }}/release/nyl.exe
+            target/${{ matrix.target }}/release/nyl
+            target/${{ matrix.target }}/release/nyl.exe
           if-no-files-found: ignore
           retention-days: 7
