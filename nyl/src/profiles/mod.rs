@@ -146,18 +146,30 @@ impl ProfileConfig {
     /// # Returns
     /// ProfileConfig loaded from the highest-priority source
     pub fn load(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_from_dir(file, None)
+    }
+
+    /// Load profile configuration from a specific directory context
+    ///
+    /// # Arguments
+    /// * `file` - Optional explicit file path (highest priority)
+    /// * `dir` - Optional directory to search from (defaults to current directory)
+    ///
+    /// # Returns
+    /// ProfileConfig loaded from the highest-priority source
+    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
         // 1. If explicit file provided, use it
         if let Some(path) = file {
             return Self::load_from_file(&path);
         }
 
-        // 2. Search for nyl-profiles.yaml in current/parent directories
-        if let Some(path) = Self::find_profiles_file()? {
+        // 2. Search for nyl-profiles.yaml in specified/current directory or parent directories
+        if let Some(path) = Self::find_profiles_file_in_dir(dir)? {
             return Self::load_from_file(&path);
         }
 
         // 3. Try to load from project config
-        if let Some(config) = Self::load_from_project_config()? {
+        if let Some(config) = Self::load_from_project_config_in_dir(dir)? {
             return Ok(config);
         }
 
@@ -173,9 +185,9 @@ impl ProfileConfig {
         })
     }
 
-    /// Find nyl-profiles.yaml file in current or parent directories
-    fn find_profiles_file() -> Result<Option<PathBuf>> {
-        crate::util::fs::find_config_file(Self::FILENAMES, None, false)
+    /// Find nyl-profiles.yaml file starting from a specific directory
+    fn find_profiles_file_in_dir(dir: Option<&Path>) -> Result<Option<PathBuf>> {
+        crate::util::fs::find_config_file(Self::FILENAMES, dir, false)
     }
 
     /// Load profiles from a specific file
@@ -203,9 +215,9 @@ impl ProfileConfig {
         })
     }
 
-    /// Load profiles from project config (nyl-project.yaml)
-    fn load_from_project_config() -> Result<Option<Self>> {
-        let project_config = ProjectConfig::load(None)?;
+    /// Load profiles from project config in a specific directory
+    fn load_from_project_config_in_dir(dir: Option<&Path>) -> Result<Option<Self>> {
+        let project_config = ProjectConfig::load_from_dir(None, dir)?;
 
         if project_config.config.profiles.is_empty() {
             return Ok(None);
@@ -437,9 +449,8 @@ prod:
     #[test]
     fn test_profile_config_empty_load() {
         let temp = TempDir::new().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
 
-        let config = ProfileConfig::load(None).unwrap();
+        let config = ProfileConfig::load_from_dir(None, Some(temp.path())).unwrap();
         assert!(config.file.is_none());
         assert!(config.profiles.is_empty());
     }

@@ -130,9 +130,21 @@ impl SecretsConfig {
     /// # Returns
     /// SecretsConfig with initialized provider
     pub fn load(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_from_dir(file, None)
+    }
+
+    /// Load secrets configuration from a specific directory context
+    ///
+    /// # Arguments
+    /// * `file` - Optional explicit file path
+    /// * `dir` - Optional directory to search from (defaults to current directory)
+    ///
+    /// # Returns
+    /// SecretsConfig with initialized provider
+    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
         let file = match file {
             Some(f) => Some(f),
-            None => Self::find_secrets_file()?,
+            None => Self::find_secrets_file_in_dir(dir)?,
         };
 
         if let Some(ref path) = file {
@@ -146,9 +158,9 @@ impl SecretsConfig {
         }
     }
 
-    /// Find secrets configuration file
-    fn find_secrets_file() -> Result<Option<PathBuf>> {
-        crate::util::fs::find_config_file(Self::FILENAMES, None, false)
+    /// Find secrets configuration file in a specific directory
+    fn find_secrets_file_in_dir(dir: Option<&Path>) -> Result<Option<PathBuf>> {
+        crate::util::fs::find_config_file(Self::FILENAMES, dir, false)
     }
 
     /// Load secrets configuration from file
@@ -242,9 +254,8 @@ mod tests {
     #[test]
     fn test_secrets_config_default() {
         let temp = TempDir::new().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
 
-        let config = SecretsConfig::load(None).unwrap();
+        let config = SecretsConfig::load_from_dir(None, Some(temp.path())).unwrap();
         assert!(config.file.is_none());
 
         // Default provider should be NullProvider - it returns empty keys

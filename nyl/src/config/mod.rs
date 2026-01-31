@@ -101,8 +101,8 @@ impl ProjectConfig {
 
     /// Load project configuration from file
     ///
-    /// If no file is specified, attempts to find one. If no file is found,
-    /// returns a default configuration.
+    /// If no file is specified, attempts to find one in the current directory.
+    /// If no file is found, returns a default configuration.
     ///
     /// # Arguments
     /// * `file` - Optional path to config file
@@ -110,9 +110,24 @@ impl ProjectConfig {
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
     pub fn load(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_from_dir(file, None)
+    }
+
+    /// Load project configuration from file in a specific directory context
+    ///
+    /// If no file is specified, attempts to find one starting from the given directory.
+    /// If no file is found, returns a default configuration.
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    /// * `dir` - Optional directory to search from (defaults to current directory)
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
         let file = match file {
             Some(f) => Some(f),
-            None => Self::find(None)?,
+            None => Self::find(dir)?,
         };
 
         if let Some(ref path) = file {
@@ -136,9 +151,21 @@ impl ProjectConfig {
     /// # Returns
     /// * ProjectConfig with loaded or default configuration
     pub fn load_with_warning(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_with_warning_from_dir(file, None)
+    }
+
+    /// Load project configuration with warning from a specific directory context
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    /// * `dir` - Optional directory to search from
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_with_warning_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
         let file = match file {
             Some(f) => Some(f),
-            None => Self::find(None)?,
+            None => Self::find(dir)?,
         };
 
         if let Some(ref path) = file {
@@ -316,9 +343,8 @@ search_path = ["lib", "vendor"]
     #[test]
     fn test_load_no_config_returns_defaults() {
         let temp = TempDir::new().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
 
-        let config = ProjectConfig::load(None).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
         assert!(config.file.is_none());
         assert!(config.config.settings.components_path.is_none());
     }

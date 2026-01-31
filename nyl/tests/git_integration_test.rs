@@ -20,6 +20,22 @@ fn setup_test_env() {
     env::set_var("GIT_SSH_COMMAND", "echo 'SSH disabled in tests' && exit 1");
 }
 
+/// Convert a path to a file:// URL that works on both Unix and Windows
+fn path_to_file_url(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        // On Windows, convert backslashes to forward slashes and use three slashes
+        // e.g., C:\Users\foo -> file:///C:/Users/foo
+        let path_str = path.display().to_string().replace('\\', "/");
+        format!("file:///{}", path_str)
+    }
+    #[cfg(not(windows))]
+    {
+        // On Unix, use two slashes (file:// + absolute path starting with /)
+        format!("file://{}", path.display())
+    }
+}
+
 /// Helper to create a test Git repository with commits
 fn create_test_git_repo(repo_dir: &Path) {
     // Initialize repository with explicit branch name
@@ -111,7 +127,7 @@ fn test_git_manager_resolve_ref_main_branch() {
     // Clone and resolve main branch
     let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
-        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
         .unwrap();
 
     // Verify the worktree exists
@@ -134,11 +150,7 @@ fn test_git_manager_resolve_ref_with_subpath() {
 
     let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("main"),
-            Some("subdir"),
-        )
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), Some("subdir"))
         .unwrap();
 
     // Verify we're in the subdirectory
@@ -160,11 +172,7 @@ fn test_git_manager_resolve_ref_branch() {
 
     let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("test-branch"),
-            None,
-        )
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("test-branch"), None)
         .unwrap();
 
     assert!(result.exists());
@@ -182,7 +190,7 @@ fn test_git_manager_resolve_ref_tag() {
 
     let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
-        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("v1.0.0"), None)
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("v1.0.0"), None)
         .unwrap();
 
     assert!(result.exists());
@@ -202,16 +210,12 @@ fn test_git_manager_multiple_refs_same_repo() {
 
     // Resolve main branch
     let main_result = manager
-        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
         .unwrap();
 
     // Resolve test-branch
     let branch_result = manager
-        .resolve_ref(
-            &format!("file://{}", temp_repo.path().display()),
-            Some("test-branch"),
-            None,
-        )
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("test-branch"), None)
         .unwrap();
 
     // Both should exist and be different paths (different worktrees)
@@ -238,7 +242,7 @@ fn test_git_manager_cache_reuse() {
     {
         let mut manager = GitManager::with_cache_dir(&cache_path);
         let _result = manager
-            .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
+            .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
             .unwrap();
     }
 
@@ -246,7 +250,7 @@ fn test_git_manager_cache_reuse() {
     {
         let mut manager = GitManager::with_cache_dir(&cache_path);
         let result = manager
-            .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
+            .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
             .unwrap();
 
         assert!(result.exists());
@@ -265,7 +269,7 @@ fn test_cache_directory_structure() {
 
     let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let _result = manager
-        .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
         .unwrap();
 
     // Verify cache structure

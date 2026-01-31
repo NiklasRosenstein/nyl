@@ -120,10 +120,15 @@ search_path = ["."]
 
 /// Create a new component
 fn create_component(api_version: &str, kind: &str) -> Result<()> {
+    create_component_in_dir(api_version, kind, None)
+}
+
+/// Create a new component in a specific directory (useful for testing)
+fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&Path>) -> Result<()> {
     info!("Creating new component: {}/{}", api_version, kind);
 
     // Load project config to find components directory
-    let config = ProjectConfig::load(None)?;
+    let config = ProjectConfig::load_from_dir(None, project_dir)?;
     let components_base = config.get_components_path();
 
     debug!("Components base path: {}", components_base.display());
@@ -378,14 +383,7 @@ mod tests {
         let components_dir = temp.path().join("components");
         fs::create_dir(&components_dir).unwrap();
 
-        // Change to temp directory so config can be found
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = create_component("v1.example.io", "MyApp");
-
-        // Restore original directory before assertions
-        std::env::set_current_dir(&original_dir).ok();
+        let result = create_component_in_dir("v1.example.io", "MyApp", Some(temp.path()));
 
         assert!(result.is_ok());
 
@@ -408,14 +406,7 @@ mod tests {
         let component_dir = temp.path().join("components").join("v1.example.io").join("MyApp");
         fs::create_dir_all(&component_dir).unwrap();
 
-        // Change to temp directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = create_component("v1.example.io", "MyApp");
-
-        // Restore original directory before assertions
-        std::env::set_current_dir(&original_dir).ok();
+        let result = create_component_in_dir("v1.example.io", "MyApp", Some(temp.path()));
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
