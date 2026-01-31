@@ -105,13 +105,11 @@ fn test_git_manager_resolve_ref_main_branch() {
     let temp_repo = TempDir::new().unwrap();
     create_test_git_repo(temp_repo.path());
 
-    // Set up cache directory
+    // Set up cache directory (use explicit path instead of env var to avoid race conditions)
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
     // Clone and resolve main branch
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
         .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
         .unwrap();
@@ -133,10 +131,8 @@ fn test_git_manager_resolve_ref_with_subpath() {
     create_test_git_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
         .resolve_ref(
             &format!("file://{}", temp_repo.path().display()),
@@ -161,10 +157,8 @@ fn test_git_manager_resolve_ref_branch() {
     create_test_git_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
         .resolve_ref(
             &format!("file://{}", temp_repo.path().display()),
@@ -185,10 +179,8 @@ fn test_git_manager_resolve_ref_tag() {
     create_test_git_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let result = manager
         .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("v1.0.0"), None)
         .unwrap();
@@ -205,10 +197,8 @@ fn test_git_manager_multiple_refs_same_repo() {
     create_test_git_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
 
     // Resolve main branch
     let main_result = manager
@@ -246,18 +236,15 @@ fn test_git_manager_cache_reuse() {
 
     // First resolution
     {
-        std::env::set_var("NYL_CACHE_DIR", &cache_path);
-        let mut manager = GitManager::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(&cache_path);
         let _result = manager
             .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
             .unwrap();
     }
 
     // Second resolution (should reuse cache)
-    // Re-set the env var to ensure it hasn't been changed by parallel tests
     {
-        std::env::set_var("NYL_CACHE_DIR", &cache_path);
-        let mut manager = GitManager::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(&cache_path);
         let result = manager
             .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
             .unwrap();
@@ -275,10 +262,8 @@ fn test_cache_directory_structure() {
     create_test_git_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    let cache_path = cache_dir.path().to_path_buf();
-    std::env::set_var("NYL_CACHE_DIR", &cache_path);
 
-    let mut manager = GitManager::new().unwrap();
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
     let _result = manager
         .resolve_ref(&format!("file://{}", temp_repo.path().display()), Some("main"), None)
         .unwrap();
