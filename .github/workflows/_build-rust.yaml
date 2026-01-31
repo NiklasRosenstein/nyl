@@ -117,12 +117,12 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: |
           binary="../target/${{ matrix.target }}/release/nyl"
-          ldd_output=$(ldd "$binary" 2>&1)
-          if echo "$ldd_output" | grep -qE "not a dynamic executable|statically linked"; then
+          file_output=$(file "$binary")
+          echo "Binary info: $file_output"
+          if echo "$file_output" | grep -q "statically linked"; then
             echo "✓ Binary is statically linked"
           else
-            echo "✗ Binary has dynamic dependencies:"
-            echo "$ldd_output"
+            echo "✗ Binary is not statically linked"
             exit 1
           fi
 
