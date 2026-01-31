@@ -61,6 +61,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # Configure Cargo to use the correct linker for aarch64
+      - name: Configure linker (aarch64-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
       # Musl toolchain setup for static linking
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
