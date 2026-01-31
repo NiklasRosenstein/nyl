@@ -25,10 +25,6 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
     // Load project configuration
     let project_dir = Path::new(&args.path);
 
-    // Change to project directory to ensure relative paths are resolved correctly
-    let original_dir = std::env::current_dir()?;
-    std::env::set_current_dir(project_dir)?;
-
     // Try to find config file
     let config_file = ProjectConfig::find(Some(project_dir))?;
 
@@ -75,8 +71,8 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
         }
     }
 
-    // Determine result before restoring directory
-    let result = if args.strict && has_warnings {
+    // Determine result
+    if args.strict && has_warnings {
         println!("\n✗ Validation failed in strict mode (warnings treated as errors)");
         Err(NylError::Validation("Validation failed in strict mode".to_string()))
     } else {
@@ -86,12 +82,7 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
             println!("\n✓ Validation passed");
         }
         Ok(())
-    };
-
-    // Always restore original directory
-    std::env::set_current_dir(original_dir)?;
-
-    result
+    }
 }
 
 #[cfg(test)]

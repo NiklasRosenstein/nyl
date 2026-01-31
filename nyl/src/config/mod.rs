@@ -367,12 +367,21 @@ search_path = ["lib", "vendor"]
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl-project.yaml");
 
-        let yaml_content = r#"
+        // Use platform-appropriate absolute path
+        #[cfg(windows)]
+        let absolute_path = "C:/absolute/path";
+        #[cfg(not(windows))]
+        let absolute_path = "/absolute/path";
+
+        let yaml_content = format!(
+            r#"
 settings:
   search_path:
     - relative/path
-    - /absolute/path
-"#;
+    - {}
+"#,
+            absolute_path
+        );
         fs::write(&config_path, yaml_content).unwrap();
 
         let config = ProjectConfig::load(Some(config_path)).unwrap();
@@ -381,8 +390,8 @@ settings:
         assert!(config.config.settings.search_path[0].is_absolute());
         assert!(config.config.settings.search_path[0].starts_with(temp.path()));
 
-        // Second path should remain absolute
-        assert_eq!(config.config.settings.search_path[1], PathBuf::from("/absolute/path"));
+        // Second path should remain absolute as-is
+        assert_eq!(config.config.settings.search_path[1], PathBuf::from(absolute_path));
     }
 
     #[test]
