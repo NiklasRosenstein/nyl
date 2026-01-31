@@ -38,6 +38,7 @@ jobs:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include: ${{ fromJson(inputs.targets) }}
     steps:
