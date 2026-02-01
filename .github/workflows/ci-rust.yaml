@@ -149,4 +149,7 @@ jobs:
     needs: [changes, build-all]
     # Only trigger when Docker-related files changed
     if: needs.changes.outputs.docker == 'true'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/ci-docker.yaml
