@@ -29,7 +29,7 @@ spec:
 
 ## API Versions
 
-- `nyl.io/v1`: Core Nyl resources (NylRelease, HelmChart)
+- `nyl.niklasrosenstein.github.com/v1`: Core Nyl resources (NylRelease, HelmChart)
 - `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
 
 ## Processing Behavior
@@ -51,7 +51,7 @@ Nyl resources are processed based on their kind:
 Nyl supports YAML multi-document files with `---` separators:
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: myapp

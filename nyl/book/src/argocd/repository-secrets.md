@@ -327,7 +327,7 @@ This means these URLs are considered equivalent:
 ### Private Helm Chart
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: my-app

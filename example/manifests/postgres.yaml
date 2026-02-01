@@ -1,4 +1,4 @@
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: StatefulSecret
 metadata:
   name: postgres-password
@@ -6,7 +6,7 @@ stringData:
   PASSWORD: ${{ randhex(32) }}
 
 ---
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: postgres
