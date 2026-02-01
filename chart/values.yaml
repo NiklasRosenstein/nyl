@@ -1,0 +1,71 @@
+# Default values for argocd-with-nyl Helm chart
+
+# ArgoCD namespace settings
+namespace:
+  create: true
+  name: argocd
+
+# ArgoCD Helm chart configuration
+argocd:
+  # ArgoCD Helm chart repository and version
+  chart:
+    repository: https://argoproj.github.io/argo-helm
+    name: argo-cd
+    version: "7.4.3"
+  
+  # ArgoCD Helm chart values
+  values:
+    dex:
+      enabled: false
+    
+    repoServer:
+      # Enable cluster role rules for in-cluster Helm and Nyl lookups
+      clusterRoleRules:
+        enabled: true
+
+# Nyl Config Management Plugin settings
+nyl:
+  # Nyl CMP container image
+  image:
+    repository: ghcr.io/helsing-ai/nyl/argocd-cmp
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  
+  # Nyl environment variables
+  env:
+    NYL_CACHE_DIR: /tmp/nyl
+  
+  # Security context for the Nyl CMP container
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+  
+  # Secret containing environment variables for Nyl (e.g., SOPS_AGE_KEY)
+  # Set to null if you don't need a secret
+  envSecret:
+    enabled: false
+    name: argocd-nyl-env
+    # data:
+    #   SOPS_AGE_KEY: ""  # Set your SOPS_AGE_KEY here if needed
+
+# ArgoCD Application settings for self-management
+# Set selfManage.enabled to true to have ArgoCD manage its own installation
+selfManage:
+  enabled: false
+  repoURL: https://github.com/NiklasRosenstein/nyl.git
+  targetRevision: HEAD
+  path: chart
+
+# Additional ArgoCD Helm chart values to merge
+# This allows full customization of the ArgoCD installation
+additionalValues: {}
+  # Example: Configure admin password
+  # configs:
+  #   secret:
+  #     argocdServerAdminPassword: $2a$10$...  # bcrypt hash
+  # Example: Enable Ingress
+  # server:
+  #   ingress:
+  #     enabled: true
+  #     hosts:
+  #       - argocd.example.com

@@ -139,17 +139,19 @@ The Rust binary is **pre-built by CI** and provided in the Docker build context.
    nyl render --in-cluster .
    ```
 
-3. **`argocd-with-nyl/argocd.yaml`** (line 43)
-   - Update image tag to new major version
-   - Add comment about SOPS not yet implemented
+3. **`chart/` (formerly `argocd-with-nyl/`)**
+   - Converted to proper Helm chart structure
+   - Uses `nyl.niklasrosenstein.github.com/v1/HelmChart` resource
+   - Now published via Helm Chart Releaser action
 
 4. **`argocd-cmp/README.md`**
    - Document Rust-based build process
    - Note that binary comes from CI artifacts
    - Update version numbers and tool list
 
-5. **`argocd-with-nyl/README.md`**
-   - Add migration guide for existing users
+5. **`chart/README.md`** (formerly `argocd-with-nyl/README.md`)
+   - Updated with Helm chart installation instructions
+   - Added migration guide for existing users
    - Document command changes (`template` → `render`)
    - Note SOPS unavailable initially
 

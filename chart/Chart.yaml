@@ -1,0 +1,17 @@
+apiVersion: v2
+name: argocd-with-nyl
+description: ArgoCD Helm chart with Nyl Config Management Plugin
+type: application
+version: 0.1.0
+appVersion: "7.4.3"
+keywords:
+  - argocd
+  - nyl
+  - gitops
+  - kubernetes
+home: https://github.com/NiklasRosenstein/nyl
+sources:
+  - https://github.com/NiklasRosenstein/nyl
+maintainers:
+  - name: Niklas Rosenstein
+    url: https://github.com/NiklasRosenstein
