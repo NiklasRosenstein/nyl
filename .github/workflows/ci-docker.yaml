@@ -28,6 +28,7 @@ on:
     tags: ["*"]
     paths:
       - "docker/**"
+      - "chart/**"
 
   # Called by ci-rust.yaml after artifacts are uploaded
   workflow_call:
