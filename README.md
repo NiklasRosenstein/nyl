@@ -26,10 +26,10 @@ Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
 
 → See [docker/README.md](docker/README.md) for build instructions.
 
-### [`argocd-with-nyl/`](argocd-with-nyl/) - ArgoCD Bootstrap Example
-Example Kubernetes manifest to deploy ArgoCD with Nyl as a Config Management Plugin.
+### [`chart/`](chart/) - ArgoCD Helm Chart
+Helm chart to deploy ArgoCD with Nyl as a Config Management Plugin.
 
-→ See [argocd-with-nyl/README.md](argocd-with-nyl/README.md) for deployment guide.
+→ See [chart/README.md](chart/README.md) for installation instructions.
 
 ## 🚀 Quick Start
 
