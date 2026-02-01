@@ -102,8 +102,6 @@ chart/
 └── README.md               -- This file
 ```
 
-**Note**: This directory also contains legacy Nyl project files (`.envrc`, `.secrets.yaml`, `.sops.yaml`, `nyl-project.yaml`, `nyl-secrets.yaml`, `argocd.yaml`) that are excluded from the Helm chart package via `.helmignore`. These files are kept for backward compatibility and reference but are not used by the Helm chart.
-
 ### How It Works
 
 This Helm chart uses Nyl's `HelmChart` custom resource (`nyl.niklasrosenstein.github.com/v1`) to deploy ArgoCD. The `HelmChart` resource tells Nyl to:
@@ -125,7 +123,7 @@ If you're upgrading from the Python version of Nyl, here's what you need to know
    - The ArgoCD plugin.yaml in this repository has been updated
 
 2. **Image version**: New major version (1.0.0)
-   - Update `argocd.yaml` line 43 to use the new image tag
+   - Update your Helm values to use the new image tag
    - Example: `ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0`
 
 3. **SOPS support**: Not yet implemented in Rust version

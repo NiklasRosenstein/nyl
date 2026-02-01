@@ -21,10 +21,3 @@
 .idea/
 *.tmproj
 .vscode/
-# Nyl project files (not needed in Helm chart)
-.envrc
-.secrets.yaml
-.sops.yaml
-nyl-project.yaml
-nyl-secrets.yaml
-argocd.yaml
