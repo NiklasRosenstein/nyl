@@ -190,6 +190,9 @@ jobs:
           fi
           SHORT_SHA="${FULL_SHA:0:7}"
 
+          # OCI registry paths must be lowercase.
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
           sed -i "s|tag: .*|tag: sha-${SHORT_SHA}|" chart/values.yaml
           helm package chart/
-          helm push argocd-with-nyl-*.tgz oci://ghcr.io/${{ github.repository_owner }}/nyl/chart
+          helm push argocd-with-nyl-*.tgz oci://ghcr.io/${OWNER}/nyl/chart
