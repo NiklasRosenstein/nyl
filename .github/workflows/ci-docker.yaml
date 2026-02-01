@@ -168,7 +168,6 @@ jobs:
           context: .
           file: argocd-cmp/Dockerfile
           platforms: linux/amd64,linux/arm64
-          # Only push on non-PR events (develop pushes, tags)
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
