@@ -1,0 +1,8 @@
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: example/v1/Nginx
+metadata:
+  name: my-nginx
+  namespace: default
+spec:
+  replicas: 3
+  image: nginx:1.25
