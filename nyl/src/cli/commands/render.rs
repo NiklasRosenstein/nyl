@@ -4,11 +4,15 @@ use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
+    constants::API_VERSION_COMPONENTS,
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
-    resources::{extract_application_generators, extract_nyl_release, HelmChart, NylRelease, ReleaseMetadata},
+    resources::{
+        extract_application_generators, extract_nyl_release, is_nyl_component, ChartRef, HelmChart, NylComponent,
+        NylRelease, ReleaseMetadata,
+    },
     secrets::SecretsConfig,
     template::TemplateContext,
     NylError, Result,
@@ -105,15 +109,16 @@ pub async fn render_manifests(
     let resources = load_resources(path)?;
     let filtered = filter_resources(resources, component)?;
 
-    // 7. Check if any HelmChart resources exist (need cluster info)
-    let has_helm_charts = filtered.iter().any(|r| {
+    // 7. Check if any resources need Helm rendering (HelmChart or Component)
+    let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1."))
+        (kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")))
+            || api_version == Some(API_VERSION_COMPONENTS)
     });
 
     // 8. Determine kube_version and api_versions (only if needed)
-    let (kube_version, api_versions) = if !has_helm_charts {
+    let (kube_version, api_versions) = if !needs_helm_rendering {
         // No HelmCharts, version info not needed
         (String::new(), Vec::new())
     } else if offline {
@@ -266,6 +271,44 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
+        render_helm_chart(&chart, context, config, kube_version, api_versions)
+    } else if is_nyl_component(resource) {
+        // Parse as Component and render via the existing Helm path
+        let component: NylComponent = serde_json::from_value(resource.clone())
+            .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
+
+        let chart_dir = config.get_components_path().join(&component.kind);
+        let chart_yaml = chart_dir.join("Chart.yaml");
+        if !chart_yaml.exists() {
+            return Err(NylError::Config(format!(
+                "Component '{}' references chart path '{}', but {} does not exist",
+                component.kind,
+                chart_dir.display(),
+                chart_yaml.display()
+            )));
+        }
+
+        let release_name = component.metadata.name.clone();
+        let release_namespace = component.metadata.namespace.clone();
+
+        let chart = HelmChart {
+            api_version: "v1.0".to_string(),
+            kind: "HelmChart".to_string(),
+            metadata: component.metadata,
+            spec: crate::resources::HelmChartSpec {
+                chart: ChartRef {
+                    path: Some(chart_dir.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+                release: Some(ReleaseMetadata {
+                    name: release_name,
+                    namespace: release_namespace,
+                    create_namespace: false,
+                }),
+                values: component.spec,
+            },
+        };
+
         render_helm_chart(&chart, context, config, kube_version, api_versions)
     } else {
         // For Phase 3, pass through other resources as-is
