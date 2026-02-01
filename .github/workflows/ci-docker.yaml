@@ -114,6 +114,14 @@ jobs:
           branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
 
+      - name: Debug artifact contents
+        run: |
+          echo "event_name: ${{ github.event_name }}"
+          echo "ref: ${{ github.ref }}"
+          echo "ref_name: ${{ github.ref_name }}"
+          echo "run_id: ${{ github.run_id }}"
+          find ./artifacts -type f 2>/dev/null || echo "no ./artifacts directory"
+
       # Prepare binaries for Docker build
       # Dockerfile expects: nyl-amd64 and nyl-arm64 in context root
       - name: Prepare binaries for Docker
