@@ -43,7 +43,7 @@ spec:
       extraContainers:
         - name: nyl-v1
           # NOTE: This image uses the Rust version of Nyl (SOPS not yet implemented)
-          image: ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0
+          image: ghcr.io/niklasrosenstein/nyl:1.0.0
           securityContext:
             runAsNonRoot: true
             runAsUser: 999

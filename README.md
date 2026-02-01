@@ -16,7 +16,7 @@ Fast, efficient Kubernetes manifest generator written in Rust. Complete rewrite 
 
 → See [nyl/README.md](nyl/README.md) for installation and usage details.
 
-### [`argocd-cmp/`](argocd-cmp/) - ArgoCD Config Management Plugin
+### [`docker/`](docker/) - ArgoCD Config Management Plugin
 Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
 
 **Includes:**
@@ -24,7 +24,7 @@ Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
 - ArgoCD CMP Server
 - Helm, SOPS, Kyverno
 
-→ See [argocd-cmp/README.md](argocd-cmp/README.md) for build instructions.
+→ See [docker/README.md](docker/README.md) for build instructions.
 
 ### [`chart/`](chart/) - ArgoCD Helm Chart
 Helm chart to deploy ArgoCD with Nyl as a Config Management Plugin.
