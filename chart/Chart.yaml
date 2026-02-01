@@ -1,5 +1,5 @@
 apiVersion: v2
-name: argocd-with-nyl
+name: chart
 description: ArgoCD Helm chart with Nyl Config Management Plugin
 type: application
 version: 0.1.0

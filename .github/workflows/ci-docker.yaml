@@ -28,7 +28,6 @@ on:
     tags: ["*"]
     paths:
       - "docker/**"
-      - ".github/workflows/ci-docker.yaml"
 
   # Called by ci-rust.yaml after artifacts are uploaded
   workflow_call:
@@ -194,5 +193,10 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           sed -i "s|tag: .*|tag: sha-${SHORT_SHA}|" chart/values.yaml
-          helm package chart/
-          helm push argocd-with-nyl-*.tgz oci://ghcr.io/${OWNER}/nyl/chart
+
+          # Use the SHA as a semver pre-release suffix so each push produces
+          # a distinct OCI tag (e.g. 0.1.0-sha-abc1234) instead of
+          # overwriting the base version every time.
+          BASE_VERSION=$(helm show chart chart/ | grep '^version:' | awk '{print $2}')
+          helm package chart/ --version="${BASE_VERSION}-sha-${SHORT_SHA}"
+          helm push chart-*.tgz oci://ghcr.io/${OWNER}/nyl
