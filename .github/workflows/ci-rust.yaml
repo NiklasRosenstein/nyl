@@ -6,7 +6,7 @@ on:
     tags: ["*-rust"]
     paths:
       - "nyl/**"
-      - "argocd-cmp/**"  # Trigger if Docker needs binaries
+      - "docker/**"  # Trigger if Docker needs binaries
       - ".github/workflows/ci-rust.yaml"
       - ".github/workflows/ci-docker.yaml"  # Trigger if Docker workflow changes
       - ".github/workflows/_build-rust.yaml"
@@ -14,7 +14,7 @@ on:
     branches: [develop]
     paths:
       - "nyl/**"
-      - "argocd-cmp/**"  # Trigger if Docker needs binaries
+      - "docker/**"  # Trigger if Docker needs binaries
       - ".github/workflows/ci-rust.yaml"
       - ".github/workflows/ci-docker.yaml"  # Trigger if Docker workflow changes
       - ".github/workflows/_build-rust.yaml"
@@ -98,7 +98,7 @@ jobs:
         with:
           filters: |
             docker:
-              - 'argocd-cmp/**'
+              - 'docker/**'
               - '.github/workflows/ci-docker.yaml'
               - '.github/workflows/_build-rust.yaml'
 
