@@ -90,7 +90,7 @@ The existing ArgoCD CMP image uses:
   - Helm v3.19.5
   - SOPS v3.11.0
   - Kyverno v1.16.2
-- Image: `ghcr.io/helsing-ai/nyl:0.0.7`
+- Image: `ghcr.io/niklasrosenstein/nyl:0.0.7`
 - Current size: ~200MB+
 
 ### Migration Changes (Rust)
