@@ -1,4 +1,4 @@
-# nyl/argocd-cmp
+# nyl
 
 This directory builds a container image that contains Nyl (Rust version) and the [ArgoCD CMP Server][1] with the following tools:
 
@@ -25,7 +25,7 @@ cd ..
 cp nyl/target/release/nyl ./nyl-amd64
 
 # Build Docker image
-docker build -t nyl-cmp:test -f argocd-cmp/Dockerfile . --build-arg TARGETARCH=amd64
+docker build -t nyl:test -f docker/Dockerfile . --build-arg TARGETARCH=amd64
 ```
 
 **Note**: In CI, the binary is built separately and added to the build context automatically.

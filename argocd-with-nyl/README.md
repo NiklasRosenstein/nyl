@@ -18,7 +18,7 @@ You may want to modify the file to suit your needs before proceeding, for exampl
 * Configure ArgoCD to use OIDC for authentication.
 * Configure ArgoCD to use an Ingress.
 * Point ArgoCD to your own Git repository (this is required for ArgoCD to own its own installation after bootstrapping).
-* Adjust the `nyl/argocd-cmp` image version.
+* Adjust the `nyl` image version.
 
 Once you are ready, run the following command to bootstrap ArgoCD:
 
@@ -65,7 +65,7 @@ If you're upgrading from the Python version of Nyl, here's what you need to know
 
 2. **Image version**: New major version (1.0.0)
    - Update `argocd.yaml` line 43 to use the new image tag
-   - Example: `ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0`
+   - Example: `ghcr.io/niklasrosenstein/nyl:1.0.0`
 
 3. **SOPS support**: Not yet implemented in Rust version
    - **Workaround**: Use Kubernetes secrets provider or Null provider temporarily
@@ -76,7 +76,7 @@ If you're upgrading from the Python version of Nyl, here's what you need to know
 
 1. **Update image reference** in your ArgoCD application:
    ```yaml
-   image: ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0
+   image: ghcr.io/niklasrosenstein/nyl:1.0.0
    ```
 
 2. **Update any local scripts** that use `nyl template`:

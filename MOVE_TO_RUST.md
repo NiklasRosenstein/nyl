@@ -90,7 +90,7 @@ The existing ArgoCD CMP image uses:
   - Helm v3.19.5
   - SOPS v3.11.0
   - Kyverno v1.16.2
-- Image: `ghcr.io/helsing-ai/nyl/argocd-cmp:0.0.7`
+- Image: `ghcr.io/niklasrosenstein/nyl:0.0.7`
 - Current size: ~200MB+
 
 ### Migration Changes (Rust)
@@ -124,13 +124,13 @@ The Rust binary is **pre-built by CI** and provided in the Docker build context.
 
 ### Files to Update
 
-1. **`argocd-cmp/Dockerfile`**
+1. **`docker/Dockerfile`**
    - Replace Python build stages (lines 1-22) with direct binary copy
    - Change final stage base from `python:3.14-slim` to `debian:bookworm-slim`
    - Remove Python venv copy, add Rust binary from nyl-bin stage
    - Keep SOPS in image for future use
 
-2. **`argocd-cmp/plugin.yaml`** (line 37)
+2. **`docker/plugin.yaml`** (line 37)
    ```yaml
    # OLD:
    nyl template --in-cluster .
@@ -143,7 +143,7 @@ The Rust binary is **pre-built by CI** and provided in the Docker build context.
    - Update image tag to new major version
    - Add comment about SOPS not yet implemented
 
-4. **`argocd-cmp/README.md`**
+4. **`docker/README.md`**
    - Document Rust-based build process
    - Note that binary comes from CI artifacts
    - Update version numbers and tool list

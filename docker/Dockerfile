@@ -82,7 +82,7 @@ COPY --from=helm-bin /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=sops-bin /usr/local/bin/sops /usr/local/bin/sops
 COPY --from=kyverno-bin /usr/local/bin/kyverno /usr/local/bin/kyverno
 COPY --from=nyl-bin /usr/local/bin/nyl /usr/local/bin/nyl
-COPY --chown=999 argocd-cmp/plugin.yaml /home/argocd/cmp-server/config/plugin.yaml
+COPY --chown=999 docker/plugin.yaml /home/argocd/cmp-server/config/plugin.yaml
 
 RUN groupadd --system --gid 999 argocd && \
     useradd --system --uid 999 --gid 999 --home /home/argocd -m --shell /bin/false argocd && \
