@@ -29,6 +29,7 @@ on:
     paths:
       - "docker/**"
       - "chart/**"
+      - ".github/workflows/ci-docker.yaml"
 
   # Called by ci-rust.yaml after artifacts are uploaded
   workflow_call:
