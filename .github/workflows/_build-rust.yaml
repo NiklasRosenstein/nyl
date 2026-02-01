@@ -119,7 +119,7 @@ jobs:
           binary="../target/${{ matrix.target }}/release/nyl"
           file_output=$(file "$binary")
           echo "Binary info: $file_output"
-          if echo "$file_output" | grep -q "statically linked"; then
+          if echo "$file_output" | grep -q "static.*linked"; then
             echo "✓ Binary is statically linked"
           else
             echo "✗ Binary is not statically linked"
