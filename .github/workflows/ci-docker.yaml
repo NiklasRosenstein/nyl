@@ -70,25 +70,41 @@ jobs:
           run_id: ${{ github.event.workflow_run.id }}
           if_no_artifact_found: fail
 
-      - name: Download x86_64 binary artifact (direct/workflow_call)
-        if: github.event_name != 'workflow_run'
+      # workflow_call: ci-docker runs inside the same workflow run as ci-rust,
+      # so artifacts are already available via the standard download action.
+      - name: Download x86_64 binary artifact (workflow_call)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@v4
+        with:
+          name: nyl-x86_64-unknown-linux-gnu
+          path: ./artifacts/amd64
+
+      - name: Download aarch64 binary artifact (workflow_call)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@v4
+        with:
+          name: nyl-aarch64-unknown-linux-gnu
+          path: ./artifacts/arm64
+
+      # push: ci-docker was triggered independently, so we need to find the
+      # ci-rust run on this branch to pull artifacts from.
+      - name: Download x86_64 binary artifact (push)
+        if: github.event_name == 'push'
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
           name: nyl-x86_64-unknown-linux-gnu
           path: ./artifacts/amd64
-          # For workflow_call (PRs), use the branch from the calling workflow
           branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
 
-      - name: Download aarch64 binary artifact (direct/workflow_call)
-        if: github.event_name != 'workflow_run'
+      - name: Download aarch64 binary artifact (push)
+        if: github.event_name == 'push'
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
           name: nyl-aarch64-unknown-linux-gnu
           path: ./artifacts/arm64
-          # For workflow_call (PRs), use the branch from the calling workflow
           branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
 
