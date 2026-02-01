@@ -11,7 +11,7 @@
 #
 # Dependencies:
 # - Requires ci-rust.yaml to have run and uploaded artifacts
-# - Downloads: nyl-x86_64-unknown-linux-gnu, nyl-aarch64-unknown-linux-gnu
+# - Downloads: nyl-x86_64-unknown-linux-musl, nyl-aarch64-unknown-linux-musl
 
 name: Docker CI
 
@@ -55,7 +55,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-x86_64-unknown-linux-gnu
+          name: nyl-x86_64-unknown-linux-musl
           path: ./artifacts/amd64
           run_id: ${{ github.event.workflow_run.id }}
           if_no_artifact_found: fail
@@ -65,7 +65,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-aarch64-unknown-linux-gnu
+          name: nyl-aarch64-unknown-linux-musl
           path: ./artifacts/arm64
           run_id: ${{ github.event.workflow_run.id }}
           if_no_artifact_found: fail
@@ -78,7 +78,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-x86_64-unknown-linux-gnu
+          name: nyl-x86_64-unknown-linux-musl
           path: ./artifacts/amd64
           run_id: ${{ github.run_id }}
           if_no_artifact_found: fail
@@ -88,7 +88,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-aarch64-unknown-linux-gnu
+          name: nyl-aarch64-unknown-linux-musl
           path: ./artifacts/arm64
           run_id: ${{ github.run_id }}
           if_no_artifact_found: fail
@@ -100,7 +100,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-x86_64-unknown-linux-gnu
+          name: nyl-x86_64-unknown-linux-musl
           path: ./artifacts/amd64
           branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
@@ -110,7 +110,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v3
         with:
           workflow: ci-rust.yaml
-          name: nyl-aarch64-unknown-linux-gnu
+          name: nyl-aarch64-unknown-linux-musl
           path: ./artifacts/arm64
           branch: ${{ github.ref_name }}
           if_no_artifact_found: fail
