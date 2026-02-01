@@ -1,3 +1,5 @@
+# NOTE: This is a legacy Nyl project file kept for backward compatibility and reference.
+# For new installations, use the Helm chart instead: helm install argocd ./chart
 #
 # This is an example Kubernetes manifest that can be applied with Nyl to deploy ArgoCD with Nyl as a Config Management
 # Plugin.
@@ -20,7 +22,7 @@ stringData:
   SOPS_AGE_KEY: ${{ secrets.get("SOPS_AGE_KEY") }}
 
 ---
-apiVersion: inline.nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: argocd
@@ -77,9 +79,9 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/helsing-ai/nyl.git
+    repoURL: https://github.com/NiklasRosenstein/nyl.git
     targetRevision: HEAD
-    path: argocd-with-nyl
+    path: chart
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd

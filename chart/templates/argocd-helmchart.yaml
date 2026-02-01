@@ -10,11 +10,36 @@ spec:
     version: {{ .Values.argocd.chart.version | quote }}
   values:
     {{- $defaultValues := .Values.argocd.values }}
-    {{- $nylContainer := dict "name" "nyl-v1" "image" (printf "%s:%s" .Values.nyl.image.repository .Values.nyl.image.tag) "imagePullPolicy" .Values.nyl.image.pullPolicy "securityContext" .Values.nyl.securityContext "volumeMounts" (list (dict "mountPath" "/var/run/argocd" "name" "var-files") (dict "mountPath" "/home/argocd/cmp-server/plugins" "name" "plugins") (dict "mountPath" "/tmp" "name" "cmp-tmp")) "env" (list (dict "name" "NYL_CACHE_DIR" "value" .Values.nyl.env.NYL_CACHE_DIR)) }}
+    
+    {{- /* Build volume mounts list */ -}}
+    {{- $volumeMounts := list }}
+    {{- $volumeMounts = append $volumeMounts (dict "mountPath" "/var/run/argocd" "name" "var-files") }}
+    {{- $volumeMounts = append $volumeMounts (dict "mountPath" "/home/argocd/cmp-server/plugins" "name" "plugins") }}
+    {{- $volumeMounts = append $volumeMounts (dict "mountPath" "/tmp" "name" "cmp-tmp") }}
+    
+    {{- /* Build environment variables list */ -}}
+    {{- $envVars := list }}
+    {{- $envVars = append $envVars (dict "name" "NYL_CACHE_DIR" "value" .Values.nyl.env.NYL_CACHE_DIR) }}
+    
+    {{- /* Build Nyl container configuration */ -}}
+    {{- $nylContainer := dict 
+      "name" "nyl-v1"
+      "image" (printf "%s:%s" .Values.nyl.image.repository .Values.nyl.image.tag)
+      "imagePullPolicy" .Values.nyl.image.pullPolicy
+      "securityContext" .Values.nyl.securityContext
+      "volumeMounts" $volumeMounts
+      "env" $envVars
+    }}
+    
+    {{- /* Add envFrom if secret is enabled */ -}}
     {{- if .Values.nyl.envSecret.enabled }}
     {{- $_ := set $nylContainer "envFrom" (list (dict "secretRef" (dict "name" .Values.nyl.envSecret.name))) }}
     {{- end }}
+    
+    {{- /* Build repoServer configuration */ -}}
     {{- $repoServerValues := dict "extraContainers" (list $nylContainer) "volumes" (list (dict "name" "cmp-tmp" "emptyDir" dict)) }}
     {{- $repoServerValues = merge $repoServerValues $defaultValues.repoServer }}
+    
+    {{- /* Merge all values */ -}}
     {{- $mergedValues := merge (dict "repoServer" $repoServerValues) $defaultValues .Values.additionalValues }}
     {{- $mergedValues | toYaml | nindent 4 }}
