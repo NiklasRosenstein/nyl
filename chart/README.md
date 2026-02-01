@@ -98,8 +98,11 @@ chart/
 │   ├── nyl-secret.yaml     -- Secret for Nyl environment variables (optional)
 │   ├── argocd-helmchart.yaml -- Nyl HelmChart resource for ArgoCD
 │   └── argocd-application.yaml -- Self-management Application (optional)
+├── .helmignore             -- Files to exclude from package
 └── README.md               -- This file
 ```
+
+**Note**: This directory also contains legacy Nyl project files (`.envrc`, `.secrets.yaml`, `.sops.yaml`, `nyl-project.yaml`, `nyl-secrets.yaml`, `argocd.yaml`) that are excluded from the Helm chart package via `.helmignore`. These files are kept for backward compatibility and reference but are not used by the Helm chart.
 
 ### How It Works
 
