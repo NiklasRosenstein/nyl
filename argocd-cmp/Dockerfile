@@ -1,14 +1,12 @@
-#: Validate Nyl binary (Rust).
-#: --------------------------
-#: NOTE: Binary is built by CI (musl, statically linked) and provided in build
-#: context as nyl-{amd64,arm64}. Alpine is sufficient since the binary has no
-#: dynamic dependencies.
+#: Copy Nyl binary (Rust).
+#: ----------------------
+#: Binary is built by CI (musl, statically linked) and provided in build context
+#: as nyl-{amd64,arm64}. No validation here: the arm64 build runs under QEMU
+#: emulation which cannot execute the binary; CI already verifies it.
 
-FROM alpine AS nyl-bin
+FROM scratch AS nyl-bin
 ARG TARGETARCH=amd64
 COPY nyl-${TARGETARCH} /usr/local/bin/nyl
-RUN chmod +x /usr/local/bin/nyl && \
-    /usr/local/bin/nyl --version
 
 #: Base stage in which we'll fetch binaries from third-party tools.
 #: ----------------------------------------------------------------
@@ -86,9 +84,7 @@ COPY --from=kyverno-bin /usr/local/bin/kyverno /usr/local/bin/kyverno
 COPY --from=nyl-bin /usr/local/bin/nyl /usr/local/bin/nyl
 COPY --chown=999 argocd-cmp/plugin.yaml /home/argocd/cmp-server/config/plugin.yaml
 
-# Validate Nyl can be run, plus various setup steps.
-RUN nyl --version \
-    && groupadd --system --gid 999 argocd && \
+RUN groupadd --system --gid 999 argocd && \
     useradd --system --uid 999 --gid 999 --home /home/argocd -m --shell /bin/false argocd && \
     mkdir -p /var/log/nyl \
     && chown -R argocd:argocd /var/log/nyl
