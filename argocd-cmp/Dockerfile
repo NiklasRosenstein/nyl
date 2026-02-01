@@ -1,25 +1,12 @@
-FROM python:3.14-slim AS build_base
-COPY --from=ghcr.io/astral-sh/uv:0.9.25 /uv /bin/uv
+#: Copy Nyl binary (Rust).
+#: ----------------------
+#: Binary is built by CI (musl, statically linked) and provided in build context
+#: as nyl-{amd64,arm64}. No validation here: the arm64 build runs under QEMU
+#: emulation which cannot execute the binary; CI already verifies it.
 
-#: Build Nyl itself.
-#: -----------------
-
-FROM build_base AS build
-
-WORKDIR /opt/nyl
-
-# Install dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-project --link-mode=copy --compile-bytecode
-
-ADD src /opt/nyl
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    --mount=type=bind,source=README.md,target=README.md \
-    uv sync --frozen --link-mode=copy --compile-bytecode
+FROM scratch AS nyl-bin
+ARG TARGETARCH=amd64
+COPY nyl-${TARGETARCH} /usr/local/bin/nyl
 
 #: Base stage in which we'll fetch binaries from third-party tools.
 #: ----------------------------------------------------------------
@@ -84,22 +71,20 @@ RUN \
 #: Build the ArgoCD CMP server image.
 #: ----------------------------------
 
-FROM python:3.14-slim AS nyl-cmp
+FROM debian:bookworm-slim AS nyl-cmp
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
 COPY --from=argocd-bin /usr/local/bin/argocd /usr/local/bin/argocd
 RUN ln -s /usr/local/bin/argocd /usr/local/bin/argocd-cmp-server && chown 999:999 /usr/local/bin/argocd-cmp-server
 COPY --from=helm-bin /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=sops-bin /usr/local/bin/sops /usr/local/bin/sops
 COPY --from=kyverno-bin /usr/local/bin/kyverno /usr/local/bin/kyverno
-COPY --from=build /opt/nyl /opt/nyl
-RUN ln -s /opt/nyl/.venv/bin/nyl /usr/local/bin/nyl
+COPY --from=nyl-bin /usr/local/bin/nyl /usr/local/bin/nyl
 COPY --chown=999 argocd-cmp/plugin.yaml /home/argocd/cmp-server/config/plugin.yaml
 
-# Validate Nyl can be run, plus various setup steps.
-RUN nyl version \
-    && groupadd --system --gid 999 argocd && \
+RUN groupadd --system --gid 999 argocd && \
     useradd --system --uid 999 --gid 999 --home /home/argocd -m --shell /bin/false argocd && \
     mkdir -p /var/log/nyl \
     && chown -R argocd:argocd /var/log/nyl

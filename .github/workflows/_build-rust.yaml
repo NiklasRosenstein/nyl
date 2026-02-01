@@ -1,0 +1,140 @@
+# Reusable workflow for building Rust binaries across all platforms
+# This is the SINGLE SOURCE OF TRUTH for binary building logic
+# Used by: ci-rust.yaml (primary CI), potentially release workflows
+#
+# Key features:
+# - Cross-compilation support (Linux, macOS, Windows)
+# - Architecture support (x86_64, aarch64)
+# - ABI variants (gnu, musl, darwin, msvc)
+# - Binary size verification (max 20MB)
+# - Static linking verification for musl targets
+# - Consistent caching with rust-cache@v2
+
+name: Build Rust Binaries
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: 'JSON array of build targets (e.g., [{"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu"}])'
+        required: true
+        type: string
+      upload-artifacts:
+        description: 'Whether to upload build artifacts (default: true)'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    working-directory: nyl
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.targets) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nyl
+
+      # Cross-compilation setup for aarch64 Linux GNU
+      - name: Install cross-compilation tools (aarch64-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # Configure Cargo to use the correct linker for aarch64
+      - name: Configure linker (aarch64-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      # Musl toolchain setup for static linking
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # Special handling for aarch64-musl (requires cross tool)
+      - name: Install cross for aarch64-musl
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # Build binary using cross for aarch64-musl
+      - name: Build release binary (cross)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cross build --release --target ${{ matrix.target }}
+
+      # Build binary using standard cargo for all other targets
+      - name: Build release binary
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Verify binary size doesn't exceed 20MB limit
+      - name: Check binary size (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          size=$(stat -f%z ../target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s ../target/${{ matrix.target }}/release/nyl)
+          echo "Binary size: $((size / 1024 / 1024))MB"
+          if [ $size -gt 20971520 ]; then
+            echo "::error::Binary size exceeds 20MB limit"
+            exit 1
+          fi
+
+      - name: Check binary size (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $size = (Get-Item ../target/${{ matrix.target }}/release/nyl.exe).Length
+          Write-Host "Binary size: $([math]::Round($size / 1MB, 2))MB"
+          if ($size -gt 20971520) {
+            Write-Error "Binary size exceeds 20MB limit"
+            exit 1
+          }
+
+      # Verify static linking for musl targets (important for Docker containers)
+      - name: Verify static linking (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          binary="../target/${{ matrix.target }}/release/nyl"
+          file_output=$(file "$binary")
+          echo "Binary info: $file_output"
+          if echo "$file_output" | grep -q "static.*linked"; then
+            echo "✓ Binary is statically linked"
+          else
+            echo "✗ Binary is not statically linked"
+            exit 1
+          fi
+
+      # Upload artifacts with 7-day retention
+      # Artifact name format: nyl-{target}
+      - name: Upload artifact
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyl-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/nyl
+            target/${{ matrix.target }}/release/nyl.exe
+          if-no-files-found: ignore
+          retention-days: 7

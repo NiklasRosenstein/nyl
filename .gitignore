@@ -1,14 +1,20 @@
+# Nyl runtime cache
 .nyl/
-docs/site/
+
+# Build artifacts
 /result
 
-# Python
-__pycache__/
-*.py[cod]
-.Python
-build/
-dist/
-sdist/
-*.egg-info/
-*.egg
-.dmypy.json
+# Rust
+nyl/target/
+nyl/Cargo.lock
+nyl/book/book/
+**/*.rs.bk
+*.pdb
+
+# Development
+todo.txt
+.claude/
+
+# Added by cargo
+
+/target

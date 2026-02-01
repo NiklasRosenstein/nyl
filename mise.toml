@@ -1,16 +1,119 @@
 [tools]
-"cargo:tire" = "0.1.2"
+# Rust toolchain (PRIMARY)
+rust = "1.93.0"
+
+# Cargo extensions for development and release
+"cargo:cargo-dist" = "latest"
+"cargo:cargo-tarpaulin" = "latest"
+"cargo:cargo-deny" = "latest"
+"cargo:cargo-audit" = "latest"
+
+# Kubernetes tools
 kyverno = "1.14.4"
-uv = "0.9.25"
 sops = "3.11.0"
 helm = "3.19.5"
 kubectl = "1.35.0"
-"pipx:slap-cli" = "1.15.0"
 
-[tasks.build-docs]
-dir = "docs"
-run = "uv run mkdocs build"
+# Primary Rust tasks (run from repository root)
+[tasks.fmt]
+description = "Format Rust code"
+dir = "nyl"
+run = "cargo fmt"
 
-[tasks.serve-docs]
-dir = "docs"
-run = "uv run mkdocs serve"
+[tasks.fmt-check]
+description = "Check Rust formatting"
+dir = "nyl"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Run Rust clippy"
+dir = "nyl"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Run Rust tests"
+dir = "nyl"
+run = "cargo test --all-features"
+
+[tasks.test-verbose]
+description = "Run Rust tests with output"
+dir = "nyl"
+run = "cargo test --all-features -- --nocapture"
+
+[tasks.bench]
+description = "Run Rust benchmarks"
+dir = "nyl"
+run = "cargo bench"
+
+[tasks.build]
+description = "Build Rust release binary"
+dir = "nyl"
+run = "cargo build --release"
+
+[tasks.build-dist]
+description = "Build with dist profile"
+dir = "nyl"
+run = "cargo build --profile dist"
+
+[tasks.check-all]
+description = "Run all checks"
+dir = "nyl"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+  "cargo test --all-features",
+]
+
+[tasks.pre-commit]
+description = "Run pre-commit checks"
+depends = ["fmt-check", "lint", "test"]
+
+[tasks.coverage]
+description = "Generate coverage report"
+dir = "nyl"
+run = "cargo tarpaulin --out Html --output-dir coverage"
+
+[tasks.security-audit]
+description = "Run security audit"
+dir = "nyl"
+run = "cargo audit"
+
+[tasks.dist-init]
+description = "Initialize cargo-dist"
+dir = "nyl"
+run = "dist init"
+
+[tasks.dist-build]
+description = "Build release artifacts"
+dir = "nyl"
+run = "dist build"
+
+[tasks.dist-plan]
+description = "Show dist plan"
+dir = "nyl"
+run = "dist plan"
+
+[tasks.docs-build]
+description = "Build Rust mdbook docs"
+dir = "nyl"
+run = "mdbook build book"
+
+[tasks.docs-serve]
+description = "Serve Rust mdbook docs"
+dir = "nyl"
+run = "mdbook serve book --open"
+
+[tasks.docs-rustdoc]
+description = "Generate API docs"
+dir = "nyl"
+run = "cargo doc --no-deps --open"
+
+[tasks.size-check]
+description = "Check binary size"
+dir = "nyl"
+run = "ls -lh target/release/nyl && du -h target/release/nyl"
+
+[tasks.clean]
+description = "Clean build artifacts"
+dir = "nyl"
+run = "cargo clean"

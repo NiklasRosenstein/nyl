@@ -40,7 +40,8 @@ spec:
     repoServer:
       extraContainers:
         - name: nyl-v1
-          image: ghcr.io/helsing-ai/nyl/argocd-cmp:0.0.7
+          # NOTE: This image uses the Rust version of Nyl (SOPS not yet implemented)
+          image: ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0
           securityContext:
             runAsNonRoot: true
             runAsUser: 999

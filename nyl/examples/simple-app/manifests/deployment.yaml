@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: {{ profile.namespace | default('default') }}
+  labels:
+    app: myapp
+    environment: {{ profile.environment }}
+spec:
+  replicas: {{ profile.replicas }}
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+        environment: {{ profile.environment }}
+    spec:
+      containers:
+      - name: myapp
+        image: myorg/myapp:{{ profile.image_tag }}
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: ENVIRONMENT
+          value: "{{ profile.environment }}"
+        - name: DEBUG
+          value: "{{ profile.debug }}"
+        - name: APP_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: myapp-config
+              key: config.yaml
+        resources:
+          requests:
+            cpu: {{ profile.resources.requests.cpu }}
+            memory: {{ profile.resources.requests.memory }}
+          limits:
+            cpu: {{ profile.resources.limits.cpu }}
+            memory: {{ profile.resources.limits.memory }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5

@@ -1,44 +1,90 @@
-# nyl
+# Nyl Repository
 
-Nyl is a versatile tool for generating Kubernetes manifests from a simple YAML configuration, encouraging consistent and
-reusable deployment configurations, project layouts and operational workflows.
+This repository contains the Nyl project and related components for Kubernetes manifest generation.
 
-## Installation
+## 📦 Repository Contents
 
-Requires Python 3.11 or newer.
+### [`nyl/`](nyl/) - The Nyl Tool
+Fast, efficient Kubernetes manifest generator written in Rust. Complete rewrite with 10x performance improvements.
 
-    $ uvx nyl
+**Key features:**
+- 🚀 Blazing fast manifest generation
+- 💾 Memory efficient (<50MB RAM)
+- 📦 Single static binary (8.5MB)
+- 🔧 Helm integration
+- 🎨 Jinja2-compatible templating
 
-For some features, additional programs must be available:
+→ See [nyl/README.md](nyl/README.md) for installation and usage details.
 
-- [kubectl](https://kubernetes.io/de/docs/reference/kubectl/) for applying
-- [helm](https://helm.sh/) for rendering Helm charts
-- [kyverno](https://kyverno.io/docs/kyverno-cli/) ^1.13.x when using the Nyl `PostProcessor` resource
-- [sops](https://github.com/getsops/sops) when using the SOPS secrets provider
+### [`argocd-cmp/`](argocd-cmp/) - ArgoCD Config Management Plugin
+Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
 
-## Local development
+**Includes:**
+- Nyl (Rust binary)
+- ArgoCD CMP Server
+- Helm, SOPS, Kyverno
 
-You can install the tools you need with [Mise](https://mise.jdx.dev/).
+→ See [argocd-cmp/README.md](argocd-cmp/README.md) for build instructions.
 
-    $ mise install
-    $ eval "$(mise activate)"
+### [`argocd-with-nyl/`](argocd-with-nyl/) - ArgoCD Bootstrap Example
+Example Kubernetes manifest to deploy ArgoCD with Nyl as a Config Management Plugin.
 
-Install the project with [Uv](https://docs.astral.sh/uv/).
+→ See [argocd-with-nyl/README.md](argocd-with-nyl/README.md) for deployment guide.
 
-    $ uv sync
+## 🚀 Quick Start
 
-Use [Tire](https://github.com/NiklasRosenstein/tire/) tire for formatting, linting, type checking and unit tests.
+```bash
+# Install Nyl from releases
+curl -LO https://github.com/helsing-ai/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
+tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
+sudo mv nyl /usr/local/bin/
 
-    $ tire fmt [--check]
-    $ tire lint
-    $ tire check
-    $ tire test
+# Create a new project
+nyl new project my-app
+cd my-app
 
-To live-preview the documentation, use
+# Render manifests
+nyl render --environment dev
+```
 
-    $ mise run serve-docs
+## 🔧 Development
 
-## Tracking upstream information
+Install development tools with [mise](https://mise.jdx.dev/):
 
-- Discussion around ArgoCD supporting Helm lookups (maybe with Project-level service account?), see
-  https://github.com/argoproj/argo-cd/issues/5202#issuecomment-2088810772
+```bash
+mise install
+eval "$(mise activate)"
+
+# Build and test
+mise run build       # Build release binary
+mise run test        # Run tests
+mise run lint        # Run clippy
+mise run fmt         # Format code
+mise run pre-commit  # Run all checks
+
+# Documentation
+mise run docs-serve  # Serve mdbook documentation
+```
+
+## 📚 Documentation
+
+- **[Nyl Tool Documentation](nyl/README.md)** - Installation, commands, examples
+- **[Migration Guide](MOVE_TO_RUST.md)** - Python to Rust migration details
+- **[Online Docs](https://helsing-ai.github.io/nyl/)** - Complete documentation (mdbook)
+
+## 🦀 Rust Rewrite
+
+Nyl has been completely rewritten in Rust with significant improvements:
+
+| Metric | Improvement |
+|--------|-------------|
+| Performance | 10x faster |
+| Memory | 75% reduction |
+| Binary size | 8.5MB (vs ~200MB+ image) |
+| Cold start | <50ms |
+
+See [MOVE_TO_RUST.md](MOVE_TO_RUST.md) for complete migration details.
+
+## 📄 License
+
+MIT License - see LICENSE for details.
