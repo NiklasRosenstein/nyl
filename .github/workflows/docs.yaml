@@ -10,6 +10,10 @@ on:
     paths:
       - "nyl/book/**"
       - ".github/workflows/docs.yaml"
+  # Re-deploy after a Helm chart release so the updated index.yaml is served.
+  workflow_run:
+    workflows: ["Release Helm Chart"]
+    types: [completed]
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -27,6 +31,9 @@ jobs:
   build:
     name: Build mdBook
     runs-on: ubuntu-latest
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +46,22 @@ jobs:
         run: mdbook build
         working-directory: nyl/book
 
+      # Pull in the Helm chart index.yaml that chart-releaser maintains on
+      # gh-pages so that both the docs site and the Helm repo are served from
+      # the single Pages deployment.
+      - name: Checkout gh-pages for Helm chart index
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Include Helm chart index
+        run: |
+          if [ -f gh-pages/index.yaml ]; then
+            cp gh-pages/index.yaml nyl/book/book/index.yaml
+          fi
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -46,7 +69,9 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    if: github.event_name == 'push'
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
