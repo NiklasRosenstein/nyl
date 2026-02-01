@@ -171,3 +171,25 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Install Helm
+        if: github.event_name != 'pull_request'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Package and push Helm chart
+        if: github.event_name != 'pull_request'
+        run: |
+          # Match the short SHA format used by docker/metadata-action type=sha.
+          # workflow_run: github.sha is NOT the triggering commit; use head_sha.
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            FULL_SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            FULL_SHA="${{ github.sha }}"
+          fi
+          SHORT_SHA="${FULL_SHA:0:7}"
+
+          sed -i "s|tag: .*|tag: sha-${SHORT_SHA}|" chart/values.yaml
+          helm package chart/
+          helm push argocd-with-nyl-*.tgz oci://ghcr.io/${{ github.repository_owner }}/nyl/chart
