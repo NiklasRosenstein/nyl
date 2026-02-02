@@ -28,7 +28,7 @@ spec:
       path: examples/argocd-bootstrap
 ---
 # ApplicationGenerator for ArgoCD self-management
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
 kind: ApplicationGenerator
 metadata:
   name: bootstrap

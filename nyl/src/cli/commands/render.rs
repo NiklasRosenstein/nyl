@@ -4,7 +4,7 @@ use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
-    constants::API_VERSION_COMPONENTS,
+    constants::{API_VERSION, API_VERSION_COMPONENTS},
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
@@ -113,8 +113,7 @@ pub async fn render_manifests(
     let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        (kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")))
-            || api_version == Some(API_VERSION_COMPONENTS)
+        (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || api_version == Some(API_VERSION_COMPONENTS)
     });
 
     // 8. Determine kube_version and api_versions (only if needed)
@@ -200,6 +199,12 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
+        // Skip nyl project configuration files — they are not manifests
+        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(stem, "nyl-project" | "nyl-profiles" | "nyl-secrets") {
+            continue;
+        }
+
         let content =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
         let docs = parse_yaml_documents(&content)?;
@@ -267,7 +272,7 @@ fn generate_resource(
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
 
-    if kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")) {
+    if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
