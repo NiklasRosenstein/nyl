@@ -7,7 +7,7 @@ The HelmChart resource enables declarative Helm chart deployment with templating
 ## Resource Definition
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: string              # Chart instance name
@@ -44,7 +44,7 @@ spec:
 Reference a chart by filesystem path (absolute or relative):
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -61,7 +61,7 @@ spec:
 Reference a chart by name, searched in configured search paths:
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -84,7 +84,7 @@ search_path = ["./charts", "/opt/helm-charts"]
 Reference a chart from a Git repository:
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -219,13 +219,13 @@ This affects chart templates that use `.Capabilities.APIVersions`.
 ## Complete Example
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: myapp
   namespace: production
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: myapp
@@ -263,7 +263,7 @@ Use the same chart with different values per environment:
 
 ```yaml
 # base manifest
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: myapp

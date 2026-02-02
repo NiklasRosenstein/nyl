@@ -126,8 +126,8 @@ Key-value map of annotations to add to all generated Applications.
 Example:
 ```yaml
 annotations:
-  nyl.io/generator: cluster-apps
   docs-url: https://wiki.example.com/apps
+  team-slack: "#platform-team"
 ```
 
 ## File Filtering
@@ -265,7 +265,6 @@ spec:
     managed-by: nyl
     environment: production
   annotations:
-    nyl.io/generator: team-apps
     team-slack: "#platform-team"
     oncall-pagerduty: "P123ABC"
 ```
@@ -334,7 +333,7 @@ For a NylRelease file like this:
 
 ```yaml
 # clusters/default/nginx.yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: nginx
@@ -354,7 +353,7 @@ metadata:
   labels:                        # From generator.spec.labels
     managed-by: nyl
   annotations:                   # From generator.spec.annotations
-    nyl.io/generator: cluster-apps
+    docs-url: https://wiki.example.com/apps
 spec:
   project: default               # From generator.spec.project
   source:

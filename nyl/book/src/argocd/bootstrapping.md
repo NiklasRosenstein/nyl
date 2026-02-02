@@ -66,13 +66,13 @@ type: null
 Create `argocd/argocd.yaml`:
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: argocd
   namespace: argocd
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: argocd
@@ -177,7 +177,7 @@ spec:
 
   # Annotations added to all generated Applications
   annotations:
-    nyl.io/generator: cluster-apps
+    docs-url: https://wiki.example.com/cluster-apps
 ```
 
 ## Step 4: Create Sample Applications
@@ -185,13 +185,13 @@ spec:
 Create `clusters/default/nginx.yaml`:
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: nginx
   namespace: default
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -212,13 +212,13 @@ spec:
 Create `clusters/default/redis.yaml`:
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: redis
   namespace: default
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: redis
@@ -407,13 +407,13 @@ To add a new application to be managed by ArgoCD:
 
 ```yaml
 # clusters/default/postgres.yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: postgres
   namespace: database
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: postgres

@@ -56,7 +56,7 @@ HelmChart resources can reference Helm charts stored in Git repositories.
 ### Basic Example
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -180,7 +180,7 @@ When running inside a Kubernetes cluster with access to ArgoCD secrets, Nyl auto
 **Example**: Using a private Helm chart
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: private-app
@@ -312,7 +312,7 @@ rm -rf $NYL_CACHE_DIR/git/worktrees/{hash}-*
 ### Multi-environment Chart from Git
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: app-production
@@ -332,7 +332,7 @@ spec:
 ### Development Branch
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: app-development
@@ -352,7 +352,7 @@ spec:
 ### Specific Version
 
 ```yaml
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: app-stable

@@ -5,7 +5,7 @@ The NylRelease resource specifies release metadata (name and namespace) for a de
 ## Resource Definition
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: string        # Release name
@@ -64,7 +64,7 @@ Error: Multiple NylRelease resources found in file
 ### Minimal NylRelease
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: myapp
@@ -74,7 +74,7 @@ metadata:
 ### With Other Resources
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: myapp
@@ -112,13 +112,13 @@ spec:
 ### With HelmChart
 
 ```yaml
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: nginx
   namespace: web
 ---
-apiVersion: v1.nyl.io
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -142,7 +142,7 @@ NylRelease is primarily used for ArgoCD integration:
 
 ```yaml
 # app.yaml in Git repository
-apiVersion: nyl.io/v1
+apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: myapp
