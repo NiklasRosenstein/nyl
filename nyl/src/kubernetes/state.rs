@@ -7,7 +7,11 @@ use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE}, kubernetes::ResourceKey, NylError, Result};
+use crate::{
+    constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE},
+    kubernetes::ResourceKey,
+    NylError, Result,
+};
 
 /// Status of a release
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
