@@ -1,0 +1,255 @@
+# Integration Tests for Helm Chart and ArgoCD
+#
+# This workflow validates the Nyl Helm chart deployment in Minikube.
+# It tests:
+# - OCI chart pulling and installation via nyl apply
+# - ArgoCD deployment with Nyl CMP sidecar
+# - Self-managed ArgoCD Application sync
+
+name: Integration CI
+
+on:
+  workflow_run:
+    workflows: ["Docker CI"]
+    types: [completed]
+    branches: [develop]
+
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Git SHA to test (leave empty for latest develop)'
+        required: false
+        type: string
+
+concurrency:
+  group: integration-test
+  cancel-in-progress: true
+
+env:
+  DEPLOYMENT_TIMEOUT: 300
+  SYNC_TIMEOUT: 180
+
+jobs:
+  integration-test:
+    name: Helm + ArgoCD Integration Test
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+
+    steps:
+      - name: Determine test SHA
+        id: sha
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.sha }}" ]; then
+              FULL_SHA="${{ inputs.sha }}"
+            else
+              FULL_SHA="${{ github.sha }}"
+            fi
+          else
+            FULL_SHA="${{ github.event.workflow_run.head_sha }}"
+          fi
+
+          SHORT_SHA="${FULL_SHA:0:7}"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          echo "full_sha=${FULL_SHA}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "image_tag=sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "chart_version=0.1.0-sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "owner=${OWNER}" >> $GITHUB_OUTPUT
+
+          echo "Testing SHA: ${FULL_SHA}"
+          echo "Image tag: sha-${SHORT_SHA}"
+          echo "Chart version: 0.1.0-sha-${SHORT_SHA}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.full_sha }}
+
+      - name: Download Nyl binary (workflow_run)
+        if: github.event_name == 'workflow_run'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-rust.yaml
+          name: nyl-x86_64-unknown-linux-musl
+          path: ./nyl-bin
+          run_id: ${{ github.event.workflow_run.id }}
+          if_no_artifact_found: fail
+
+      - name: Download Nyl binary (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-rust.yaml
+          name: nyl-x86_64-unknown-linux-musl
+          path: ./nyl-bin
+          branch: develop
+          if_no_artifact_found: fail
+
+      - name: Install Nyl and Helm
+        run: |
+          chmod +x ./nyl-bin/nyl
+          sudo mv ./nyl-bin/nyl /usr/local/bin/nyl
+          nyl --version
+
+          # Install Helm (needed for OCI chart pulling)
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@v0.0.18
+        with:
+          cpus: 2
+          memory: 4096
+          kubernetes-version: v1.29.0
+          driver: docker
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Login to Helm OCI registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Create pull secret
+        run: |
+          kubectl create namespace argocd
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --namespace=argocd \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bootstrap ArgoCD with nyl apply
+        env:
+          CHART_OWNER: ${{ steps.sha.outputs.owner }}
+          CHART_VERSION: ${{ steps.sha.outputs.chart_version }}
+          IMAGE_TAG: ${{ steps.sha.outputs.image_tag }}
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          TARGET_REVISION: ${{ steps.sha.outputs.full_sha }}
+        run: |
+          nyl apply examples/argocd-bootstrap/
+
+      - name: Wait for ArgoCD deployments
+        run: |
+          echo "Waiting for ArgoCD components..."
+
+          for deployment in argocd-server argocd-repo-server argocd-application-controller; do
+            echo "Waiting for ${deployment}..."
+            kubectl rollout status deployment/${deployment} -n argocd \
+              --timeout=${DEPLOYMENT_TIMEOUT}s || {
+              echo "Deployment ${deployment} failed"
+              kubectl describe deployment/${deployment} -n argocd
+              kubectl logs deployment/${deployment} -n argocd --tail=50 || true
+              exit 1
+            }
+          done
+
+      - name: Verify Nyl sidecar
+        run: |
+          REPO_POD=$(kubectl get pods -n argocd \
+            -l app.kubernetes.io/component=repo-server \
+            -o jsonpath='{.items[0].metadata.name}')
+
+          echo "Repo-server pod: ${REPO_POD}"
+          echo "Containers:"
+          kubectl get pod ${REPO_POD} -n argocd \
+            -o jsonpath='{.spec.containers[*].name}' | tr ' ' '\n'
+
+          NYL_READY=$(kubectl get pod ${REPO_POD} -n argocd \
+            -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v1")].ready}')
+
+          if [ "$NYL_READY" != "true" ]; then
+            echo "ERROR: nyl-v1 sidecar not ready"
+            kubectl describe pod ${REPO_POD} -n argocd
+            kubectl logs ${REPO_POD} -n argocd -c nyl-v1 --tail=50 || true
+            exit 1
+          fi
+
+          echo "SUCCESS: nyl-v1 sidecar is ready"
+
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+          argocd version --client
+
+      - name: Login to ArgoCD
+        run: |
+          for i in $(seq 1 30); do
+            if kubectl get secret argocd-initial-admin-secret -n argocd &>/dev/null; then
+              break
+            fi
+            echo "Waiting for admin secret... ($i/30)"
+            sleep 5
+          done
+
+          PASSWORD=$(kubectl get secret argocd-initial-admin-secret -n argocd \
+            -o jsonpath='{.data.password}' | base64 -d)
+
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          sleep 5
+
+          argocd login localhost:8080 \
+            --username admin \
+            --password "$PASSWORD" \
+            --insecure
+
+      - name: Verify and sync ArgoCD Application
+        run: |
+          echo "=== ArgoCD Applications ==="
+          argocd app list
+
+          if ! argocd app get argocd &>/dev/null; then
+            echo "ERROR: ArgoCD self-managed application not found"
+            kubectl get applications -n argocd -o yaml
+            exit 1
+          fi
+
+          echo "Syncing ArgoCD application..."
+          argocd app sync argocd --timeout ${SYNC_TIMEOUT} || {
+            echo "Sync failed"
+            argocd app get argocd --show-operation
+            exit 1
+          }
+
+          echo "Waiting for healthy status..."
+          argocd app wait argocd --timeout ${SYNC_TIMEOUT} --health || {
+            echo "Application not healthy"
+            argocd app get argocd --show-operation
+            exit 1
+          }
+
+          echo "SUCCESS: ArgoCD self-managed application is healthy"
+
+      - name: Final verification
+        run: |
+          echo "=== Final State ==="
+          kubectl get deployments -n argocd
+          kubectl get pods -n argocd
+          argocd app list
+          argocd app get argocd
+          echo "Integration test completed successfully!"
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== DEBUG: Integration test failed ==="
+          kubectl get events -n argocd --sort-by='.lastTimestamp' | tail -30
+          kubectl get pods -n argocd -o wide
+          kubectl describe pods -n argocd
+          kubectl logs -l app.kubernetes.io/component=repo-server -n argocd \
+            --all-containers --tail=100 || true
+          kubectl logs -l app.kubernetes.io/component=application-controller -n argocd \
+            --tail=100 || true
