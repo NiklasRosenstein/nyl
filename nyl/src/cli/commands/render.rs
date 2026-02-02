@@ -534,17 +534,20 @@ fn create_argocd_application_from_generator(
     base_path: &Path,
     generator: &crate::resources::ApplicationGenerator,
 ) -> Result<serde_json::Value> {
-    // Calculate relative path from base
-    let rel_path = file_path
+    // Calculate subdirectory relative to the scanned base path
+    let rel_dir = file_path
         .strip_prefix(base_path)
         .unwrap_or(file_path)
         .parent()
-        .unwrap_or(Path::new("."))
-        .to_str()
-        .ok_or_else(|| NylError::Config("Invalid file path".to_string()))?;
+        .unwrap_or(Path::new(""));
 
-    // Use relative path or "." if empty
-    let path_str = if rel_path.is_empty() { "." } else { rel_path };
+    // Application path must be relative to the repo root, not the worktree.
+    // Start from the generator's source.path and append any subdirectory.
+    let path_str = if rel_dir.as_os_str().is_empty() || rel_dir == Path::new(".") {
+        generator.spec.source.path.clone()
+    } else {
+        format!("{}/{}", generator.spec.source.path, rel_dir.display())
+    };
 
     // Build the Application manifest
     let mut app = serde_json::json!({
