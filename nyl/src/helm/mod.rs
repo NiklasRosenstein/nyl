@@ -163,7 +163,7 @@ impl HelmChartResolver {
     /// Resolve a chart from an OCI or Helm repository using `helm pull`
     fn resolve_repository(repository: &str, version: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
         let puller = OciChartPuller::new()?;
-        let chart_path = puller.pull(repository, version)?;
+        let chart_path = puller.pull(repository, version, chart_ref.name.as_deref())?;
 
         Ok(ResolvedChart {
             path: chart_path,

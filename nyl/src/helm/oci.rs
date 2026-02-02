@@ -43,15 +43,18 @@ impl OciChartPuller {
         }
     }
 
-    /// Pull a chart from an OCI repository
+    /// Pull a chart from an OCI or traditional Helm repository
     ///
     /// # Arguments
-    /// * `repository` - Full OCI URL like `oci://ghcr.io/owner/repo/chart`
+    /// * `repository` - OCI URL (`oci://ghcr.io/owner/repo/chart`) or traditional
+    ///   repo index URL (`https://example.com/charts`)
     /// * `version` - Chart version like `0.1.0` or `0.1.0-sha-abc1234`
+    /// * `chart_name` - Chart name within the repository. Required for traditional
+    ///   (non-OCI) repos; ignored for OCI where the name is the last URL path segment.
     ///
     /// # Returns
     /// Path to the extracted chart directory
-    pub fn pull(&self, repository: &str, version: &str) -> Result<PathBuf> {
+    pub fn pull(&self, repository: &str, version: &str, chart_name: Option<&str>) -> Result<PathBuf> {
         let chart_dir = self.chart_cache_path(repository, version);
 
         // Return cached chart if it exists and contains Chart.yaml
@@ -61,36 +64,54 @@ impl OciChartPuller {
 
         // Ensure cache directory exists
         std::fs::create_dir_all(&self.cache_dir)
-            .map_err(|e| NylError::Process(format!("Failed to create OCI cache directory: {}", e)))?;
+            .map_err(|e| NylError::Process(format!("Failed to create chart cache directory: {}", e)))?;
 
-        // Run: helm pull <repository> --version <version> --untar -d <cache_dir>
-        let output = Command::new("helm")
-            .arg("pull")
-            .arg(repository)
-            .arg("--version")
-            .arg(version)
-            .arg("--untar")
-            .arg("-d")
-            .arg(&self.cache_dir)
+        // Pull into a temp directory to avoid collisions with existing cache entries
+        let tmp_dir = self.cache_dir.join(format!(".pull-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| NylError::Process(format!("Failed to create temp pull directory: {}", e)))?;
+
+        let is_oci = repository.starts_with("oci://");
+
+        let mut cmd = Command::new("helm");
+        cmd.arg("pull");
+
+        if is_oci {
+            // OCI:         helm pull oci://registry/path/chart --version <ver>
+            cmd.arg(repository);
+        } else {
+            // Traditional: helm pull --repo <repo-url> <chart-name> --version <ver>
+            let name = chart_name
+                .ok_or_else(|| NylError::Config("Chart name is required for non-OCI Helm repositories".to_string()))?;
+            cmd.arg("--repo").arg(repository).arg(name);
+        }
+
+        cmd.arg("--version").arg(version).arg("--untar").arg("-d").arg(&tmp_dir);
+
+        let output = cmd
             .output()
             .map_err(|e| NylError::Process(format!("Failed to execute helm pull: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(NylError::HelmChart(format!(
                 "helm pull failed for {}@{}: {}",
                 repository, version, stderr
             )));
         }
 
-        // helm pull --untar extracts to <cache_dir>/<chart-name>/
-        // Find the extracted chart directory (there should be exactly one new directory)
-        let chart_name = extract_chart_name(repository);
-        let extracted = self.cache_dir.join(&chart_name);
+        // helm pull --untar extracts to <tmp_dir>/<chart-name>/
+        let extracted_name = if is_oci {
+            extract_chart_name(repository)
+        } else {
+            chart_name.unwrap_or("chart").to_string()
+        };
+        let extracted = tmp_dir.join(&extracted_name);
 
         if !extracted.join("Chart.yaml").exists() {
-            // Rename extracted directory to our expected cache path
-            // This handles the case where the directory name differs
+            let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(NylError::HelmChart(format!(
                 "Chart.yaml not found after pulling {}@{} (expected at {})",
                 repository,
@@ -99,11 +120,11 @@ impl OciChartPuller {
             )));
         }
 
-        // Move to the versioned cache path if different
-        if extracted != chart_dir {
-            std::fs::rename(&extracted, &chart_dir)
-                .map_err(|e| NylError::Process(format!("Failed to move cached chart: {}", e)))?;
-        }
+        // Move to the versioned cache path
+        std::fs::rename(&extracted, &chart_dir)
+            .map_err(|e| NylError::Process(format!("Failed to move cached chart: {}", e)))?;
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
 
         Ok(chart_dir)
     }
@@ -196,7 +217,7 @@ mod tests {
         .unwrap();
 
         // Pull should return the cached path without running helm
-        let result = puller.pull(repo, version).unwrap();
+        let result = puller.pull(repo, version, None).unwrap();
         assert_eq!(result, cache_path);
         assert!(result.join("Chart.yaml").exists());
     }
