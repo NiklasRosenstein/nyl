@@ -7,7 +7,7 @@ use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{kubernetes::ResourceKey, NylError, Result};
+use crate::{constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE}, kubernetes::ResourceKey, NylError, Result};
 
 /// Status of a release
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,8 +133,8 @@ impl KubernetesReleaseStorage {
         }
 
         let mut labels = BTreeMap::new();
-        labels.insert("nyl.niklasrosenstein.github.com/release".to_string(), release.release_name.clone());
-        labels.insert("nyl.niklasrosenstein.github.com/revision".to_string(), release.revision.to_string());
+        labels.insert(LABEL_RELEASE.to_string(), release.release_name.clone());
+        labels.insert(LABEL_REVISION.to_string(), release.revision.to_string());
 
         Ok(Secret {
             metadata: ObjectMeta {
@@ -143,7 +143,7 @@ impl KubernetesReleaseStorage {
                 labels: Some(labels),
                 ..Default::default()
             },
-            type_: Some("nyl.niklasrosenstein.github.com/release.v1".to_string()),
+            type_: Some(SECRET_TYPE_RELEASE.to_string()),
             data: Some(data),
             ..Default::default()
         })
@@ -160,7 +160,7 @@ impl KubernetesReleaseStorage {
             .metadata
             .labels
             .as_ref()
-            .and_then(|l| l.get("nyl.niklasrosenstein.github.com/release"))
+            .and_then(|l| l.get(LABEL_RELEASE))
             .ok_or_else(|| NylError::Config("Secret missing release label".to_string()))?
             .clone();
 
@@ -175,7 +175,7 @@ impl KubernetesReleaseStorage {
             .metadata
             .labels
             .as_ref()
-            .and_then(|l| l.get("nyl.niklasrosenstein.github.com/revision"))
+            .and_then(|l| l.get(LABEL_REVISION))
             .and_then(|r| r.parse().ok())
             .ok_or_else(|| NylError::Config("Secret missing or invalid revision label".to_string()))?;
 
@@ -282,7 +282,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
 
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
-        let label_selector = format!("nyl.niklasrosenstein.github.com/release={}", release_name);
+        let label_selector = format!("{}={}", LABEL_RELEASE, release_name);
         let lp = ListParams::default().labels(&label_selector);
 
         let secrets = api.list(&lp).await?;
@@ -293,7 +293,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
                 s.metadata
                     .labels
                     .as_ref()
-                    .and_then(|l| l.get("nyl.niklasrosenstein.github.com/revision"))
+                    .and_then(|l| l.get(LABEL_REVISION))
                     .and_then(|r| r.parse().ok())
             })
             .collect();

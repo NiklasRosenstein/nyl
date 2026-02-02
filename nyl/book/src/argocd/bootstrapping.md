@@ -177,7 +177,7 @@ spec:
 
   # Annotations added to all generated Applications
   annotations:
-    nyl.niklasrosenstein.github.com/generator: cluster-apps
+    docs-url: https://wiki.example.com/cluster-apps
 ```
 
 ## Step 4: Create Sample Applications

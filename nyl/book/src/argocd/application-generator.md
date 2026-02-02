@@ -126,8 +126,8 @@ Key-value map of annotations to add to all generated Applications.
 Example:
 ```yaml
 annotations:
-  nyl.niklasrosenstein.github.com/generator: cluster-apps
   docs-url: https://wiki.example.com/apps
+  team-slack: "#platform-team"
 ```
 
 ## File Filtering
@@ -265,7 +265,6 @@ spec:
     managed-by: nyl
     environment: production
   annotations:
-    nyl.niklasrosenstein.github.com/generator: team-apps
     team-slack: "#platform-team"
     oncall-pagerduty: "P123ABC"
 ```
@@ -354,7 +353,7 @@ metadata:
   labels:                        # From generator.spec.labels
     managed-by: nyl
   annotations:                   # From generator.spec.annotations
-    nyl.niklasrosenstein.github.com/generator: cluster-apps
+    docs-url: https://wiki.example.com/apps
 spec:
   project: default               # From generator.spec.project
   source:
