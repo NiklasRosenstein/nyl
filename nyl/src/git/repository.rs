@@ -71,7 +71,11 @@ impl BareRepository {
         let mut remote = repo.find_remote("origin").map_err(GitError::Repository)?;
         remote
             .fetch(
-                &["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"],
+                &[
+                    "refs/heads/*:refs/heads/*",
+                    "refs/tags/*:refs/tags/*",
+                    "+HEAD:refs/remotes/origin/HEAD",
+                ],
                 Some(&mut fetch_options),
                 None,
             )
@@ -136,6 +140,14 @@ impl BareRepository {
         if ref_name == "HEAD" {
             if let Ok(head) = self.repo.head() {
                 if let Some(oid) = head.target() {
+                    return Ok(oid);
+                }
+            }
+
+            // Bare repos created via init+fetch have no local HEAD.
+            // Use the remote HEAD fetched into refs/remotes/origin/HEAD.
+            if let Ok(reference) = self.repo.find_reference("refs/remotes/origin/HEAD") {
+                if let Some(oid) = reference.target() {
                     return Ok(oid);
                 }
             }
