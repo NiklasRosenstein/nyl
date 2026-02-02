@@ -14,7 +14,7 @@ use crate::{
         NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
-    template::TemplateContext,
+    template::{TemplateContext, TemplateEngine},
     NylError, Result,
 };
 
@@ -105,8 +105,8 @@ pub async fn render_manifests(
     // 5. Create generator
     let generator = Generator::new(project_config.clone());
 
-    // 6. Load and filter resources
-    let resources = load_resources(path)?;
+    // 6. Load and filter resources (rendering Jinja templates in manifest files)
+    let resources = load_resources(path, &context)?;
     let filtered = filter_resources(resources, component)?;
 
     // 7. Check if any resources need Helm rendering (HelmChart or Component)
@@ -183,9 +183,11 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     Ok(())
 }
 
-/// Load all YAML/JSON resources from a directory
-fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
+/// Load all YAML/JSON resources from a directory, rendering Jinja templates
+fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
     let path = Path::new(path);
+    let engine = TemplateEngine::new();
+    let ctx_json = context.to_json();
     let mut resources = Vec::new();
 
     for entry in WalkDir::new(path).follow_links(true).into_iter().filter_map(|e| e.ok()) {
@@ -205,9 +207,12 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let content =
+        let raw =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
-        let docs = parse_yaml_documents(&content)?;
+
+        let rendered = engine.render(&raw, &ctx_json)?;
+
+        let docs = parse_yaml_documents(&rendered)?;
         resources.extend(docs);
     }
 

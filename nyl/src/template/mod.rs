@@ -66,10 +66,15 @@ impl TemplateContext {
 
     /// Convert context to JSON value for template rendering
     pub fn to_json(&self) -> serde_json::Value {
+        let env: serde_json::Map<String, serde_json::Value> = std::env::vars()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+
         serde_json::json!({
             "values": self.values,
             "secrets": self.secrets,
             "environment": self.environment,
+            "env": env,
         })
     }
 }
