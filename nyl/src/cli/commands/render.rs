@@ -142,18 +142,37 @@ pub async fn render_manifests(
         (kube_version, api_versions)
     };
 
-    // 9. Generate manifests
+    // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
-    for resource in filtered {
-        let manifests = generate_resource(
-            &generator,
-            &resource,
-            &context,
-            &project_config,
-            &kube_version,
-            &api_versions,
-        )?;
-        all_manifests.extend(manifests);
+    let mut pending = filtered;
+    for depth in 0..=10 {
+        let mut next_pending = Vec::new();
+        for resource in pending {
+            let manifests = generate_resource(
+                &generator,
+                &resource,
+                &context,
+                &project_config,
+                &kube_version,
+                &api_versions,
+            )?;
+            for manifest in manifests {
+                if is_renderable_resource(&manifest) {
+                    next_pending.push(manifest);
+                } else {
+                    all_manifests.push(manifest);
+                }
+            }
+        }
+        pending = next_pending;
+        if pending.is_empty() {
+            break;
+        }
+        if depth == 10 {
+            return Err(NylError::Config(
+                "Maximum HelmChart nesting depth (10) exceeded".to_string(),
+            ));
+        }
     }
 
     Ok((all_manifests, profile, env_name))
@@ -169,6 +188,12 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         &args.kube_api_versions,
     )
     .await?;
+
+    // Filter out NylRelease (control resource, not applied to the cluster)
+    let manifests: Vec<_> = manifests
+        .into_iter()
+        .filter(|m| !NylRelease::is_nyl_release(m))
+        .collect();
 
     // Extract ApplicationGenerator resources and filter them from output
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
@@ -262,6 +287,14 @@ fn filter_resources(
     } else {
         Ok(resources)
     }
+}
+
+/// Check whether a resource will be expanded by generate_resource
+/// (i.e. it is a HelmChart or Component, not a plain k8s manifest)
+fn is_renderable_resource(resource: &serde_json::Value) -> bool {
+    let kind = resource.get("kind").and_then(|k| k.as_str());
+    let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+    (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || is_nyl_component(resource)
 }
 
 /// Generate manifests from a resource

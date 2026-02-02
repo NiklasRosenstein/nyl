@@ -21,11 +21,6 @@ spec:
       image:
         tag: "{{ env.IMAGE_TAG | default('develop') }}"
         pullPolicy: Always
-    selfManage:
-      enabled: true
-      repoURL: "{{ env.REPO_URL }}"
-      targetRevision: "{{ env.TARGET_REVISION | default('HEAD') }}"
-      path: examples/argocd-bootstrap
 ---
 # ApplicationGenerator for ArgoCD self-management
 apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
