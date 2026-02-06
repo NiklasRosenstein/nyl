@@ -81,7 +81,7 @@ jobs:
           workflow: ci-rust.yaml
           name: nyl-x86_64-unknown-linux-musl
           path: ./nyl-bin
-          run_id: ${{ github.event.workflow_run.id }}
+          commit: ${{ github.event.workflow_run.head_sha }}
           if_no_artifact_found: fail
 
       - name: Download Nyl binary (workflow_dispatch)
@@ -91,7 +91,7 @@ jobs:
           workflow: ci-rust.yaml
           name: nyl-x86_64-unknown-linux-musl
           path: ./nyl-bin
-          branch: develop
+          commit: ${{ steps.sha.outputs.full_sha }}
           if_no_artifact_found: fail
 
       - name: Install Nyl and Helm
