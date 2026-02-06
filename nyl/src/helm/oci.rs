@@ -87,7 +87,11 @@ impl OciChartPuller {
             cmd.arg("--repo").arg(repository).arg(name);
         }
 
-        cmd.arg("--version").arg(version).arg("--untar").arg("-d").arg(tmp_dir.path());
+        cmd.arg("--version")
+            .arg(version)
+            .arg("--untar")
+            .arg("-d")
+            .arg(tmp_dir.path());
 
         let output = cmd
             .output()
@@ -267,7 +271,10 @@ mod tests {
     #[test]
     fn test_sanitize_version_path_traversal() {
         // Path separators should be sanitized
-        assert_eq!(OciChartPuller::sanitize_version("../../../etc/passwd"), ".._.._.._etc_passwd");
+        assert_eq!(
+            OciChartPuller::sanitize_version("../../../etc/passwd"),
+            ".._.._.._etc_passwd"
+        );
         assert_eq!(OciChartPuller::sanitize_version("1.0/../../bad"), "1.0_.._.._bad");
         assert_eq!(OciChartPuller::sanitize_version(".."), "..");
     }

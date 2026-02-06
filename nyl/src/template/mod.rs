@@ -77,7 +77,7 @@ impl TemplateContext {
     }
 
     /// Filter environment variables to only include NYL_ prefixed ones.
-    /// 
+    ///
     /// This prevents accidental leakage of sensitive CI/runtime secrets into manifests.
     fn filter_env_vars<I>(vars: I) -> serde_json::Map<String, serde_json::Value>
     where
@@ -194,9 +194,9 @@ mod tests {
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("NYL_CONFIG".to_string(), "test_config".to_string()),
         ];
-        
+
         let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
-        
+
         // Check that only NYL_ prefixed vars are included
         assert_eq!(filtered.len(), 3);
         assert!(filtered.contains_key("NYL_TEST_VAR"));
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(filtered.get("NYL_ANOTHER").unwrap().as_str().unwrap(), "also_visible");
         assert!(filtered.contains_key("NYL_CONFIG"));
         assert_eq!(filtered.get("NYL_CONFIG").unwrap().as_str().unwrap(), "test_config");
-        
+
         // Verify non-NYL_ prefixed vars are excluded
         assert!(!filtered.contains_key("SECRET_KEY"));
         assert!(!filtered.contains_key("PATH"));

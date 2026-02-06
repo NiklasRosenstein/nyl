@@ -699,7 +699,7 @@ metadata:
     #[test]
     fn test_path_normalization_posix() {
         use std::path::Path;
-        
+
         // Simulate the path normalization logic in create_argocd_application_from_generator
         let rel_dir = Path::new("subdir/nested");
         let mut rel_dir_normalized = String::new();
@@ -711,14 +711,14 @@ metadata:
                 rel_dir_normalized.push_str(&os_str.to_string_lossy());
             }
         }
-        
+
         assert_eq!(rel_dir_normalized, "subdir/nested");
     }
 
     #[test]
     fn test_path_normalization_with_join() {
         use std::path::Path;
-        
+
         // Test with platform-native path construction
         let rel_dir = Path::new("subdir").join("nested");
         let mut rel_dir_normalized = String::new();
@@ -730,7 +730,7 @@ metadata:
                 rel_dir_normalized.push_str(&os_str.to_string_lossy());
             }
         }
-        
+
         // Should always produce POSIX-style paths regardless of platform
         assert_eq!(rel_dir_normalized, "subdir/nested");
     }
@@ -738,7 +738,7 @@ metadata:
     #[test]
     fn test_path_normalization_root() {
         use std::path::Path;
-        
+
         // Test empty path handling
         let rel_dir = Path::new("");
         let mut rel_dir_normalized = String::new();
@@ -750,7 +750,7 @@ metadata:
                 rel_dir_normalized.push_str(&os_str.to_string_lossy());
             }
         }
-        
+
         assert_eq!(rel_dir_normalized, "");
     }
 }
