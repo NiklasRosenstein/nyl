@@ -66,7 +66,10 @@ impl TemplateContext {
 
     /// Convert context to JSON value for template rendering
     pub fn to_json(&self) -> serde_json::Value {
+        // Only expose environment variables with the NYL_ prefix to prevent
+        // accidental leakage of sensitive CI/runtime secrets into manifests.
         let env: serde_json::Map<String, serde_json::Value> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("NYL_"))
             .map(|(k, v)| (k, serde_json::Value::String(v)))
             .collect();
 

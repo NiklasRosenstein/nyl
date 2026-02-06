@@ -66,10 +66,10 @@ impl OciChartPuller {
         std::fs::create_dir_all(&self.cache_dir)
             .map_err(|e| NylError::Process(format!("Failed to create chart cache directory: {}", e)))?;
 
-        // Pull into a temp directory to avoid collisions with existing cache entries
-        let tmp_dir = self.cache_dir.join(format!(".pull-tmp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir)
+        // Pull into a unique temp directory to avoid collisions with concurrent pulls
+        let tmp_dir = tempfile::Builder::new()
+            .prefix(".pull-tmp-")
+            .tempdir_in(&self.cache_dir)
             .map_err(|e| NylError::Process(format!("Failed to create temp pull directory: {}", e)))?;
 
         let is_oci = repository.starts_with("oci://");
@@ -87,7 +87,7 @@ impl OciChartPuller {
             cmd.arg("--repo").arg(repository).arg(name);
         }
 
-        cmd.arg("--version").arg(version).arg("--untar").arg("-d").arg(&tmp_dir);
+        cmd.arg("--version").arg(version).arg("--untar").arg("-d").arg(tmp_dir.path());
 
         let output = cmd
             .output()
@@ -95,7 +95,6 @@ impl OciChartPuller {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(NylError::HelmChart(format!(
                 "helm pull failed for {}@{}: {}",
                 repository, version, stderr
@@ -108,10 +107,9 @@ impl OciChartPuller {
         } else {
             chart_name.unwrap_or("chart").to_string()
         };
-        let extracted = tmp_dir.join(&extracted_name);
+        let extracted = tmp_dir.path().join(&extracted_name);
 
         if !extracted.join("Chart.yaml").exists() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(NylError::HelmChart(format!(
                 "Chart.yaml not found after pulling {}@{} (expected at {})",
                 repository,
@@ -121,10 +119,22 @@ impl OciChartPuller {
         }
 
         // Move to the versioned cache path
-        std::fs::rename(&extracted, &chart_dir)
-            .map_err(|e| NylError::Process(format!("Failed to move cached chart: {}", e)))?;
+        match std::fs::rename(&extracted, &chart_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another concurrent pull populated the cache between our existence
+                // check and this rename. Treat this as a cache hit, but verify the
+                // cache looks valid before proceeding.
+                if !chart_dir.join("Chart.yaml").exists() {
+                    return Err(NylError::Process(format!("Failed to move cached chart: {}", e)));
+                }
+            }
+            Err(e) => {
+                return Err(NylError::Process(format!("Failed to move cached chart: {}", e)));
+            }
+        }
 
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+        // tmp_dir will be automatically cleaned up when it goes out of scope
 
         Ok(chart_dir)
     }
@@ -135,7 +145,32 @@ impl OciChartPuller {
         hasher.update(repository.as_bytes());
         let repo_hash = hex::encode(hasher.finalize());
 
-        self.cache_dir.join(format!("{}-{}", &repo_hash[..16], version))
+        let safe_version = Self::sanitize_version(version);
+        self.cache_dir.join(format!("{}-{}", &repo_hash[..16], safe_version))
+    }
+
+    /// Sanitize a chart version string for safe use as a filesystem path component.
+    ///
+    /// This restricts the version to a safe subset of characters and replaces any
+    /// disallowed character with an underscore, preventing path traversal via
+    /// separators or `..`.
+    fn sanitize_version(version: &str) -> String {
+        let sanitized: String = version
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        if sanitized.is_empty() {
+            "unknown".to_string()
+        } else {
+            sanitized
+        }
     }
 }
 

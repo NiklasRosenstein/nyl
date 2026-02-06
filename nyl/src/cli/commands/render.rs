@@ -145,7 +145,7 @@ pub async fn render_manifests(
     // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
     let mut pending = filtered;
-    for depth in 0..=10 {
+    for depth in 0..10 {
         let mut next_pending = Vec::new();
         for resource in pending {
             let manifests = generate_resource(
@@ -168,7 +168,7 @@ pub async fn render_manifests(
         if pending.is_empty() {
             break;
         }
-        if depth == 10 {
+        if depth == 9 {
             return Err(NylError::Config(
                 "Maximum HelmChart nesting depth (10) exceeded".to_string(),
             ));
@@ -541,12 +541,23 @@ fn create_argocd_application_from_generator(
         .parent()
         .unwrap_or(Path::new(""));
 
+    // Normalize the relative directory to POSIX-style separators for ArgoCD.
+    let mut rel_dir_normalized = String::new();
+    for component in rel_dir.components() {
+        if let std::path::Component::Normal(os_str) = component {
+            if !rel_dir_normalized.is_empty() {
+                rel_dir_normalized.push('/');
+            }
+            rel_dir_normalized.push_str(&os_str.to_string_lossy());
+        }
+    }
+
     // Application path must be relative to the repo root, not the worktree.
     // Start from the generator's source.path and append any subdirectory.
-    let path_str = if rel_dir.as_os_str().is_empty() || rel_dir == Path::new(".") {
+    let path_str = if rel_dir_normalized.is_empty() {
         generator.spec.source.path.clone()
     } else {
-        format!("{}/{}", generator.spec.source.path, rel_dir.display())
+        format!("{}/{}", generator.spec.source.path, rel_dir_normalized)
     };
 
     // Build the Application manifest
