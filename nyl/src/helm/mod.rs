@@ -58,6 +58,9 @@ pub struct HelmChartResolver {
 
     /// Working directory for relative path resolution
     working_dir: PathBuf,
+
+    /// Optional cache directory for Git operations (defaults to env var/system default)
+    cache_dir: Option<PathBuf>,
 }
 
 impl HelmChartResolver {
@@ -67,9 +70,20 @@ impl HelmChartResolver {
     /// * `search_paths` - Directories to search for charts
     /// * `working_dir` - Working directory for relative paths
     pub fn new(search_paths: Vec<PathBuf>, working_dir: PathBuf) -> Self {
+        Self::with_cache_dir(search_paths, working_dir, None)
+    }
+
+    /// Create a new chart resolver with explicit cache directory
+    ///
+    /// # Arguments
+    /// * `search_paths` - Directories to search for charts
+    /// * `working_dir` - Working directory for relative paths
+    /// * `cache_dir` - Optional cache directory for Git operations (defaults to env var/system default)
+    pub fn with_cache_dir(search_paths: Vec<PathBuf>, working_dir: PathBuf, cache_dir: Option<PathBuf>) -> Self {
         Self {
             search_paths,
             working_dir,
+            cache_dir,
         }
     }
 
@@ -95,7 +109,7 @@ impl HelmChartResolver {
             match protocol {
                 RepositoryProtocol::Git => {
                     // Git repository: git+https://... or git+git@...
-                    return Self::resolve_git(url, chart_ref);
+                    return self.resolve_git(url, chart_ref);
                 }
                 RepositoryProtocol::Oci | RepositoryProtocol::Helm => {
                     // OCI or traditional Helm repository
@@ -211,8 +225,12 @@ impl HelmChartResolver {
     }
 
     /// Resolve a Git chart reference
-    fn resolve_git(repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        let mut git_manager = crate::git::GitManager::new()?;
+    fn resolve_git(&self, repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
+            crate::git::GitManager::with_cache_dir(cache_dir)
+        } else {
+            crate::git::GitManager::new()?
+        };
 
         // Use 'name' field as subpath for Git repos
         let subpath = chart_ref.name.as_deref();
@@ -240,6 +258,7 @@ impl std::fmt::Debug for HelmChartResolver {
         f.debug_struct("HelmChartResolver")
             .field("search_paths", &self.search_paths)
             .field("working_dir", &self.working_dir)
+            .field("cache_dir", &self.cache_dir)
             .finish()
     }
 }
@@ -407,8 +426,6 @@ mod tests {
     // as it requires actual Git operations
 
     #[test]
-<<<<<<< HEAD
-=======
     fn test_parse_repository_protocol_git_https() {
         let (protocol, url) = parse_repository_protocol("git+https://github.com/user/repo.git");
         assert_eq!(protocol, RepositoryProtocol::Git);
@@ -444,7 +461,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> 67a1ab3 (Unify chart reference API: use 'repository' field with protocol prefixes)
     fn test_resolve_repository_requires_version() {
         let temp = TempDir::new().unwrap();
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());

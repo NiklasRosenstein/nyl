@@ -368,9 +368,12 @@ fn test_git_chart_with_https_protocol_prefix() {
     create_test_helm_chart_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    env::set_var("NYL_CACHE_DIR", cache_dir.path());
 
-    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+    let resolver = HelmChartResolver::with_cache_dir(
+        vec![],
+        temp_repo.path().to_path_buf(),
+        Some(cache_dir.path().to_path_buf()),
+    );
 
     let chart_ref = ChartRef {
         repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
@@ -397,9 +400,12 @@ fn test_git_chart_with_subpath() {
     create_test_helm_chart_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    env::set_var("NYL_CACHE_DIR", cache_dir.path());
 
-    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+    let resolver = HelmChartResolver::with_cache_dir(
+        vec![],
+        temp_repo.path().to_path_buf(),
+        Some(cache_dir.path().to_path_buf()),
+    );
 
     let chart_ref = ChartRef {
         repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
@@ -426,9 +432,12 @@ fn test_git_chart_with_tag_version() {
     create_test_helm_chart_repo(temp_repo.path());
 
     let cache_dir = TempDir::new().unwrap();
-    env::set_var("NYL_CACHE_DIR", cache_dir.path());
 
-    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+    let resolver = HelmChartResolver::with_cache_dir(
+        vec![],
+        temp_repo.path().to_path_buf(),
+        Some(cache_dir.path().to_path_buf()),
+    );
 
     let chart_ref = ChartRef {
         repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
