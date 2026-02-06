@@ -334,7 +334,7 @@ metadata:
 spec:
   chart:
     git: git@github.com:myorg/private-charts.git
-    git_ref: main
+    version: main
     path: charts/my-app
   release:
     name: my-app

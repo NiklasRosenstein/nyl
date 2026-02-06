@@ -28,13 +28,18 @@ pub struct ChartRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Chart version
+    /// Chart version or Git reference
+    ///
+    /// For Helm repositories: Specifies the chart version (required)
+    /// For Git repositories: Specifies the Git reference - branch, tag, or commit
+    ///                       (optional, defaults to HEAD)
+    ///
+    /// Examples:
+    /// - Branch: "main", "develop"
+    /// - Tag: "v1.0.0", "1.2.3"
+    /// - Commit: "abc123..." (full or short hash)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-
-    /// Git reference (branch, tag, commit) - Phase 3
-    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub git_ref: Option<String>,
 }
 
 /// Kubernetes object metadata

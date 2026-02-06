@@ -19,10 +19,10 @@ spec:
 
     # Git repository
     git: string             # Git repository URL
-    git_ref: string         # Branch, tag, or commit (default: HEAD)
+    version: string         # Branch, tag, or commit (default: HEAD)
     path: string            # Subdirectory within repository
 
-    # Helm repository (not yet implemented)
+    # Helm repository
     repository: string      # Helm repository URL
     name: string            # Chart name in repository
     version: string         # Chart version
@@ -91,7 +91,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/bitnami/charts.git
-    git_ref: main
+    version: main
     path: bitnami/nginx
   release:
     name: nginx
@@ -100,7 +100,7 @@ spec:
 
 **Git Parameters:**
 - **`git`** (required): Git repository URL (HTTPS or SSH)
-- **`git_ref`** (optional): Branch, tag, or commit SHA (default: `HEAD`)
+- **`version`** (optional): Branch, tag, or commit SHA (default: `HEAD`)
 - **`path`** (optional): Subdirectory within the repository containing the chart
 
 **Examples:**
@@ -109,25 +109,25 @@ spec:
 # Latest from main branch
 chart:
   git: https://github.com/example/charts.git
-  git_ref: main
+  version: main
   path: charts/myapp
 
 # Specific version tag
 chart:
   git: https://github.com/example/charts.git
-  git_ref: v2.1.0
+  version: v2.1.0
   path: charts/myapp
 
 # Specific commit
 chart:
   git: https://github.com/example/charts.git
-  git_ref: abc123def456
+  version: abc123def456
   path: charts/myapp
 
 # Root of repository (no path)
 chart:
   git: https://github.com/example/simple-chart.git
-  git_ref: main
+  version: main
 ```
 
 See [Git Integration](../../git-integration.md) for more details on Git support.
@@ -232,7 +232,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/company/charts.git
-    git_ref: v2.1.0
+    version: v2.1.0
     path: applications/myapp
   release:
     name: myapp
@@ -270,7 +270,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/company/charts.git
-    git_ref: stable
+    version: stable
     path: myapp
   values:
     # Base values here

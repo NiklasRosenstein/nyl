@@ -51,7 +51,7 @@ impl HelmChartResolver {
     /// Resolve a chart reference to an absolute path
     ///
     /// Supports:
-    /// - Git repositories (git + git_ref + path)
+    /// - Git repositories (git + version + path)
     /// - Local paths (path)
     /// - Chart names from search paths (name)
     ///
@@ -176,7 +176,7 @@ impl HelmChartResolver {
         let mut git_manager = crate::git::GitManager::new()?;
 
         let worktree_path =
-            git_manager.resolve_ref(git_url, chart_ref.git_ref.as_deref(), chart_ref.path.as_deref())?;
+            git_manager.resolve_ref(git_url, chart_ref.version.as_deref(), chart_ref.path.as_deref())?;
 
         // Verify Chart.yaml exists
         let chart_yaml = worktree_path.join("Chart.yaml");

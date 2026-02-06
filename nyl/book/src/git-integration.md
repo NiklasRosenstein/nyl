@@ -63,7 +63,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/bitnami/charts.git
-    git_ref: main
+    version: main
     path: bitnami/nginx
   release:
     name: nginx
@@ -73,7 +73,7 @@ spec:
 ### Parameters
 
 - **`git`**: Git repository URL (required)
-- **`git_ref`**: Branch, tag, or commit (optional, defaults to HEAD)
+- **`version`**: Branch, tag, or commit (optional, defaults to HEAD)
 - **`path`**: Subdirectory within repository (optional)
 
 ### Supported Ref Types
@@ -85,7 +85,7 @@ You can reference different types of Git refs:
 spec:
   chart:
     git: https://github.com/example/charts.git
-    git_ref: main
+    version: main
 ```
 
 **Tag:**
@@ -93,7 +93,7 @@ spec:
 spec:
   chart:
     git: https://github.com/example/charts.git
-    git_ref: v2.1.0
+    version: v2.1.0
 ```
 
 **Commit SHA:**
@@ -101,7 +101,7 @@ spec:
 spec:
   chart:
     git: https://github.com/example/charts.git
-    git_ref: abc123def456
+    version: abc123def456
 ```
 
 **HEAD (default):**
@@ -109,7 +109,7 @@ spec:
 spec:
   chart:
     git: https://github.com/example/charts.git
-    # git_ref defaults to HEAD
+    # version defaults to HEAD
 ```
 
 ## Using Git with ApplicationGenerator
@@ -187,7 +187,7 @@ metadata:
 spec:
   chart:
     git: git@github.com:myorg/private-charts.git
-    git_ref: main
+    version: main
     path: charts/app
   release:
     name: private-app
@@ -280,7 +280,7 @@ export NYL_CACHE_DIR=$HOME/.cache/nyl
 spec:
   chart:
     git: https://github.com/large/repo.git
-    git_ref: v1.2.3  # Specific tag, not a branch
+    version: v1.2.3  # Specific tag, not a branch
 ```
 
 ### Stale cache
@@ -319,7 +319,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/company/charts.git
-    git_ref: stable
+    version: stable
     path: applications/myapp
   release:
     name: myapp
@@ -339,7 +339,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/company/charts.git
-    git_ref: develop
+    version: develop
     path: applications/myapp
   release:
     name: myapp
@@ -359,7 +359,7 @@ metadata:
 spec:
   chart:
     git: https://github.com/company/charts.git
-    git_ref: v2.1.0
+    version: v2.1.0
     path: applications/myapp
   release:
     name: myapp
@@ -399,14 +399,14 @@ spec:
 
 1. **Pin versions in production**: Use tags or commit SHAs for production deployments:
    ```yaml
-   git_ref: v1.2.3  # Tag
+   version: v1.2.3  # Tag
    # or
-   git_ref: abc123  # Commit SHA
+   version: abc123  # Commit SHA
    ```
 
 2. **Use branches for development**: Use branch refs for development environments:
    ```yaml
-   git_ref: develop  # Branch name
+   version: develop  # Branch name
    ```
 
 3. **Set cache directory**: Configure `NYL_CACHE_DIR` in CI/CD environments:
