@@ -283,6 +283,11 @@ mod tests {
     fn test_sanitize_version_empty() {
         // Empty version should return "unknown"
         assert_eq!(OciChartPuller::sanitize_version(""), "unknown");
+    }
+
+    #[test]
+    fn test_sanitize_version_only_special_chars() {
+        // Version with only special characters gets all replaced with underscores
         assert_eq!(OciChartPuller::sanitize_version("!@#$%"), "_____");
     }
 }

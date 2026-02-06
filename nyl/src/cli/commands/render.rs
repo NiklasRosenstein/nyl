@@ -716,6 +716,26 @@ metadata:
     }
 
     #[test]
+    fn test_path_normalization_with_join() {
+        use std::path::Path;
+        
+        // Test with platform-native path construction
+        let rel_dir = Path::new("subdir").join("nested");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+        
+        // Should always produce POSIX-style paths regardless of platform
+        assert_eq!(rel_dir_normalized, "subdir/nested");
+    }
+
+    #[test]
     fn test_path_normalization_root() {
         use std::path::Path;
         
