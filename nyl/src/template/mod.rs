@@ -176,4 +176,31 @@ mod tests {
         let result = engine.render("{{ bad | b64decode }}", &context);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_template_context_filters_env_vars() {
+        use crate::profiles::Profile;
+        
+        // Set some test environment variables
+        std::env::set_var("NYL_TEST_VAR", "visible");
+        std::env::set_var("SECRET_KEY", "should_not_be_visible");
+        std::env::set_var("NYL_ANOTHER", "also_visible");
+        
+        let profile = Profile::default();
+        let secrets = crate::secrets::SecretsConfig::load(None).unwrap();
+        
+        let context = TemplateContext::build(&profile, &secrets, "test").unwrap();
+        let json = context.to_json();
+        
+        // Check that only NYL_ prefixed vars are included
+        let env = json.get("env").unwrap().as_object().unwrap();
+        assert!(env.contains_key("NYL_TEST_VAR"));
+        assert!(env.contains_key("NYL_ANOTHER"));
+        assert!(!env.contains_key("SECRET_KEY"));
+        
+        // Clean up
+        std::env::remove_var("NYL_TEST_VAR");
+        std::env::remove_var("SECRET_KEY");
+        std::env::remove_var("NYL_ANOTHER");
+    }
 }

@@ -256,4 +256,33 @@ mod tests {
         assert_eq!(result, cache_path);
         assert!(result.join("Chart.yaml").exists());
     }
+
+    #[test]
+    fn test_sanitize_version_safe() {
+        assert_eq!(OciChartPuller::sanitize_version("1.0.0"), "1.0.0");
+        assert_eq!(OciChartPuller::sanitize_version("1.0.0-alpha"), "1.0.0-alpha");
+        assert_eq!(OciChartPuller::sanitize_version("1.0.0_beta"), "1.0.0_beta");
+    }
+
+    #[test]
+    fn test_sanitize_version_path_traversal() {
+        // Path separators should be sanitized
+        assert_eq!(OciChartPuller::sanitize_version("../../../etc/passwd"), ".._.._.._etc_passwd");
+        assert_eq!(OciChartPuller::sanitize_version("1.0/../../bad"), "1.0_.._.._bad");
+        assert_eq!(OciChartPuller::sanitize_version(".."), "..");
+    }
+
+    #[test]
+    fn test_sanitize_version_special_chars() {
+        // Special characters should be replaced with underscores
+        assert_eq!(OciChartPuller::sanitize_version("1.0.0+build"), "1.0.0_build");
+        assert_eq!(OciChartPuller::sanitize_version("v1.0.0!@#$"), "v1.0.0____");
+    }
+
+    #[test]
+    fn test_sanitize_version_empty() {
+        // Empty version should return "unknown"
+        assert_eq!(OciChartPuller::sanitize_version(""), "unknown");
+        assert_eq!(OciChartPuller::sanitize_version("!@#$%"), "_____");
+    }
 }

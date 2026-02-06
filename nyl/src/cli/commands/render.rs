@@ -695,4 +695,42 @@ metadata:
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0]["kind"], "Deployment");
     }
+
+    #[test]
+    fn test_path_normalization_posix() {
+        use std::path::Path;
+        
+        // Simulate the path normalization logic in create_argocd_application_from_generator
+        let rel_dir = Path::new("subdir/nested");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+        
+        assert_eq!(rel_dir_normalized, "subdir/nested");
+    }
+
+    #[test]
+    fn test_path_normalization_root() {
+        use std::path::Path;
+        
+        // Test empty path handling
+        let rel_dir = Path::new("");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+        
+        assert_eq!(rel_dir_normalized, "");
+    }
 }
