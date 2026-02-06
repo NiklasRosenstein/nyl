@@ -62,9 +62,9 @@ metadata:
   name: nginx
 spec:
   chart:
-    git: https://github.com/bitnami/charts.git
+    repository: git+https://github.com/bitnami/charts.git
     version: main
-    path: bitnami/nginx
+    name: bitnami/nginx
   release:
     name: nginx
     namespace: default
@@ -72,9 +72,9 @@ spec:
 
 ### Parameters
 
-- **`git`**: Git repository URL (required)
+- **`repository`**: Git repository URL with `git+` prefix (required)
 - **`version`**: Branch, tag, or commit (optional, defaults to HEAD)
-- **`path`**: Subdirectory within repository (optional)
+- **`name`**: Subdirectory within repository (optional)
 
 ### Supported Ref Types
 
@@ -84,7 +84,7 @@ You can reference different types of Git refs:
 ```yaml
 spec:
   chart:
-    git: https://github.com/example/charts.git
+    repository: git+https://github.com/example/charts.git
     version: main
 ```
 
@@ -92,7 +92,7 @@ spec:
 ```yaml
 spec:
   chart:
-    git: https://github.com/example/charts.git
+    repository: git+https://github.com/example/charts.git
     version: v2.1.0
 ```
 
@@ -100,7 +100,7 @@ spec:
 ```yaml
 spec:
   chart:
-    git: https://github.com/example/charts.git
+    repository: git+https://github.com/example/charts.git
     version: abc123def456
 ```
 
@@ -108,7 +108,7 @@ spec:
 ```yaml
 spec:
   chart:
-    git: https://github.com/example/charts.git
+    repository: git+https://github.com/example/charts.git
     # version defaults to HEAD
 ```
 
@@ -186,9 +186,9 @@ metadata:
   name: private-app
 spec:
   chart:
-    git: git@github.com:myorg/private-charts.git
+    repository: git+git@github.com:myorg/private-charts.git
     version: main
-    path: charts/app
+    name: charts/app
   release:
     name: private-app
     namespace: default
@@ -279,7 +279,7 @@ export NYL_CACHE_DIR=$HOME/.cache/nyl
 ```yaml
 spec:
   chart:
-    git: https://github.com/large/repo.git
+    repository: git+https://github.com/large/repo.git
     version: v1.2.3  # Specific tag, not a branch
 ```
 
@@ -318,9 +318,9 @@ metadata:
   name: app-production
 spec:
   chart:
-    git: https://github.com/company/charts.git
+    repository: git+https://github.com/company/charts.git
     version: stable
-    path: applications/myapp
+    name: applications/myapp
   release:
     name: myapp
     namespace: production
@@ -338,9 +338,9 @@ metadata:
   name: app-development
 spec:
   chart:
-    git: https://github.com/company/charts.git
+    repository: git+https://github.com/company/charts.git
     version: develop
-    path: applications/myapp
+    name: applications/myapp
   release:
     name: myapp
     namespace: development
@@ -358,9 +358,9 @@ metadata:
   name: app-stable
 spec:
   chart:
-    git: https://github.com/company/charts.git
+    repository: git+https://github.com/company/charts.git
     version: v2.1.0
-    path: applications/myapp
+    name: applications/myapp
   release:
     name: myapp
     namespace: staging
@@ -423,6 +423,6 @@ spec:
    ```yaml
    spec:
      chart:
-       git: https://github.com/company/charts.git
-       path: charts/applications/myapp
+       repository: git+https://github.com/company/charts.git
+       name: charts/applications/myapp
    ```

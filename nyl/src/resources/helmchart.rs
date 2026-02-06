@@ -8,23 +8,37 @@ use crate::constants::API_VERSION;
 
 /// Reference to a Helm chart
 ///
-/// Phase 2: Only `path` is supported for local charts
-/// Phase 3: `git` and `repository` for remote charts
+/// Supports Git, OCI, traditional Helm repositories, and local filesystem paths
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChartRef {
-    /// Local filesystem path to the chart
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-
-    /// Git repository URL (Phase 3)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git: Option<String>,
-
-    /// Helm repository URL (Phase 3)
+    /// Repository URL for Git, OCI, or traditional Helm repositories
+    ///
+    /// Protocol prefixes indicate the repository type:
+    /// - `git+https://` or `git+git@` - Git repository
+    /// - `oci://` - OCI registry
+    /// - `https://` or no prefix - Traditional Helm repository
+    ///
+    /// Examples:
+    /// - Git: "git+https://github.com/user/repo.git"
+    /// - Git SSH: "git+git@github.com:user/repo.git"
+    /// - OCI: "oci://ghcr.io/owner/chart"
+    /// - Helm: "https://charts.example.com"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
 
-    /// Chart name (required if using git or repository)
+    /// Universal name field with context-dependent meaning
+    ///
+    /// When `repository` is set:
+    /// - For Helm/OCI repositories: Specifies the chart name (required)
+    /// - For Git repositories: Specifies subdirectory path within repo (optional)
+    ///
+    /// When `repository` is NOT set:
+    /// - Treated as local filesystem path (absolute or relative)
+    ///
+    /// Examples:
+    /// - Local filesystem: "./charts/mychart", "/opt/charts/app"
+    /// - Git subpath: "charts/mychart", "deploy/helm/app"
+    /// - Helm/OCI chart: "nginx", "prometheus"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
@@ -203,15 +217,15 @@ mod tests {
     #[test]
     fn test_chart_ref_local_path() {
         let chart_ref = ChartRef {
-            path: Some("./charts/mychart".to_string()),
+            name: Some("./charts/mychart".to_string()),
             ..Default::default()
         };
 
         let yaml = serde_norway::to_string(&chart_ref).unwrap();
-        assert!(yaml.contains("path: ./charts/mychart"));
+        assert!(yaml.contains("name: ./charts/mychart"));
 
         let deserialized: ChartRef = serde_norway::from_str(&yaml).unwrap();
-        assert_eq!(deserialized.path, Some("./charts/mychart".to_string()));
+        assert_eq!(deserialized.name, Some("./charts/mychart".to_string()));
     }
 
     #[test]
@@ -220,7 +234,6 @@ mod tests {
             repository: Some("https://charts.example.com".to_string()),
             name: Some("nginx".to_string()),
             version: Some("1.0.0".to_string()),
-            ..Default::default()
         };
 
         let yaml = serde_norway::to_string(&chart_ref).unwrap();
@@ -253,7 +266,7 @@ mod tests {
     #[test]
     fn test_helm_chart_new() {
         let chart_ref = ChartRef {
-            path: Some("./charts/app".to_string()),
+            name: Some("./charts/app".to_string()),
             ..Default::default()
         };
 
@@ -262,13 +275,13 @@ mod tests {
         assert_eq!(helm_chart.api_version, "nyl.niklasrosenstein.github.com/v1");
         assert_eq!(helm_chart.kind, "HelmChart");
         assert_eq!(helm_chart.metadata.name, "my-app");
-        assert_eq!(helm_chart.spec.chart.path, Some("./charts/app".to_string()));
+        assert_eq!(helm_chart.spec.chart.name, Some("./charts/app".to_string()));
     }
 
     #[test]
     fn test_helm_chart_builder() {
         let chart_ref = ChartRef {
-            path: Some("./charts/app".to_string()),
+            name: Some("./charts/app".to_string()),
             ..Default::default()
         };
 
@@ -321,7 +334,7 @@ mod tests {
     #[test]
     fn test_helm_chart_serialization() {
         let chart_ref = ChartRef {
-            path: Some("./charts/nginx".to_string()),
+            name: Some("./charts/nginx".to_string()),
             ..Default::default()
         };
 
@@ -346,7 +359,7 @@ mod tests {
         // Round-trip
         let deserialized: HelmChart = serde_norway::from_str(&yaml).unwrap();
         assert_eq!(deserialized.metadata.name, "nginx-app");
-        assert_eq!(deserialized.spec.chart.path, Some("./charts/nginx".to_string()));
+        assert_eq!(deserialized.spec.chart.name, Some("./charts/nginx".to_string()));
     }
 
     #[test]

@@ -95,7 +95,7 @@ impl Generator {
     ) -> Result<HelmChart> {
         // Create ChartRef pointing to the component's chart
         let chart_ref = ChartRef {
-            path: Some(component.path.to_string_lossy().to_string()),
+            name: Some(component.path.to_string_lossy().to_string()),
             ..Default::default()
         };
 
@@ -172,7 +172,7 @@ pub fn instantiate_component(component: &Component, name: &str, values: &serde_j
 fn instantiate_helm_component(component: &HelmComponent, name: &str, values: &serde_json::Value) -> Result<HelmChart> {
     // Create ChartRef pointing to the component's chart
     let chart_ref = ChartRef {
-        path: Some(component.path.to_string_lossy().to_string()),
+        name: Some(component.path.to_string_lossy().to_string()),
         ..Default::default()
     };
 
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(helm_chart.metadata.name, "prod-app");
         assert_eq!(helm_chart.api_version, "v2.apps.io");
         assert_eq!(helm_chart.kind, "WebApplication");
-        assert_eq!(helm_chart.spec.chart.path, Some("/charts/webapp".to_string()));
+        assert_eq!(helm_chart.spec.chart.name, Some("/charts/webapp".to_string()));
         assert_eq!(helm_chart.spec.values["port"], 8080);
         assert_eq!(helm_chart.spec.values["environment"], "production");
     }

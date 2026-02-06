@@ -290,3 +290,153 @@ fn test_cache_directory_structure() {
     let worktrees: Vec<_> = fs::read_dir(&worktrees_dir).unwrap().filter_map(|e| e.ok()).collect();
     assert_eq!(worktrees.len(), 1);
 }
+
+/// Helper to create a test Git repository with a Helm chart
+fn create_test_helm_chart_repo(repo_dir: &Path) {
+    // Initialize repository with explicit branch name
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to init git repo");
+
+    // Configure user
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to set git user");
+
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to set git email");
+
+    // Disable signing
+    Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to disable commit signing");
+
+    // Create a Helm chart at the root
+    fs::write(
+        repo_dir.join("Chart.yaml"),
+        "apiVersion: v2\nname: root-chart\nversion: 1.0.0\n",
+    )
+    .expect("Failed to create Chart.yaml");
+    fs::write(repo_dir.join("values.yaml"), "key: value\n").expect("Failed to create values.yaml");
+
+    // Create a Helm chart in a subdirectory
+    fs::create_dir_all(repo_dir.join("charts/subchart")).expect("Failed to create charts/subchart");
+    fs::write(
+        repo_dir.join("charts/subchart/Chart.yaml"),
+        "apiVersion: v2\nname: subchart\nversion: 2.0.0\n",
+    )
+    .expect("Failed to create subchart Chart.yaml");
+
+    // Add and commit
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to git add");
+
+    Command::new("git")
+        .args(["commit", "-m", "Add Helm charts"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to git commit");
+
+    // Create a tag
+    Command::new("git")
+        .args(["tag", "v1.0.0"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to create tag");
+}
+
+#[test]
+fn test_git_chart_with_https_protocol_prefix() {
+    setup_test_env();
+
+    use nyl::helm::HelmChartResolver;
+    use nyl::resources::ChartRef;
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_helm_chart_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+    env::set_var("NYL_CACHE_DIR", cache_dir.path());
+
+    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+
+    let chart_ref = ChartRef {
+        repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
+        version: Some("main".to_string()),
+        name: None, // Chart at root
+    };
+
+    let resolved = resolver.resolve_chart(&chart_ref).unwrap();
+    assert!(resolved.path.exists());
+    assert!(resolved.path.join("Chart.yaml").exists());
+
+    let content = fs::read_to_string(resolved.path.join("Chart.yaml")).unwrap();
+    assert!(content.contains("name: root-chart"));
+}
+
+#[test]
+fn test_git_chart_with_subpath() {
+    setup_test_env();
+
+    use nyl::helm::HelmChartResolver;
+    use nyl::resources::ChartRef;
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_helm_chart_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+    env::set_var("NYL_CACHE_DIR", cache_dir.path());
+
+    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+
+    let chart_ref = ChartRef {
+        repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
+        version: Some("main".to_string()),
+        name: Some("charts/subchart".to_string()), // Subpath in repo
+    };
+
+    let resolved = resolver.resolve_chart(&chart_ref).unwrap();
+    assert!(resolved.path.exists());
+    assert!(resolved.path.join("Chart.yaml").exists());
+
+    let content = fs::read_to_string(resolved.path.join("Chart.yaml")).unwrap();
+    assert!(content.contains("name: subchart"));
+}
+
+#[test]
+fn test_git_chart_with_tag_version() {
+    setup_test_env();
+
+    use nyl::helm::HelmChartResolver;
+    use nyl::resources::ChartRef;
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_helm_chart_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+    env::set_var("NYL_CACHE_DIR", cache_dir.path());
+
+    let resolver = HelmChartResolver::new(vec![], temp_repo.path().to_path_buf());
+
+    let chart_ref = ChartRef {
+        repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
+        version: Some("v1.0.0".to_string()),
+        name: None,
+    };
+
+    let resolved = resolver.resolve_chart(&chart_ref).unwrap();
+    assert!(resolved.path.exists());
+    assert!(resolved.path.join("Chart.yaml").exists());
+}

@@ -100,7 +100,7 @@ fn test_helm_chart_resolution_integration() {
 
     // Resolve by explicit path
     let chart_ref2 = ChartRef {
-        path: Some(charts_dir.join("postgres").to_string_lossy().to_string()),
+        name: Some(charts_dir.join("postgres").to_string_lossy().to_string()),
         ..Default::default()
     };
 
@@ -284,9 +284,9 @@ fn test_component_to_helmchart_flow() {
     let release = helm_chart.spec.release.as_ref().unwrap();
     assert_eq!(release.name, "my-webapp");
 
-    // Verify chart path
-    assert!(helm_chart.spec.chart.path.is_some());
-    let chart_path = PathBuf::from(helm_chart.spec.chart.path.unwrap());
+    // Verify chart name (path)
+    assert!(helm_chart.spec.chart.name.is_some());
+    let chart_path = PathBuf::from(helm_chart.spec.chart.name.unwrap());
     assert!(chart_path.ends_with("WebApplication"));
 }
 
