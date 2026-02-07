@@ -62,7 +62,7 @@ settings:
     // Create a local helm chart
     let chart_dir = temp.path().join("charts").join("test-chart");
     fs::create_dir_all(chart_dir.join("templates")).unwrap();
-    
+
     fs::write(
         chart_dir.join("Chart.yaml"),
         r#"
@@ -122,7 +122,7 @@ spec:
         .arg("v1,apps/v1")
         .arg("--max-depth")
         .arg("1");
-    
+
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("kind: HelmChart"))
@@ -186,7 +186,7 @@ settings:
     // Create a local helm chart
     let chart_dir = temp.path().join("charts").join("nginx");
     fs::create_dir_all(chart_dir.join("templates")).unwrap();
-    
+
     fs::write(
         chart_dir.join("Chart.yaml"),
         r#"
@@ -243,13 +243,17 @@ spec:
         .arg("--kube-api-versions")
         .arg("v1,apps/v1")
         .arg("--track-parent");
-    
+
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-api-version"))
+        .stdout(predicate::str::contains(
+            "nyl.niklasrosenstein.github.com/parent-api-version",
+        ))
         .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-kind"))
         .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-name"))
-        .stdout(predicate::str::contains("nyl.niklasrosenstein.github.com/parent-namespace"))
+        .stdout(predicate::str::contains(
+            "nyl.niklasrosenstein.github.com/parent-namespace",
+        ))
         .stdout(predicate::str::contains("my-nginx")); // parent name
 }
 
@@ -285,10 +289,7 @@ data:
     // Run render command with both flags
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("--max-depth")
-        .arg("3")
-        .arg("--track-parent");
+    cmd.arg("render").arg("--max-depth").arg("3").arg("--track-parent");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -318,7 +319,7 @@ settings:
         .arg("5")
         .arg("--track-parent")
         .arg("--dry-run");
-    
+
     // Should succeed but with no manifests message
     cmd.assert().success();
 }
@@ -341,11 +342,8 @@ settings:
     // The command will succeed with no manifests, but we're testing that flags are accepted
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.current_dir(temp.path());
-    cmd.arg("diff")
-        .arg("--max-depth")
-        .arg("5")
-        .arg("--track-parent");
-    
+    cmd.arg("diff").arg("--max-depth").arg("5").arg("--track-parent");
+
     // Should succeed but with no manifests message
     cmd.assert().success();
 }

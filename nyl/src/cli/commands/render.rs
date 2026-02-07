@@ -342,13 +342,22 @@ fn generate_resource(
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
         let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
-        
+
         // Add parent tracking annotations if enabled
         if track_parent {
-            Ok(manifests.into_iter().map(|mut m| {
-                add_parent_annotations(&mut m, &chart.api_version, &chart.kind, &chart.metadata.name, chart.metadata.namespace.as_deref());
-                m
-            }).collect())
+            Ok(manifests
+                .into_iter()
+                .map(|mut m| {
+                    add_parent_annotations(
+                        &mut m,
+                        &chart.api_version,
+                        &chart.kind,
+                        &chart.metadata.name,
+                        chart.metadata.namespace.as_deref(),
+                    );
+                    m
+                })
+                .collect())
         } else {
             Ok(manifests)
         }
@@ -398,10 +407,19 @@ fn generate_resource(
 
             // Add parent tracking annotations if enabled
             if track_parent {
-                Ok(manifests.into_iter().map(|mut m| {
-                    add_parent_annotations(&mut m, &component_api_version, &component_kind, &component_name, release_namespace.as_deref());
-                    m
-                }).collect())
+                Ok(manifests
+                    .into_iter()
+                    .map(|mut m| {
+                        add_parent_annotations(
+                            &mut m,
+                            &component_api_version,
+                            &component_kind,
+                            &component_name,
+                            release_namespace.as_deref(),
+                        );
+                        m
+                    })
+                    .collect())
             } else {
                 Ok(manifests)
             }
@@ -446,10 +464,19 @@ fn generate_resource(
 
             // Add parent tracking annotations if enabled
             if track_parent {
-                Ok(manifests.into_iter().map(|mut m| {
-                    add_parent_annotations(&mut m, &component_api_version, &component_kind, &component_name, release_namespace.as_deref());
-                    m
-                }).collect())
+                Ok(manifests
+                    .into_iter()
+                    .map(|mut m| {
+                        add_parent_annotations(
+                            &mut m,
+                            &component_api_version,
+                            &component_kind,
+                            &component_name,
+                            release_namespace.as_deref(),
+                        );
+                        m
+                    })
+                    .collect())
             } else {
                 Ok(manifests)
             }
@@ -719,8 +746,7 @@ fn add_parent_annotations(
     parent_namespace: Option<&str>,
 ) {
     use crate::constants::{
-        ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
-        ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+        ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
     };
 
     if let Some(metadata) = manifest.get_mut("metadata").and_then(|m| m.as_object_mut()) {
@@ -902,8 +928,7 @@ metadata:
     #[test]
     fn test_add_parent_annotations() {
         use crate::constants::{
-            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
-            ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
         };
 
         // Test adding annotations to a manifest
@@ -930,7 +955,11 @@ metadata:
         // Verify annotations were added
         let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
         assert_eq!(
-            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            annotations
+                .get(ANNOTATION_PARENT_API_VERSION)
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "nyl.niklasrosenstein.github.com/v1"
         );
         assert_eq!(
@@ -950,8 +979,7 @@ metadata:
     #[test]
     fn test_add_parent_annotations_without_namespace() {
         use crate::constants::{
-            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
-            ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
         };
 
         let mut manifest = serde_json::json!({
@@ -973,7 +1001,11 @@ metadata:
         // Verify annotations were added (except namespace)
         let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
         assert_eq!(
-            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            annotations
+                .get(ANNOTATION_PARENT_API_VERSION)
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "nyl.niklasrosenstein.github.com/v1"
         );
         assert_eq!(
@@ -1020,7 +1052,11 @@ metadata:
         );
         // New annotation should also be there
         assert_eq!(
-            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            annotations
+                .get(ANNOTATION_PARENT_API_VERSION)
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "nyl.niklasrosenstein.github.com/v1"
         );
     }
