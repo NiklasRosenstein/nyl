@@ -44,6 +44,14 @@ pub struct RenderArgs {
     /// Kubernetes API versions for Helm (required with --offline, comma-separated or repeated)
     #[arg(long, required_if_eq("offline", "true"), value_delimiter = ',')]
     pub kube_api_versions: Vec<String>,
+
+    /// Maximum evaluation depth for recursive resource expansion (default: 10)
+    #[arg(long, default_value = "10")]
+    pub max_depth: usize,
+
+    /// Track parent resource information in annotations
+    #[arg(long)]
+    pub track_parent: bool,
 }
 
 /// Output format for rendered manifests
@@ -62,6 +70,8 @@ pub async fn render_manifests(
     offline: bool,
     cli_kube_version: Option<&str>,
     cli_api_versions: &[String],
+    max_depth: usize,
+    track_parent: bool,
 ) -> Result<(Vec<serde_json::Value>, Profile, String)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
@@ -145,7 +155,7 @@ pub async fn render_manifests(
     // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
     let mut pending = filtered;
-    for depth in 0..10 {
+    for depth in 0..max_depth {
         let mut next_pending = Vec::new();
         for resource in pending {
             let manifests = generate_resource(
@@ -155,6 +165,7 @@ pub async fn render_manifests(
                 &project_config,
                 &kube_version,
                 &api_versions,
+                track_parent,
             )?;
             for manifest in manifests {
                 if is_renderable_resource(&manifest) {
@@ -168,9 +179,9 @@ pub async fn render_manifests(
         if pending.is_empty() {
             break;
         }
-        if depth == 9 {
+        if depth == max_depth - 1 {
             return Err(NylError::Config(
-                "Maximum HelmChart nesting depth (10) exceeded".to_string(),
+                format!("Maximum HelmChart nesting depth ({}) exceeded", max_depth),
             ));
         }
     }
@@ -186,6 +197,8 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         args.offline,
         args.kube_version.as_deref(),
         &args.kube_api_versions,
+        args.max_depth,
+        args.track_parent,
     )
     .await?;
 
@@ -316,6 +329,7 @@ fn generate_resource(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
+    track_parent: bool,
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -325,7 +339,17 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+        let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
+        
+        // Add parent tracking annotations if enabled
+        if track_parent {
+            Ok(manifests.into_iter().map(|mut m| {
+                add_parent_annotations(&mut m, &chart.api_version, &chart.kind, &chart.metadata.name, chart.metadata.namespace.as_deref());
+                m
+            }).collect())
+        } else {
+            Ok(manifests)
+        }
     } else if is_nyl_component(resource) {
         // Parse as Component and render via the existing Helm path
         let component: NylComponent = serde_json::from_value(resource.clone())
@@ -344,11 +368,13 @@ fn generate_resource(
 
         let release_name = component.metadata.name.clone();
         let release_namespace = component.metadata.namespace.clone();
+        let component_api_version = component.api_version.clone();
+        let component_kind = component.kind.clone();
 
         let chart = HelmChart {
             api_version: "v1.0".to_string(),
             kind: "HelmChart".to_string(),
-            metadata: component.metadata,
+            metadata: component.metadata.clone(),
             spec: crate::resources::HelmChartSpec {
                 chart: ChartRef {
                     name: Some(chart_dir.to_string_lossy().into_owned()),
@@ -356,14 +382,24 @@ fn generate_resource(
                 },
                 release: Some(ReleaseMetadata {
                     name: release_name,
-                    namespace: release_namespace,
+                    namespace: release_namespace.clone(),
                     create_namespace: false,
                 }),
                 values: component.spec,
             },
         };
 
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+        let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
+        
+        // Add parent tracking annotations if enabled
+        if track_parent {
+            Ok(manifests.into_iter().map(|mut m| {
+                add_parent_annotations(&mut m, &component_api_version, &component_kind, &component.metadata.name, release_namespace.as_deref());
+                m
+            }).collect())
+        } else {
+            Ok(manifests)
+        }
     } else {
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
@@ -616,6 +652,48 @@ fn create_argocd_application_from_generator(
     }
 
     Ok(app)
+}
+
+/// Add parent resource tracking annotations to a manifest
+fn add_parent_annotations(
+    manifest: &mut serde_json::Value,
+    parent_api_version: &str,
+    parent_kind: &str,
+    parent_name: &str,
+    parent_namespace: Option<&str>,
+) {
+    use crate::constants::{
+        ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
+        ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+    };
+
+    if let Some(metadata) = manifest.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        let annotations = metadata
+            .entry("annotations")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut();
+
+        if let Some(annotations) = annotations {
+            annotations.insert(
+                ANNOTATION_PARENT_API_VERSION.to_string(),
+                serde_json::Value::String(parent_api_version.to_string()),
+            );
+            annotations.insert(
+                ANNOTATION_PARENT_KIND.to_string(),
+                serde_json::Value::String(parent_kind.to_string()),
+            );
+            annotations.insert(
+                ANNOTATION_PARENT_NAME.to_string(),
+                serde_json::Value::String(parent_name.to_string()),
+            );
+            if let Some(ns) = parent_namespace {
+                annotations.insert(
+                    ANNOTATION_PARENT_NAMESPACE.to_string(),
+                    serde_json::Value::String(ns.to_string()),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
