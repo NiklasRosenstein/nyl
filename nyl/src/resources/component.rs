@@ -68,11 +68,16 @@ fn is_remote_repository(s: &str) -> bool {
 /// - `name`: Chart name (optional, after '#')
 /// - `version`: Version or Git ref (optional, after '@')
 ///
-/// **Parsing behavior:** The parser searches from right to left, finding the rightmost
-/// '@' for version and the rightmost '#' (before the version) for the name. This means:
+/// **Parsing behavior:** The parser searches from right to left:
+/// 1. First finds the rightmost '#' to identify the name boundary
+/// 2. Then finds the rightmost '@' *after* that '#' (if any) for the version
+/// 
+/// This ensures Git SSH URLs like `git+git@github.com:org/repo#charts/app` are parsed correctly,
+/// where the `@` in `git@github.com` is part of the base URL, not a version separator.
+///
 /// - Valid: `http://repo.com#chart@v1.0` → base=`http://repo.com`, name=`chart`, version=`v1.0`
-/// - Valid: `git+https://github.com/user/repo#charts/app@main` → base=`git+https://github.com/user/repo`, name=`charts/app`, version=`main`
-/// - Edge case: URLs with '@' or '#' in the base part should be avoided or the base should be URL-encoded
+/// - Valid: `git+git@github.com:user/repo#charts/app@main` → base=`git+git@github.com:user/repo`, name=`charts/app`, version=`main`
+/// - Valid: `git+git@github.com:user/repo#charts/app` → base=`git+git@github.com:user/repo`, name=`charts/app`, version=None
 ///
 /// Examples:
 /// - `http://my-repo.org#my-chart@1.0.0` → repository URL with name and version
@@ -81,23 +86,46 @@ fn is_remote_repository(s: &str) -> bool {
 /// - `my-chart` → local path/name
 /// - `path/to/chart` → local path
 pub fn parse_component_kind(kind: &str) -> ComponentKindParsed {
-    // First, find the '@' for version (rightmost '@')
-    let (base_and_name, version) = if let Some(at_pos) = kind.rfind('@') {
-        let version_part = &kind[at_pos + 1..];
-        (kind[..at_pos].to_string(), Some(version_part.to_string()))
+    // First, find the '#' for name (rightmost '#')
+    // This helps distinguish between '@' in the base (like git@github.com) and '@' for version
+    if let Some(hash_pos) = kind.rfind('#') {
+        let base = kind[..hash_pos].to_string();
+        let after_hash = &kind[hash_pos + 1..];
+        
+        // Now look for '@' in the part after '#' for version
+        if let Some(at_pos) = after_hash.rfind('@') {
+            let name = after_hash[..at_pos].to_string();
+            let version = after_hash[at_pos + 1..].to_string();
+            ComponentKindParsed {
+                base,
+                name: Some(name),
+                version: Some(version),
+            }
+        } else {
+            // No '@' after '#', so no version
+            ComponentKindParsed {
+                base,
+                name: Some(after_hash.to_string()),
+                version: None,
+            }
+        }
     } else {
-        (kind.to_string(), None)
-    };
-
-    // Then, find the '#' for name (rightmost '#' in the remaining part)
-    let (base, name) = if let Some(hash_pos) = base_and_name.rfind('#') {
-        let name_part = &base_and_name[hash_pos + 1..];
-        (base_and_name[..hash_pos].to_string(), Some(name_part.to_string()))
-    } else {
-        (base_and_name, None)
-    };
-
-    ComponentKindParsed { base, name, version }
+        // No '#', so check for '@' for version only (no name)
+        if let Some(at_pos) = kind.rfind('@') {
+            ComponentKindParsed {
+                base: kind[..at_pos].to_string(),
+                name: None,
+                version: Some(kind[at_pos + 1..].to_string()),
+            }
+        } else {
+            // No '#' and no '@', entire string is the base
+            ComponentKindParsed {
+                base: kind.to_string(),
+                name: None,
+                version: None,
+            }
+        }
+    }
 }
 
 /// Check if a component kind uses the shortcut format for remote Helm charts
@@ -291,6 +319,23 @@ mod tests {
         assert_eq!(parsed.base, "git+https://github.com/user/repo");
         assert_eq!(parsed.name, Some("charts/app".to_string()));
         assert_eq!(parsed.version, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_parse_component_kind_git_ssh_with_at() {
+        // Git SSH URLs have @ in the base (git@github.com), should not be confused with version
+        let parsed = parse_component_kind("git+git@github.com:user/repo#charts/app");
+        assert_eq!(parsed.base, "git+git@github.com:user/repo");
+        assert_eq!(parsed.name, Some("charts/app".to_string()));
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_parse_component_kind_git_ssh_with_version() {
+        let parsed = parse_component_kind("git+git@github.com:user/repo#charts/app@v1.0");
+        assert_eq!(parsed.base, "git+git@github.com:user/repo");
+        assert_eq!(parsed.name, Some("charts/app".to_string()));
+        assert_eq!(parsed.version, Some("v1.0".to_string()));
     }
 
     #[test]

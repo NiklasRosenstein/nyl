@@ -336,6 +336,18 @@ fn generate_resource(
         if is_remote_helm_chart_shortcut(&component.kind) {
             // Shortcut format: <repository>#<name>@<version>
             let parsed = parse_component_kind(&component.kind);
+
+            // Validate HTTP(S) shortcuts: require an explicit chart name segment (`#<chart-name>`).
+            if (parsed.base.starts_with("http://") || parsed.base.starts_with("https://"))
+                && parsed.name.is_none()
+            {
+                return Err(NylError::Config(format!(
+                    "Invalid remote Helm chart shortcut '{}': missing chart name. \
+                     Use '<repository>#<chart-name>' or '<repository>#<chart-name>@<version>'.",
+                    component.kind
+                )));
+            }
+
             let chart_ref = component_kind_to_chart_ref(&parsed);
 
             let release_name = component.metadata.name.clone();

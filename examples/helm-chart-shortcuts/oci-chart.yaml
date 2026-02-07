@@ -1,4 +1,4 @@
-# OCI registry example (cert-manager from Jetstack)
+# OCI registry example (Bitnami nginx chart)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
 kind: oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4
 metadata:

@@ -1,6 +1,6 @@
-# HTTP chart without version (uses latest from Bitnami)
+# HTTP chart with explicit version (Bitnami redis)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: https://charts.bitnami.com/bitnami#redis
+kind: https://charts.bitnami.com/bitnami#redis@20.4.0
 metadata:
   name: my-redis
   namespace: default

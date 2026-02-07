@@ -25,13 +25,13 @@ This is equivalent to the full HelmChart resource but with less boilerplate.
 The `kind` field uses the format: `<repository>[#<name>][@<version>]`
 
 - `<repository>`: Repository URL (for remote charts) or local path
-- `#<name>`: Chart name (optional, after `#`)
-- `@<version>`: Version or Git ref (optional, after `@`)
+- `#<name>`: Chart name (required for HTTP/HTTPS repositories, optional for others)
+- `@<version>`: Version or Git ref (required for HTTP/HTTPS and OCI repositories)
 
 **Remote repositories** are identified by URL prefixes:
-- `http://` or `https://` - Traditional Helm repositories
-- `git+` - Git repositories  
-- `oci://` - OCI registries
+- `http://` or `https://` - Traditional Helm repositories (requires `#<name>` and `@<version>`)
+- `git+` - Git repositories (optional `#<subpath>` and `@<ref>`, defaults to HEAD if version omitted)
+- `oci://` - OCI registries (requires `@<version>`)
 
 **Local paths** (without URL prefix) use the existing component resolution mechanism.
 
@@ -71,17 +71,6 @@ spec:
   server:
     persistentVolume:
       enabled: false
-```
-
-```yaml
-# Without version (uses latest)
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: https://charts.bitnami.com/bitnami#redis
-metadata:
-  name: my-redis
-spec:
-  auth:
-    enabled: false
 ```
 
 ```yaml
