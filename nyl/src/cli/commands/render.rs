@@ -1065,6 +1065,8 @@ metadata:
         assert_eq!(
             levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.nikolasrosenstein.github.com"),
             1
+        );
+    }
 
     #[test]
     fn test_add_parent_annotations() {
@@ -1214,6 +1216,7 @@ metadata:
             "metadata": {"name": "test"}
         });
         assert!(!is_known_nyl_resource(&resource));
+    }
 
     #[test]
     fn test_add_parent_annotations_without_namespace() {
