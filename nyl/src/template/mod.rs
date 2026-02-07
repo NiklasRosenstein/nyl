@@ -30,6 +30,12 @@ impl TemplateEngine {
         let result = tmpl.render(context)?;
         Ok(result)
     }
+
+    /// Render a template with the given context, associating a name for error messages
+    pub fn render_named(&self, name: &str, template: &str, context: &serde_json::Value) -> Result<String> {
+        let result = self.env.render_named_str(name, template, context)?;
+        Ok(result)
+    }
 }
 
 impl Default for TemplateEngine {

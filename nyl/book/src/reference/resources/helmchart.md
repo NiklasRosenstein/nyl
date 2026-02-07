@@ -191,7 +191,7 @@ Values support Jinja2 templating:
 spec:
   values:
     image:
-      tag: "{{ env.IMAGE_TAG }}"
+      tag: "{{ env.NYL_IMAGE_TAG }}"
     environment: "{{ profile.name }}"
 ```
 

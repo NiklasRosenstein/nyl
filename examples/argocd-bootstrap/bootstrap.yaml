@@ -11,15 +11,15 @@ metadata:
   name: argocd
 spec:
   chart:
-    repository: "oci://ghcr.io/{{ env.CHART_OWNER | default('niklasrosenstein') }}/nyl/chart"
-    version: "{{ env.CHART_VERSION | default('0.1.0') }}"
+    repository: "oci://ghcr.io/{{ env.NYL_CHART_OWNER | default('niklasrosenstein') }}/nyl/chart"
+    version: "{{ env.NYL_CHART_VERSION | default('0.1.0') }}"
   release:
     name: argocd
     namespace: argocd
   values:
     nyl:
       image:
-        tag: "{{ env.IMAGE_TAG | default('develop') }}"
+        tag: "{{ env.NYL_IMAGE_TAG | default('develop') }}"
         pullPolicy: Always
 ---
 # ApplicationGenerator for ArgoCD self-management
@@ -33,8 +33,8 @@ spec:
     server: https://kubernetes.default.svc
     namespace: argocd
   source:
-    repoURL: "{{ env.REPO_URL }}"
-    targetRevision: "{{ env.TARGET_REVISION | default('HEAD') }}"
+    repoURL: "{{ env.NYL_REPO_URL }}"
+    targetRevision: "{{ env.NYL_TARGET_REVISION | default('HEAD') }}"
     path: examples/argocd-bootstrap
   project: default
   syncPolicy:

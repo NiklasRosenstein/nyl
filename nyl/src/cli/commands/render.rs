@@ -235,7 +235,7 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
         let raw =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
 
-        let rendered = engine.render(&raw, &ctx_json)?;
+        let rendered = engine.render_named(&file_path.display().to_string(), &raw, &ctx_json)?;
 
         let docs = parse_yaml_documents(&rendered)?;
         resources.extend(docs);

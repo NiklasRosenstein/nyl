@@ -132,11 +132,11 @@ jobs:
 
       - name: Bootstrap ArgoCD with nyl apply
         env:
-          CHART_OWNER: ${{ steps.sha.outputs.owner }}
-          CHART_VERSION: ${{ steps.sha.outputs.chart_version }}
-          IMAGE_TAG: ${{ steps.sha.outputs.image_tag }}
-          REPO_URL: https://github.com/${{ github.repository }}.git
-          TARGET_REVISION: ${{ steps.sha.outputs.full_sha }}
+          NYL_CHART_OWNER: ${{ steps.sha.outputs.owner }}
+          NYL_CHART_VERSION: ${{ steps.sha.outputs.chart_version }}
+          NYL_IMAGE_TAG: ${{ steps.sha.outputs.image_tag }}
+          NYL_REPO_URL: https://github.com/${{ github.repository }}.git
+          NYL_TARGET_REVISION: ${{ steps.sha.outputs.full_sha }}
         run: |
           nyl apply examples/argocd-bootstrap/
 

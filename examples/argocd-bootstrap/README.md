@@ -8,19 +8,19 @@ keeps itself in sync with this directory.
 
 | Variable           | Default                      | Description                              |
 |--------------------|------------------------------|------------------------------------------|
-| `CHART_OWNER`      | `niklasrosenstein`           | GitHub owner for the OCI chart registry  |
-| `CHART_VERSION`    | `0.1.0`                      | Helm chart version tag                   |
-| `IMAGE_TAG`        | `develop`                    | Container image tag for the Nyl sidecar  |
-| `REPO_URL`         | *(required)*                 | Git repository URL for self-management   |
-| `TARGET_REVISION`  | `HEAD`                       | Git revision for ArgoCD to track         |
+| `NYL_CHART_OWNER`      | `niklasrosenstein`           | GitHub owner for the OCI chart registry  |
+| `NYL_CHART_VERSION`    | `0.1.0`                      | Helm chart version tag                   |
+| `NYL_IMAGE_TAG`        | `develop`                    | Container image tag for the Nyl sidecar  |
+| `NYL_REPO_URL`         | *(required)*                 | Git repository URL for self-management   |
+| `NYL_TARGET_REVISION`  | `HEAD`                       | Git revision for ArgoCD to track         |
 
 ## Usage
 
 ```bash
-export CHART_VERSION="0.1.0-sha-abc1234"
-export IMAGE_TAG="sha-abc1234"
-export REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
-export TARGET_REVISION="HEAD"
+export NYL_CHART_VERSION="0.1.0-sha-abc1234"
+export NYL_IMAGE_TAG="sha-abc1234"
+export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
+export NYL_TARGET_REVISION="HEAD"
 
 nyl apply examples/argocd-bootstrap/
 ```
