@@ -33,8 +33,6 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 └── .github/          # CI/CD workflows
 ```
 
-**Working Directory:** All development work happens in the `nyl/` subdirectory.
-
 ## Development Workflow
 
 ### Prerequisites
