@@ -62,7 +62,7 @@ pub struct DiffArgs {
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
     // 1. Render desired manifests
-    let (raw_manifests, profile, _env_name) = render_manifests(
+    let (raw_manifests, profile, _env_name, _credential_provider) = render_manifests(
         &args.path,
         args.component.as_deref(),
         args.profile.as_deref(),

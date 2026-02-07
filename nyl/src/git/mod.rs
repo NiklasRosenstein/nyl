@@ -101,6 +101,15 @@ impl GitManager {
         })
     }
 
+    /// Create a Git manager with a pre-built credential provider
+    pub fn with_credential_provider(provider: Arc<CredentialProvider>) -> Result<Self> {
+        Ok(Self {
+            cache: CacheLayout::new()?,
+            bare_repos: HashMap::new(),
+            credential_provider: Some(provider),
+        })
+    }
+
     /// Resolve a Git URL and ref to a local path
     ///
     /// # Arguments
