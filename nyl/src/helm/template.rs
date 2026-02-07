@@ -104,8 +104,12 @@ impl HelmTemplateExecutor {
         release: &ReleaseMetadata,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
-        tracing::debug!("Rendering Helm chart: {} (release: {})", resolved.path.display(), release.name);
-        
+        tracing::debug!(
+            "Rendering Helm chart: {} (release: {})",
+            resolved.path.display(),
+            release.name
+        );
+
         // Write values to temp file if not empty
         let values_file = if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
             Some(write_values_file(values)?)
@@ -149,13 +153,7 @@ impl HelmTemplateExecutor {
         }
 
         // Log the command being executed
-        tracing::debug!(
-            "Executing helm command: helm {}",
-            cmd.get_args()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        tracing::debug!("Executing helm command: {:?}", cmd);
 
         // Execute helm template
         let output = cmd

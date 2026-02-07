@@ -63,7 +63,7 @@ impl OciChartPuller {
             return Ok(chart_dir);
         }
 
-        tracing::debug!("Pulling Helm chart from {}", repository);
+        tracing::debug!("Pulling Helm chart from {}", crate::util::sanitize_url(repository));
 
         // Ensure cache directory exists
         std::fs::create_dir_all(&self.cache_dir)
@@ -97,13 +97,7 @@ impl OciChartPuller {
             .arg(tmp_dir.path());
 
         // Log the command being executed
-        tracing::debug!(
-            "Executing helm command: helm {}",
-            cmd.get_args()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        tracing::debug!("Executing helm command: {:?}", cmd);
 
         let output = cmd
             .output()
