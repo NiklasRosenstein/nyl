@@ -65,6 +65,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nyl
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
       - name: Run tests
         run: cargo test --all-features
 

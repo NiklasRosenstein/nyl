@@ -45,12 +45,8 @@ data:
 }
 
 /// Test that --max-depth actually limits recursive evaluation
-/// 
-/// Note: This test requires Helm to be installed and is ignored by default in CI.
-/// Run with `cargo test -- --ignored` to execute.
 #[test]
-#[ignore]
-fn test_max_depth_limits_evaluation_with_helm() {
+fn test_max_depth_limits_evaluation() {
     let temp = TempDir::new().unwrap();
 
     // Create project structure
@@ -133,49 +129,6 @@ spec:
         .stdout(predicate::str::contains("nested-chart"));
 }
 
-/// Test that --max-depth flag works with simple resources (no Helm required)
-#[test]
-fn test_max_depth_limits_evaluation() {
-    let temp = TempDir::new().unwrap();
-
-    // Create project structure
-    fs::write(
-        temp.path().join("nyl-project.yaml"),
-        r#"
-settings:
-  searchPath: []
-"#,
-    )
-    .unwrap();
-
-    // Create a simple ConfigMap that doesn't require Helm
-    fs::write(
-        temp.path().join("test.yaml"),
-        r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test-config
-data:
-  key: value
-"#,
-    )
-    .unwrap();
-
-    // Run with max-depth=1 - should succeed with simple resources
-    // This verifies the flag is accepted and doesn't error
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
-    cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("--max-depth")
-        .arg("1");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("kind: ConfigMap"))
-        .stdout(predicate::str::contains("test-config"));
-}
-
 /// Test that --track-parent flag is accepted
 #[test]
 fn test_track_parent_flag_accepted() {
@@ -216,11 +169,7 @@ data:
 }
 
 /// Test that --track-parent actually adds parent annotations
-/// 
-/// Note: This test requires Helm to be installed and is ignored by default in CI.
-/// Run with `cargo test -- --ignored` to execute.
 #[test]
-#[ignore]
 fn test_track_parent_adds_annotations() {
     let temp = TempDir::new().unwrap();
 
