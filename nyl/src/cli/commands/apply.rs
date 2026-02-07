@@ -42,6 +42,14 @@ pub struct ApplyArgs {
     /// Dry run mode
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Maximum evaluation depth for recursive resource expansion (default: 10)
+    #[arg(long, default_value = "10")]
+    pub max_depth: usize,
+
+    /// Track parent resource information in annotations
+    #[arg(long)]
+    pub track_parent: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -54,6 +62,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
+        args.max_depth,
+        args.track_parent,
     )
     .await?;
 

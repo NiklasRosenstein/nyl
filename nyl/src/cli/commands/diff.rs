@@ -58,6 +58,14 @@ pub struct DiffArgs {
     /// 'raw' compares manifests directly (may show server defaults)
     #[arg(long, default_value = "normalized")]
     pub mode: DiffMode,
+
+    /// Maximum evaluation depth for recursive resource expansion (default: 10)
+    #[arg(long, default_value = "10")]
+    pub max_depth: usize,
+
+    /// Track parent resource information in annotations
+    #[arg(long)]
+    pub track_parent: bool,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
@@ -69,6 +77,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
+        args.max_depth,
+        args.track_parent,
     )
     .await?;
 
