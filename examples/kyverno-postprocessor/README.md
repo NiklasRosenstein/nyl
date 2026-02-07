@@ -1,6 +1,6 @@
 # Kyverno Post-Processor Example
 
-This example demonstrates how to use the Kyverno post-processor in Nyl to apply policies to Kubernetes manifests at render time.
+This example demonstrates how to use the Kyverno post-processor in Nyl.
 
 ## Setup
 
@@ -17,14 +17,9 @@ This example demonstrates how to use the Kyverno post-processor in Nyl to apply 
    nyl render examples/kyverno-postprocessor/manifests.yaml --offline --kube-version v1.28.0 --kube-api-versions apps/v1
    ```
 
-## Example Features
+## What This Example Shows
 
-The example demonstrates:
+This example shows mutation policies applied to Service resources, demonstrating the Kyverno post-processor in action.
 
-1. **Inline Policies**: Full Kyverno policy resources defined inline
-2. **Shorthand Rules**: Using convenience fields like `mutatingPolicyRules` to reduce boilerplate
-3. **Global Scope**: Policies that apply to all resources in the render
+See `manifests.yaml` for the full example configuration.
 
-## Files
-
-- `manifests.yaml`: Contains both resources to be mutated and the Kyverno post-processor configuration

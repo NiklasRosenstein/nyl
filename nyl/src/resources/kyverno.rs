@@ -99,44 +99,111 @@ impl Kyverno {
     pub fn get_all_policies(&self) -> Vec<serde_json::Value> {
         let mut policies = self.spec.inline_policies.clone();
 
-        // Add shorthand rules as ClusterPolicy resources
+        // Add shorthand rules using the appropriate policy type
         if !self.spec.cluster_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy("cluster-policy", &self.spec.cluster_policy_rules));
+            policies.push(self.create_cluster_policy(&self.spec.cluster_policy_rules));
         }
 
         if !self.spec.validating_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy("validating-policy", &self.spec.validating_policy_rules));
+            policies.push(self.create_validating_policy(&self.spec.validating_policy_rules));
         }
 
         if !self.spec.mutating_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy("mutating-policy", &self.spec.mutating_policy_rules));
+            policies.push(self.create_mutating_policy(&self.spec.mutating_policy_rules));
         }
 
         if !self.spec.generating_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy("generating-policy", &self.spec.generating_policy_rules));
+            policies.push(self.create_generating_policy(&self.spec.generating_policy_rules));
         }
 
         if !self.spec.deleting_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy("deleting-policy", &self.spec.deleting_policy_rules));
+            policies.push(self.create_deleting_policy(&self.spec.deleting_policy_rules));
         }
 
         if !self.spec.image_validating_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy(
-                "image-validating-policy",
-                &self.spec.image_validating_policy_rules,
-            ));
+            policies.push(self.create_image_validating_policy(&self.spec.image_validating_policy_rules));
         }
 
         policies
     }
 
-    /// Create a ClusterPolicy resource from rules
-    fn create_cluster_policy(&self, name_suffix: &str, rules: &[serde_json::Value]) -> serde_json::Value {
+    /// Create a ClusterPolicy resource from rules (legacy format)
+    fn create_cluster_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
         serde_json::json!({
             "apiVersion": "kyverno.io/v1",
             "kind": "ClusterPolicy",
             "metadata": {
-                "name": format!("{}-{}", self.metadata.name, name_suffix),
+                "name": format!("{}-cluster-policy", self.metadata.name),
+            },
+            "spec": {
+                "rules": rules
+            }
+        })
+    }
+
+    /// Create a ValidatingPolicy resource from rules
+    fn create_validating_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "ValidatingPolicy",
+            "metadata": {
+                "name": format!("{}-validating-policy", self.metadata.name),
+            },
+            "spec": {
+                "rules": rules
+            }
+        })
+    }
+
+    /// Create a MutatingPolicy resource from rules
+    fn create_mutating_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
+            "metadata": {
+                "name": format!("{}-mutating-policy", self.metadata.name),
+            },
+            "spec": {
+                "rules": rules
+            }
+        })
+    }
+
+    /// Create a GeneratingPolicy resource from rules
+    fn create_generating_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "GeneratingPolicy",
+            "metadata": {
+                "name": format!("{}-generating-policy", self.metadata.name),
+            },
+            "spec": {
+                "rules": rules
+            }
+        })
+    }
+
+    /// Create a DeletingPolicy resource from rules
+    fn create_deleting_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "DeletingPolicy",
+            "metadata": {
+                "name": format!("{}-deleting-policy", self.metadata.name),
+            },
+            "spec": {
+                "rules": rules
+            }
+        })
+    }
+
+    /// Create an ImageValidatingPolicy resource from rules
+    fn create_image_validating_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "ImageValidatingPolicy",
+            "metadata": {
+                "name": format!("{}-image-validating-policy", self.metadata.name),
             },
             "spec": {
                 "rules": rules
@@ -330,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_cluster_policy() {
+    fn test_create_policies() {
         let kyverno = Kyverno {
             api_version: "post-processing.nyl.niklasrosenstein.github.com/v1".to_string(),
             kind: "Kyverno".to_string(),
@@ -343,18 +410,33 @@ mod tests {
                 policies: vec![],
                 inline_policies: vec![],
                 cluster_policy_rules: vec![json!({"name": "test-rule"})],
-                validating_policy_rules: vec![],
-                mutating_policy_rules: vec![],
+                validating_policy_rules: vec![json!({"name": "validate-rule"})],
+                mutating_policy_rules: vec![json!({"name": "mutate-rule"})],
                 generating_policy_rules: vec![],
                 deleting_policy_rules: vec![],
                 image_validating_policy_rules: vec![],
             },
         };
 
-        let policy = kyverno.create_cluster_policy("test", &kyverno.spec.cluster_policy_rules);
+        // Test ClusterPolicy
+        let policy = kyverno.create_cluster_policy(&kyverno.spec.cluster_policy_rules);
         assert_eq!(policy["apiVersion"], "kyverno.io/v1");
         assert_eq!(policy["kind"], "ClusterPolicy");
-        assert_eq!(policy["metadata"]["name"], "my-policy-test");
+        assert_eq!(policy["metadata"]["name"], "my-policy-cluster-policy");
+        assert_eq!(policy["spec"]["rules"].as_array().unwrap().len(), 1);
+
+        // Test ValidatingPolicy
+        let policy = kyverno.create_validating_policy(&kyverno.spec.validating_policy_rules);
+        assert_eq!(policy["apiVersion"], "policies.kyverno.io/v1");
+        assert_eq!(policy["kind"], "ValidatingPolicy");
+        assert_eq!(policy["metadata"]["name"], "my-policy-validating-policy");
+        assert_eq!(policy["spec"]["rules"].as_array().unwrap().len(), 1);
+
+        // Test MutatingPolicy
+        let policy = kyverno.create_mutating_policy(&kyverno.spec.mutating_policy_rules);
+        assert_eq!(policy["apiVersion"], "policies.kyverno.io/v1");
+        assert_eq!(policy["kind"], "MutatingPolicy");
+        assert_eq!(policy["metadata"]["name"], "my-policy-mutating-policy");
         assert_eq!(policy["spec"]["rules"].as_array().unwrap().len(), 1);
     }
 }
