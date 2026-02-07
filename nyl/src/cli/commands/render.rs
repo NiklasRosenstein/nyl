@@ -212,10 +212,10 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         .filter(|k| matches!(k.spec.scope, crate::resources::KyvernoScope::Global))
         .collect();
 
-    let final_manifests = if !global_policies.is_empty() {
-        apply_kyverno_policies(&final_manifests, &global_policies)?
-    } else {
+    let final_manifests = if global_policies.is_empty() {
         final_manifests
+    } else {
+        apply_kyverno_policies(&final_manifests, &global_policies)?
     };
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;

@@ -227,18 +227,17 @@ kind: ConfigMap
 metadata:
   name: test-config
 data:
-  scope: {}
+  scope: {scope}
 ---
 apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
 kind: Kyverno
 metadata:
   name: test-policy
 spec:
-  scope: {}
+  scope: {scope}
   clusterPolicyRules:
     - name: test-rule
-"#,
-            scope, scope
+"#
         );
 
         fs::write(temp.path().join("manifest.yaml"), manifest).unwrap();

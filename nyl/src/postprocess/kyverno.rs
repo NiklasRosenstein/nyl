@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_parse_kyverno_output_yaml() {
-        let output = r#"apiVersion: v1
+        let output = r"apiVersion: v1
 kind: ConfigMap
 metadata:
   name: test1
@@ -342,7 +342,7 @@ metadata:
 apiVersion: v1
 kind: Service
 metadata:
-  name: test2"#;
+  name: test2";
 
         let manifests = parse_kyverno_output(output).unwrap();
         assert_eq!(manifests.len(), 2);

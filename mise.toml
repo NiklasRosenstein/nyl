@@ -18,7 +18,7 @@ kubectl = "1.35.0"
 [tasks.fmt]
 description = "Format Rust code"
 dir = "nyl"
-run = "cargo fmt"
+run = "cargo fmt && cargo clippy --all-targets --fix --allow-dirty"
 
 [tasks.fmt-check]
 description = "Check Rust formatting"
