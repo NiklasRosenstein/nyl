@@ -58,8 +58,11 @@ pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyver
 
     // Check if kyverno is installed
     if !is_kyverno_installed() {
-        tracing::warn!("Kyverno CLI is not installed. Skipping policy application. Install from: https://kyverno.io/docs/kyverno-cli/");
-        return Ok(manifests.to_vec());
+        return Err(NylError::Config(
+            "Kyverno CLI is not installed but Kyverno post-processor resources were found. \
+             Install from: https://kyverno.io/docs/kyverno-cli/"
+                .to_string(),
+        ));
     }
 
     // Create a temporary directory for policy and resource files
@@ -93,11 +96,15 @@ pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyver
     let resources_file = temp_dir.path().join("resources.yaml");
     write_manifests_to_file(&resources_file, manifests)?;
 
-    // Execute kyverno apply
-    let output = execute_kyverno_apply(&policy_files, &resources_file)?;
+    // Create output directory for kyverno to write mutated manifests
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir(&output_dir).map_err(|e| NylError::Config(format!("Failed to create output directory: {}", e)))?;
 
-    // Parse the output
-    parse_kyverno_output(&output)
+    // Execute kyverno apply
+    execute_kyverno_apply(&policy_files, &resources_file, &output_dir)?;
+
+    // Read back mutated manifests from output directory
+    read_kyverno_output(&output_dir, manifests)
 }
 
 /// Check if kyverno CLI is installed
@@ -125,21 +132,21 @@ fn write_manifests_to_file(path: &Path, manifests: &[serde_json::Value]) -> Resu
     Ok(())
 }
 
-/// Execute kyverno apply command
-fn execute_kyverno_apply(policy_files: &[PathBuf], resources_file: &Path) -> Result<String> {
+/// Execute kyverno apply command, writing mutated manifests to the output directory
+fn execute_kyverno_apply(policy_files: &[PathBuf], resources_file: &Path, output_dir: &Path) -> Result<()> {
     let mut cmd = Command::new("kyverno");
     cmd.arg("apply");
 
-    // Add all policy files
+    // Add all policy files as positional arguments
     for policy_file in policy_files {
-        cmd.arg("--policy").arg(policy_file);
+        cmd.arg(policy_file);
     }
 
     // Add the resources file
     cmd.arg("--resource").arg(resources_file);
 
-    // Output as JSON for easier parsing
-    cmd.arg("--output").arg("json");
+    // Write mutated manifests to output directory
+    cmd.arg("-o").arg(output_dir);
 
     tracing::debug!("Executing kyverno apply command: {:?}", cmd);
 
@@ -147,87 +154,72 @@ fn execute_kyverno_apply(policy_files: &[PathBuf], resources_file: &Path) -> Res
         .output()
         .map_err(|e| NylError::Config(format!("Failed to execute kyverno apply: {}", e)))?;
 
+    let combined_output = String::from_utf8_lossy(&output.stdout);
+    tracing::debug!("Kyverno output:\n{}", combined_output);
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NylError::Config(format!(
-            "Kyverno apply failed with exit code {:?}: {}",
+            "Kyverno apply failed with exit code {:?}:\n{}",
             output.status.code(),
-            stderr
+            combined_output
         )));
     }
 
-    String::from_utf8(output.stdout).map_err(|e| NylError::Config(format!("Failed to parse kyverno output: {}", e)))
+    Ok(())
 }
 
-/// Parse kyverno apply output and extract processed manifests
+/// Read mutated manifests from the kyverno output directory
 ///
-/// The kyverno apply command with JSON output returns a structured result.
-/// We need to extract the mutated/validated resources from the output.
-fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
-    // Kyverno apply with --output json returns a JSON object with results
-    // We need to handle different output formats depending on the kyverno version
-
-    // Try to parse as JSON first
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
-        // If it's an object with a "resources" field, extract that
-        if let Some(resources) = json.get("resources").and_then(|r| r.as_array()) {
-            return Ok(resources.clone());
-        }
-
-        // If it's directly an array of resources
-        if json.is_array() {
-            return Ok(json.as_array().unwrap().clone());
-        }
-
-        // If there's a "results" field with resources
-        if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
-            let mut manifests = Vec::new();
-            for result in results {
-                if let Some(resource) = result.get("resource") {
-                    manifests.push(resource.clone());
-                }
-            }
-            if !manifests.is_empty() {
-                return Ok(manifests);
-            }
-        }
-    }
-
-    // If JSON parsing doesn't work, try parsing as YAML multi-document
-    // This handles the case where kyverno outputs YAML instead of JSON
+/// Kyverno writes one file per mutated resource to the output directory. Validation-only
+/// policies don't produce output files. When the output directory is empty (e.g. only
+/// validation policies were applied), the original manifests are returned unchanged.
+fn read_kyverno_output(output_dir: &Path, original_manifests: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
     let mut manifests = Vec::new();
 
-    // Split on lines that are exactly "---" (with optional whitespace)
-    let docs: Vec<String> = output
-        .split('\n')
-        .collect::<Vec<_>>()
-        .split(|line| line.trim() == "---")
-        .map(|lines| lines.join("\n"))
-        .collect();
+    let entries: Vec<_> = fs::read_dir(output_dir)
+        .map_err(|e| NylError::Config(format!("Failed to read kyverno output directory: {}", e)))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| NylError::Config(format!("Failed to read kyverno output directory entries: {}", e)))?;
 
-    for doc in docs {
-        let trimmed = doc.trim();
-        if trimmed.is_empty()
-            || trimmed
-                .lines()
-                .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
-        {
-            continue;
-        }
+    // Validation-only policies don't produce output files. If kyverno succeeded
+    // (checked by the caller) but wrote no output, return the originals unchanged.
+    if entries.is_empty() {
+        tracing::debug!("Kyverno output directory is empty; returning original manifests unchanged");
+        return Ok(original_manifests.to_vec());
+    }
 
-        if let Ok(value) = serde_norway::from_str::<serde_json::Value>(trimmed) {
-            if !value.is_null() {
-                manifests.push(value);
+    for entry in &entries {
+        let content = fs::read_to_string(entry.path()).map_err(|e| {
+            NylError::Config(format!(
+                "Failed to read kyverno output file {}: {}",
+                entry.path().display(),
+                e
+            ))
+        })?;
+
+        // Each file may contain multiple YAML documents
+        for doc in content.split("\n---") {
+            let trimmed = doc.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_norway::from_str::<serde_json::Value>(trimmed) {
+                Ok(value) if !value.is_null() => manifests.push(value),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Failed to parse YAML document from kyverno output: {}", e);
+                }
             }
         }
     }
 
-    if manifests.is_empty() {
-        // If we couldn't parse anything, log a warning and return empty
-        tracing::warn!("Could not parse kyverno output. This might be a version compatibility issue.");
-        return Err(NylError::Config(
-            "Failed to parse kyverno apply output. Please check kyverno version compatibility.".to_string(),
-        ));
+    if manifests.len() != original_manifests.len() {
+        return Err(NylError::Config(format!(
+            "Unexpected behaviour of `kyverno apply` command: The number of resources generated in the \
+             output folder ({}) does not match the number of input resources ({})",
+            manifests.len(),
+            original_manifests.len()
+        )));
     }
 
     Ok(manifests)
@@ -260,11 +252,11 @@ mod tests {
                 policies: vec![],
                 inline_policies: vec![],
                 cluster_policy_rules: vec![],
-                validating_policy_rules: vec![],
-                mutating_policy_rules: vec![],
-                generating_policy_rules: vec![],
-                deleting_policy_rules: vec![],
-                image_validating_policy_rules: vec![],
+                validating_policies: vec![],
+                mutating_policies: vec![],
+                generating_policies: vec![],
+                deleting_policies: vec![],
+                image_validating_policies: vec![],
             },
         };
 
@@ -288,11 +280,11 @@ mod tests {
                 policies: vec![],
                 inline_policies: vec![],
                 cluster_policy_rules: vec![],
-                validating_policy_rules: vec![],
-                mutating_policy_rules: vec![],
-                generating_policy_rules: vec![],
-                deleting_policy_rules: vec![],
-                image_validating_policy_rules: vec![],
+                validating_policies: vec![],
+                mutating_policies: vec![],
+                generating_policies: vec![],
+                deleting_policies: vec![],
+                image_validating_policies: vec![],
             },
         };
 
@@ -320,33 +312,55 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_kyverno_output_json_array() {
-        let output = r#"[
-            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test"}},
-            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "svc"}}
-        ]"#;
+    fn test_read_kyverno_output() {
+        let temp_dir = TempDir::new().unwrap();
 
-        let manifests = parse_kyverno_output(output).unwrap();
+        // Write two resource files like kyverno would
+        fs::write(
+            temp_dir.path().join("resource-0.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test1\n",
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("resource-1.yaml"),
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: test2\n",
+        )
+        .unwrap();
+
+        let originals = vec![
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test1"}}),
+            json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "test2"}}),
+        ];
+        let manifests = read_kyverno_output(temp_dir.path(), &originals).unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0]["kind"], "ConfigMap");
-        assert_eq!(manifests[1]["kind"], "Service");
     }
 
     #[test]
-    fn test_parse_kyverno_output_yaml() {
-        let output = r"apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test1
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: test2";
+    fn test_read_kyverno_output_empty_returns_originals() {
+        let temp_dir = TempDir::new().unwrap();
 
-        let manifests = parse_kyverno_output(output).unwrap();
-        assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0]["kind"], "ConfigMap");
-        assert_eq!(manifests[1]["kind"], "Service");
+        // Empty output dir (e.g. validation-only policies)
+        let originals = vec![json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test1"}})];
+        let manifests = read_kyverno_output(temp_dir.path(), &originals).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0]["metadata"]["name"], "test1");
+    }
+
+    #[test]
+    fn test_read_kyverno_output_count_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+
+        fs::write(
+            temp_dir.path().join("resource-0.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test1\n",
+        )
+        .unwrap();
+
+        let originals = vec![
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test1"}}),
+            json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "test2"}}),
+        ];
+        let result = read_kyverno_output(temp_dir.path(), &originals);
+        assert!(result.is_err());
     }
 }

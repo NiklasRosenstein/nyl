@@ -16,6 +16,11 @@ fn is_kyverno_available() -> bool {
 
 #[test]
 fn test_kyverno_resources_are_filtered() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
     let temp = TempDir::new().unwrap();
 
     // Create a manifest with Kyverno resource
@@ -35,17 +40,19 @@ metadata:
   name: test-policy
 spec:
   scope: Global
-  mutatingPolicyRules:
-    - name: add-label
-      match:
-        resources:
-          kinds:
-            - ConfigMap
-      mutate:
-        patchStrategicMerge:
-          metadata:
-            labels:
-              managed-by: nyl
+  mutatingPolicies:
+    - name: add-managed-by-label
+      matchConstraints:
+        resourceRules:
+          - apiGroups: ['']
+            apiVersions: ['v1']
+            operations: ['CREATE']
+            resources: ['configmaps']
+      mutations:
+        - patchType: ApplyConfiguration
+          applyConfiguration:
+            expression: >-
+              Object{metadata: Object.metadata{labels: Object.metadata.labels{managedBy: "nyl"}}}
 "#,
     )
     .unwrap();
@@ -67,24 +74,21 @@ spec:
     assert!(stdout.contains("test-config"));
     assert!(!stdout.contains("kind: Kyverno"));
 
-    // If Kyverno CLI is available, verify the label was added
-    if is_kyverno_available() {
-        assert!(
-            stdout.contains("managed-by: nyl"),
-            "Expected label 'managed-by: nyl' to be added by Kyverno policy"
-        );
-    } else {
-        // If Kyverno is not available, verify we got the warning
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("Kyverno CLI is not installed"),
-            "Expected warning about Kyverno CLI not being installed"
-        );
-    }
+    // Verify the label was added by the mutation policy
+    assert!(
+        stdout.contains("managedBy: nyl") || stdout.contains("managedBy: \"nyl\""),
+        "Expected label 'managedBy: nyl' to be added by Kyverno policy, got:\n{}",
+        stdout
+    );
 }
 
 #[test]
 fn test_multiple_kyverno_resources() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
     let temp = TempDir::new().unwrap();
 
     // Create a manifest with multiple Kyverno resources
@@ -108,6 +112,16 @@ spec:
   scope: Global
   clusterPolicyRules:
     - name: rule1
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              cluster-policy-applied: "true"
 ---
 apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
 kind: Kyverno
@@ -115,8 +129,17 @@ metadata:
   name: policy-2
 spec:
   scope: Local
-  mutatingPolicyRules:
-    - name: rule2
+  mutatingPolicies:
+    - matchConstraints:
+        resourceRules:
+          - apiGroups: ['apps']
+            apiVersions: ['v1']
+            operations: ['CREATE']
+            resources: ['deployments']
+      mutations:
+        - patchType: ApplyConfiguration
+          applyConfiguration:
+            expression: "object"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -160,6 +183,11 @@ spec:
 
 #[test]
 fn test_kyverno_with_inline_policies() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
     let temp = TempDir::new().unwrap();
 
     // Create a manifest with inline policies
@@ -190,9 +218,15 @@ spec:
         rules:
           - name: test-rule
             match:
-              resources:
-                kinds:
-                  - Pod
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            mutate:
+              patchStrategicMerge:
+                metadata:
+                  labels:
+                    inline-applied: "true"
 "#,
     )
     .unwrap();
@@ -206,16 +240,33 @@ spec:
         .arg("--kube-api-versions")
         .arg("v1");
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Pod"))
-        .stdout(predicate::str::contains("test-pod"))
-        // Kyverno resource should not be in output
-        .stdout(predicate::str::contains("kind: Kyverno").not());
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Pod"));
+    assert!(stdout.contains("test-pod"));
+    assert!(!stdout.contains("kind: Kyverno"));
+
+    // Verify the inline ClusterPolicy mutation was applied
+    assert!(
+        stdout.contains("inline-applied: \"true\"") || stdout.contains("inline-applied: 'true'"),
+        "Expected label 'inline-applied: true' to be added by inline ClusterPolicy, got:\n{}",
+        stdout
+    );
 }
 
 #[test]
 fn test_kyverno_scope_variations() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
     let temp = TempDir::new().unwrap();
 
     // Test all scope types
@@ -237,6 +288,16 @@ spec:
   scope: {scope}
   clusterPolicyRules:
     - name: test-rule
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              scope-tested: "true"
 "#
         );
 
@@ -251,15 +312,29 @@ spec:
             .arg("--kube-api-versions")
             .arg("v1");
 
-        cmd.assert()
-            .success()
-            .stdout(predicate::str::contains("ConfigMap"))
-            .stdout(predicate::str::contains("Kyverno").not());
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "Command should succeed for scope {}, stderr: {}",
+            scope,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("ConfigMap"),
+            "Output should contain ConfigMap for scope {}",
+            scope
+        );
+        assert!(
+            !stdout.contains("kind: Kyverno"),
+            "Kyverno resource should be filtered for scope {}",
+            scope
+        );
     }
 }
 
 #[test]
-#[ignore] // Only runs when Kyverno CLI is installed
 fn test_kyverno_validation_failure() {
     if !is_kyverno_available() {
         eprintln!("Skipping test: Kyverno CLI not available");
@@ -286,18 +361,17 @@ metadata:
   name: require-label-policy
 spec:
   scope: Global
-  validatingPolicyRules:
+  validatingPolicies:
     - name: require-environment-label
-      match:
-        resources:
-          kinds:
-            - ConfigMap
-      validate:
-        message: "ConfigMap must have 'environment' label"
-        pattern:
-          metadata:
-            labels:
-              environment: "?*"
+      matchConstraints:
+        resourceRules:
+          - apiGroups: ['']
+            apiVersions: ['v1']
+            operations: ['CREATE']
+            resources: ['configmaps']
+      validations:
+        - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
+          message: "ConfigMap must have 'environment' label"
 "#,
     )
     .unwrap();
@@ -323,7 +397,6 @@ spec:
 }
 
 #[test]
-#[ignore] // Only runs when Kyverno CLI is installed
 fn test_kyverno_mutation_applied() {
     if !is_kyverno_available() {
         eprintln!("Skipping test: Kyverno CLI not available");
@@ -351,18 +424,19 @@ metadata:
   name: mutate-loadbalancer
 spec:
   scope: Global
-  mutatingPolicyRules:
+  mutatingPolicies:
     - name: add-loadbalancer-class
-      match:
-        resources:
-          kinds:
-            - Service
-      mutate:
-        patchStrategicMerge:
-          spec:
-            (type): LoadBalancer
-            loadBalancerClass: ngrok
-            allocateLoadBalancerNodePorts: false
+      matchConstraints:
+        resourceRules:
+          - apiGroups: ['']
+            apiVersions: ['v1']
+            operations: ['CREATE']
+            resources: ['services']
+      mutations:
+        - patchType: ApplyConfiguration
+          applyConfiguration:
+            expression: >-
+              Object{spec: Object.spec{loadBalancerClass: "ngrok", allocateLoadBalancerNodePorts: false}}
 "#,
     )
     .unwrap();
@@ -377,17 +451,165 @@ spec:
         .arg("v1");
 
     let output = cmd.output().unwrap();
-    assert!(output.status.success(), "Command should succeed");
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Verify the mutation was applied
     assert!(
-        stdout.contains("loadBalancerClass: ngrok"),
-        "Expected loadBalancerClass to be added by Kyverno mutation policy"
+        stdout.contains("loadBalancerClass: ngrok") || stdout.contains("loadBalancerClass: \"ngrok\""),
+        "Expected loadBalancerClass to be added by Kyverno mutation policy, got:\n{}",
+        stdout
     );
     assert!(
         stdout.contains("allocateLoadBalancerNodePorts: false"),
-        "Expected allocateLoadBalancerNodePorts to be set by Kyverno mutation policy"
+        "Expected allocateLoadBalancerNodePorts to be set by Kyverno mutation policy, got:\n{}",
+        stdout
     );
 }
+
+/// Verify that a ValidatingPolicy passes when the resource satisfies the validation expression.
+#[test]
+fn test_validating_policy_passes() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    // Resource that satisfies the validation (has the required label)
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid-config
+  labels:
+    environment: production
+data:
+  key: value
+---
+apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
+kind: Kyverno
+metadata:
+  name: require-env-label
+spec:
+  scope: Global
+  validatingPolicies:
+    - name: check-environment-label
+      matchConstraints:
+        resourceRules:
+          - apiGroups: ['']
+            apiVersions: ['v1']
+            operations: ['CREATE']
+            resources: ['configmaps']
+      validations:
+        - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
+          message: "ConfigMap must have 'environment' label"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "ValidatingPolicy should pass for a conforming resource, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("valid-config"));
+    assert!(stdout.contains("environment: production"));
+    assert!(!stdout.contains("kind: Kyverno"));
+}
+
+/// Verify that a ClusterPolicy (kyverno.io/v1) mutation is actually applied to resources.
+#[test]
+fn test_cluster_policy_mutation_applied() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+data:
+  key: value
+---
+apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
+kind: Kyverno
+metadata:
+  name: add-labels
+spec:
+  scope: Global
+  clusterPolicyRules:
+    - name: add-team-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              team: platform
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("my-config"));
+    assert!(!stdout.contains("kind: Kyverno"));
+
+    // Verify ClusterPolicy mutation was applied
+    assert!(
+        stdout.contains("team: platform"),
+        "Expected label 'team: platform' to be added by ClusterPolicy mutation, got:\n{}",
+        stdout
+    );
+}
+
+// NOTE: GeneratingPolicy, DeletingPolicy, and ImageValidatingPolicy are not evaluable
+// by `kyverno apply` in offline mode (kyverno CLI 1.17 reports "Applying 0 policy rule(s)"
+// and produces no output for these types). Integration tests for these types would require
+// a live Kubernetes cluster. The CRD generation for these types is verified by unit tests
+// in src/resources/kyverno.rs.
