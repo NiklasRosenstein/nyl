@@ -324,21 +324,21 @@ fn is_nyl_like_api_version(api_version: &str) -> bool {
     if api_version.contains("nyl.niklasrosenstein.github.com") {
         return true;
     }
-    
+
     // Extract the domain part (before any version suffix like /v1)
     let domain = api_version.split('/').next().unwrap_or(api_version);
-    
+
     // Check for similar patterns using Levenshtein distance
     // Extract base domains from the API version constants
     let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
-    
+
     for api_ver in &nyl_api_versions {
         let known_domain = api_ver.split('/').next().unwrap_or(api_ver);
         if levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -346,29 +346,29 @@ fn is_nyl_like_api_version(api_version: &str) -> bool {
 fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let len1 = s1.len();
     let len2 = s2.len();
-    
+
     if len1 == 0 {
         return len2;
     }
     if len2 == 0 {
         return len1;
     }
-    
+
     // Convert to character vectors once for efficient indexing
     let chars1: Vec<char> = s1.chars().collect();
     let chars2: Vec<char> = s2.chars().collect();
     let len1 = chars1.len();
     let len2 = chars2.len();
-    
+
     let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
-    
+
     for i in 0..=len1 {
         matrix[i][0] = i;
     }
     for j in 0..=len2 {
         matrix[0][j] = j;
     }
-    
+
     for i in 0..len1 {
         for j in 0..len2 {
             let cost = if chars1[i] == chars2[j] { 0 } else { 1 };
@@ -377,7 +377,7 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
                 .min(matrix[i][j] + cost);
         }
     }
-    
+
     matrix[len1][len2]
 }
 
@@ -385,29 +385,29 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
-    
+
     // Check for HelmChart
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         return true;
     }
-    
+
     // Check for Component
     if is_nyl_component(resource) {
         return true;
     }
-    
+
     // Check for NylRelease
     if NylRelease::is_nyl_release(resource) {
         return true;
     }
-    
+
     // Check for ApplicationGenerator
     if let Some(api_ver) = api_version {
         if api_ver == API_VERSION_ARGOCD && kind == Some("ApplicationGenerator") {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -512,11 +512,12 @@ fn generate_resource(
                 let kind_str = kind.unwrap_or("<unknown>");
                 // Dynamically build the list of known API versions from constants
                 let known_api_versions = vec![API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
-                let api_versions_str = known_api_versions.iter()
+                let api_versions_str = known_api_versions
+                    .iter()
                     .map(|s| format!("'{}'", s))
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 tracing::warn!(
                     "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
                      It will be treated as a regular Kubernetes manifest. \
@@ -528,7 +529,7 @@ fn generate_resource(
                 );
             }
         }
-        
+
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
         Ok(vec![resource.clone()])
@@ -938,8 +939,14 @@ metadata:
         assert_eq!(levenshtein_distance("abc", "abd"), 1);
         assert_eq!(levenshtein_distance("abc", "abcd"), 1);
         assert_eq!(levenshtein_distance("abc", "def"), 3);
-        assert_eq!(levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.niklasrosenstein.github.com"), 0);
-        assert_eq!(levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.nikolasrosenstein.github.com"), 1);
+        assert_eq!(
+            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.niklasrosenstein.github.com"),
+            0
+        );
+        assert_eq!(
+            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.nikolasrosenstein.github.com"),
+            1
+        );
     }
 
     #[test]
