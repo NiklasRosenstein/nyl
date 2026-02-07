@@ -68,12 +68,18 @@ fn is_remote_repository(s: &str) -> bool {
 /// - `name`: Chart name (optional, after '#')
 /// - `version`: Version or Git ref (optional, after '@')
 ///
+/// **Parsing behavior:** The parser searches from right to left, finding the rightmost
+/// '@' for version and the rightmost '#' (before the version) for the name. This means:
+/// - Valid: `http://repo.com#chart@v1.0` → base=`http://repo.com`, name=`chart`, version=`v1.0`
+/// - Valid: `git+https://github.com/user/repo#charts/app@main` → base=`git+https://github.com/user/repo`, name=`charts/app`, version=`main`
+/// - Edge case: URLs with '@' or '#' in the base part should be avoided or the base should be URL-encoded
+///
 /// Examples:
-/// - `http://my-repo.org#my-chart@1.0.0` -> repository URL with name and version
-/// - `https://charts.example.com#nginx` -> repository URL with name only
-/// - `oci://ghcr.io/owner/chart@v1.0.0` -> OCI registry with version only
-/// - `my-chart` -> local path/name
-/// - `path/to/chart` -> local path
+/// - `http://my-repo.org#my-chart@1.0.0` → repository URL with name and version
+/// - `https://charts.example.com#nginx` → repository URL with name only
+/// - `oci://ghcr.io/owner/chart@v1.0.0` → OCI registry with version only
+/// - `my-chart` → local path/name
+/// - `path/to/chart` → local path
 pub fn parse_component_kind(kind: &str) -> ComponentKindParsed {
     // First, find the '@' for version (rightmost '@')
     let (base_and_name, version) = if let Some(at_pos) = kind.rfind('@') {

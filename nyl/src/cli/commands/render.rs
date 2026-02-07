@@ -374,7 +374,7 @@ fn generate_resource(
             let release_namespace = component.metadata.namespace.clone();
 
             let chart = HelmChart {
-                api_version: "v1.0".to_string(),
+                api_version: API_VERSION.to_string(),
                 kind: "HelmChart".to_string(),
                 metadata: component.metadata,
                 spec: crate::resources::HelmChartSpec {
