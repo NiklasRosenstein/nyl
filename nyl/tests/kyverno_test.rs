@@ -57,7 +57,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -162,7 +162,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -231,7 +231,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -303,7 +303,7 @@ spec:
 
         fs::write(temp.path().join("manifest.yaml"), manifest).unwrap();
 
-        let mut cmd = Command::cargo_bin("nyl").unwrap();
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
         cmd.arg("render")
             .arg(temp.path().join("manifest.yaml"))
             .arg("--offline")
@@ -376,7 +376,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -441,7 +441,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -516,7 +516,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
@@ -580,7 +580,7 @@ spec:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("render")
         .arg(temp.path().join("manifest.yaml"))
         .arg("--offline")
