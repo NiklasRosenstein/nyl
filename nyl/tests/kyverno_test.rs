@@ -314,7 +314,7 @@ spec:
 
     // The command should fail because the validation policy rejects the resource
     let output = cmd.output().unwrap();
-    
+
     // Kyverno apply should fail when validation doesn't pass
     // This tests that we properly handle validation failures
     assert!(
@@ -381,7 +381,7 @@ spec:
     assert!(output.status.success(), "Command should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Verify the mutation was applied
     assert!(
         stdout.contains("loadBalancerClass: ngrok"),

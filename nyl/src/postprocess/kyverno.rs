@@ -51,10 +51,7 @@ impl Default for KyvernoContext {
 ///
 /// This function takes a list of manifests and applies all Global-scoped Kyverno
 /// policies to them using the `kyverno apply` command.
-pub fn apply_kyverno_policies(
-    manifests: &[serde_json::Value],
-    policies: &[Kyverno],
-) -> Result<Vec<serde_json::Value>> {
+pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyverno]) -> Result<Vec<serde_json::Value>> {
     if policies.is_empty() {
         return Ok(manifests.to_vec());
     }
@@ -119,8 +116,7 @@ fn write_manifests_to_file(path: &Path, manifests: &[serde_json::Value]) -> Resu
 
     for (i, manifest) in manifests.iter().enumerate() {
         if i > 0 {
-            writeln!(file, "---")
-                .map_err(|e| NylError::Config(format!("Failed to write separator to file: {}", e)))?;
+            writeln!(file, "---").map_err(|e| NylError::Config(format!("Failed to write separator to file: {}", e)))?;
         }
         let yaml = serde_norway::to_string(manifest).map_err(NylError::Yaml)?;
         write!(file, "{}", yaml).map_err(|e| NylError::Config(format!("Failed to write manifest to file: {}", e)))?;
@@ -160,8 +156,7 @@ fn execute_kyverno_apply(policy_files: &[PathBuf], resources_file: &Path) -> Res
         )));
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|e| NylError::Config(format!("Failed to parse kyverno output: {}", e)))
+    String::from_utf8(output.stdout).map_err(|e| NylError::Config(format!("Failed to parse kyverno output: {}", e)))
 }
 
 /// Parse kyverno apply output and extract processed manifests
@@ -171,19 +166,19 @@ fn execute_kyverno_apply(policy_files: &[PathBuf], resources_file: &Path) -> Res
 fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
     // Kyverno apply with --output json returns a JSON object with results
     // We need to handle different output formats depending on the kyverno version
-    
+
     // Try to parse as JSON first
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         // If it's an object with a "resources" field, extract that
         if let Some(resources) = json.get("resources").and_then(|r| r.as_array()) {
             return Ok(resources.clone());
         }
-        
+
         // If it's directly an array of resources
         if json.is_array() {
             return Ok(json.as_array().unwrap().clone());
         }
-        
+
         // If there's a "results" field with resources
         if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
             let mut manifests = Vec::new();
@@ -197,11 +192,11 @@ fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
             }
         }
     }
-    
+
     // If JSON parsing doesn't work, try parsing as YAML multi-document
     // This handles the case where kyverno outputs YAML instead of JSON
     let mut manifests = Vec::new();
-    
+
     // Split on lines that are exactly "---" (with optional whitespace)
     let docs: Vec<String> = output
         .split('\n')
@@ -209,20 +204,24 @@ fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
         .split(|line| line.trim() == "---")
         .map(|lines| lines.join("\n"))
         .collect();
-    
+
     for doc in docs {
         let trimmed = doc.trim();
-        if trimmed.is_empty() || trimmed.lines().all(|line| line.trim().starts_with('#') || line.trim().is_empty()) {
+        if trimmed.is_empty()
+            || trimmed
+                .lines()
+                .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
+        {
             continue;
         }
-        
+
         if let Ok(value) = serde_norway::from_str::<serde_json::Value>(trimmed) {
             if !value.is_null() {
                 manifests.push(value);
             }
         }
     }
-    
+
     if manifests.is_empty() {
         // If we couldn't parse anything, log a warning and return empty
         tracing::warn!("Could not parse kyverno output. This might be a version compatibility issue.");
@@ -230,7 +229,7 @@ fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
             "Failed to parse kyverno apply output. Please check kyverno version compatibility.".to_string(),
         ));
     }
-    
+
     Ok(manifests)
 }
 

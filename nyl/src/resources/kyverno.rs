@@ -78,7 +78,11 @@ pub struct KyvernoSpec {
     pub deleting_policy_rules: Vec<serde_json::Value>,
 
     /// Shorthand for image validation policy rules
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "imageValidatingPolicyRules")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "imageValidatingPolicyRules"
+    )]
     pub image_validating_policy_rules: Vec<serde_json::Value>,
 }
 
@@ -91,8 +95,7 @@ impl Kyverno {
 
     /// Parse Kyverno from JSON value
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| NylError::Config(format!("Invalid Kyverno resource: {}", e)))
+        serde_json::from_value(value.clone()).map_err(|e| NylError::Config(format!("Invalid Kyverno resource: {}", e)))
     }
 
     /// Get all policies as full Kyverno policy resources
@@ -215,9 +218,7 @@ impl Kyverno {
 /// Extract Kyverno resources from manifests
 ///
 /// Returns a tuple of (Kyverno resources, filtered manifests without Kyverno)
-pub fn extract_kyverno_resources(
-    manifests: &[serde_json::Value],
-) -> Result<(Vec<Kyverno>, Vec<serde_json::Value>)> {
+pub fn extract_kyverno_resources(manifests: &[serde_json::Value]) -> Result<(Vec<Kyverno>, Vec<serde_json::Value>)> {
     let mut kyverno_resources = Vec::new();
     let mut filtered = Vec::new();
 
