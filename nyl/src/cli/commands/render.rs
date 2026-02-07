@@ -8,10 +8,11 @@ use crate::{
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
+    postprocess::apply_kyverno_policies,
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
-        extract_application_generators, extract_nyl_release, is_nyl_component, ChartRef, HelmChart, NylComponent,
-        NylRelease, ReleaseMetadata,
+        extract_application_generators, extract_kyverno_resources, extract_nyl_release, is_nyl_component, ChartRef,
+        HelmChart, NylComponent, NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -203,6 +204,19 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         let applications = process_application_generator(&generator, &args.path)?;
         final_manifests.extend(applications);
     }
+
+    // Extract and apply Kyverno policies (Global scope only in render)
+    let (kyverno_resources, final_manifests) = extract_kyverno_resources(&final_manifests)?;
+    let global_policies: Vec<_> = kyverno_resources
+        .into_iter()
+        .filter(|k| matches!(k.spec.scope, crate::resources::KyvernoScope::Global))
+        .collect();
+
+    let final_manifests = if !global_policies.is_empty() {
+        apply_kyverno_policies(&final_manifests, &global_policies)?
+    } else {
+        final_manifests
+    };
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())
