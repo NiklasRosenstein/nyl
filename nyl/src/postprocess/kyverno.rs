@@ -201,7 +201,16 @@ fn parse_kyverno_output(output: &str) -> Result<Vec<serde_json::Value>> {
     // If JSON parsing doesn't work, try parsing as YAML multi-document
     // This handles the case where kyverno outputs YAML instead of JSON
     let mut manifests = Vec::new();
-    for doc in output.split("\n---\n") {
+    
+    // Split on lines that are exactly "---" (with optional whitespace)
+    let docs: Vec<String> = output
+        .split('\n')
+        .collect::<Vec<_>>()
+        .split(|line| line.trim() == "---")
+        .map(|lines| lines.join("\n"))
+        .collect();
+    
+    for doc in docs {
         let trimmed = doc.trim();
         if trimmed.is_empty() || trimmed.lines().all(|line| line.trim().starts_with('#') || line.trim().is_empty()) {
             continue;
