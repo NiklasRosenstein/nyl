@@ -64,6 +64,7 @@ enum OutputFormat {
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
+#[allow(clippy::too_many_arguments)]
 pub async fn render_manifests(
     path: &str,
     component: Option<&str>,
@@ -324,6 +325,7 @@ fn is_renderable_resource(resource: &serde_json::Value) -> bool {
 }
 
 /// Generate manifests from a resource
+#[allow(clippy::too_many_lines)]
 fn generate_resource(
     _generator: &Generator,
     resource: &serde_json::Value,
