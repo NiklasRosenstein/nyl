@@ -172,6 +172,8 @@ impl SecretsConfig {
             )));
         }
 
+        tracing::debug!("Reading secrets file: {}", path.display());
+
         let contents = std::fs::read_to_string(path)?;
 
         let config: SecretProviderConfig = if path.extension().and_then(|s| s.to_str()) == Some("json") {

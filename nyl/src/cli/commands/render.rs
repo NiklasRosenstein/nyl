@@ -10,8 +10,9 @@ use crate::{
     kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
-        extract_application_generators, extract_nyl_release, is_nyl_component, ChartRef, HelmChart, NylComponent,
-        NylRelease, ReleaseMetadata,
+        component_kind_to_chart_ref, extract_application_generators, extract_nyl_release, is_nyl_component,
+        is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, NylComponent, NylRelease,
+        ReleaseMetadata,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -243,6 +244,8 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
             continue;
         }
 
+        tracing::debug!("Reading manifest file: {}", file_path.display());
+
         let raw =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
 
@@ -431,39 +434,77 @@ fn generate_resource(
         let component: NylComponent = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
 
-        let chart_dir = config.get_components_path().join(&component.kind);
-        let chart_yaml = chart_dir.join("Chart.yaml");
-        if !chart_yaml.exists() {
-            return Err(NylError::Config(format!(
-                "Component '{}' references chart path '{}', but {} does not exist",
-                component.kind,
-                chart_dir.display(),
-                chart_yaml.display()
-            )));
-        }
+        // Check if the kind uses the shortcut format for remote Helm charts
+        if is_remote_helm_chart_shortcut(&component.kind) {
+            // Shortcut format: <repository>#<name>@<version>
+            let parsed = parse_component_kind(&component.kind);
 
-        let release_name = component.metadata.name.clone();
-        let release_namespace = component.metadata.namespace.clone();
+            // Validate HTTP(S) shortcuts: require an explicit chart name segment (`#<chart-name>`).
+            if (parsed.base.starts_with("http://") || parsed.base.starts_with("https://")) && parsed.name.is_none() {
+                return Err(NylError::Config(format!(
+                    "Invalid remote Helm chart shortcut '{}': missing chart name. \
+                     Use '<repository>#<chart-name>' or '<repository>#<chart-name>@<version>'.",
+                    component.kind
+                )));
+            }
 
-        let chart = HelmChart {
-            api_version: "v1.0".to_string(),
-            kind: "HelmChart".to_string(),
-            metadata: component.metadata,
-            spec: crate::resources::HelmChartSpec {
-                chart: ChartRef {
-                    name: Some(chart_dir.to_string_lossy().into_owned()),
-                    ..Default::default()
+            let chart_ref = component_kind_to_chart_ref(&parsed);
+
+            let release_name = component.metadata.name.clone();
+            let release_namespace = component.metadata.namespace.clone();
+
+            let chart = HelmChart {
+                api_version: API_VERSION.to_string(),
+                kind: "HelmChart".to_string(),
+                metadata: component.metadata,
+                spec: crate::resources::HelmChartSpec {
+                    chart: chart_ref,
+                    release: Some(ReleaseMetadata {
+                        name: release_name,
+                        namespace: release_namespace,
+                        create_namespace: false,
+                    }),
+                    values: component.spec,
                 },
-                release: Some(ReleaseMetadata {
-                    name: release_name,
-                    namespace: release_namespace,
-                    create_namespace: false,
-                }),
-                values: component.spec,
-            },
-        };
+            };
 
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+            render_helm_chart(&chart, context, config, kube_version, api_versions)
+        } else {
+            // Local component path - use existing component resolution mechanism
+            let chart_dir = config.get_components_path().join(&component.kind);
+            let chart_yaml = chart_dir.join("Chart.yaml");
+            if !chart_yaml.exists() {
+                return Err(NylError::Config(format!(
+                    "Component '{}' references chart path '{}', but {} does not exist",
+                    component.kind,
+                    chart_dir.display(),
+                    chart_yaml.display()
+                )));
+            }
+
+            let release_name = component.metadata.name.clone();
+            let release_namespace = component.metadata.namespace.clone();
+
+            let chart = HelmChart {
+                api_version: API_VERSION.to_string(),
+                kind: "HelmChart".to_string(),
+                metadata: component.metadata,
+                spec: crate::resources::HelmChartSpec {
+                    chart: ChartRef {
+                        name: Some(chart_dir.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                    release: Some(ReleaseMetadata {
+                        name: release_name,
+                        namespace: release_namespace,
+                        create_namespace: false,
+                    }),
+                    values: component.spec,
+                },
+            };
+
+            render_helm_chart(&chart, context, config, kube_version, api_versions)
+        }
     } else {
         // Check if this looks like an unknown Nyl resource
         if let Some(api_ver) = api_version {
@@ -569,6 +610,8 @@ fn process_application_generator(
     let mut applications = Vec::new();
 
     for file_path in yaml_files {
+        tracing::debug!("Reading YAML file: {}", file_path.display());
+
         // Read and parse file
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
@@ -996,5 +1039,45 @@ metadata:
             "metadata": {"name": "test"}
         });
         assert!(!is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_helm_chart() {
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "HelmChart",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_component() {
+        let resource = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "example/v1/Nginx",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_component_shortcut() {
+        let resource = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "https://charts.example.com/repo#nginx@1.0.0",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_plain_k8s() {
+        let resource = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test"}
+        });
+        assert!(!is_renderable_resource(&resource));
     }
 }
