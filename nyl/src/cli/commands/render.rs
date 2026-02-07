@@ -326,14 +326,11 @@ fn is_nyl_like_api_version(api_version: &str) -> bool {
     let domain = api_version.split('/').next().unwrap_or(api_version);
     
     // Check for similar patterns using Levenshtein distance
-    // These are the base domains without version suffixes
-    let nyl_domains = [
-        "nyl.niklasrosenstein.github.com",
-        "components.nyl.niklasrosenstein.github.com",
-        "argocd.nyl.niklasrosenstein.github.com",
-    ];
+    // Extract base domains from the API version constants
+    let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
     
-    for known_domain in &nyl_domains {
+    for api_ver in &nyl_api_versions {
+        let known_domain = api_ver.split('/').next().unwrap_or(api_ver);
         if levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE {
             return true;
         }
@@ -472,16 +469,21 @@ fn generate_resource(
         if let Some(api_ver) = api_version {
             if is_nyl_like_api_version(api_ver) && !is_known_nyl_resource(resource) {
                 let kind_str = kind.unwrap_or("<unknown>");
+                // Dynamically build the list of known API versions from constants
+                let known_api_versions = vec![API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+                let api_versions_str = known_api_versions.iter()
+                    .map(|s| format!("'{}'", s))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                
                 tracing::warn!(
                     "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
                      It will be treated as a regular Kubernetes manifest. \
-                     Known Nyl apiVersions: '{}', '{}', '{}'. \
+                     Known Nyl apiVersions: {}. \
                      Known kinds: HelmChart, NylRelease, ApplicationGenerator, and any Component kind.",
                     api_ver,
                     kind_str,
-                    API_VERSION,
-                    API_VERSION_COMPONENTS,
-                    API_VERSION_ARGOCD
+                    api_versions_str
                 );
             }
         }
