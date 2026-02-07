@@ -4,4 +4,4 @@
 /// Kubernetes manifests before they are emitted.
 mod kyverno;
 
-pub use kyverno::{apply_kyverno_policies, KyvernoContext};
+pub use kyverno::apply_kyverno_policies;

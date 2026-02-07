@@ -9,9 +9,6 @@ pub const API_VERSION_ARGOCD: &str = "argocd.nyl.niklasrosenstein.github.com/v1"
 /// API version for Component resources
 pub const API_VERSION_COMPONENTS: &str = "components.nyl.niklasrosenstein.github.com/v1";
 
-/// API version for Post-processing resources (Kyverno)
-pub const API_VERSION_POSTPROCESSING: &str = "post-processing.nyl.niklasrosenstein.github.com/v1";
-
 /// Label name for release identification in Kubernetes secrets
 pub const LABEL_RELEASE: &str = "nyl.niklasrosenstein.github.com/release";
 
@@ -32,3 +29,6 @@ pub const ANNOTATION_PARENT_NAME: &str = "nyl.niklasrosenstein.github.com/parent
 
 /// Annotation for tracking parent resource namespace
 pub const ANNOTATION_PARENT_NAMESPACE: &str = "nyl.niklasrosenstein.github.com/parent-namespace";
+
+/// Annotation for declaring Kyverno policy scope
+pub const ANNOTATION_KYVERNO_SCOPE: &str = "nyl.niklasrosenstein.github.com/apply-policy-scope";

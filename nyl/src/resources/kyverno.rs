@@ -1,213 +1,176 @@
-/// Kyverno post-processor resource definition
+/// Kyverno policy resource handling for annotation-based policy application
 ///
-/// This resource instructs Nyl to apply Kyverno policies to resources at render time.
-/// The Kyverno resource itself is not emitted in the final output.
-///
-/// # Policy types
-///
-/// - `clusterPolicyRules`: Generates `ClusterPolicy` (`kyverno.io/v1`) resources.
-///   Works with any kyverno CLI version. Items are individual rules wrapped in `spec.rules`.
-/// - `mutatingPolicies`, `validatingPolicies`, `generatingPolicies`, `deletingPolicies`,
-///   `imageValidatingPolicies`: Generate their respective policy types under
-///   `policies.kyverno.io/v1`. Requires kyverno CLI >= 1.17. Each item is the full `spec`
-///   of the target CRD (spec passthrough). An optional `name` field in each item is extracted
-///   and used as `metadata.name`; otherwise a default name is generated.
+/// This module provides support for applying Kyverno policies at different stages
+/// of the rendering pipeline using scope annotations on standard Kyverno CRDs.
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use crate::constants::API_VERSION_POSTPROCESSING;
+use crate::constants::ANNOTATION_KYVERNO_SCOPE;
 use crate::{NylError, Result};
 
-/// Kyverno resource for post-processing manifests with policies
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Kyverno {
-    #[serde(rename = "apiVersion")]
-    pub api_version: String,
-    pub kind: String,
-    pub metadata: KyvernoMetadata,
-    pub spec: KyvernoSpec,
-}
-
-/// Metadata for Kyverno resource
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct KyvernoMetadata {
-    /// Resource name
-    pub name: String,
-    /// Namespace (optional, primarily for organizational purposes)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-}
-
 /// Scope for Kyverno policy application
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum KyvernoScope {
-    /// Applies only to resources produced in the same YAML file;
-    /// or if defined in a Helm chart, only to resources from that chart
-    #[default]
-    Local,
-    /// Applies only to resources produced in the same YAML file,
-    /// even if the Kyverno resource was defined in a Helm chart
+    /// Applies to sibling resources in the same batch only
+    Immediate,
+    /// Applies to siblings and all descendant resources
+    Subtree,
+    /// Applies to all resources from the same file
     Root,
-    /// Applies to all resources produced in `nyl render`
+    /// Applies to all resources from all files
     Global,
 }
 
-/// Kyverno policy specification
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct KyvernoSpec {
-    /// Scope of policy application (default: Local)
-    #[serde(default)]
-    pub scope: KyvernoScope,
-
-    /// Paths to Kyverno policy files (relative to the manifest file)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub policies: Vec<String>,
-
-    /// Inline Kyverno policies (full policy resources)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "inlinePolicies")]
-    pub inline_policies: Vec<serde_json::Value>,
-
-    /// Shorthand for ClusterPolicy rules (kyverno.io/v1)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "clusterPolicyRules")]
-    pub cluster_policy_rules: Vec<serde_json::Value>,
-
-    /// ValidatingPolicy specs (policies.kyverno.io/v1, requires kyverno >= 1.17)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "validatingPolicies")]
-    pub validating_policies: Vec<serde_json::Value>,
-
-    /// MutatingPolicy specs (policies.kyverno.io/v1, requires kyverno >= 1.17)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "mutatingPolicies")]
-    pub mutating_policies: Vec<serde_json::Value>,
-
-    /// GeneratingPolicy specs (policies.kyverno.io/v1, requires kyverno >= 1.17)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "generatingPolicies")]
-    pub generating_policies: Vec<serde_json::Value>,
-
-    /// DeletingPolicy specs (policies.kyverno.io/v1, requires kyverno >= 1.17)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "deletingPolicies")]
-    pub deleting_policies: Vec<serde_json::Value>,
-
-    /// ImageValidatingPolicy specs (policies.kyverno.io/v1, requires kyverno >= 1.17)
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "imageValidatingPolicies")]
-    pub image_validating_policies: Vec<serde_json::Value>,
+impl KyvernoScope {
+    /// Parse scope from annotation value
+    pub fn from_annotation(value: &str) -> Result<Self> {
+        match value {
+            "Immediate" => Ok(KyvernoScope::Immediate),
+            "Subtree" => Ok(KyvernoScope::Subtree),
+            "Root" => Ok(KyvernoScope::Root),
+            "Global" => Ok(KyvernoScope::Global),
+            _ => Err(NylError::Config(format!(
+                "Invalid Kyverno scope annotation value: '{}'. \
+                 Valid values are: Immediate, Subtree, Root, Global",
+                value
+            ))),
+        }
+    }
 }
 
-impl Kyverno {
-    /// Check if a manifest is a Kyverno resource
-    pub fn is_kyverno(manifest: &serde_json::Value) -> bool {
-        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_POSTPROCESSING)
-            && manifest.get("kind").and_then(|v| v.as_str()) == Some("Kyverno")
-    }
+/// Annotated Kyverno policy resource with scope information
+#[derive(Debug, Clone)]
+pub struct AnnotatedKyvernoPolicy {
+    /// The scope for policy application
+    pub scope: KyvernoScope,
+    /// The actual Kyverno policy resource (as JSON)
+    pub policy: serde_json::Value,
+    /// Policy name (from metadata.name)
+    pub name: String,
+    /// Policy kind (ClusterPolicy, MutatingPolicy, etc.)
+    pub kind: String,
+}
 
-    /// Parse Kyverno from JSON value
-    pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone()).map_err(|e| NylError::Config(format!("Invalid Kyverno resource: {}", e)))
-    }
+impl AnnotatedKyvernoPolicy {
+    /// Extract annotated policy from manifest
+    pub fn from_manifest(manifest: &serde_json::Value) -> Result<Self> {
+        let scope_str = manifest
+            .get("metadata")
+            .and_then(|m| m.get("annotations"))
+            .and_then(|a| a.get(ANNOTATION_KYVERNO_SCOPE))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| NylError::Config("Kyverno policy missing scope annotation".to_string()))?;
 
-    /// Get all policies as full Kyverno policy resources
-    pub fn get_all_policies(&self) -> Vec<serde_json::Value> {
-        let mut policies = self.spec.inline_policies.clone();
+        let scope = KyvernoScope::from_annotation(scope_str)?;
 
-        // Add ClusterPolicy from shorthand rules (wraps rules in spec.rules)
-        if !self.spec.cluster_policy_rules.is_empty() {
-            policies.push(self.create_cluster_policy(&self.spec.cluster_policy_rules));
-        }
+        let name = manifest
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|n| n.as_str())
+            .ok_or_else(|| NylError::Config("Kyverno policy missing metadata.name".to_string()))?
+            .to_string();
 
-        // Add new policy types (spec passthrough, one policy per spec item)
-        if !self.spec.validating_policies.is_empty() {
-            policies.extend(self.create_policies(
-                "ValidatingPolicy",
-                "validating-policy",
-                &self.spec.validating_policies,
-            ));
-        }
+        let kind = manifest
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| NylError::Config("Kyverno policy missing kind".to_string()))?
+            .to_string();
 
-        if !self.spec.mutating_policies.is_empty() {
-            policies.extend(self.create_policies("MutatingPolicy", "mutating-policy", &self.spec.mutating_policies));
-        }
-
-        if !self.spec.generating_policies.is_empty() {
-            policies.extend(self.create_policies(
-                "GeneratingPolicy",
-                "generating-policy",
-                &self.spec.generating_policies,
-            ));
-        }
-
-        if !self.spec.deleting_policies.is_empty() {
-            policies.extend(self.create_policies("DeletingPolicy", "deleting-policy", &self.spec.deleting_policies));
-        }
-
-        if !self.spec.image_validating_policies.is_empty() {
-            policies.extend(self.create_policies(
-                "ImageValidatingPolicy",
-                "image-validating-policy",
-                &self.spec.image_validating_policies,
-            ));
-        }
-
-        policies
-    }
-
-    /// Create a ClusterPolicy resource from rules (kyverno.io/v1)
-    ///
-    /// Each item in `rules` is a single rule; they are all wrapped into one ClusterPolicy.
-    fn create_cluster_policy(&self, rules: &[serde_json::Value]) -> serde_json::Value {
-        serde_json::json!({
-            "apiVersion": "kyverno.io/v1",
-            "kind": "ClusterPolicy",
-            "metadata": {
-                "name": format!("{}-cluster-policy", self.metadata.name),
-            },
-            "spec": {
-                "rules": rules
-            }
+        Ok(Self {
+            scope,
+            policy: manifest.clone(),
+            name,
+            kind,
         })
     }
+}
 
-    /// Create policy resources from spec passthroughs (policies.kyverno.io/v1)
-    ///
-    /// Each item in `specs` is the full `spec` of the target CRD. An optional `name` field
-    /// in each item is extracted and used as `metadata.name`; otherwise a default name is
-    /// generated from the Kyverno resource name and the index.
-    fn create_policies(&self, kind: &str, suffix: &str, specs: &[serde_json::Value]) -> Vec<serde_json::Value> {
-        specs
-            .iter()
-            .enumerate()
-            .map(|(idx, spec)| {
-                let mut spec = spec.clone();
-                let name = spec
-                    .as_object_mut()
-                    .and_then(|o| o.remove("name"))
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| format!("{}-{}-{}", self.metadata.name, suffix, idx));
-                serde_json::json!({
-                    "apiVersion": "policies.kyverno.io/v1",
-                    "kind": kind,
-                    "metadata": { "name": name },
-                    "spec": spec
-                })
-            })
-            .collect()
+/// Check if a manifest is a Kyverno policy resource
+pub fn is_kyverno_policy(manifest: &serde_json::Value) -> bool {
+    let api_version = manifest.get("apiVersion").and_then(|v| v.as_str());
+    let kind = manifest.get("kind").and_then(|k| k.as_str());
+
+    match (api_version, kind) {
+        (Some(api), Some(k)) => {
+            // kyverno.io/v1 or v2 with ClusterPolicy
+            (api.starts_with("kyverno.io/") && k == "ClusterPolicy")
+                ||
+                // policies.kyverno.io/v1 with policy kinds
+                (api.starts_with("policies.kyverno.io/")
+                    && matches!(
+                        k,
+                        "MutatingPolicy"
+                            | "ValidatingPolicy"
+                            | "GeneratingPolicy"
+                            | "DeletingPolicy"
+                            | "ImageValidatingPolicy"
+                    ))
+        }
+        _ => false,
     }
 }
 
-/// Extract Kyverno resources from manifests
+/// Check if manifest has Kyverno scope annotation
+pub fn has_kyverno_scope_annotation(manifest: &serde_json::Value) -> bool {
+    manifest
+        .get("metadata")
+        .and_then(|m| m.get("annotations"))
+        .and_then(|a| a.get(ANNOTATION_KYVERNO_SCOPE))
+        .is_some()
+}
+
+/// Extract Kyverno policies by scope from manifests
 ///
-/// Returns a tuple of (Kyverno resources, filtered manifests without Kyverno)
-pub fn extract_kyverno_resources(manifests: &[serde_json::Value]) -> Result<(Vec<Kyverno>, Vec<serde_json::Value>)> {
-    let mut kyverno_resources = Vec::new();
+/// Returns (policies with matching scope, remaining manifests)
+pub fn extract_policies_by_scope(
+    manifests: &[serde_json::Value],
+    scope: KyvernoScope,
+) -> Result<(Vec<AnnotatedKyvernoPolicy>, Vec<serde_json::Value>)> {
+    let mut policies = Vec::new();
     let mut filtered = Vec::new();
 
     for manifest in manifests {
-        if Kyverno::is_kyverno(manifest) {
-            kyverno_resources.push(Kyverno::from_value(manifest)?);
+        if is_kyverno_policy(manifest) && has_kyverno_scope_annotation(manifest) {
+            let policy = AnnotatedKyvernoPolicy::from_manifest(manifest)?;
+            if policy.scope == scope {
+                policies.push(policy);
+            } else {
+                // Wrong scope, keep in manifests for later extraction
+                filtered.push(manifest.clone());
+            }
+        } else {
+            // Not a policy or no annotation → regular resource
+            filtered.push(manifest.clone());
+        }
+    }
+
+    Ok((policies, filtered))
+}
+
+/// Extract ALL annotated Kyverno policies from manifests (any scope)
+///
+/// Returns (policies grouped by scope, manifests without policies)
+#[allow(clippy::type_complexity)]
+pub fn extract_all_kyverno_policies(
+    manifests: &[serde_json::Value],
+) -> Result<(
+    HashMap<KyvernoScope, Vec<AnnotatedKyvernoPolicy>>,
+    Vec<serde_json::Value>,
+)> {
+    let mut policies_by_scope: HashMap<KyvernoScope, Vec<AnnotatedKyvernoPolicy>> = HashMap::new();
+    let mut filtered = Vec::new();
+
+    for manifest in manifests {
+        if is_kyverno_policy(manifest) && has_kyverno_scope_annotation(manifest) {
+            let policy = AnnotatedKyvernoPolicy::from_manifest(manifest)?;
+            policies_by_scope.entry(policy.scope.clone()).or_default().push(policy);
         } else {
             filtered.push(manifest.clone());
         }
     }
 
-    Ok((kyverno_resources, filtered))
+    Ok((policies_by_scope, filtered))
 }
 
 #[cfg(test)]
@@ -216,133 +179,130 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_is_kyverno_true() {
+    fn test_is_kyverno_policy_cluster_policy() {
         let manifest = json!({
-            "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
-            "kind": "Kyverno",
-            "metadata": {
-                "name": "test-policy"
-            },
-            "spec": {
-                "scope": "Local"
-            }
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": {"name": "test"}
         });
-
-        assert!(Kyverno::is_kyverno(&manifest));
+        assert!(is_kyverno_policy(&manifest));
     }
 
     #[test]
-    fn test_is_kyverno_false_wrong_kind() {
+    fn test_is_kyverno_policy_cluster_policy_v2() {
         let manifest = json!({
-            "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "kyverno.io/v2",
+            "kind": "ClusterPolicy",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_kyverno_policy(&manifest));
+    }
+
+    #[test]
+    fn test_is_kyverno_policy_mutating_policy() {
+        let manifest = json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_kyverno_policy(&manifest));
+    }
+
+    #[test]
+    fn test_is_kyverno_policy_validating_policy() {
+        let manifest = json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "ValidatingPolicy",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_kyverno_policy(&manifest));
+    }
+
+    #[test]
+    fn test_is_kyverno_policy_false() {
+        let manifest = json!({
+            "apiVersion": "v1",
             "kind": "ConfigMap",
+            "metadata": {"name": "test"}
+        });
+        assert!(!is_kyverno_policy(&manifest));
+    }
+
+    #[test]
+    fn test_has_kyverno_scope_annotation_true() {
+        let manifest = json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
             "metadata": {
-                "name": "test"
+                "name": "test",
+                "annotations": {
+                    "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                }
             }
         });
-
-        assert!(!Kyverno::is_kyverno(&manifest));
+        assert!(has_kyverno_scope_annotation(&manifest));
     }
 
     #[test]
-    fn test_from_value_with_inline_policies() {
-        let value = json!({
-            "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
-            "kind": "Kyverno",
+    fn test_has_kyverno_scope_annotation_false() {
+        let manifest = json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
+            "metadata": {"name": "test"}
+        });
+        assert!(!has_kyverno_scope_annotation(&manifest));
+    }
+
+    #[test]
+    fn test_annotated_kyverno_policy_from_manifest() {
+        let manifest = json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
             "metadata": {
-                "name": "test-policy"
+                "name": "test-policy",
+                "annotations": {
+                    "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                }
             },
-            "spec": {
-                "scope": "Local",
-                "inlinePolicies": [
-                    {
-                        "apiVersion": "kyverno.io/v1",
-                        "kind": "ClusterPolicy",
-                        "metadata": {"name": "test"},
-                        "spec": {"rules": []}
-                    }
-                ]
-            }
+            "spec": {}
         });
 
-        let kyverno = Kyverno::from_value(&value).unwrap();
-        assert_eq!(kyverno.metadata.name, "test-policy");
-        assert_eq!(kyverno.spec.scope, KyvernoScope::Local);
-        assert_eq!(kyverno.spec.inline_policies.len(), 1);
+        let policy = AnnotatedKyvernoPolicy::from_manifest(&manifest).unwrap();
+        assert_eq!(policy.scope, KyvernoScope::Subtree);
+        assert_eq!(policy.name, "test-policy");
+        assert_eq!(policy.kind, "MutatingPolicy");
     }
 
     #[test]
-    fn test_from_value_with_mutating_policies() {
-        let value = json!({
-            "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
-            "kind": "Kyverno",
-            "metadata": {
-                "name": "mutation-policy"
-            },
-            "spec": {
-                "scope": "Global",
-                "mutatingPolicies": [
-                    {
-                        "name": "add-managed-by-label",
-                        "matchConstraints": {
-                            "resourceRules": [{
-                                "apiGroups": [""],
-                                "apiVersions": ["v1"],
-                                "operations": ["CREATE"],
-                                "resources": ["configmaps"]
-                            }]
-                        },
-                        "mutations": [{
-                            "patchType": "ApplyConfiguration",
-                            "applyConfiguration": {
-                                "expression": "Object{metadata: Object.metadata{labels: Object.metadata.labels{managedBy: \"nyl\"}}}"
-                            }
-                        }]
-                    }
-                ]
-            }
-        });
-
-        let kyverno = Kyverno::from_value(&value).unwrap();
-        assert_eq!(kyverno.spec.scope, KyvernoScope::Global);
-        assert_eq!(kyverno.spec.mutating_policies.len(), 1);
+    fn test_scope_from_annotation_all_values() {
+        assert_eq!(
+            KyvernoScope::from_annotation("Immediate").unwrap(),
+            KyvernoScope::Immediate
+        );
+        assert_eq!(KyvernoScope::from_annotation("Subtree").unwrap(), KyvernoScope::Subtree);
+        assert_eq!(KyvernoScope::from_annotation("Root").unwrap(), KyvernoScope::Root);
+        assert_eq!(KyvernoScope::from_annotation("Global").unwrap(), KyvernoScope::Global);
     }
 
     #[test]
-    fn test_get_all_policies() {
-        let kyverno = Kyverno {
-            api_version: "post-processing.nyl.niklasrosenstein.github.com/v1".to_string(),
-            kind: "Kyverno".to_string(),
-            metadata: KyvernoMetadata {
-                name: "test".to_string(),
-                namespace: None,
-            },
-            spec: KyvernoSpec {
-                scope: KyvernoScope::Local,
-                policies: vec![],
-                inline_policies: vec![json!({"apiVersion": "kyverno.io/v1", "kind": "ClusterPolicy"})],
-                cluster_policy_rules: vec![json!({"name": "rule1"})],
-                validating_policies: vec![],
-                mutating_policies: vec![json!({"matchConstraints": {}, "mutations": []})],
-                generating_policies: vec![],
-                deleting_policies: vec![],
-                image_validating_policies: vec![],
-            },
-        };
-
-        let policies = kyverno.get_all_policies();
-        // 1 inline + 1 cluster + 1 mutating = 3 policies
-        assert_eq!(policies.len(), 3);
+    fn test_scope_from_annotation_invalid() {
+        assert!(KyvernoScope::from_annotation("Invalid").is_err());
+        let err = KyvernoScope::from_annotation("Local").unwrap_err();
+        assert!(matches!(err, NylError::Config(_)));
     }
 
     #[test]
-    fn test_extract_kyverno_resources() {
+    fn test_extract_policies_by_scope() {
         let manifests = vec![
             json!({
-                "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
-                "kind": "Kyverno",
-                "metadata": {"name": "policy1"},
-                "spec": {"scope": "Local"}
+                "apiVersion": "policies.kyverno.io/v1",
+                "kind": "MutatingPolicy",
+                "metadata": {
+                    "name": "policy1",
+                    "annotations": {
+                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Immediate"
+                    }
+                }
             }),
             json!({
                 "apiVersion": "v1",
@@ -350,81 +310,85 @@ mod tests {
                 "metadata": {"name": "config"}
             }),
             json!({
-                "apiVersion": "post-processing.nyl.niklasrosenstein.github.com/v1",
-                "kind": "Kyverno",
-                "metadata": {"name": "policy2"},
-                "spec": {"scope": "Global"}
+                "apiVersion": "policies.kyverno.io/v1",
+                "kind": "ValidatingPolicy",
+                "metadata": {
+                    "name": "policy2",
+                    "annotations": {
+                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Global"
+                    }
+                }
             }),
         ];
 
-        let (kyverno_resources, filtered) = extract_kyverno_resources(&manifests).unwrap();
-        assert_eq!(kyverno_resources.len(), 2);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["kind"], "ConfigMap");
+        let (immediate_policies, filtered) = extract_policies_by_scope(&manifests, KyvernoScope::Immediate).unwrap();
+        assert_eq!(immediate_policies.len(), 1);
+        assert_eq!(immediate_policies[0].name, "policy1");
+        // filtered should have ConfigMap + Global policy (not extracted)
+        assert_eq!(filtered.len(), 2);
     }
 
     #[test]
-    fn test_scope_serialization() {
-        let scope = KyvernoScope::Local;
-        let serialized = serde_json::to_string(&scope).unwrap();
-        assert_eq!(serialized, "\"Local\"");
+    fn test_extract_all_kyverno_policies() {
+        let manifests = vec![
+            json!({
+                "apiVersion": "policies.kyverno.io/v1",
+                "kind": "MutatingPolicy",
+                "metadata": {
+                    "name": "policy1",
+                    "annotations": {
+                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Immediate"
+                    }
+                }
+            }),
+            json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "config"}
+            }),
+            json!({
+                "apiVersion": "policies.kyverno.io/v1",
+                "kind": "ValidatingPolicy",
+                "metadata": {
+                    "name": "policy2",
+                    "annotations": {
+                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Global"
+                    }
+                }
+            }),
+            json!({
+                "apiVersion": "kyverno.io/v1",
+                "kind": "ClusterPolicy",
+                "metadata": {
+                    "name": "policy3",
+                    "annotations": {
+                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                    }
+                }
+            }),
+        ];
 
-        let scope = KyvernoScope::Global;
-        let serialized = serde_json::to_string(&scope).unwrap();
-        assert_eq!(serialized, "\"Global\"");
+        let (policies_by_scope, filtered) = extract_all_kyverno_policies(&manifests).unwrap();
+        assert_eq!(policies_by_scope.len(), 3); // Immediate, Global, Subtree
+        assert_eq!(filtered.len(), 1); // Just ConfigMap
+
+        assert_eq!(policies_by_scope[&KyvernoScope::Immediate].len(), 1);
+        assert_eq!(policies_by_scope[&KyvernoScope::Global].len(), 1);
+        assert_eq!(policies_by_scope[&KyvernoScope::Subtree].len(), 1);
     }
 
     #[test]
-    fn test_create_policies() {
-        let validating_spec = json!({"name": "my-validate", "validations": [{"expression": "true"}]});
-        let mutating_spec = json!({"matchConstraints": {}, "mutations": []});
+    fn test_unannotated_policy_not_extracted() {
+        let manifests = vec![json!({
+            "apiVersion": "policies.kyverno.io/v1",
+            "kind": "MutatingPolicy",
+            "metadata": {
+                "name": "policy-no-annotation"
+            }
+        })];
 
-        let kyverno = Kyverno {
-            api_version: "post-processing.nyl.niklasrosenstein.github.com/v1".to_string(),
-            kind: "Kyverno".to_string(),
-            metadata: KyvernoMetadata {
-                name: "my-policy".to_string(),
-                namespace: None,
-            },
-            spec: KyvernoSpec {
-                scope: KyvernoScope::Local,
-                policies: vec![],
-                inline_policies: vec![],
-                cluster_policy_rules: vec![json!({"name": "test-rule"})],
-                validating_policies: vec![validating_spec],
-                mutating_policies: vec![mutating_spec],
-                generating_policies: vec![],
-                deleting_policies: vec![],
-                image_validating_policies: vec![],
-            },
-        };
-
-        // Test ClusterPolicy (wraps rules in spec.rules)
-        let policy = kyverno.create_cluster_policy(&kyverno.spec.cluster_policy_rules);
-        assert_eq!(policy["apiVersion"], "kyverno.io/v1");
-        assert_eq!(policy["kind"], "ClusterPolicy");
-        assert_eq!(policy["metadata"]["name"], "my-policy-cluster-policy");
-        assert_eq!(policy["spec"]["rules"].as_array().unwrap().len(), 1);
-
-        // Test ValidatingPolicy (spec passthrough with name extraction)
-        let policies = kyverno.create_policies(
-            "ValidatingPolicy",
-            "validating-policy",
-            &kyverno.spec.validating_policies,
-        );
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0]["apiVersion"], "policies.kyverno.io/v1");
-        assert_eq!(policies[0]["kind"], "ValidatingPolicy");
-        assert_eq!(policies[0]["metadata"]["name"], "my-validate");
-        // name should be removed from spec
-        assert!(policies[0]["spec"]["name"].is_null());
-        assert_eq!(policies[0]["spec"]["validations"][0]["expression"], "true");
-
-        // Test MutatingPolicy (spec passthrough with default name)
-        let policies = kyverno.create_policies("MutatingPolicy", "mutating-policy", &kyverno.spec.mutating_policies);
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0]["apiVersion"], "policies.kyverno.io/v1");
-        assert_eq!(policies[0]["kind"], "MutatingPolicy");
-        assert_eq!(policies[0]["metadata"]["name"], "my-policy-mutating-policy-0");
+        let (policies_by_scope, filtered) = extract_all_kyverno_policies(&manifests).unwrap();
+        assert_eq!(policies_by_scope.len(), 0);
+        assert_eq!(filtered.len(), 1); // Policy treated as normal resource
     }
 }

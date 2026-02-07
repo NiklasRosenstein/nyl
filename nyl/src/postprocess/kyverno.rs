@@ -7,59 +7,48 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-use crate::resources::{Kyverno, KyvernoScope};
+use crate::resources::{is_kyverno_policy, AnnotatedKyvernoPolicy};
 use crate::{NylError, Result};
 
-/// Context for tracking Kyverno resources and their scopes
-#[derive(Debug)]
-pub struct KyvernoContext {
-    /// All Kyverno resources collected during rendering
-    pub global_policies: Vec<Kyverno>,
-    /// Policies with Root or Local scope (tracked per file/chart)
-    pub scoped_policies: Vec<(Kyverno, String)>, // (policy, source_path)
-}
-
-impl KyvernoContext {
-    /// Create a new empty context
-    pub fn new() -> Self {
-        Self {
-            global_policies: Vec::new(),
-            scoped_policies: Vec::new(),
-        }
-    }
-
-    /// Add a Kyverno resource to the context
-    pub fn add_kyverno(&mut self, kyverno: Kyverno, source_path: String) {
-        match kyverno.spec.scope {
-            KyvernoScope::Global => {
-                self.global_policies.push(kyverno);
-            }
-            KyvernoScope::Local | KyvernoScope::Root => {
-                self.scoped_policies.push((kyverno, source_path));
-            }
-        }
-    }
-}
-
-impl Default for KyvernoContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Apply Kyverno policies to a set of manifests
+/// Apply Kyverno policies to manifests
 ///
-/// This function takes a list of manifests and applies all Global-scoped Kyverno
-/// policies to them using the `kyverno apply` command.
-pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyverno]) -> Result<Vec<serde_json::Value>> {
+/// Policy resources themselves are excluded from mutation
+pub fn apply_kyverno_policies(
+    manifests: &[serde_json::Value],
+    policies: &[AnnotatedKyvernoPolicy],
+) -> Result<Vec<serde_json::Value>> {
     if policies.is_empty() {
         return Ok(manifests.to_vec());
+    }
+
+    // Separate policy resources from regular resources
+    let (policy_manifests, regular_manifests): (Vec<_>, Vec<_>) = manifests.iter().partition(|m| is_kyverno_policy(m));
+
+    // Only apply to regular resources
+    let policy_resources: Vec<serde_json::Value> = policies.iter().map(|p| p.policy.clone()).collect();
+
+    let mutated_manifests = apply_kyverno_policies_internal(&regular_manifests, &policy_resources)?;
+
+    // Combine mutated resources with policy resources (unchanged)
+    let mut result = mutated_manifests;
+    result.extend(policy_manifests.into_iter().cloned());
+
+    Ok(result)
+}
+
+/// Internal function to apply Kyverno policies using the CLI
+fn apply_kyverno_policies_internal(
+    manifests: &[&serde_json::Value],
+    policies: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>> {
+    if manifests.is_empty() {
+        return Ok(Vec::new());
     }
 
     // Check if kyverno is installed
     if !is_kyverno_installed() {
         return Err(NylError::Config(
-            "Kyverno CLI is not installed but Kyverno post-processor resources were found. \
+            "Kyverno CLI is not installed but Kyverno policies were found. \
              Install from: https://kyverno.io/docs/kyverno-cli/"
                 .to_string(),
         ));
@@ -73,23 +62,12 @@ pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyver
 
     // Write all policies to files
     let mut policy_files = Vec::new();
-    for (idx, kyverno) in policies.iter().enumerate() {
-        // Collect all policy resources (inline + generated from shorthand rules)
-        let all_policies = kyverno.get_all_policies();
-
-        // Also handle policy file references
-        if !kyverno.spec.policies.is_empty() {
-            tracing::warn!("Policy file references in Kyverno spec are not yet implemented. Only inline and shorthand policies are supported.");
-        }
-
-        // Write each policy to a file
-        for (policy_idx, policy) in all_policies.iter().enumerate() {
-            let policy_file = policies_dir.join(format!("policy-{}-{}.yaml", idx, policy_idx));
-            let policy_yaml = serde_norway::to_string(policy).map_err(NylError::Yaml)?;
-            fs::write(&policy_file, policy_yaml)
-                .map_err(|e| NylError::Config(format!("Failed to write policy file: {}", e)))?;
-            policy_files.push(policy_file);
-        }
+    for (idx, policy) in policies.iter().enumerate() {
+        let policy_file = policies_dir.join(format!("policy-{}.yaml", idx));
+        let policy_yaml = serde_norway::to_string(policy).map_err(NylError::Yaml)?;
+        fs::write(&policy_file, policy_yaml)
+            .map_err(|e| NylError::Config(format!("Failed to write policy file: {}", e)))?;
+        policy_files.push(policy_file);
     }
 
     // Write all resources to a single file
@@ -104,7 +82,8 @@ pub fn apply_kyverno_policies(manifests: &[serde_json::Value], policies: &[Kyver
     execute_kyverno_apply(&policy_files, &resources_file, &output_dir)?;
 
     // Read back mutated manifests from output directory
-    read_kyverno_output(&output_dir, manifests)
+    let original_vec: Vec<serde_json::Value> = manifests.iter().map(|&m| m.clone()).collect();
+    read_kyverno_output(&output_dir, &original_vec)
 }
 
 /// Check if kyverno CLI is installed
@@ -117,7 +96,7 @@ fn is_kyverno_installed() -> bool {
 }
 
 /// Write manifests to a YAML file
-fn write_manifests_to_file(path: &Path, manifests: &[serde_json::Value]) -> Result<()> {
+fn write_manifests_to_file(path: &Path, manifests: &[&serde_json::Value]) -> Result<()> {
     let mut file =
         fs::File::create(path).map_err(|e| NylError::Config(format!("Failed to create resources file: {}", e)))?;
 
@@ -231,79 +210,17 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_kyverno_context_new() {
-        let ctx = KyvernoContext::new();
-        assert!(ctx.global_policies.is_empty());
-        assert!(ctx.scoped_policies.is_empty());
-    }
-
-    #[test]
-    fn test_kyverno_context_add_global() {
-        let mut ctx = KyvernoContext::new();
-        let kyverno = Kyverno {
-            api_version: "post-processing.nyl.niklasrosenstein.github.com/v1".to_string(),
-            kind: "Kyverno".to_string(),
-            metadata: crate::resources::KyvernoMetadata {
-                name: "test".to_string(),
-                namespace: None,
-            },
-            spec: crate::resources::KyvernoSpec {
-                scope: KyvernoScope::Global,
-                policies: vec![],
-                inline_policies: vec![],
-                cluster_policy_rules: vec![],
-                validating_policies: vec![],
-                mutating_policies: vec![],
-                generating_policies: vec![],
-                deleting_policies: vec![],
-                image_validating_policies: vec![],
-            },
-        };
-
-        ctx.add_kyverno(kyverno, "test.yaml".to_string());
-        assert_eq!(ctx.global_policies.len(), 1);
-        assert_eq!(ctx.scoped_policies.len(), 0);
-    }
-
-    #[test]
-    fn test_kyverno_context_add_local() {
-        let mut ctx = KyvernoContext::new();
-        let kyverno = Kyverno {
-            api_version: "post-processing.nyl.niklasrosenstein.github.com/v1".to_string(),
-            kind: "Kyverno".to_string(),
-            metadata: crate::resources::KyvernoMetadata {
-                name: "test".to_string(),
-                namespace: None,
-            },
-            spec: crate::resources::KyvernoSpec {
-                scope: KyvernoScope::Local,
-                policies: vec![],
-                inline_policies: vec![],
-                cluster_policy_rules: vec![],
-                validating_policies: vec![],
-                mutating_policies: vec![],
-                generating_policies: vec![],
-                deleting_policies: vec![],
-                image_validating_policies: vec![],
-            },
-        };
-
-        ctx.add_kyverno(kyverno, "test.yaml".to_string());
-        assert_eq!(ctx.global_policies.len(), 0);
-        assert_eq!(ctx.scoped_policies.len(), 1);
-    }
-
-    #[test]
     fn test_write_manifests_to_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.yaml");
 
-        let manifests = vec![
+        let manifests = [
             json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test1"}}),
             json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "test2"}}),
         ];
+        let manifest_refs: Vec<&serde_json::Value> = manifests.iter().collect();
 
-        write_manifests_to_file(&file_path, &manifests).unwrap();
+        write_manifests_to_file(&file_path, &manifest_refs).unwrap();
 
         let content = fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("ConfigMap"));

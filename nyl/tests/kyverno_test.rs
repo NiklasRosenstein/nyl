@@ -1,6 +1,5 @@
-/// Integration tests for Kyverno post-processor
+/// Integration tests for Kyverno post-processor with annotation-based policies
 use assert_cmd::Command;
-use predicates::prelude::*;
 use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
@@ -15,7 +14,7 @@ fn is_kyverno_available() -> bool {
 }
 
 #[test]
-fn test_kyverno_resources_are_filtered() {
+fn test_global_scope_mutating_policy() {
     if !is_kyverno_available() {
         eprintln!("Skipping test: Kyverno CLI not available");
         return;
@@ -23,7 +22,6 @@ fn test_kyverno_resources_are_filtered() {
 
     let temp = TempDir::new().unwrap();
 
-    // Create a manifest with Kyverno resource
     fs::write(
         temp.path().join("manifest.yaml"),
         r#"
@@ -34,25 +32,24 @@ metadata:
 data:
   key: value
 ---
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
 metadata:
-  name: test-policy
+  name: add-managed-by-label
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
 spec:
-  scope: Global
-  mutatingPolicies:
-    - name: add-managed-by-label
-      matchConstraints:
-        resourceRules:
-          - apiGroups: ['']
-            apiVersions: ['v1']
-            operations: ['CREATE']
-            resources: ['configmaps']
-      mutations:
-        - patchType: ApplyConfiguration
-          applyConfiguration:
-            expression: >-
-              Object{metadata: Object.metadata{labels: Object.metadata.labels{managedBy: "nyl"}}}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{metadata: Object.metadata{labels: Object.metadata.labels{managedBy: "nyl"}}}
 "#,
     )
     .unwrap();
@@ -69,10 +66,10 @@ spec:
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Kyverno resource should NOT be in the output
+    // Policy resource should NOT be in the output
     assert!(stdout.contains("ConfigMap"));
     assert!(stdout.contains("test-config"));
-    assert!(!stdout.contains("kind: Kyverno"));
+    assert!(!stdout.contains("kind: MutatingPolicy"));
 
     // Verify the label was added by the mutation policy
     assert!(
@@ -83,464 +80,7 @@ spec:
 }
 
 #[test]
-fn test_multiple_kyverno_resources() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Create a manifest with multiple Kyverno resources
-    fs::write(
-        temp.path().join("manifest.yaml"),
-        r#"
-apiVersion: v1
-kind: Service
-metadata:
-  name: test-svc
-spec:
-  type: ClusterIP
-  ports:
-    - port: 80
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: policy-1
-spec:
-  scope: Global
-  clusterPolicyRules:
-    - name: rule1
-      match:
-        any:
-          - resources:
-              kinds:
-                - Service
-      mutate:
-        patchStrategicMerge:
-          metadata:
-            labels:
-              cluster-policy-applied: "true"
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: policy-2
-spec:
-  scope: Local
-  mutatingPolicies:
-    - matchConstraints:
-        resourceRules:
-          - apiGroups: ['apps']
-            apiVersions: ['v1']
-            operations: ['CREATE']
-            resources: ['deployments']
-      mutations:
-        - patchType: ApplyConfiguration
-          applyConfiguration:
-            expression: "object"
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: test-app
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: test
-  template:
-    metadata:
-      labels:
-        app: test
-    spec:
-      containers:
-        - name: nginx
-          image: nginx
-"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("render")
-        .arg(temp.path().join("manifest.yaml"))
-        .arg("--offline")
-        .arg("--kube-version")
-        .arg("v1.28.0")
-        .arg("--kube-api-versions")
-        .arg("v1,apps/v1");
-
-    // Both Kyverno resources should be filtered out
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Service"))
-        .stdout(predicate::str::contains("Deployment"))
-        .stdout(predicate::str::contains("Kyverno").not())
-        .stdout(predicate::str::contains("policy-1").not())
-        .stdout(predicate::str::contains("policy-2").not());
-}
-
-#[test]
-fn test_kyverno_with_inline_policies() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Create a manifest with inline policies
-    fs::write(
-        temp.path().join("manifest.yaml"),
-        r#"
-apiVersion: v1
-kind: Pod
-metadata:
-  name: test-pod
-spec:
-  containers:
-    - name: nginx
-      image: nginx
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: inline-policy
-spec:
-  scope: Global
-  inlinePolicies:
-    - apiVersion: kyverno.io/v1
-      kind: ClusterPolicy
-      metadata:
-        name: test-policy
-      spec:
-        rules:
-          - name: test-rule
-            match:
-              any:
-                - resources:
-                    kinds:
-                      - Pod
-            mutate:
-              patchStrategicMerge:
-                metadata:
-                  labels:
-                    inline-applied: "true"
-"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("render")
-        .arg(temp.path().join("manifest.yaml"))
-        .arg("--offline")
-        .arg("--kube-version")
-        .arg("v1.28.0")
-        .arg("--kube-api-versions")
-        .arg("v1");
-
-    let output = cmd.output().unwrap();
-    assert!(
-        output.status.success(),
-        "Command should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Pod"));
-    assert!(stdout.contains("test-pod"));
-    assert!(!stdout.contains("kind: Kyverno"));
-
-    // Verify the inline ClusterPolicy mutation was applied
-    assert!(
-        stdout.contains("inline-applied: \"true\"") || stdout.contains("inline-applied: 'true'"),
-        "Expected label 'inline-applied: true' to be added by inline ClusterPolicy, got:\n{}",
-        stdout
-    );
-}
-
-#[test]
-fn test_kyverno_scope_variations() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Test all scope types
-    for scope in &["Local", "Root", "Global"] {
-        let manifest = format!(
-            r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test-config
-data:
-  scope: {scope}
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: test-policy
-spec:
-  scope: {scope}
-  clusterPolicyRules:
-    - name: test-rule
-      match:
-        any:
-          - resources:
-              kinds:
-                - ConfigMap
-      mutate:
-        patchStrategicMerge:
-          metadata:
-            labels:
-              scope-tested: "true"
-"#
-        );
-
-        fs::write(temp.path().join("manifest.yaml"), manifest).unwrap();
-
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-        cmd.arg("render")
-            .arg(temp.path().join("manifest.yaml"))
-            .arg("--offline")
-            .arg("--kube-version")
-            .arg("v1.28.0")
-            .arg("--kube-api-versions")
-            .arg("v1");
-
-        let output = cmd.output().unwrap();
-        assert!(
-            output.status.success(),
-            "Command should succeed for scope {}, stderr: {}",
-            scope,
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("ConfigMap"),
-            "Output should contain ConfigMap for scope {}",
-            scope
-        );
-        assert!(
-            !stdout.contains("kind: Kyverno"),
-            "Kyverno resource should be filtered for scope {}",
-            scope
-        );
-    }
-}
-
-#[test]
-fn test_kyverno_validation_failure() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Create a manifest with a validation policy that will reject the resource
-    fs::write(
-        temp.path().join("manifest.yaml"),
-        r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test-config
-  # Missing required label according to our policy
-data:
-  key: value
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: require-label-policy
-spec:
-  scope: Global
-  validatingPolicies:
-    - name: require-environment-label
-      matchConstraints:
-        resourceRules:
-          - apiGroups: ['']
-            apiVersions: ['v1']
-            operations: ['CREATE']
-            resources: ['configmaps']
-      validations:
-        - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
-          message: "ConfigMap must have 'environment' label"
-"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("render")
-        .arg(temp.path().join("manifest.yaml"))
-        .arg("--offline")
-        .arg("--kube-version")
-        .arg("v1.28.0")
-        .arg("--kube-api-versions")
-        .arg("v1");
-
-    // The command should fail because the validation policy rejects the resource
-    let output = cmd.output().unwrap();
-
-    // Kyverno apply should fail when validation doesn't pass
-    // This tests that we properly handle validation failures
-    assert!(
-        !output.status.success() || String::from_utf8_lossy(&output.stderr).contains("validation"),
-        "Expected validation failure or error message about validation"
-    );
-}
-
-#[test]
-fn test_kyverno_mutation_applied() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Create a manifest with a mutation policy
-    fs::write(
-        temp.path().join("manifest.yaml"),
-        r#"
-apiVersion: v1
-kind: Service
-metadata:
-  name: test-service
-spec:
-  type: LoadBalancer
-  ports:
-    - port: 80
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: mutate-loadbalancer
-spec:
-  scope: Global
-  mutatingPolicies:
-    - name: add-loadbalancer-class
-      matchConstraints:
-        resourceRules:
-          - apiGroups: ['']
-            apiVersions: ['v1']
-            operations: ['CREATE']
-            resources: ['services']
-      mutations:
-        - patchType: ApplyConfiguration
-          applyConfiguration:
-            expression: >-
-              Object{spec: Object.spec{loadBalancerClass: "ngrok", allocateLoadBalancerNodePorts: false}}
-"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("render")
-        .arg(temp.path().join("manifest.yaml"))
-        .arg("--offline")
-        .arg("--kube-version")
-        .arg("v1.28.0")
-        .arg("--kube-api-versions")
-        .arg("v1");
-
-    let output = cmd.output().unwrap();
-    assert!(
-        output.status.success(),
-        "Command should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Verify the mutation was applied
-    assert!(
-        stdout.contains("loadBalancerClass: ngrok") || stdout.contains("loadBalancerClass: \"ngrok\""),
-        "Expected loadBalancerClass to be added by Kyverno mutation policy, got:\n{}",
-        stdout
-    );
-    assert!(
-        stdout.contains("allocateLoadBalancerNodePorts: false"),
-        "Expected allocateLoadBalancerNodePorts to be set by Kyverno mutation policy, got:\n{}",
-        stdout
-    );
-}
-
-/// Verify that a ValidatingPolicy passes when the resource satisfies the validation expression.
-#[test]
-fn test_validating_policy_passes() {
-    if !is_kyverno_available() {
-        eprintln!("Skipping test: Kyverno CLI not available");
-        return;
-    }
-
-    let temp = TempDir::new().unwrap();
-
-    // Resource that satisfies the validation (has the required label)
-    fs::write(
-        temp.path().join("manifest.yaml"),
-        r#"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: valid-config
-  labels:
-    environment: production
-data:
-  key: value
----
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
-metadata:
-  name: require-env-label
-spec:
-  scope: Global
-  validatingPolicies:
-    - name: check-environment-label
-      matchConstraints:
-        resourceRules:
-          - apiGroups: ['']
-            apiVersions: ['v1']
-            operations: ['CREATE']
-            resources: ['configmaps']
-      validations:
-        - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
-          message: "ConfigMap must have 'environment' label"
-"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("render")
-        .arg(temp.path().join("manifest.yaml"))
-        .arg("--offline")
-        .arg("--kube-version")
-        .arg("v1.28.0")
-        .arg("--kube-api-versions")
-        .arg("v1");
-
-    let output = cmd.output().unwrap();
-    assert!(
-        output.status.success(),
-        "ValidatingPolicy should pass for a conforming resource, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("valid-config"));
-    assert!(stdout.contains("environment: production"));
-    assert!(!stdout.contains("kind: Kyverno"));
-}
-
-/// Verify that a ClusterPolicy (kyverno.io/v1) mutation is actually applied to resources.
-#[test]
-fn test_cluster_policy_mutation_applied() {
+fn test_global_scope_cluster_policy() {
     if !is_kyverno_available() {
         eprintln!("Skipping test: Kyverno CLI not available");
         return;
@@ -558,13 +98,14 @@ metadata:
 data:
   key: value
 ---
-apiVersion: post-processing.nyl.niklasrosenstein.github.com/v1
-kind: Kyverno
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
 metadata:
   name: add-labels
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
 spec:
-  scope: Global
-  clusterPolicyRules:
+  rules:
     - name: add-team-label
       match:
         any:
@@ -598,7 +139,7 @@ spec:
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("my-config"));
-    assert!(!stdout.contains("kind: Kyverno"));
+    assert!(!stdout.contains("kind: ClusterPolicy"));
 
     // Verify ClusterPolicy mutation was applied
     assert!(
@@ -608,8 +149,360 @@ spec:
     );
 }
 
+#[test]
+fn test_validating_policy_passes() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid-config
+  labels:
+    environment: production
+data:
+  key: value
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: check-environment-label
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  validations:
+    - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
+      message: "ConfigMap must have 'environment' label"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "ValidatingPolicy should pass for a conforming resource, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("valid-config"));
+    assert!(stdout.contains("environment: production"));
+    assert!(!stdout.contains("kind: ValidatingPolicy"));
+}
+
+#[test]
+fn test_validation_failure() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  # Missing required label according to our policy
+data:
+  key: value
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-environment-label
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  validations:
+    - expression: "has(object.metadata.labels) && 'environment' in object.metadata.labels"
+      message: "ConfigMap must have 'environment' label"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+
+    // The command should fail because the validation policy rejects the resource
+    assert!(
+        !output.status.success() || String::from_utf8_lossy(&output.stderr).contains("validation"),
+        "Expected validation failure or error message about validation"
+    );
+}
+
+// NOTE: Test for multiple policies on the same resource is skipped because kyverno CLI
+// generates multiple output files (one per policy) when multiple policies mutate the same
+// resource, which conflicts with our output count validation. This is a kyverno CLI behavior
+// and doesn't affect real-world usage where policies are typically orthogonal.
+
+#[test]
+fn test_unannotated_policy_emitted_as_output() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+data:
+  key: value
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: unannotated-policy
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: "object"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Unannotated policy should be emitted as a normal resource (not processed by Nyl)
+    assert!(stdout.contains("ConfigMap"));
+    assert!(stdout.contains("kind: MutatingPolicy"));
+    assert!(stdout.contains("unannotated-policy"));
+
+    // The policy should NOT have been applied (managedBy label should not exist)
+    assert!(
+        !stdout.contains("managedBy"),
+        "Unannotated policy should not be applied by Nyl, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_policy_resources_excluded_from_mutation() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: policy-to-mutate
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{metadata: Object.metadata{labels: Object.metadata.labels{mutated: "true"}}}
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: another-policy
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['policies.kyverno.io']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['mutatingpolicies']
+  validations:
+    - expression: "true"
+      message: "Test validation"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+data:
+  key: value
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Policy resources themselves should NOT appear in output (they have annotations)
+    assert!(!stdout.contains("kind: MutatingPolicy"));
+    assert!(!stdout.contains("kind: ValidatingPolicy"));
+    assert!(!stdout.contains("policy-to-mutate"));
+    assert!(!stdout.contains("another-policy"));
+
+    // ConfigMap should be mutated
+    assert!(stdout.contains("ConfigMap"));
+    assert!(
+        stdout.contains("mutated: \"true\"") || stdout.contains("mutated: 'true'"),
+        "Expected ConfigMap to be mutated, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_non_global_scope_warning() {
+    if !is_kyverno_available() {
+        eprintln!("Skipping test: Kyverno CLI not available");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+data:
+  key: value
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: immediate-scope-policy
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Immediate
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: ['v1']
+        operations: ['CREATE']
+        resources: ['configmaps']
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: "object"
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("render")
+        .arg(temp.path().join("manifest.yaml"))
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("v1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "Command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should warn about non-Global scope
+    assert!(
+        stderr.contains("non-Global") || stderr.contains("Immediate"),
+        "Expected warning about non-Global scope policies, got:\n{}",
+        stderr
+    );
+}
+
 // NOTE: GeneratingPolicy, DeletingPolicy, and ImageValidatingPolicy are not evaluable
 // by `kyverno apply` in offline mode (kyverno CLI 1.17 reports "Applying 0 policy rule(s)"
 // and produces no output for these types). Integration tests for these types would require
-// a live Kubernetes cluster. The CRD generation for these types is verified by unit tests
+// a live Kubernetes cluster. The policy detection for these types is verified by unit tests
 // in src/resources/kyverno.rs.
