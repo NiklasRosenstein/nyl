@@ -244,6 +244,8 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
             continue;
         }
 
+        tracing::debug!("Reading manifest file: {}", file_path.display());
+
         let raw =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
 
@@ -485,6 +487,8 @@ fn process_application_generator(
     let mut applications = Vec::new();
 
     for file_path in yaml_files {
+        tracing::debug!("Reading YAML file: {}", file_path.display());
+
         // Read and parse file
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
