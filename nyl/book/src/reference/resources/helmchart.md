@@ -13,19 +13,16 @@ metadata:
   name: string              # Chart instance name
 spec:
   chart:                    # Chart reference (choose one method)
-    # Local path or chart name
-    path: string            # Local filesystem path
-    name: string            # Chart name (searched in search paths)
+    # Universal fields:
+    repository: string      # Repository URL (Git, OCI, or Helm)
+    name: string            # Universal name field (context-dependent)
+    version: string         # Chart version or Git reference
 
-    # Git repository
-    git: string             # Git repository URL
-    git_ref: string         # Branch, tag, or commit (default: HEAD)
-    path: string            # Subdirectory within repository
-
-    # Helm repository (not yet implemented)
-    repository: string      # Helm repository URL
-    name: string            # Chart name in repository
-    version: string         # Chart version
+    # Repository types (indicated by protocol prefix):
+    # - Git: repository starts with "git+" (e.g., "git+https://...")
+    # - OCI: repository starts with "oci://" (e.g., "oci://ghcr.io/...")
+    # - Helm: plain HTTPS URL (e.g., "https://charts.example.com")
+    # - Local: no repository, name is filesystem path
 
   release:                  # Optional release configuration
     name: string            # Release name (default: metadata.name)
@@ -41,7 +38,7 @@ spec:
 
 ### Local Path
 
-Reference a chart by filesystem path (absolute or relative):
+Reference a chart by filesystem path (absolute or relative) using the `name` field:
 
 ```yaml
 apiVersion: nyl.niklasrosenstein.github.com/v1
@@ -50,7 +47,7 @@ metadata:
   name: nginx
 spec:
   chart:
-    path: ./charts/nginx
+    name: ./charts/nginx
   release:
     name: nginx
     namespace: default
@@ -58,7 +55,7 @@ spec:
 
 ### Chart Name
 
-Reference a chart by name, searched in configured search paths:
+Reference a chart by name (without path separators), searched in configured search paths:
 
 ```yaml
 apiVersion: nyl.niklasrosenstein.github.com/v1
@@ -81,7 +78,7 @@ search_path = ["./charts", "/opt/helm-charts"]
 
 ### Git Repository
 
-Reference a chart from a Git repository:
+Reference a chart from a Git repository using the `git+` protocol prefix:
 
 ```yaml
 apiVersion: nyl.niklasrosenstein.github.com/v1
@@ -90,44 +87,50 @@ metadata:
   name: nginx
 spec:
   chart:
-    git: https://github.com/bitnami/charts.git
-    git_ref: main
-    path: bitnami/nginx
+    repository: git+https://github.com/bitnami/charts.git
+    version: main
+    name: bitnami/nginx
   release:
     name: nginx
     namespace: default
 ```
 
 **Git Parameters:**
-- **`git`** (required): Git repository URL (HTTPS or SSH)
-- **`git_ref`** (optional): Branch, tag, or commit SHA (default: `HEAD`)
-- **`path`** (optional): Subdirectory within the repository containing the chart
+- **`repository`** (required): Git repository URL with `git+` prefix (HTTPS or SSH)
+- **`version`** (optional): Branch, tag, or commit SHA (default: `HEAD`)
+- **`name`** (optional): Subdirectory within the repository containing the chart
 
 **Examples:**
 
 ```yaml
 # Latest from main branch
 chart:
-  git: https://github.com/example/charts.git
-  git_ref: main
-  path: charts/myapp
+  repository: git+https://github.com/example/charts.git
+  version: main
+  name: charts/myapp
 
 # Specific version tag
 chart:
-  git: https://github.com/example/charts.git
-  git_ref: v2.1.0
-  path: charts/myapp
+  repository: git+https://github.com/example/charts.git
+  version: v2.1.0
+  name: charts/myapp
 
 # Specific commit
 chart:
-  git: https://github.com/example/charts.git
-  git_ref: abc123def456
-  path: charts/myapp
+  repository: git+https://github.com/example/charts.git
+  version: abc123def456
+  name: charts/myapp
 
-# Root of repository (no path)
+# Root of repository (no subpath)
 chart:
-  git: https://github.com/example/simple-chart.git
-  git_ref: main
+  repository: git+https://github.com/example/simple-chart.git
+  version: main
+
+# SSH URL
+chart:
+  repository: git+git@github.com:example/charts.git
+  version: main
+  name: charts/myapp
 ```
 
 See [Git Integration](../../git-integration.md) for more details on Git support.
@@ -231,9 +234,9 @@ metadata:
   name: myapp
 spec:
   chart:
-    git: https://github.com/company/charts.git
-    git_ref: v2.1.0
-    path: applications/myapp
+    repository: git+https://github.com/company/charts.git
+    version: v2.1.0
+    name: applications/myapp
   release:
     name: myapp
     namespace: production
@@ -269,9 +272,9 @@ metadata:
   name: myapp
 spec:
   chart:
-    git: https://github.com/company/charts.git
-    git_ref: stable
-    path: myapp
+    repository: git+https://github.com/company/charts.git
+    version: stable
+    name: myapp
   values:
     # Base values here
 ```

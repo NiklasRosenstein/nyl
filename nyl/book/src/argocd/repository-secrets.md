@@ -333,9 +333,9 @@ metadata:
   name: my-app
 spec:
   chart:
-    git: git@github.com:myorg/private-charts.git
-    git_ref: main
-    path: charts/my-app
+    repository: git+git@github.com:myorg/private-charts.git
+    version: main
+    name: charts/my-app
   release:
     name: my-app
     namespace: default

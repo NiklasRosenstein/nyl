@@ -13,6 +13,31 @@ mod template;
 pub use oci::OciChartPuller;
 pub use template::HelmTemplateExecutor;
 
+/// Repository protocol type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryProtocol {
+    /// Git repository (git+ prefix)
+    Git,
+    /// OCI registry (oci:// prefix)
+    Oci,
+    /// Traditional Helm repository (https:// or no prefix)
+    Helm,
+}
+
+/// Parse protocol prefix from repository URL
+///
+/// Returns (protocol, url_without_prefix)
+/// Supported protocols: "git+", "oci://"
+fn parse_repository_protocol(repository: &str) -> (RepositoryProtocol, &str) {
+    if let Some(url) = repository.strip_prefix("git+") {
+        (RepositoryProtocol::Git, url)
+    } else if repository.starts_with("oci://") {
+        (RepositoryProtocol::Oci, repository)
+    } else {
+        (RepositoryProtocol::Helm, repository)
+    }
+}
+
 /// Resolved chart reference with absolute path
 #[derive(Debug, Clone)]
 pub struct ResolvedChart {
@@ -33,6 +58,9 @@ pub struct HelmChartResolver {
 
     /// Working directory for relative path resolution
     working_dir: PathBuf,
+
+    /// Optional cache directory for Git operations (defaults to env var/system default)
+    cache_dir: Option<PathBuf>,
 }
 
 impl HelmChartResolver {
@@ -42,18 +70,31 @@ impl HelmChartResolver {
     /// * `search_paths` - Directories to search for charts
     /// * `working_dir` - Working directory for relative paths
     pub fn new(search_paths: Vec<PathBuf>, working_dir: PathBuf) -> Self {
+        Self::with_cache_dir(search_paths, working_dir, None)
+    }
+
+    /// Create a new chart resolver with explicit cache directory
+    ///
+    /// # Arguments
+    /// * `search_paths` - Directories to search for charts
+    /// * `working_dir` - Working directory for relative paths
+    /// * `cache_dir` - Optional cache directory for Git operations (defaults to env var/system default)
+    pub fn with_cache_dir(search_paths: Vec<PathBuf>, working_dir: PathBuf, cache_dir: Option<PathBuf>) -> Self {
         Self {
             search_paths,
             working_dir,
+            cache_dir,
         }
     }
 
     /// Resolve a chart reference to an absolute path
     ///
     /// Supports:
-    /// - Git repositories (git + git_ref + path)
-    /// - Local paths (path)
-    /// - Chart names from search paths (name)
+    /// - Git repositories (repository with git+ prefix + version + name as subpath)
+    /// - OCI repositories (repository with oci:// prefix + version)
+    /// - Helm repositories (repository + version + name as chart name)
+    /// - Local paths (name as filesystem path)
+    /// - Chart names from search paths (name without path separators)
     ///
     /// # Arguments
     /// * `chart_ref` - The chart reference to resolve
@@ -61,31 +102,43 @@ impl HelmChartResolver {
     /// # Returns
     /// ResolvedChart with absolute path
     pub fn resolve_chart(&self, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        // Handle Git chart references
-        if let Some(ref git_url) = chart_ref.git {
-            return Self::resolve_git(git_url, chart_ref);
-        }
-
+        // Handle repository field (Git, OCI, or traditional Helm)
         if let Some(ref repository) = chart_ref.repository {
-            let version = chart_ref
-                .version
-                .as_ref()
-                .ok_or_else(|| NylError::Config("Chart version is required when using repository".to_string()))?;
-            return Self::resolve_repository(repository, version, chart_ref);
+            let (protocol, url) = parse_repository_protocol(repository);
+
+            match protocol {
+                RepositoryProtocol::Git => {
+                    // Git repository: git+https://... or git+git@...
+                    return self.resolve_git(url, chart_ref);
+                }
+                RepositoryProtocol::Oci | RepositoryProtocol::Helm => {
+                    // OCI or traditional Helm repository
+                    let version = chart_ref.version.as_ref().ok_or_else(|| {
+                        NylError::Config("Chart version is required when using repository".to_string())
+                    })?;
+                    return Self::resolve_repository(repository, version, chart_ref);
+                }
+            }
         }
 
-        // Handle local path
-        if let Some(ref path) = chart_ref.path {
-            return self.resolve_local_path(path, chart_ref);
-        }
-
-        // Handle chart by name (search in search_paths)
+        // Handle name field (local path or search)
         if let Some(ref name) = chart_ref.name {
-            return self.resolve_by_name(name, chart_ref);
+            // If name looks like a path (contains / or \ or starts with . or ~ or /), treat as local path
+            // Otherwise, search in search_paths
+            if name.contains('/')
+                || name.contains('\\')
+                || name.starts_with('.')
+                || name.starts_with('~')
+                || name.starts_with('/')
+            {
+                return self.resolve_local_path(name, chart_ref);
+            } else {
+                return self.resolve_by_name(name, chart_ref);
+            }
         }
 
         Err(NylError::Config(
-            "Chart reference must have either 'path' or 'name'".to_string(),
+            "Chart reference must have either 'repository' or 'name'".to_string(),
         ))
     }
 
@@ -172,11 +225,17 @@ impl HelmChartResolver {
     }
 
     /// Resolve a Git chart reference
-    fn resolve_git(git_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        let mut git_manager = crate::git::GitManager::new()?;
+    fn resolve_git(&self, repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
+            crate::git::GitManager::with_cache_dir(cache_dir)
+        } else {
+            crate::git::GitManager::new()?
+        };
 
-        let worktree_path =
-            git_manager.resolve_ref(git_url, chart_ref.git_ref.as_deref(), chart_ref.path.as_deref())?;
+        // Use 'name' field as subpath for Git repos
+        let subpath = chart_ref.name.as_deref();
+
+        let worktree_path = git_manager.resolve_ref(repository_url, chart_ref.version.as_deref(), subpath)?;
 
         // Verify Chart.yaml exists
         let chart_yaml = worktree_path.join("Chart.yaml");
@@ -199,6 +258,7 @@ impl std::fmt::Debug for HelmChartResolver {
         f.debug_struct("HelmChartResolver")
             .field("search_paths", &self.search_paths)
             .field("working_dir", &self.working_dir)
+            .field("cache_dir", &self.cache_dir)
             .finish()
     }
 }
@@ -237,7 +297,7 @@ mod tests {
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
         let chart_ref = ChartRef {
-            path: Some(temp.path().join("mychart").to_string_lossy().to_string()),
+            name: Some(temp.path().join("mychart").to_string_lossy().to_string()),
             ..Default::default()
         };
 
@@ -254,7 +314,7 @@ mod tests {
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
         let chart_ref = ChartRef {
-            path: Some("mychart".to_string()),
+            name: Some("./mychart".to_string()),
             ..Default::default()
         };
 
@@ -316,7 +376,7 @@ mod tests {
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
         let chart_ref = ChartRef {
-            path: Some("missing".to_string()),
+            name: Some("./missing".to_string()),
             ..Default::default()
         };
 
@@ -353,7 +413,7 @@ mod tests {
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
         let chart_ref = ChartRef {
-            path: Some("bad-chart".to_string()),
+            name: Some("./bad-chart".to_string()),
             ..Default::default()
         };
 
@@ -364,6 +424,41 @@ mod tests {
 
     // Git chart resolution test is now an integration test
     // as it requires actual Git operations
+
+    #[test]
+    fn test_parse_repository_protocol_git_https() {
+        let (protocol, url) = parse_repository_protocol("git+https://github.com/user/repo.git");
+        assert_eq!(protocol, RepositoryProtocol::Git);
+        assert_eq!(url, "https://github.com/user/repo.git");
+    }
+
+    #[test]
+    fn test_parse_repository_protocol_git_ssh() {
+        let (protocol, url) = parse_repository_protocol("git+git@github.com:user/repo.git");
+        assert_eq!(protocol, RepositoryProtocol::Git);
+        assert_eq!(url, "git@github.com:user/repo.git");
+    }
+
+    #[test]
+    fn test_parse_repository_protocol_oci() {
+        let (protocol, url) = parse_repository_protocol("oci://ghcr.io/owner/chart");
+        assert_eq!(protocol, RepositoryProtocol::Oci);
+        assert_eq!(url, "oci://ghcr.io/owner/chart");
+    }
+
+    #[test]
+    fn test_parse_repository_protocol_helm() {
+        let (protocol, url) = parse_repository_protocol("https://charts.example.com");
+        assert_eq!(protocol, RepositoryProtocol::Helm);
+        assert_eq!(url, "https://charts.example.com");
+    }
+
+    #[test]
+    fn test_parse_repository_protocol_plain_url() {
+        let (protocol, url) = parse_repository_protocol("charts.example.com");
+        assert_eq!(protocol, RepositoryProtocol::Helm);
+        assert_eq!(url, "charts.example.com");
+    }
 
     #[test]
     fn test_resolve_repository_requires_version() {
@@ -381,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_no_path_or_name() {
+    fn test_resolve_no_repository_or_name() {
         let temp = TempDir::new().unwrap();
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
@@ -392,6 +487,6 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must have either 'path' or 'name'"));
+            .contains("must have either 'repository' or 'name'"));
     }
 }

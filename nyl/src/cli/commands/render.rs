@@ -340,7 +340,7 @@ fn generate_resource(
             metadata: component.metadata,
             spec: crate::resources::HelmChartSpec {
                 chart: ChartRef {
-                    path: Some(chart_dir.to_string_lossy().into_owned()),
+                    name: Some(chart_dir.to_string_lossy().into_owned()),
                     ..Default::default()
                 },
                 release: Some(ReleaseMetadata {
