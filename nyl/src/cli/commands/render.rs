@@ -208,19 +208,30 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     Ok(())
 }
 
-/// Load all YAML/JSON resources from a directory, rendering Jinja templates
+/// Load YAML/JSON resources from a path, rendering Jinja templates.
+///
+/// If `path` is a file, only that file is loaded. If `path` is a directory,
+/// only the immediate YAML/JSON files in that directory are loaded (non-recursive).
 fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
     let path = Path::new(path);
     let engine = TemplateEngine::new();
     let ctx_json = context.to_json();
     let mut resources = Vec::new();
 
-    for entry in WalkDir::new(path).follow_links(true).into_iter().filter_map(|e| e.ok()) {
-        let file_path = entry.path();
-        if !file_path.is_file() {
-            continue;
-        }
+    let files: Vec<std::path::PathBuf> = if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(path)
+            .map_err(|e| NylError::Config(format!("Failed to read directory '{}': {}", path.display(), e)))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        entries.sort();
+        entries
+    };
 
+    for file_path in &files {
         let ext = file_path.extension().and_then(|s| s.to_str());
         if !matches!(ext, Some("yaml" | "yml" | "json")) {
             continue;
