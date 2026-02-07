@@ -1,0 +1,19 @@
+# Full example with HTTP Helm repository
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: https://charts.bitnami.com/bitnami#nginx@15.0.0
+metadata:
+  name: my-nginx
+  namespace: default
+spec:
+  # These values are passed directly to the Helm chart
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

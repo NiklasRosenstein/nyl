@@ -1,0 +1,11 @@
+# OCI registry example
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: oci://ghcr.io/myorg/myapp@v1.2.3
+metadata:
+  name: myapp
+  namespace: production
+spec:
+  enabled: true
+  replicas: 3
+  image:
+    pullPolicy: IfNotPresent

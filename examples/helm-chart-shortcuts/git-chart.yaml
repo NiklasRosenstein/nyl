@@ -1,0 +1,10 @@
+# Git repository example
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: git+https://github.com/myorg/helm-charts#charts/myapp@main
+metadata:
+  name: git-app
+  namespace: staging
+spec:
+  config:
+    enabled: true
+    debug: false

@@ -1,0 +1,10 @@
+# HTTP chart without version (uses latest)
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: http://my-chart-repo.org#my-chart
+metadata:
+  name: custom-release
+  namespace: release-namespace
+spec:
+  config:
+    enabled: true
+    replicas: 2

@@ -793,4 +793,44 @@ metadata:
 
         assert_eq!(rel_dir_normalized, "");
     }
+
+    #[test]
+    fn test_is_renderable_resource_helm_chart() {
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "HelmChart",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_component() {
+        let resource = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "example/v1/Nginx",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_component_shortcut() {
+        let resource = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "https://charts.example.com/repo#nginx@1.0.0",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_plain_k8s() {
+        let resource = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test"}
+        });
+        assert!(!is_renderable_resource(&resource));
+    }
 }
