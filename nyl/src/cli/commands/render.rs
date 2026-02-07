@@ -11,7 +11,7 @@ use crate::{
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
         component_kind_to_chart_ref, extract_application_generators, extract_nyl_release,
-        is_helm_chart_shortcut, is_nyl_component, parse_component_kind, ChartRef, HelmChart,
+        is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart,
         NylComponent, NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
@@ -333,7 +333,7 @@ fn generate_resource(
             .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
 
         // Check if the kind uses the shortcut format for remote Helm charts
-        if is_helm_chart_shortcut(&component.kind) {
+        if is_remote_helm_chart_shortcut(&component.kind) {
             // Shortcut format: <repository>#<name>@<version>
             let parsed = parse_component_kind(&component.kind);
             let chart_ref = component_kind_to_chart_ref(&parsed);

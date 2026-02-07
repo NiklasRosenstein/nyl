@@ -104,7 +104,7 @@ pub fn parse_component_kind(kind: &str) -> ComponentKindParsed {
 ///
 /// Returns `true` if the kind appears to be a remote repository URL rather than
 /// a local component path.
-pub fn is_helm_chart_shortcut(kind: &str) -> bool {
+pub fn is_remote_helm_chart_shortcut(kind: &str) -> bool {
     // Extract the base part (before '#' and '@')
     let parsed = parse_component_kind(kind);
     is_remote_repository(&parsed.base)
@@ -294,18 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_helm_chart_shortcut_remote() {
-        assert!(is_helm_chart_shortcut("http://my-repo.org#chart@1.0.0"));
-        assert!(is_helm_chart_shortcut("https://charts.example.com#nginx"));
-        assert!(is_helm_chart_shortcut("oci://ghcr.io/chart@v1.0.0"));
-        assert!(is_helm_chart_shortcut("git+https://github.com/user/repo"));
+    fn test_is_remote_helm_chart_shortcut_remote() {
+        assert!(is_remote_helm_chart_shortcut("http://my-repo.org#chart@1.0.0"));
+        assert!(is_remote_helm_chart_shortcut("https://charts.example.com#nginx"));
+        assert!(is_remote_helm_chart_shortcut("oci://ghcr.io/chart@v1.0.0"));
+        assert!(is_remote_helm_chart_shortcut("git+https://github.com/user/repo"));
     }
 
     #[test]
-    fn test_is_helm_chart_shortcut_local() {
-        assert!(!is_helm_chart_shortcut("my-chart"));
-        assert!(!is_helm_chart_shortcut("path/to/chart"));
-        assert!(!is_helm_chart_shortcut("example/v1/Nginx"));
+    fn test_is_remote_helm_chart_shortcut_local() {
+        assert!(!is_remote_helm_chart_shortcut("my-chart"));
+        assert!(!is_remote_helm_chart_shortcut("path/to/chart"));
+        assert!(!is_remote_helm_chart_shortcut("example/v1/Nginx"));
     }
 
     #[test]

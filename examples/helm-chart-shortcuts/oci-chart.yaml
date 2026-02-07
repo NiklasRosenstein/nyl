@@ -1,11 +1,10 @@
-# OCI registry example
+# OCI registry example (cert-manager from Jetstack)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: oci://ghcr.io/myorg/myapp@v1.2.3
+kind: oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4
 metadata:
-  name: myapp
-  namespace: production
+  name: nginx-oci
+  namespace: default
 spec:
-  enabled: true
-  replicas: 3
-  image:
-    pullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    type: ClusterIP

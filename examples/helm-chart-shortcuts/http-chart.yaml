@@ -1,6 +1,6 @@
-# Full example with HTTP Helm repository
+# Full example with HTTP Helm repository (Bitnami nginx chart)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: https://charts.bitnami.com/bitnami#nginx@15.0.0
+kind: https://charts.bitnami.com/bitnami#nginx@18.2.4
 metadata:
   name: my-nginx
   namespace: default

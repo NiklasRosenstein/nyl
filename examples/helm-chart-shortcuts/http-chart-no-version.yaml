@@ -1,10 +1,12 @@
-# HTTP chart without version (uses latest)
+# HTTP chart without version (uses latest from Bitnami)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: http://my-chart-repo.org#my-chart
+kind: https://charts.bitnami.com/bitnami#redis
 metadata:
-  name: custom-release
-  namespace: release-namespace
+  name: my-redis
+  namespace: default
 spec:
-  config:
-    enabled: true
-    replicas: 2
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false

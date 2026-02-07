@@ -1,10 +1,12 @@
-# Git repository example
+# Git repository example (Prometheus from official Helm charts)
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: git+https://github.com/myorg/helm-charts#charts/myapp@main
+kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
 metadata:
-  name: git-app
-  namespace: staging
+  name: prometheus
+  namespace: monitoring
 spec:
-  config:
-    enabled: true
-    debug: false
+  server:
+    persistentVolume:
+      enabled: false
+  alertmanager:
+    enabled: false

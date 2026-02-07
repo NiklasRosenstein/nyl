@@ -11,8 +11,8 @@ pub use application_generator::{
     ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, SyncPolicy,
 };
 pub use component::{
-    component_kind_to_chart_ref, is_helm_chart_shortcut, is_nyl_component, parse_component_kind, ComponentKindParsed,
-    NylComponent,
+    component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind,
+    ComponentKindParsed, NylComponent,
 };
 pub use helmchart::{ChartRef, HelmChart, HelmChartSpec, ObjectMetadata, ReleaseMetadata};
 pub use nyl_release::{extract_nyl_release, NylRelease, NylReleaseMetadata, NylReleaseSpec};
