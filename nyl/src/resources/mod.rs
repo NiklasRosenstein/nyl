@@ -10,6 +10,9 @@ pub use application_generator::{
     extract_application_generators, ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata,
     ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, SyncPolicy,
 };
-pub use component::{is_nyl_component, NylComponent};
+pub use component::{
+    component_kind_to_chart_ref, is_helm_chart_shortcut, is_nyl_component, parse_component_kind, ComponentKindParsed,
+    NylComponent,
+};
 pub use helmchart::{ChartRef, HelmChart, HelmChartSpec, ObjectMetadata, ReleaseMetadata};
 pub use nyl_release::{extract_nyl_release, NylRelease, NylReleaseMetadata, NylReleaseSpec};

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::constants::API_VERSION_COMPONENTS;
-use crate::resources::ObjectMetadata;
+use crate::resources::{ChartRef, ObjectMetadata};
 
 fn default_spec() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
@@ -35,6 +35,96 @@ pub struct NylComponent {
 /// it encodes a filesystem path rather than a fixed resource type.
 pub fn is_nyl_component(manifest: &serde_json::Value) -> bool {
     manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_COMPONENTS)
+}
+
+/// Parsed result from parsing a component kind shortcut
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentKindParsed {
+    /// The base part (repository URL or local path)
+    pub base: String,
+    /// The chart name (after '#'), if present
+    pub name: Option<String>,
+    /// The version (after '@'), if present
+    pub version: Option<String>,
+}
+
+/// Check if a string is a remote repository URL
+///
+/// Remote repositories are identified by these prefixes:
+/// - `http://` or `https://` - Traditional Helm repositories or HTTP URLs
+/// - `git+` - Git repositories
+/// - `oci://` - OCI registries
+fn is_remote_repository(s: &str) -> bool {
+    s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("git+")
+        || s.starts_with("oci://")
+}
+
+/// Parse a component kind string into its components
+///
+/// The format is: `<base>[#<name>][@<version>]`
+/// - `base`: Repository URL (if remote) or local path/name
+/// - `name`: Chart name (optional, after '#')
+/// - `version`: Version or Git ref (optional, after '@')
+///
+/// Examples:
+/// - `http://my-repo.org#my-chart@1.0.0` -> repository URL with name and version
+/// - `https://charts.example.com#nginx` -> repository URL with name only
+/// - `oci://ghcr.io/owner/chart@v1.0.0` -> OCI registry with version only
+/// - `my-chart` -> local path/name
+/// - `path/to/chart` -> local path
+pub fn parse_component_kind(kind: &str) -> ComponentKindParsed {
+    // First, find the '@' for version (rightmost '@')
+    let (base_and_name, version) = if let Some(at_pos) = kind.rfind('@') {
+        let version_part = &kind[at_pos + 1..];
+        (kind[..at_pos].to_string(), Some(version_part.to_string()))
+    } else {
+        (kind.to_string(), None)
+    };
+
+    // Then, find the '#' for name (rightmost '#' in the remaining part)
+    let (base, name) = if let Some(hash_pos) = base_and_name.rfind('#') {
+        let name_part = &base_and_name[hash_pos + 1..];
+        (base_and_name[..hash_pos].to_string(), Some(name_part.to_string()))
+    } else {
+        (base_and_name, None)
+    };
+
+    ComponentKindParsed { base, name, version }
+}
+
+/// Check if a component kind uses the shortcut format for remote Helm charts
+///
+/// Returns `true` if the kind appears to be a remote repository URL rather than
+/// a local component path.
+pub fn is_helm_chart_shortcut(kind: &str) -> bool {
+    // Extract the base part (before '#' and '@')
+    let parsed = parse_component_kind(kind);
+    is_remote_repository(&parsed.base)
+}
+
+/// Convert a parsed component kind to a ChartRef
+///
+/// This maps the shortcut format to the HelmChart's ChartRef structure:
+/// - For remote repositories: Sets repository, name, and version fields
+/// - For local paths: Sets only the name field (as local path)
+pub fn component_kind_to_chart_ref(parsed: &ComponentKindParsed) -> ChartRef {
+    if is_remote_repository(&parsed.base) {
+        // Remote repository: use repository field
+        ChartRef {
+            repository: Some(parsed.base.clone()),
+            name: parsed.name.clone(),
+            version: parsed.version.clone(),
+        }
+    } else {
+        // Local path: use name field only
+        ChartRef {
+            repository: None,
+            name: Some(parsed.base.clone()),
+            version: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +215,130 @@ mod tests {
         let component: NylComponent = serde_json::from_value(manifest).unwrap();
         assert!(component.spec.is_object());
         assert!(component.spec.as_object().unwrap().is_empty());
+    }
+
+    // --- shortcut parsing tests -------------------------------------------
+
+    #[test]
+    fn test_is_remote_repository() {
+        assert!(is_remote_repository("http://example.com"));
+        assert!(is_remote_repository("https://example.com"));
+        assert!(is_remote_repository("git+https://github.com/user/repo"));
+        assert!(is_remote_repository("oci://ghcr.io/owner/chart"));
+
+        assert!(!is_remote_repository("my-chart"));
+        assert!(!is_remote_repository("path/to/chart"));
+        assert!(!is_remote_repository("./charts/app"));
+    }
+
+    #[test]
+    fn test_parse_component_kind_full_format() {
+        let parsed = parse_component_kind("http://my-repo.org#my-chart@1.0.0");
+        assert_eq!(parsed.base, "http://my-repo.org");
+        assert_eq!(parsed.name, Some("my-chart".to_string()));
+        assert_eq!(parsed.version, Some("1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_component_kind_no_version() {
+        let parsed = parse_component_kind("https://charts.example.com#nginx");
+        assert_eq!(parsed.base, "https://charts.example.com");
+        assert_eq!(parsed.name, Some("nginx".to_string()));
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_parse_component_kind_no_name() {
+        let parsed = parse_component_kind("oci://ghcr.io/owner/chart@v1.0.0");
+        assert_eq!(parsed.base, "oci://ghcr.io/owner/chart");
+        assert_eq!(parsed.name, None);
+        assert_eq!(parsed.version, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_component_kind_only_base() {
+        let parsed = parse_component_kind("http://my-chart-repo.org");
+        assert_eq!(parsed.base, "http://my-chart-repo.org");
+        assert_eq!(parsed.name, None);
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_parse_component_kind_local_path() {
+        let parsed = parse_component_kind("my-chart");
+        assert_eq!(parsed.base, "my-chart");
+        assert_eq!(parsed.name, None);
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_parse_component_kind_local_path_with_slashes() {
+        let parsed = parse_component_kind("path/to/my-chart");
+        assert_eq!(parsed.base, "path/to/my-chart");
+        assert_eq!(parsed.name, None);
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_parse_component_kind_git_format() {
+        let parsed = parse_component_kind("git+https://github.com/user/repo#charts/app@main");
+        assert_eq!(parsed.base, "git+https://github.com/user/repo");
+        assert_eq!(parsed.name, Some("charts/app".to_string()));
+        assert_eq!(parsed.version, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_is_helm_chart_shortcut_remote() {
+        assert!(is_helm_chart_shortcut("http://my-repo.org#chart@1.0.0"));
+        assert!(is_helm_chart_shortcut("https://charts.example.com#nginx"));
+        assert!(is_helm_chart_shortcut("oci://ghcr.io/chart@v1.0.0"));
+        assert!(is_helm_chart_shortcut("git+https://github.com/user/repo"));
+    }
+
+    #[test]
+    fn test_is_helm_chart_shortcut_local() {
+        assert!(!is_helm_chart_shortcut("my-chart"));
+        assert!(!is_helm_chart_shortcut("path/to/chart"));
+        assert!(!is_helm_chart_shortcut("example/v1/Nginx"));
+    }
+
+    #[test]
+    fn test_component_kind_to_chart_ref_remote_full() {
+        let parsed = parse_component_kind("http://my-repo.org#my-chart@1.0.0");
+        let chart_ref = component_kind_to_chart_ref(&parsed);
+
+        assert_eq!(chart_ref.repository, Some("http://my-repo.org".to_string()));
+        assert_eq!(chart_ref.name, Some("my-chart".to_string()));
+        assert_eq!(chart_ref.version, Some("1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_component_kind_to_chart_ref_remote_no_version() {
+        let parsed = parse_component_kind("https://charts.example.com#nginx");
+        let chart_ref = component_kind_to_chart_ref(&parsed);
+
+        assert_eq!(chart_ref.repository, Some("https://charts.example.com".to_string()));
+        assert_eq!(chart_ref.name, Some("nginx".to_string()));
+        assert_eq!(chart_ref.version, None);
+    }
+
+    #[test]
+    fn test_component_kind_to_chart_ref_local() {
+        let parsed = parse_component_kind("my-chart");
+        let chart_ref = component_kind_to_chart_ref(&parsed);
+
+        assert_eq!(chart_ref.repository, None);
+        assert_eq!(chart_ref.name, Some("my-chart".to_string()));
+        assert_eq!(chart_ref.version, None);
+    }
+
+    #[test]
+    fn test_component_kind_to_chart_ref_local_path() {
+        let parsed = parse_component_kind("path/to/my-chart");
+        let chart_ref = component_kind_to_chart_ref(&parsed);
+
+        assert_eq!(chart_ref.repository, None);
+        assert_eq!(chart_ref.name, Some("path/to/my-chart".to_string()));
+        assert_eq!(chart_ref.version, None);
     }
 }

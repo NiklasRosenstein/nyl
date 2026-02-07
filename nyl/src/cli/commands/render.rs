@@ -10,8 +10,9 @@ use crate::{
     kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
-        extract_application_generators, extract_nyl_release, is_nyl_component, ChartRef, HelmChart, NylComponent,
-        NylRelease, ReleaseMetadata,
+        component_kind_to_chart_ref, extract_application_generators, extract_nyl_release,
+        is_helm_chart_shortcut, is_nyl_component, parse_component_kind, ChartRef, HelmChart,
+        NylComponent, NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -331,39 +332,67 @@ fn generate_resource(
         let component: NylComponent = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
 
-        let chart_dir = config.get_components_path().join(&component.kind);
-        let chart_yaml = chart_dir.join("Chart.yaml");
-        if !chart_yaml.exists() {
-            return Err(NylError::Config(format!(
-                "Component '{}' references chart path '{}', but {} does not exist",
-                component.kind,
-                chart_dir.display(),
-                chart_yaml.display()
-            )));
-        }
+        // Check if the kind uses the shortcut format for remote Helm charts
+        if is_helm_chart_shortcut(&component.kind) {
+            // Shortcut format: <repository>#<name>@<version>
+            let parsed = parse_component_kind(&component.kind);
+            let chart_ref = component_kind_to_chart_ref(&parsed);
 
-        let release_name = component.metadata.name.clone();
-        let release_namespace = component.metadata.namespace.clone();
+            let release_name = component.metadata.name.clone();
+            let release_namespace = component.metadata.namespace.clone();
 
-        let chart = HelmChart {
-            api_version: "v1.0".to_string(),
-            kind: "HelmChart".to_string(),
-            metadata: component.metadata,
-            spec: crate::resources::HelmChartSpec {
-                chart: ChartRef {
-                    name: Some(chart_dir.to_string_lossy().into_owned()),
-                    ..Default::default()
+            let chart = HelmChart {
+                api_version: API_VERSION.to_string(),
+                kind: "HelmChart".to_string(),
+                metadata: component.metadata,
+                spec: crate::resources::HelmChartSpec {
+                    chart: chart_ref,
+                    release: Some(ReleaseMetadata {
+                        name: release_name,
+                        namespace: release_namespace,
+                        create_namespace: false,
+                    }),
+                    values: component.spec,
                 },
-                release: Some(ReleaseMetadata {
-                    name: release_name,
-                    namespace: release_namespace,
-                    create_namespace: false,
-                }),
-                values: component.spec,
-            },
-        };
+            };
 
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+            render_helm_chart(&chart, context, config, kube_version, api_versions)
+        } else {
+            // Local component path - use existing component resolution mechanism
+            let chart_dir = config.get_components_path().join(&component.kind);
+            let chart_yaml = chart_dir.join("Chart.yaml");
+            if !chart_yaml.exists() {
+                return Err(NylError::Config(format!(
+                    "Component '{}' references chart path '{}', but {} does not exist",
+                    component.kind,
+                    chart_dir.display(),
+                    chart_yaml.display()
+                )));
+            }
+
+            let release_name = component.metadata.name.clone();
+            let release_namespace = component.metadata.namespace.clone();
+
+            let chart = HelmChart {
+                api_version: "v1.0".to_string(),
+                kind: "HelmChart".to_string(),
+                metadata: component.metadata,
+                spec: crate::resources::HelmChartSpec {
+                    chart: ChartRef {
+                        name: Some(chart_dir.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                    release: Some(ReleaseMetadata {
+                        name: release_name,
+                        namespace: release_namespace,
+                        create_namespace: false,
+                    }),
+                    values: component.spec,
+                },
+            };
+
+            render_helm_chart(&chart, context, config, kube_version, api_versions)
+        }
     } else {
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
