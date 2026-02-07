@@ -17,3 +17,15 @@ pub const LABEL_REVISION: &str = "nyl.niklasrosenstein.github.com/revision";
 
 /// Secret type for Nyl release state storage
 pub const SECRET_TYPE_RELEASE: &str = "nyl.niklasrosenstein.github.com/release.v1";
+
+/// Annotation for tracking parent resource API version
+pub const ANNOTATION_PARENT_API_VERSION: &str = "nyl.niklasrosenstein.github.com/parent-api-version";
+
+/// Annotation for tracking parent resource kind
+pub const ANNOTATION_PARENT_KIND: &str = "nyl.niklasrosenstein.github.com/parent-kind";
+
+/// Annotation for tracking parent resource name
+pub const ANNOTATION_PARENT_NAME: &str = "nyl.niklasrosenstein.github.com/parent-name";
+
+/// Annotation for tracking parent resource namespace
+pub const ANNOTATION_PARENT_NAMESPACE: &str = "nyl.niklasrosenstein.github.com/parent-namespace";
