@@ -843,4 +843,130 @@ metadata:
 
         assert_eq!(rel_dir_normalized, "");
     }
+
+    #[test]
+    fn test_add_parent_annotations() {
+        use crate::constants::{
+            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
+            ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+        };
+
+        // Test adding annotations to a manifest
+        let mut manifest = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "test-pod",
+                "namespace": "default"
+            },
+            "spec": {
+                "containers": []
+            }
+        });
+
+        add_parent_annotations(
+            &mut manifest,
+            "nyl.niklasrosenstein.github.com/v1",
+            "HelmChart",
+            "my-chart",
+            Some("default"),
+        );
+
+        // Verify annotations were added
+        let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            "nyl.niklasrosenstein.github.com/v1"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_KIND).unwrap().as_str().unwrap(),
+            "HelmChart"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_NAME).unwrap().as_str().unwrap(),
+            "my-chart"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_NAMESPACE).unwrap().as_str().unwrap(),
+            "default"
+        );
+    }
+
+    #[test]
+    fn test_add_parent_annotations_without_namespace() {
+        use crate::constants::{
+            ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND,
+            ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
+        };
+
+        let mut manifest = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test-config"
+            }
+        });
+
+        add_parent_annotations(
+            &mut manifest,
+            "nyl.niklasrosenstein.github.com/v1",
+            "Component",
+            "my-component",
+            None,
+        );
+
+        // Verify annotations were added (except namespace)
+        let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            "nyl.niklasrosenstein.github.com/v1"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_KIND).unwrap().as_str().unwrap(),
+            "Component"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_NAME).unwrap().as_str().unwrap(),
+            "my-component"
+        );
+        // Namespace annotation should not be present
+        assert!(annotations.get(ANNOTATION_PARENT_NAMESPACE).is_none());
+    }
+
+    #[test]
+    fn test_add_parent_annotations_preserves_existing() {
+        use crate::constants::ANNOTATION_PARENT_API_VERSION;
+
+        // Test that existing annotations are preserved
+        let mut manifest = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": "test-service",
+                "annotations": {
+                    "existing-annotation": "existing-value"
+                }
+            }
+        });
+
+        add_parent_annotations(
+            &mut manifest,
+            "nyl.niklasrosenstein.github.com/v1",
+            "HelmChart",
+            "my-chart",
+            None,
+        );
+
+        let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
+        // Original annotation should still be there
+        assert_eq!(
+            annotations.get("existing-annotation").unwrap().as_str().unwrap(),
+            "existing-value"
+        );
+        // New annotation should also be there
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_API_VERSION).unwrap().as_str().unwrap(),
+            "nyl.niklasrosenstein.github.com/v1"
+        );
+    }
 }
