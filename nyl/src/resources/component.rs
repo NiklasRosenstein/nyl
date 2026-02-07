@@ -55,10 +55,7 @@ pub struct ComponentKindParsed {
 /// - `git+` - Git repositories
 /// - `oci://` - OCI registries
 fn is_remote_repository(s: &str) -> bool {
-    s.starts_with("http://")
-        || s.starts_with("https://")
-        || s.starts_with("git+")
-        || s.starts_with("oci://")
+    s.starts_with("http://") || s.starts_with("https://") || s.starts_with("git+") || s.starts_with("oci://")
 }
 
 /// Parse a component kind string into its components
@@ -71,7 +68,7 @@ fn is_remote_repository(s: &str) -> bool {
 /// **Parsing behavior:** The parser searches from right to left:
 /// 1. First finds the rightmost '#' to identify the name boundary
 /// 2. Then finds the rightmost '@' *after* that '#' (if any) for the version
-/// 
+///
 /// This ensures Git SSH URLs like `git+git@github.com:org/repo#charts/app` are parsed correctly,
 /// where the `@` in `git@github.com` is part of the base URL, not a version separator.
 ///
@@ -91,7 +88,7 @@ pub fn parse_component_kind(kind: &str) -> ComponentKindParsed {
     if let Some(hash_pos) = kind.rfind('#') {
         let base = kind[..hash_pos].to_string();
         let after_hash = &kind[hash_pos + 1..];
-        
+
         // Now look for '@' in the part after '#' for version
         if let Some(at_pos) = after_hash.rfind('@') {
             let name = after_hash[..at_pos].to_string();

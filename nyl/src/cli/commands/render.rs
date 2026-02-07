@@ -10,9 +10,9 @@ use crate::{
     kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
-        component_kind_to_chart_ref, extract_application_generators, extract_nyl_release,
-        is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart,
-        NylComponent, NylRelease, ReleaseMetadata,
+        component_kind_to_chart_ref, extract_application_generators, extract_nyl_release, is_nyl_component,
+        is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, NylComponent, NylRelease,
+        ReleaseMetadata,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -338,9 +338,7 @@ fn generate_resource(
             let parsed = parse_component_kind(&component.kind);
 
             // Validate HTTP(S) shortcuts: require an explicit chart name segment (`#<chart-name>`).
-            if (parsed.base.starts_with("http://") || parsed.base.starts_with("https://"))
-                && parsed.name.is_none()
-            {
+            if (parsed.base.starts_with("http://") || parsed.base.starts_with("https://")) && parsed.name.is_none() {
                 return Err(NylError::Config(format!(
                     "Invalid remote Helm chart shortcut '{}': missing chart name. \
                      Use '<repository>#<chart-name>' or '<repository>#<chart-name>@<version>'.",
