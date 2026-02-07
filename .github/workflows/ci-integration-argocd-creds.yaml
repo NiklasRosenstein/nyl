@@ -232,8 +232,8 @@ jobs:
         if: failure()
         run: |
           echo "=== DEBUG: Integration test failed ==="
-          echo "--- Kubernetes secrets ---"
-          kubectl get secrets -n argocd -o yaml || true
+          echo "--- Kubernetes secrets (metadata only) ---"
+          kubectl get secrets -n argocd -o custom-columns=NAME:.metadata.name,TYPE:.type,LABELS:.metadata.labels || true
           echo "--- Kubernetes events ---"
           kubectl get events -n argocd --sort-by='.lastTimestamp' | tail -20 || true
           echo "--- Nyl render output ---"
