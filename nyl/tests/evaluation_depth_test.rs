@@ -111,7 +111,7 @@ spec:
     )
     .unwrap();
 
-    // Run with max-depth=1 - should fail with depth exceeded error
+    // Run with max-depth=1 - should succeed and return the nested HelmChart without expanding it
     let mut cmd = Command::cargo_bin("nyl").unwrap();
     cmd.current_dir(temp.path());
     cmd.arg("render")
@@ -124,9 +124,9 @@ spec:
         .arg("1");
     
     cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Maximum resource evaluation depth"))
-        .stderr(predicate::str::contains("exceeded"));
+        .success()
+        .stdout(predicate::str::contains("kind: HelmChart"))
+        .stdout(predicate::str::contains("nested-chart"));
 }
 
 /// Test that --track-parent flag is accepted

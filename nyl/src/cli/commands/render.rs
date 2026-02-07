@@ -155,7 +155,7 @@ pub async fn render_manifests(
     // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
     let mut pending = filtered;
-    for depth in 0..max_depth {
+    for _ in 0..max_depth {
         let mut next_pending = Vec::new();
         for resource in pending {
             let manifests = generate_resource(
@@ -179,12 +179,11 @@ pub async fn render_manifests(
         if pending.is_empty() {
             break;
         }
-        if depth == max_depth - 1 {
-            return Err(NylError::Config(
-                format!("Maximum resource evaluation depth ({}) exceeded", max_depth),
-            ));
-        }
     }
+
+    // Include any remaining pending resources that weren't fully evaluated
+    // This happens when max_depth is reached before all resources are expanded
+    all_manifests.extend(pending);
 
     Ok((all_manifests, profile, env_name))
 }
