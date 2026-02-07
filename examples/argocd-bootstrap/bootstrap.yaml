@@ -1,0 +1,43 @@
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: argocd
+  namespace: argocd
+---
+# HelmChart referencing the OCI-published nyl chart
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: argocd
+spec:
+  chart:
+    repository: "oci://ghcr.io/{{ env.CHART_OWNER | default('niklasrosenstein') }}/nyl/chart"
+    version: "{{ env.CHART_VERSION | default('0.1.0') }}"
+  release:
+    name: argocd
+    namespace: argocd
+  values:
+    nyl:
+      image:
+        tag: "{{ env.IMAGE_TAG | default('develop') }}"
+        pullPolicy: Always
+---
+# ApplicationGenerator for ArgoCD self-management
+apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
+kind: ApplicationGenerator
+metadata:
+  name: bootstrap
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: "{{ env.REPO_URL }}"
+    targetRevision: "{{ env.TARGET_REVISION | default('HEAD') }}"
+    path: examples/argocd-bootstrap
+  project: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -8,7 +8,9 @@ use crate::resources::ChartRef;
 use crate::{NylError, Result};
 use std::path::{Path, PathBuf};
 
+mod oci;
 mod template;
+pub use oci::OciChartPuller;
 pub use template::HelmTemplateExecutor;
 
 /// Resolved chart reference with absolute path
@@ -64,10 +66,12 @@ impl HelmChartResolver {
             return Self::resolve_git(git_url, chart_ref);
         }
 
-        if chart_ref.repository.is_some() {
-            return Err(NylError::Config(
-                "Repository chart references not supported in Phase 2".to_string(),
-            ));
+        if let Some(ref repository) = chart_ref.repository {
+            let version = chart_ref
+                .version
+                .as_ref()
+                .ok_or_else(|| NylError::Config("Chart version is required when using repository".to_string()))?;
+            return Self::resolve_repository(repository, version, chart_ref);
         }
 
         // Handle local path
@@ -154,6 +158,17 @@ impl HelmChartResolver {
     /// Get the working directory
     pub fn working_dir(&self) -> &Path {
         &self.working_dir
+    }
+
+    /// Resolve a chart from an OCI or Helm repository using `helm pull`
+    fn resolve_repository(repository: &str, version: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let puller = OciChartPuller::new()?;
+        let chart_path = puller.pull(repository, version, chart_ref.name.as_deref())?;
+
+        Ok(ResolvedChart {
+            path: chart_path,
+            chart_ref: chart_ref.clone(),
+        })
     }
 
     /// Resolve a Git chart reference
@@ -351,22 +366,18 @@ mod tests {
     // as it requires actual Git operations
 
     #[test]
-    fn test_resolve_repository_not_supported() {
+    fn test_resolve_repository_requires_version() {
         let temp = TempDir::new().unwrap();
         let resolver = HelmChartResolver::new(vec![], temp.path().to_path_buf());
 
         let chart_ref = ChartRef {
-            repository: Some("https://charts.example.com".to_string()),
-            name: Some("nginx".to_string()),
+            repository: Some("oci://ghcr.io/owner/nyl/chart".to_string()),
             ..Default::default()
         };
 
         let result = resolver.resolve_chart(&chart_ref);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Repository chart references not supported"));
+        assert!(result.unwrap_err().to_string().contains("version is required"));
     }
 
     #[test]

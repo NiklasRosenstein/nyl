@@ -66,11 +66,26 @@ impl TemplateContext {
 
     /// Convert context to JSON value for template rendering
     pub fn to_json(&self) -> serde_json::Value {
+        let env = Self::filter_env_vars(std::env::vars());
+
         serde_json::json!({
             "values": self.values,
             "secrets": self.secrets,
             "environment": self.environment,
+            "env": env,
         })
+    }
+
+    /// Filter environment variables to only include NYL_ prefixed ones.
+    ///
+    /// This prevents accidental leakage of sensitive CI/runtime secrets into manifests.
+    fn filter_env_vars<I>(vars: I) -> serde_json::Map<String, serde_json::Value>
+    where
+        I: Iterator<Item = (String, String)>,
+    {
+        vars.filter(|(k, _)| k.starts_with("NYL_"))
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect()
     }
 }
 
@@ -167,5 +182,32 @@ mod tests {
         });
         let result = engine.render("{{ bad | b64decode }}", &context);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_filter_env_vars() {
+        // Create mock environment variables without touching global state
+        let mock_vars = vec![
+            ("NYL_TEST_VAR".to_string(), "visible".to_string()),
+            ("SECRET_KEY".to_string(), "should_not_be_visible".to_string()),
+            ("NYL_ANOTHER".to_string(), "also_visible".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("NYL_CONFIG".to_string(), "test_config".to_string()),
+        ];
+
+        let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
+
+        // Check that only NYL_ prefixed vars are included
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.contains_key("NYL_TEST_VAR"));
+        assert_eq!(filtered.get("NYL_TEST_VAR").unwrap().as_str().unwrap(), "visible");
+        assert!(filtered.contains_key("NYL_ANOTHER"));
+        assert_eq!(filtered.get("NYL_ANOTHER").unwrap().as_str().unwrap(), "also_visible");
+        assert!(filtered.contains_key("NYL_CONFIG"));
+        assert_eq!(filtered.get("NYL_CONFIG").unwrap().as_str().unwrap(), "test_config");
+
+        // Verify non-NYL_ prefixed vars are excluded
+        assert!(!filtered.contains_key("SECRET_KEY"));
+        assert!(!filtered.contains_key("PATH"));
     }
 }

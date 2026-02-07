@@ -4,7 +4,7 @@ use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
-    constants::API_VERSION_COMPONENTS,
+    constants::{API_VERSION, API_VERSION_COMPONENTS},
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
@@ -14,7 +14,7 @@ use crate::{
         NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
-    template::TemplateContext,
+    template::{TemplateContext, TemplateEngine},
     NylError, Result,
 };
 
@@ -105,16 +105,15 @@ pub async fn render_manifests(
     // 5. Create generator
     let generator = Generator::new(project_config.clone());
 
-    // 6. Load and filter resources
-    let resources = load_resources(path)?;
+    // 6. Load and filter resources (rendering Jinja templates in manifest files)
+    let resources = load_resources(path, &context)?;
     let filtered = filter_resources(resources, component)?;
 
     // 7. Check if any resources need Helm rendering (HelmChart or Component)
     let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        (kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")))
-            || api_version == Some(API_VERSION_COMPONENTS)
+        (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || api_version == Some(API_VERSION_COMPONENTS)
     });
 
     // 8. Determine kube_version and api_versions (only if needed)
@@ -143,18 +142,37 @@ pub async fn render_manifests(
         (kube_version, api_versions)
     };
 
-    // 9. Generate manifests
+    // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
-    for resource in filtered {
-        let manifests = generate_resource(
-            &generator,
-            &resource,
-            &context,
-            &project_config,
-            &kube_version,
-            &api_versions,
-        )?;
-        all_manifests.extend(manifests);
+    let mut pending = filtered;
+    for depth in 0..10 {
+        let mut next_pending = Vec::new();
+        for resource in pending {
+            let manifests = generate_resource(
+                &generator,
+                &resource,
+                &context,
+                &project_config,
+                &kube_version,
+                &api_versions,
+            )?;
+            for manifest in manifests {
+                if is_renderable_resource(&manifest) {
+                    next_pending.push(manifest);
+                } else {
+                    all_manifests.push(manifest);
+                }
+            }
+        }
+        pending = next_pending;
+        if pending.is_empty() {
+            break;
+        }
+        if depth == 9 {
+            return Err(NylError::Config(
+                "Maximum HelmChart nesting depth (10) exceeded".to_string(),
+            ));
+        }
     }
 
     Ok((all_manifests, profile, env_name))
@@ -171,6 +189,12 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     )
     .await?;
 
+    // Filter out NylRelease (control resource, not applied to the cluster)
+    let manifests: Vec<_> = manifests
+        .into_iter()
+        .filter(|m| !NylRelease::is_nyl_release(m))
+        .collect();
+
     // Extract ApplicationGenerator resources and filter them from output
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
 
@@ -184,9 +208,11 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     Ok(())
 }
 
-/// Load all YAML/JSON resources from a directory
-fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
+/// Load all YAML/JSON resources from a directory, rendering Jinja templates
+fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
     let path = Path::new(path);
+    let engine = TemplateEngine::new();
+    let ctx_json = context.to_json();
     let mut resources = Vec::new();
 
     for entry in WalkDir::new(path).follow_links(true).into_iter().filter_map(|e| e.ok()) {
@@ -200,9 +226,18 @@ fn load_resources(path: &str) -> Result<Vec<serde_json::Value>> {
             continue;
         }
 
-        let content =
+        // Skip nyl project configuration files — they are not manifests
+        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(stem, "nyl-project" | "nyl-profiles" | "nyl-secrets") {
+            continue;
+        }
+
+        let raw =
             std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
-        let docs = parse_yaml_documents(&content)?;
+
+        let rendered = engine.render(&raw, &ctx_json)?;
+
+        let docs = parse_yaml_documents(&rendered)?;
         resources.extend(docs);
     }
 
@@ -254,6 +289,14 @@ fn filter_resources(
     }
 }
 
+/// Check whether a resource will be expanded by generate_resource
+/// (i.e. it is a HelmChart or Component, not a plain k8s manifest)
+fn is_renderable_resource(resource: &serde_json::Value) -> bool {
+    let kind = resource.get("kind").and_then(|k| k.as_str());
+    let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+    (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || is_nyl_component(resource)
+}
+
 /// Generate manifests from a resource
 fn generate_resource(
     _generator: &Generator,
@@ -267,7 +310,7 @@ fn generate_resource(
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
 
-    if kind == Some("HelmChart") && api_version.is_some_and(|v| v.starts_with("v1.")) {
+    if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
@@ -491,17 +534,31 @@ fn create_argocd_application_from_generator(
     base_path: &Path,
     generator: &crate::resources::ApplicationGenerator,
 ) -> Result<serde_json::Value> {
-    // Calculate relative path from base
-    let rel_path = file_path
+    // Calculate subdirectory relative to the scanned base path
+    let rel_dir = file_path
         .strip_prefix(base_path)
         .unwrap_or(file_path)
         .parent()
-        .unwrap_or(Path::new("."))
-        .to_str()
-        .ok_or_else(|| NylError::Config("Invalid file path".to_string()))?;
+        .unwrap_or(Path::new(""));
 
-    // Use relative path or "." if empty
-    let path_str = if rel_path.is_empty() { "." } else { rel_path };
+    // Normalize the relative directory to POSIX-style separators for ArgoCD.
+    let mut rel_dir_normalized = String::new();
+    for component in rel_dir.components() {
+        if let std::path::Component::Normal(os_str) = component {
+            if !rel_dir_normalized.is_empty() {
+                rel_dir_normalized.push('/');
+            }
+            rel_dir_normalized.push_str(&os_str.to_string_lossy());
+        }
+    }
+
+    // Application path must be relative to the repo root, not the worktree.
+    // Start from the generator's source.path and append any subdirectory.
+    let path_str = if rel_dir_normalized.is_empty() {
+        generator.spec.source.path.clone()
+    } else {
+        format!("{}/{}", generator.spec.source.path, rel_dir_normalized)
+    };
 
     // Build the Application manifest
     let mut app = serde_json::json!({
@@ -637,5 +694,63 @@ metadata:
         let filtered = filter_resources(resources, Some("apps/v1/Deployment")).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0]["kind"], "Deployment");
+    }
+
+    #[test]
+    fn test_path_normalization_posix() {
+        use std::path::Path;
+
+        // Simulate the path normalization logic in create_argocd_application_from_generator
+        let rel_dir = Path::new("subdir/nested");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+
+        assert_eq!(rel_dir_normalized, "subdir/nested");
+    }
+
+    #[test]
+    fn test_path_normalization_with_join() {
+        use std::path::Path;
+
+        // Test with platform-native path construction
+        let rel_dir = Path::new("subdir").join("nested");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+
+        // Should always produce POSIX-style paths regardless of platform
+        assert_eq!(rel_dir_normalized, "subdir/nested");
+    }
+
+    #[test]
+    fn test_path_normalization_root() {
+        use std::path::Path;
+
+        // Test empty path handling
+        let rel_dir = Path::new("");
+        let mut rel_dir_normalized = String::new();
+        for component in rel_dir.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if !rel_dir_normalized.is_empty() {
+                    rel_dir_normalized.push('/');
+                }
+                rel_dir_normalized.push_str(&os_str.to_string_lossy());
+            }
+        }
+
+        assert_eq!(rel_dir_normalized, "");
     }
 }
