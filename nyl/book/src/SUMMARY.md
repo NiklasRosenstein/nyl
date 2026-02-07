@@ -30,3 +30,4 @@
 - [Resources](./reference/resources.md)
   - [NylRelease](./reference/resources/nyl-release.md)
   - [ApplicationGenerator](./reference/resources/application-generator.md)
+- [Kyverno Policies](./reference/kyverno-policies.md)

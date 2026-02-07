@@ -13,6 +13,10 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 
 - **[ApplicationGenerator](./resources/application-generator.md)**: Automatically generates ArgoCD Applications from NylRelease files
 
+### Policy Resources
+
+- **[Kyverno Policies](./kyverno-policies.md)**: Apply Kyverno mutation and validation policies at render time
+
 ## Resource Format
 
 All Nyl resources follow Kubernetes resource conventions:
