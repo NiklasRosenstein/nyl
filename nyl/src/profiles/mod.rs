@@ -199,6 +199,8 @@ impl ProfileConfig {
             )));
         }
 
+        tracing::debug!("Reading profiles file: {}", path.display());
+
         let contents = std::fs::read_to_string(path)?;
 
         let profiles: HashMap<String, Profile> = if path.extension().and_then(|s| s.to_str()) == Some("json") {
