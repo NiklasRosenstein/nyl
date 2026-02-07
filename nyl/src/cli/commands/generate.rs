@@ -81,6 +81,8 @@ fn generate_argocd_applications(
     let mut skipped = 0;
 
     for file_path in yaml_files {
+        tracing::debug!("Reading YAML file: {}", file_path.display());
+
         // Read and parse file
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read {}: {}", file_path.display(), e)))?;

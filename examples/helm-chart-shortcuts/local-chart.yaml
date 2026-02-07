@@ -1,0 +1,10 @@
+# Local component path (existing behavior, not a shortcut)
+# This uses the existing component resolution mechanism
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: example/v1/MyComponent
+metadata:
+  name: local-component
+  namespace: default
+spec:
+  replicas: 3
+  image: nginx:latest
