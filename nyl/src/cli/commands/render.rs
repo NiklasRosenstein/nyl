@@ -1,11 +1,13 @@
 use clap::Args;
 use std::path::Path;
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
     constants::{API_VERSION, API_VERSION_COMPONENTS},
     generator::Generator,
+    git::CredentialProvider,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
     profiles::{deep_merge_value, Profile, ProfileConfig},
@@ -62,7 +64,7 @@ pub async fn render_manifests(
     offline: bool,
     cli_kube_version: Option<&str>,
     cli_api_versions: &[String],
-) -> Result<(Vec<serde_json::Value>, Profile, String)> {
+) -> Result<(Vec<serde_json::Value>, Profile, String, Option<Arc<CredentialProvider>>)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
@@ -109,14 +111,21 @@ pub async fn render_manifests(
     let resources = load_resources(path, &context)?;
     let filtered = filter_resources(resources, component)?;
 
-    // 7. Check if any resources need Helm rendering (HelmChart or Component)
+    // 7. Discover ArgoCD credentials if Kubernetes is available (best effort)
+    let credential_provider: Option<Arc<CredentialProvider>> = if !offline {
+        discover_argocd_credentials().await
+    } else {
+        None
+    };
+
+    // 8. Check if any resources need Helm rendering (HelmChart or Component)
     let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
         (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || api_version == Some(API_VERSION_COMPONENTS)
     });
 
-    // 8. Determine kube_version and api_versions (only if needed)
+    // 9. Determine kube_version and api_versions (only if needed)
     let (kube_version, api_versions) = if !needs_helm_rendering {
         // No HelmCharts, version info not needed
         (String::new(), Vec::new())
@@ -142,7 +151,7 @@ pub async fn render_manifests(
         (kube_version, api_versions)
     };
 
-    // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
+    // 10. Generate manifests, recursively expanding nested HelmChart/Component resources
     let mut all_manifests = Vec::new();
     let mut pending = filtered;
     for depth in 0..10 {
@@ -155,6 +164,7 @@ pub async fn render_manifests(
                 &project_config,
                 &kube_version,
                 &api_versions,
+                credential_provider.clone(),
             )?;
             for manifest in manifests {
                 if is_renderable_resource(&manifest) {
@@ -175,11 +185,11 @@ pub async fn render_manifests(
         }
     }
 
-    Ok((all_manifests, profile, env_name))
+    Ok((all_manifests, profile, env_name, credential_provider))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let (manifests, _, _) = render_manifests(
+    let (manifests, _, _, credential_provider) = render_manifests(
         &args.path,
         args.component.as_deref(),
         args.profile.as_deref(),
@@ -200,7 +210,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
 
     // Process each ApplicationGenerator
     for generator in generators {
-        let applications = process_application_generator(&generator, &args.path)?;
+        let applications = process_application_generator(&generator, &args.path, credential_provider.clone())?;
         final_manifests.extend(applications);
     }
 
@@ -316,6 +326,7 @@ fn generate_resource(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
+    credential_provider: Option<Arc<CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -325,7 +336,7 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+        render_helm_chart(&chart, context, config, kube_version, api_versions, credential_provider)
     } else if is_nyl_component(resource) {
         // Parse as Component and render via the existing Helm path
         let component: NylComponent = serde_json::from_value(resource.clone())
@@ -363,7 +374,7 @@ fn generate_resource(
             },
         };
 
-        render_helm_chart(&chart, context, config, kube_version, api_versions)
+        render_helm_chart(&chart, context, config, kube_version, api_versions, credential_provider)
     } else {
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
@@ -378,11 +389,15 @@ fn render_helm_chart(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
+    credential_provider: Option<Arc<CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
     let working_dir =
         std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
 
-    let resolver = HelmChartResolver::new(config.config.settings.search_path.clone(), working_dir);
+    let mut resolver = HelmChartResolver::new(config.config.settings.search_path.clone(), working_dir);
+    if let Some(provider) = credential_provider {
+        resolver = resolver.with_credential_provider(provider);
+    }
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
     // Merge context values into chart values
@@ -426,9 +441,14 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
 fn process_application_generator(
     generator: &crate::resources::ApplicationGenerator,
     _base_dir: &str,
+    credential_provider: Option<Arc<CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
     // Clone Git repository and resolve to local path
-    let mut git_manager = crate::git::GitManager::new()?;
+    let mut git_manager = if let Some(provider) = credential_provider {
+        crate::git::GitManager::with_credential_provider(provider)?
+    } else {
+        crate::git::GitManager::new()?
+    };
 
     let source_path = git_manager.resolve_ref(
         &generator.spec.source.repo_url,
@@ -616,6 +636,47 @@ fn create_argocd_application_from_generator(
     }
 
     Ok(app)
+}
+
+/// Discover ArgoCD repository credentials from Kubernetes secrets (best effort).
+///
+/// Returns `Some(provider)` if credentials were discovered, `None` if Kubernetes
+/// is not accessible or no ArgoCD secrets were found. Errors are logged and
+/// swallowed so that rendering can proceed without credentials.
+async fn discover_argocd_credentials() -> Option<Arc<CredentialProvider>> {
+    let client = match kube::Client::try_default().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("Kubernetes not available for ArgoCD credential discovery: {}", e);
+            return None;
+        }
+    };
+
+    let discovery = match crate::git::ArgoCDCredentialDiscovery::new(client) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!("Failed to initialize ArgoCD credential discovery: {}", e);
+            return None;
+        }
+    };
+
+    match discovery.discover_credentials().await {
+        Ok(credentials) if !credentials.is_empty() => {
+            tracing::info!(
+                "Discovered {} ArgoCD repository credential(s)",
+                credentials.len()
+            );
+            Some(Arc::new(CredentialProvider::with_credentials(credentials)))
+        }
+        Ok(_) => {
+            tracing::debug!("No ArgoCD repository credentials found");
+            None
+        }
+        Err(e) => {
+            tracing::debug!("ArgoCD credential discovery failed: {}", e);
+            None
+        }
+    }
 }
 
 #[cfg(test)]

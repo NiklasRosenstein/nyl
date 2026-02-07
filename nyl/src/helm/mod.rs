@@ -61,6 +61,9 @@ pub struct HelmChartResolver {
 
     /// Optional cache directory for Git operations (defaults to env var/system default)
     cache_dir: Option<PathBuf>,
+
+    /// Optional credential provider for Git authentication (e.g. from ArgoCD secrets)
+    credential_provider: Option<std::sync::Arc<crate::git::CredentialProvider>>,
 }
 
 impl HelmChartResolver {
@@ -84,7 +87,18 @@ impl HelmChartResolver {
             search_paths,
             working_dir,
             cache_dir,
+            credential_provider: None,
         }
+    }
+
+    /// Set the credential provider for Git authentication (e.g. from ArgoCD secrets)
+    #[must_use]
+    pub fn with_credential_provider(
+        mut self,
+        provider: std::sync::Arc<crate::git::CredentialProvider>,
+    ) -> Self {
+        self.credential_provider = Some(provider);
+        self
     }
 
     /// Resolve a chart reference to an absolute path
@@ -228,6 +242,8 @@ impl HelmChartResolver {
     fn resolve_git(&self, repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
         let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
             crate::git::GitManager::with_cache_dir(cache_dir)
+        } else if let Some(ref provider) = self.credential_provider {
+            crate::git::GitManager::with_credential_provider(provider.clone())?
         } else {
             crate::git::GitManager::new()?
         };
