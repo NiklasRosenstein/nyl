@@ -370,11 +370,12 @@ fn generate_resource(
         let release_namespace = component.metadata.namespace.clone();
         let component_api_version = component.api_version.clone();
         let component_kind = component.kind.clone();
+        let component_name = component.metadata.name.clone();
 
         let chart = HelmChart {
             api_version: "v1.0".to_string(),
             kind: "HelmChart".to_string(),
-            metadata: component.metadata.clone(),
+            metadata: component.metadata,
             spec: crate::resources::HelmChartSpec {
                 chart: ChartRef {
                     name: Some(chart_dir.to_string_lossy().into_owned()),
@@ -394,7 +395,7 @@ fn generate_resource(
         // Add parent tracking annotations if enabled
         if track_parent {
             Ok(manifests.into_iter().map(|mut m| {
-                add_parent_annotations(&mut m, &component_api_version, &component_kind, &component.metadata.name, release_namespace.as_deref());
+                add_parent_annotations(&mut m, &component_api_version, &component_kind, &component_name, release_namespace.as_deref());
                 m
             }).collect())
         } else {
