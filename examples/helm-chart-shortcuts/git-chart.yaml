@@ -1,0 +1,12 @@
+# Git repository example (Prometheus from official Helm charts)
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  server:
+    persistentVolume:
+      enabled: false
+  alertmanager:
+    enabled: false

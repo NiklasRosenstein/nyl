@@ -4,6 +4,87 @@ The HelmChart resource enables declarative Helm chart deployment with templating
 
 > **Note**: Git chart references are fully supported. Repositories are cloned automatically to a local cache. See the [Git Integration](../../git-integration.md) guide for details.
 
+## Component Shortcut Syntax
+
+For convenience, Nyl provides a shortcut syntax that allows you to reference Helm charts using the Component resource with a compact `kind` format:
+
+```yaml
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: <repository>[#<name>][@<version>]
+metadata:
+  name: release-name
+  namespace: release-namespace
+spec:
+  # Helm values go here
+```
+
+This is equivalent to the full HelmChart resource but with less boilerplate.
+
+### Shortcut Format
+
+The `kind` field uses the format: `<repository>[#<name>][@<version>]`
+
+- `<repository>`: Repository URL (for remote charts) or local path
+- `#<name>`: Chart name (required for HTTP/HTTPS repositories, optional for others)
+- `@<version>`: Version or Git ref (required for HTTP/HTTPS and OCI repositories)
+
+**Remote repositories** are identified by URL prefixes:
+- `http://` or `https://` - Traditional Helm repositories (requires `#<name>` and `@<version>`)
+- `git+` - Git repositories (optional `#<subpath>` and `@<ref>`, defaults to HEAD if version omitted)
+- `oci://` - OCI registries (requires `@<version>`)
+
+**Local paths** (without URL prefix) use the existing component resolution mechanism.
+
+### Shortcut Examples
+
+```yaml
+# HTTP Helm repository with full specification
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: https://charts.bitnami.com/bitnami#nginx@18.2.4
+metadata:
+  name: my-nginx
+  namespace: default
+spec:
+  replicaCount: 2
+  service:
+    type: ClusterIP
+```
+
+```yaml
+# OCI registry
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4
+metadata:
+  name: nginx-oci
+spec:
+  replicaCount: 1
+```
+
+```yaml
+# Git repository
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  server:
+    persistentVolume:
+      enabled: false
+```
+
+```yaml
+# Local component (existing behavior)
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: example/v1/MyComponent
+metadata:
+  name: local-app
+spec:
+  replicas: 3
+```
+
+See the [examples directory](../../../../examples/helm-chart-shortcuts/) for more examples.
+
 ## Resource Definition
 
 ```yaml
