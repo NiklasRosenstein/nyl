@@ -308,6 +308,13 @@ fn is_renderable_resource(resource: &serde_json::Value) -> bool {
     (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || is_nyl_component(resource)
 }
 
+/// Maximum Levenshtein distance for considering an API version as "similar" to a known Nyl domain.
+/// Distance of 3 allows for common typos like:
+/// - Single character substitution (e.g., "nikolas" instead of "niklas")
+/// - Missing character (e.g., ".co" instead of ".com")
+/// - Extra character (e.g., "githubb" instead of "github")
+const MAX_TYPO_DISTANCE: usize = 3;
+
 /// Check if an API version looks like it might be a Nyl resource API version
 fn is_nyl_like_api_version(api_version: &str) -> bool {
     // Check if it contains the Nyl domain
@@ -319,6 +326,7 @@ fn is_nyl_like_api_version(api_version: &str) -> bool {
     let domain = api_version.split('/').next().unwrap_or(api_version);
     
     // Check for similar patterns using Levenshtein distance
+    // These are the base domains without version suffixes
     let nyl_domains = [
         "nyl.niklasrosenstein.github.com",
         "components.nyl.niklasrosenstein.github.com",
@@ -326,7 +334,7 @@ fn is_nyl_like_api_version(api_version: &str) -> bool {
     ];
     
     for known_domain in &nyl_domains {
-        if levenshtein_distance(domain, known_domain) <= 3 {
+        if levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE {
             return true;
         }
     }
@@ -346,6 +354,12 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
         return len1;
     }
     
+    // Convert to character vectors once for efficient indexing
+    let chars1: Vec<char> = s1.chars().collect();
+    let chars2: Vec<char> = s2.chars().collect();
+    let len1 = chars1.len();
+    let len2 = chars2.len();
+    
     let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
     
     for i in 0..=len1 {
@@ -355,9 +369,9 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
         matrix[0][j] = j;
     }
     
-    for (i, c1) in s1.chars().enumerate() {
-        for (j, c2) in s2.chars().enumerate() {
-            let cost = if c1 == c2 { 0 } else { 1 };
+    for i in 0..len1 {
+        for j in 0..len2 {
+            let cost = if chars1[i] == chars2[j] { 0 } else { 1 };
             matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1)
                 .min(matrix[i + 1][j] + 1)
                 .min(matrix[i][j] + cost);
