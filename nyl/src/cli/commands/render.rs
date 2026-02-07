@@ -181,7 +181,7 @@ pub async fn render_manifests(
         }
         if depth == max_depth - 1 {
             return Err(NylError::Config(
-                format!("Maximum HelmChart nesting depth ({}) exceeded", max_depth),
+                format!("Maximum resource evaluation depth ({}) exceeded", max_depth),
             ));
         }
     }
