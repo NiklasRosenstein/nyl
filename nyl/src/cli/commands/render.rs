@@ -4,7 +4,7 @@ use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
-    constants::{API_VERSION, API_VERSION_COMPONENTS},
+    constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
@@ -324,6 +324,106 @@ fn is_renderable_resource(resource: &serde_json::Value) -> bool {
     (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || is_nyl_component(resource)
 }
 
+/// Maximum Levenshtein distance for considering an API version as "similar" to a known Nyl domain.
+/// Distance of 3 allows for common typos like:
+/// - Single character substitution (e.g., "nikolas" instead of "niklas")
+/// - Missing character (e.g., ".co" instead of ".com")
+/// - Extra character (e.g., "githubb" instead of "github")
+const MAX_TYPO_DISTANCE: usize = 3;
+
+/// Check if an API version looks like it might be a Nyl resource API version
+fn is_nyl_like_api_version(api_version: &str) -> bool {
+    // Check if it contains the Nyl domain
+    if api_version.contains("nyl.niklasrosenstein.github.com") {
+        return true;
+    }
+
+    // Extract the domain part (before any version suffix like /v1)
+    let domain = api_version.split('/').next().unwrap_or(api_version);
+
+    // Check for similar patterns using Levenshtein distance
+    // Extract base domains from the API version constants
+    let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+
+    for api_ver in &nyl_api_versions {
+        let known_domain = api_ver.split('/').next().unwrap_or(api_ver);
+        if levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Calculate Levenshtein distance between two strings
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let len1 = s1.len();
+    let len2 = s2.len();
+
+    if len1 == 0 {
+        return len2;
+    }
+    if len2 == 0 {
+        return len1;
+    }
+
+    // Convert to character vectors once for efficient indexing
+    let chars1: Vec<char> = s1.chars().collect();
+    let chars2: Vec<char> = s2.chars().collect();
+    let len1 = chars1.len();
+    let len2 = chars2.len();
+
+    let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
+
+    for (i, row) in matrix.iter_mut().enumerate().take(len1 + 1) {
+        row[0] = i;
+    }
+    for (j, cell) in matrix[0].iter_mut().enumerate().take(len2 + 1) {
+        *cell = j;
+    }
+
+    for i in 0..len1 {
+        for j in 0..len2 {
+            let cost = usize::from(chars1[i] != chars2[j]);
+            matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1)
+                .min(matrix[i + 1][j] + 1)
+                .min(matrix[i][j] + cost);
+        }
+    }
+
+    matrix[len1][len2]
+}
+
+/// Check if a resource is a known Nyl resource type
+fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
+    let kind = resource.get("kind").and_then(|k| k.as_str());
+    let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+
+    // Check for HelmChart
+    if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
+        return true;
+    }
+
+    // Check for Component
+    if is_nyl_component(resource) {
+        return true;
+    }
+
+    // Check for NylRelease
+    if NylRelease::is_nyl_release(resource) {
+        return true;
+    }
+
+    // Check for ApplicationGenerator
+    if let Some(api_ver) = api_version {
+        if api_ver == API_VERSION_ARGOCD && kind == Some("ApplicationGenerator") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Generate manifests from a resource
 #[allow(clippy::too_many_lines)]
 fn generate_resource(
@@ -484,6 +584,30 @@ fn generate_resource(
             }
         }
     } else {
+        // Check if this looks like an unknown Nyl resource
+        if let Some(api_ver) = api_version {
+            if is_nyl_like_api_version(api_ver) && !is_known_nyl_resource(resource) {
+                let kind_str = kind.unwrap_or("<unknown>");
+                // Dynamically build the list of known API versions from constants
+                let known_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+                let api_versions_str = known_api_versions
+                    .iter()
+                    .map(|s| format!("'{}'", s))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                tracing::warn!(
+                    "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
+                     It will be treated as a regular Kubernetes manifest. \
+                     Known Nyl apiVersions: {}. \
+                     Known kinds: HelmChart, NylRelease, ApplicationGenerator, and any Component kind.",
+                    api_ver,
+                    kind_str,
+                    api_versions_str
+                );
+            }
+        }
+
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
         Ok(vec![resource.clone()])
@@ -928,6 +1052,23 @@ metadata:
     }
 
     #[test]
+    fn test_levenshtein_distance() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+        assert_eq!(levenshtein_distance("abc", "abc"), 0);
+        assert_eq!(levenshtein_distance("abc", "abd"), 1);
+        assert_eq!(levenshtein_distance("abc", "abcd"), 1);
+        assert_eq!(levenshtein_distance("abc", "def"), 3);
+        assert_eq!(
+            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.niklasrosenstein.github.com"),
+            0
+        );
+        assert_eq!(
+            levenshtein_distance("nyl.niklasrosenstein.github.com", "nyl.nikolasrosenstein.github.com"),
+            1
+        );
+    }
+
+    #[test]
     fn test_add_parent_annotations() {
         use crate::constants::{
             ANNOTATION_PARENT_API_VERSION, ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE,
@@ -976,6 +1117,105 @@ metadata:
             annotations.get(ANNOTATION_PARENT_NAMESPACE).unwrap().as_str().unwrap(),
             "default"
         );
+    }
+
+    #[test]
+    fn test_is_nyl_like_api_version_exact_match() {
+        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com/v1"));
+        assert!(is_nyl_like_api_version("components.nyl.niklasrosenstein.github.com/v1"));
+        assert!(is_nyl_like_api_version("argocd.nyl.niklasrosenstein.github.com/v1"));
+    }
+
+    #[test]
+    fn test_is_nyl_like_api_version_contains() {
+        // Should match anything containing the domain
+        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com/v2"));
+        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com"));
+        assert!(is_nyl_like_api_version("foo.nyl.niklasrosenstein.github.com/v1"));
+    }
+
+    #[test]
+    fn test_is_nyl_like_api_version_similar() {
+        // Typos within Levenshtein distance of 3
+        assert!(is_nyl_like_api_version("nyl.nikolasrosenstein.github.com/v1")); // one character difference
+        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.co/v1")); // missing 'm'
+    }
+
+    #[test]
+    fn test_is_nyl_like_api_version_not_similar() {
+        // Standard Kubernetes API versions should not match
+        assert!(!is_nyl_like_api_version("v1"));
+        assert!(!is_nyl_like_api_version("apps/v1"));
+        assert!(!is_nyl_like_api_version("batch/v1"));
+        assert!(!is_nyl_like_api_version("argoproj.io/v1alpha1"));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_helm_chart() {
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "HelmChart",
+            "metadata": {"name": "test"},
+            "spec": {"chart": {"name": "nginx"}}
+        });
+        assert!(is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_component() {
+        let resource = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "example/v1/MyComponent",
+            "metadata": {"name": "test"},
+            "spec": {}
+        });
+        assert!(is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_nyl_release() {
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "NylRelease",
+            "metadata": {"name": "test", "namespace": "default"}
+        });
+        assert!(is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_application_generator() {
+        let resource = serde_json::json!({
+            "apiVersion": "argocd.nyl.niklasrosenstein.github.com/v1",
+            "kind": "ApplicationGenerator",
+            "metadata": {"name": "test"},
+            "spec": {
+                "destination": {"server": "https://k8s", "namespace": "argocd"},
+                "source": {"repoURL": "https://github.com/test/repo", "path": "apps"}
+            }
+        });
+        assert!(is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_unknown() {
+        // Unknown Nyl-like resource
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "UnknownKind",
+            "metadata": {"name": "test"}
+        });
+        assert!(!is_known_nyl_resource(&resource));
+    }
+
+    #[test]
+    fn test_is_known_nyl_resource_standard_k8s() {
+        // Standard Kubernetes resource
+        let resource = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test"}
+        });
+        assert!(!is_known_nyl_resource(&resource));
     }
 
     #[test]
