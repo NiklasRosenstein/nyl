@@ -104,6 +104,8 @@ impl HelmTemplateExecutor {
         release: &ReleaseMetadata,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
+        tracing::debug!("Rendering Helm chart: {} (release: {})", resolved.path.display(), release.name);
+        
         // Write values to temp file if not empty
         let values_file = if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
             Some(write_values_file(values)?)
@@ -146,6 +148,15 @@ impl HelmTemplateExecutor {
             cmd.arg(file.path());
         }
 
+        // Log the command being executed
+        tracing::debug!(
+            "Executing helm command: helm {}",
+            cmd.get_args()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
         // Execute helm template
         let output = cmd
             .output()
@@ -155,6 +166,8 @@ impl HelmTemplateExecutor {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NylError::HelmChart(format!("helm template failed: {}", stderr)));
         }
+
+        tracing::debug!("Helm chart rendered successfully");
 
         // Parse YAML output
         let stdout = String::from_utf8_lossy(&output.stdout);

@@ -38,6 +38,8 @@ impl WorktreeManager {
 
         let oid_str = oid.to_string();
 
+        tracing::debug!("Creating git worktree at {} for commit {}", worktree_path.display(), oid_str);
+
         // Use git worktree add command (git2-rs doesn't have direct worktree support)
         let output = Command::new("git")
             .arg("-C")
@@ -56,11 +58,15 @@ impl WorktreeManager {
             )));
         }
 
+        tracing::debug!("Git worktree created successfully");
+
         Ok(())
     }
 
     /// Force checkout to a specific OID, dropping local changes
     fn force_checkout(worktree_path: &Path, oid: Oid) -> Result<()> {
+        tracing::debug!("Force checking out commit {} in worktree {}", oid, worktree_path.display());
+
         // Open the worktree repository
         let repo = Repository::open(worktree_path)?;
 

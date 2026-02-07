@@ -59,8 +59,11 @@ impl OciChartPuller {
 
         // Return cached chart if it exists and contains Chart.yaml
         if chart_dir.join("Chart.yaml").exists() {
+            tracing::debug!("Using cached Helm chart: {}", chart_dir.display());
             return Ok(chart_dir);
         }
+
+        tracing::debug!("Pulling Helm chart from {}", repository);
 
         // Ensure cache directory exists
         std::fs::create_dir_all(&self.cache_dir)
@@ -93,6 +96,15 @@ impl OciChartPuller {
             .arg("-d")
             .arg(tmp_dir.path());
 
+        // Log the command being executed
+        tracing::debug!(
+            "Executing helm command: helm {}",
+            cmd.get_args()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
         let output = cmd
             .output()
             .map_err(|e| NylError::Process(format!("Failed to execute helm pull: {}", e)))?;
@@ -104,6 +116,8 @@ impl OciChartPuller {
                 repository, version, stderr
             )));
         }
+
+        tracing::debug!("Helm chart pulled successfully");
 
         // helm pull --untar extracts to <tmp_dir>/<chart-name>/
         let extracted_name = if is_oci {

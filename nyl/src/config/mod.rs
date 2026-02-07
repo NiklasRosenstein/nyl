@@ -189,6 +189,8 @@ impl ProjectConfig {
             )));
         }
 
+        tracing::debug!("Reading configuration file: {}", path.display());
+
         let contents = std::fs::read_to_string(path)?;
 
         let mut project: Project = match path.extension().and_then(|s| s.to_str()) {
