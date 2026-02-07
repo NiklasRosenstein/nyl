@@ -149,32 +149,34 @@ jobs:
 
       - name: Test nyl render with ApplicationGenerator (credential discovery)
         run: |
+          set -euo pipefail
           cd tests/fixtures/argocd-credential-discovery
 
           echo "=== Running nyl render with verbose output ==="
-          # Run nyl render with verbose logging to see credential discovery messages
+          # Run nyl render with verbose logging to see credential discovery messages.
+          # nyl render must succeed (exit 0); tee preserves the exit code via pipefail.
           nyl render --verbose 2>&1 | tee /tmp/nyl-render-output.txt
 
           echo ""
           echo "=== Render output ==="
           cat /tmp/nyl-render-output.txt
 
-          # Verify that the render produced ArgoCD Application manifests
-          # (ApplicationGenerator should have been processed)
+          # The ApplicationGenerator references examples/argocd-bootstrap which
+          # contains a NylRelease, so we expect at least one Application manifest.
           if grep -q "kind: Application" /tmp/nyl-render-output.txt; then
             echo "SUCCESS: ApplicationGenerator produced Application manifests"
           else
-            echo "WARNING: No Application manifests found in output."
-            echo "This may indicate the ApplicationGenerator was not processed"
-            echo "(e.g., if the referenced repo path has no NylRelease files)."
-            echo "The credential discovery wiring is still validated."
+            echo "ERROR: No Application manifests found in render output"
+            echo "The ApplicationGenerator should have been processed to produce"
+            echo "ArgoCD Application resources."
+            exit 1
           fi
 
-          # Verify the render completed without errors
-          echo "SUCCESS: nyl render completed successfully"
+          echo "SUCCESS: nyl render completed successfully with credential discovery"
 
       - name: Test nyl render with plain ConfigMap (no credentials needed)
         run: |
+          set -euo pipefail
           # Create a temporary test directory
           TMPDIR=$(mktemp -d)
           cat > "$TMPDIR/nyl-project.yaml" <<'EOF'
@@ -210,17 +212,20 @@ jobs:
 
       - name: Verify credential discovery logging
         run: |
+          set -euo pipefail
           echo "=== Checking credential discovery in verbose logs ==="
-          # The verbose output should contain credential discovery log messages
-          # Check for discovery-related log messages
+          # The verbose output should contain credential discovery log messages.
+          # Because we created ArgoCD secrets and the cluster is accessible,
+          # the discovery should have found credentials.
           if grep -qi "credential\|argocd\|discover" /tmp/nyl-render-output.txt; then
-            echo "Found credential discovery log messages in output"
+            echo "Found credential discovery log messages in output:"
             grep -i "credential\|argocd\|discover" /tmp/nyl-render-output.txt || true
           else
             echo "NOTE: No explicit credential discovery messages found."
             echo "This is acceptable if discovery succeeded silently."
           fi
 
+          echo ""
           echo "Integration test completed successfully!"
 
       - name: Debug on failure

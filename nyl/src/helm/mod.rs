@@ -240,12 +240,14 @@ impl HelmChartResolver {
 
     /// Resolve a Git chart reference
     fn resolve_git(&self, repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
-            crate::git::GitManager::with_cache_dir(cache_dir)
-        } else if let Some(ref provider) = self.credential_provider {
-            crate::git::GitManager::with_credential_provider(provider.clone())?
-        } else {
-            crate::git::GitManager::new()?
+        // The cache_dir option is only used in tests; credential_provider applies
+        // whenever ArgoCD credentials are available.  When both are set the
+        // cache_dir takes precedence (test-specific) and credentials are not used,
+        // because with_cache_dir is meant for isolated test setups.
+        let mut git_manager = match (&self.cache_dir, &self.credential_provider) {
+            (Some(cache_dir), _) => crate::git::GitManager::with_cache_dir(cache_dir),
+            (None, Some(provider)) => crate::git::GitManager::with_credential_provider(provider.clone())?,
+            (None, None) => crate::git::GitManager::new()?,
         };
 
         // Use 'name' field as subpath for Git repos
