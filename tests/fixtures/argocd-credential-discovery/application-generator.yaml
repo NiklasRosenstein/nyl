@@ -1,0 +1,23 @@
+# Test ApplicationGenerator that references a Git repository.
+# The integration test creates ArgoCD repository secrets for this URL,
+# so Nyl should discover the credentials during rendering.
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: argocd-cred-test
+  namespace: argocd
+---
+apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
+kind: ApplicationGenerator
+metadata:
+  name: test-generator
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: https://github.com/NiklasRosenstein/nyl.git
+    targetRevision: HEAD
+    path: examples/argocd-bootstrap
+  project: default
