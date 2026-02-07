@@ -362,16 +362,16 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 
     let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
 
-    for i in 0..=len1 {
-        matrix[i][0] = i;
+    for (i, row) in matrix.iter_mut().enumerate().take(len1 + 1) {
+        row[0] = i;
     }
-    for j in 0..=len2 {
-        matrix[0][j] = j;
+    for (j, cell) in matrix[0].iter_mut().enumerate().take(len2 + 1) {
+        *cell = j;
     }
 
     for i in 0..len1 {
         for j in 0..len2 {
-            let cost = if chars1[i] == chars2[j] { 0 } else { 1 };
+            let cost = usize::from(chars1[i] != chars2[j]);
             matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1)
                 .min(matrix[i + 1][j] + 1)
                 .min(matrix[i][j] + cost);
@@ -511,7 +511,7 @@ fn generate_resource(
             if is_nyl_like_api_version(api_ver) && !is_known_nyl_resource(resource) {
                 let kind_str = kind.unwrap_or("<unknown>");
                 // Dynamically build the list of known API versions from constants
-                let known_api_versions = vec![API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+                let known_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
                 let api_versions_str = known_api_versions
                     .iter()
                     .map(|s| format!("'{}'", s))
