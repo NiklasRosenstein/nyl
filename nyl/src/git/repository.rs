@@ -72,8 +72,8 @@ impl BareRepository {
         remote
             .fetch(
                 &[
-                    "refs/heads/*:refs/heads/*",
-                    "refs/tags/*:refs/tags/*",
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
                     "+HEAD:refs/remotes/origin/HEAD",
                 ],
                 Some(&mut fetch_options),
