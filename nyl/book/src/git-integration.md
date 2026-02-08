@@ -76,6 +76,47 @@ spec:
 - **`version`**: Branch, tag, or commit (optional, defaults to HEAD)
 - **`name`**: Subdirectory within repository (optional)
 
+### Helm Dependencies
+
+Nyl automatically detects and builds Helm chart dependencies for charts from Git repositories. When a chart contains a `Chart.yaml` with dependencies or a `Chart.lock` file, Nyl will:
+
+1. Detect the presence of dependencies
+2. Automatically run `helm dependency build` to fetch and build them
+3. Continue with normal chart rendering
+
+This means you can use charts with dependencies from Git repositories without any additional configuration:
+
+```yaml
+# Chart.yaml in Git repository
+apiVersion: v2
+name: my-app
+version: 1.0.0
+dependencies:
+  - name: common
+    version: "^1.0"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
+  - name: postgresql
+    version: "~12.0"
+    repository: "https://charts.bitnami.com/bitnami"
+```
+
+The dependencies will be automatically resolved when you reference this chart:
+
+```yaml
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: my-app
+spec:
+  chart:
+    repository: git+https://github.com/example/charts.git
+    version: main
+    name: charts/my-app  # Chart with dependencies
+  release:
+    name: my-app
+    namespace: default
+```
+
 ### Supported Ref Types
 
 You can reference different types of Git refs:

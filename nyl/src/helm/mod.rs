@@ -246,6 +246,11 @@ impl HelmChartResolver {
             )));
         }
 
+        // Run helm dependency build if the chart has dependencies
+        if chart_has_dependencies(&worktree_path)? {
+            build_helm_dependencies(&worktree_path)?;
+        }
+
         Ok(ResolvedChart {
             path: worktree_path,
             chart_ref: chart_ref.clone(),
@@ -261,6 +266,100 @@ impl std::fmt::Debug for HelmChartResolver {
             .field("cache_dir", &self.cache_dir)
             .finish()
     }
+}
+
+/// Check if a Helm chart has dependencies
+///
+/// Returns true if the chart has a Chart.lock file or dependencies defined in Chart.yaml
+fn chart_has_dependencies(chart_path: &Path) -> Result<bool> {
+    // Check for Chart.lock (existing dependency state)
+    let chart_lock = chart_path.join("Chart.lock");
+    if chart_lock.exists() {
+        return Ok(true);
+    }
+
+    // Check Chart.yaml for dependencies field
+    let chart_yaml = chart_path.join("Chart.yaml");
+    if !chart_yaml.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(&chart_yaml)
+        .map_err(|e| NylError::Config(format!("Failed to read Chart.yaml: {}", e)))?;
+
+    // Parse as YAML and check for dependencies field
+    let yaml: serde_json::Value =
+        serde_norway::from_str(&content).map_err(|e| NylError::Config(format!("Failed to parse Chart.yaml: {}", e)))?;
+
+    Ok(yaml.get("dependencies").is_some())
+}
+
+/// Check if helm dependencies are already built
+///
+/// Returns true if Chart.lock exists and the charts/ directory contains .tgz files.
+/// This ensures we only skip the build if dependencies were previously built successfully.
+fn dependencies_already_built(chart_path: &Path) -> bool {
+    // Check if Chart.lock exists - this is created only after successful dependency build
+    let chart_lock = chart_path.join("Chart.lock");
+    if !chart_lock.exists() {
+        return false;
+    }
+
+    let charts_dir = chart_path.join("charts");
+    if !charts_dir.exists() {
+        return false;
+    }
+
+    // Check if the charts directory contains any .tgz files (packaged dependencies)
+    if let Ok(entries) = std::fs::read_dir(&charts_dir) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "tgz" {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Run helm dependency build for a chart
+///
+/// Executes `helm dependency build` in the chart directory to fetch and build chart dependencies.
+/// Skips if dependencies are already built to avoid unnecessary work.
+fn build_helm_dependencies(chart_path: &Path) -> Result<()> {
+    use std::process::Command;
+
+    // Skip if dependencies are already built
+    if dependencies_already_built(chart_path) {
+        tracing::debug!(
+            "Helm dependencies already built for chart at: {}, skipping",
+            chart_path.display()
+        );
+        return Ok(());
+    }
+
+    tracing::debug!("Building Helm dependencies for chart at: {}", chart_path.display());
+
+    let output = Command::new("helm")
+        .arg("dependency")
+        .arg("build")
+        .arg(chart_path)
+        .output()
+        .map_err(|e| NylError::Process(format!("Failed to execute helm dependency build: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NylError::HelmChart(format!("helm dependency build failed: {}", stderr)));
+    }
+
+    tracing::debug!(
+        "Successfully built Helm dependencies for chart at: {}",
+        chart_path.display()
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -488,5 +587,147 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must have either 'repository' or 'name'"));
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_with_chart_lock() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml without dependencies
+        fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: test-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        // Create Chart.lock
+        fs::write(
+            chart_dir.join("Chart.lock"),
+            "dependencies:\n- name: nginx\n  version: 1.0.0\n",
+        )
+        .unwrap();
+
+        assert!(chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_in_chart_yaml() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml with dependencies
+        let chart_yaml = r#"apiVersion: v2
+name: test-chart
+version: 1.0.0
+dependencies:
+  - name: nginx
+    version: "1.0.0"
+    repository: "https://charts.bitnami.com/bitnami"
+"#;
+        fs::write(chart_dir.join("Chart.yaml"), chart_yaml).unwrap();
+
+        assert!(chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_no_dependencies() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml without dependencies
+        fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: test-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        assert!(!chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_no_chart_yaml() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // No Chart.yaml exists
+        assert!(!chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_dependencies_already_built_with_tgz() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.lock (required for dependencies to be considered built)
+        fs::write(
+            chart_dir.join("Chart.lock"),
+            "dependencies:\n- name: test\n  version: 1.0.0\n",
+        )
+        .unwrap();
+
+        // Create charts directory with a .tgz file
+        let charts_dir = chart_dir.join("charts");
+        fs::create_dir_all(&charts_dir).unwrap();
+        fs::write(charts_dir.join("dependency-1.0.0.tgz"), "fake tgz content").unwrap();
+
+        assert!(dependencies_already_built(&chart_dir));
+    }
+
+    #[test]
+    fn test_dependencies_not_built_no_chart_lock() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create charts directory with a .tgz file but NO Chart.lock
+        let charts_dir = chart_dir.join("charts");
+        fs::create_dir_all(&charts_dir).unwrap();
+        fs::write(charts_dir.join("dependency-1.0.0.tgz"), "fake tgz content").unwrap();
+
+        // Should return false because Chart.lock doesn't exist
+        assert!(!dependencies_already_built(&chart_dir));
+    }
+
+    #[test]
+    fn test_dependencies_not_built_no_charts_dir() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // No charts directory exists
+        assert!(!dependencies_already_built(&chart_dir));
+    }
+
+    #[test]
+    fn test_dependencies_not_built_empty_charts_dir() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create empty charts directory
+        let charts_dir = chart_dir.join("charts");
+        fs::create_dir_all(&charts_dir).unwrap();
+
+        assert!(!dependencies_already_built(&chart_dir));
+    }
+
+    #[test]
+    fn test_dependencies_not_built_no_tgz_files() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create charts directory with non-.tgz files
+        let charts_dir = chart_dir.join("charts");
+        fs::create_dir_all(&charts_dir).unwrap();
+        fs::write(charts_dir.join("README.md"), "readme content").unwrap();
+
+        assert!(!dependencies_already_built(&chart_dir));
     }
 }
