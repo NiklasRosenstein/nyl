@@ -54,6 +54,14 @@ pub struct DiffArgs {
     /// simulating what --append-release would do in the apply command.
     #[arg(long)]
     pub append_release: bool,
+
+    /// Strict mode: fail immediately on first error (exit code 2)
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Exit with code 1 if changes are found, 0 if no changes (like git diff --exit-code)
+    #[arg(long)]
+    pub exit_code: bool,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
@@ -140,15 +148,45 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 7. Compute diff against LIVE cluster state
     let diff_result =
-        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode).await?;
+        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode, args.strict).await?;
 
-    // 8. Display diff
+    // 8. Display errors if any
+    if !diff_result.errors.is_empty() {
+        for (key, error) in &diff_result.errors {
+            println!("{} {} {}", "✗".red().bold(), key, format!("({})", error).red());
+        }
+        println!();
+    }
+
+    // 9. Display diff
     if args.summary {
         display_summary(&diff_result);
     } else {
         display_diff(&diff_result, &duplicates);
     }
 
+    // 10. Determine exit code
+    // Exit 2 if there were errors
+    if !diff_result.errors.is_empty() {
+        return Err(NylError::Other(format!(
+            "Diff completed with {} error(s)",
+            diff_result.errors.len()
+        )));
+    }
+
+    // Exit 1 if --exit-code and there are changes
+    if args.exit_code {
+        let has_changes = !diff_result.added.is_empty()
+            || !diff_result.modified.is_empty()
+            || !diff_result.deleted.is_empty();
+
+        if has_changes {
+            // Use a special error type to indicate "changes found" vs actual error
+            std::process::exit(1);
+        }
+    }
+
+    // Exit 0 otherwise
     Ok(())
 }
 
@@ -173,6 +211,7 @@ struct DiffResult {
     modified: Vec<(ResourceKey, String)>, // (key, unified_diff_text)
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
+    errors: Vec<(ResourceKey, String)>, // (key, error_message)
 }
 
 /// Compute diff between desired manifests and LIVE cluster state
@@ -181,6 +220,7 @@ async fn compute_diff_from_live(
     desired_manifests: &[serde_json::Value],
     previous_state: Option<&crate::kubernetes::ReleaseState>,
     mode: DiffMode,
+    strict: bool,
 ) -> Result<DiffResult> {
     // Build set of desired resource keys
     let desired_keys: HashSet<ResourceKey> = desired_manifests
@@ -225,6 +265,7 @@ async fn compute_diff_from_live(
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
     let mut unchanged = Vec::new();
+    let mut errors = Vec::new();
 
     // Check desired vs live
     for manifest in desired_manifests {
@@ -249,16 +290,28 @@ async fn compute_diff_from_live(
                             }
                         },
                         Err(e) => {
-                            tracing::warn!(
-                                "Server-side normalization failed for {}, falling back to raw: {}",
-                                key,
-                                e
-                            );
-                            if DiffEngine::are_equivalent(manifest, live)? {
-                                unchanged.push(key);
+                            if strict {
+                                // In strict mode, fail immediately on errors
+                                return Err(e);
                             } else {
-                                let diff_text = DiffEngine::diff_yaml(manifest, live)?;
-                                modified.push((key, diff_text));
+                                // In non-strict mode, collect error and try raw comparison
+                                tracing::warn!(
+                                    "Server-side normalization failed for {}, falling back to raw: {}",
+                                    key,
+                                    e
+                                );
+                                match DiffEngine::are_equivalent(manifest, live) {
+                                    Ok(true) => unchanged.push(key),
+                                    Ok(false) => match DiffEngine::diff_yaml(manifest, live) {
+                                        Ok(diff_text) => modified.push((key, diff_text)),
+                                        Err(diff_err) => {
+                                            errors.push((key, format!("{}", e)));
+                                        }
+                                    },
+                                    Err(eq_err) => {
+                                        errors.push((key, format!("{}", e)));
+                                    }
+                                }
                             }
                         }
                     }
@@ -290,18 +343,30 @@ async fn compute_diff_from_live(
         modified,
         deleted,
         unchanged,
+        errors,
     })
 }
 
 /// Display summary line with colored counts
 fn print_summary(diff: &DiffResult) {
-    println!(
-        "Summary: {} to add, {} to modify, {} to delete, {} unchanged",
-        diff.added.len().to_string().green(),
-        diff.modified.len().to_string().yellow(),
-        diff.deleted.len().to_string().red(),
-        diff.unchanged.len()
-    );
+    if diff.errors.is_empty() {
+        println!(
+            "Summary: {} to add, {} to modify, {} to delete, {} unchanged",
+            diff.added.len().to_string().green(),
+            diff.modified.len().to_string().yellow(),
+            diff.deleted.len().to_string().red(),
+            diff.unchanged.len()
+        );
+    } else {
+        println!(
+            "Summary: {} to add, {} to modify, {} to delete, {} unchanged, {} failed",
+            diff.added.len().to_string().green(),
+            diff.modified.len().to_string().yellow(),
+            diff.deleted.len().to_string().red(),
+            diff.unchanged.len(),
+            diff.errors.len().to_string().red()
+        );
+    }
 }
 
 /// Display diff results with kubectl-style unified diff output

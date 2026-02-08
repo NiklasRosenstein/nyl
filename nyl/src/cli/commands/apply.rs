@@ -32,10 +32,6 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub context: Option<String>,
 
-    /// Dry run mode
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Append to previous release instead of replacing it.
     /// Merges current resources with previous release (union, current wins on duplicates).
     /// Skips pruning to preserve resources from previous releases.
@@ -144,16 +140,15 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         // Extract resource key
         let key = ResourceKey::from_json_value(manifest)?;
 
-        match apply_manifest(&kube_client, manifest, args.dry_run).await {
+        match apply_manifest(&kube_client, manifest).await {
             Ok(outcome) => {
                 outcomes.push(outcome);
                 resource_keys.push(key);
             }
             Err(e) => {
                 // Print error immediately with resource info
-                let prefix = if args.dry_run { "[DRY RUN] " } else { "" };
                 let error_msg = format!("(failed to apply resource: {})", e);
-                println!("{}{} {} {}", prefix, "✗".red().bold(), key, error_msg.red());
+                println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
                 failed_count += 1;
             }
         }
@@ -222,32 +217,30 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         release.error = Some(format!("{} resource(s) failed to apply", failed_count));
     }
 
-    // 12. Save release state (unless dry run)
-    if !args.dry_run {
-        // Ensure the release namespace exists before saving the release state
-        ensure_namespace_exists(&kube_client, &release_namespace, args.dry_run).await?;
+    // 12. Save release state
+    // Ensure the release namespace exists before saving the release state
+    ensure_namespace_exists(&kube_client, &release_namespace).await?;
 
-        storage.save_release(&release).await?;
+    storage.save_release(&release).await?;
 
-        // Mark previous revision as superseded (if successful)
-        if release.status == ReleaseStatus::Deployed && next_revision > 1 {
-            let prev_revision = next_revision - 1;
-            storage
-                .update_release_status(
-                    &release_name,
-                    &release_namespace,
-                    prev_revision,
-                    ReleaseStatus::Superseded,
-                    None,
-                )
-                .await
-                .ok(); // Ignore errors if previous revision doesn't exist
-        }
+    // Mark previous revision as superseded (if successful)
+    if release.status == ReleaseStatus::Deployed && next_revision > 1 {
+        let prev_revision = next_revision - 1;
+        storage
+            .update_release_status(
+                &release_name,
+                &release_namespace,
+                prev_revision,
+                ReleaseStatus::Superseded,
+                None,
+            )
+            .await
+            .ok(); // Ignore errors if previous revision doesn't exist
     }
 
     // 13. Prune resources from previous release that are no longer desired
     let mut pruned_keys = Vec::new();
-    if !args.dry_run && !args.append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
+    if !args.append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
         // Get previous release's resource keys
         if let Ok(Some(previous_release)) = storage
             .get_release(&release_name, &release_namespace, next_revision - 1)
@@ -283,7 +276,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 14. Print summary
-    print_apply_summary(&outcomes, &release, args.dry_run, &duplicates, failed_count);
+    print_apply_summary(&outcomes, &release, &duplicates, failed_count);
 
     if failed_count > 0 {
         return Err(NylError::Other(format!(
@@ -308,12 +301,12 @@ fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
 }
 
 /// Apply a single manifest
-async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry_run: bool) -> Result<ApplyOutcome> {
+async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value) -> Result<ApplyOutcome> {
     // Convert JSON to DynamicObject
     let resource: DynamicObject = serde_json::from_value(manifest.clone())?;
 
     // Apply using client
-    client.apply_resource(&resource, "nyl", dry_run).await
+    client.apply_resource(&resource, "nyl", false).await
 }
 
 /// Print apply summary
@@ -321,53 +314,31 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry
 fn print_apply_summary(
     outcomes: &[ApplyOutcome],
     release: &ReleaseState,
-    dry_run: bool,
     duplicates: &HashMap<ResourceKey, usize>,
     failed_count: usize,
 ) {
-    let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
     for outcome in outcomes {
         match outcome {
             ApplyOutcome::Created { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!(
-                    "{}{} {} {}{}",
-                    prefix,
-                    "+".green().bold(),
-                    kind,
-                    ns_name,
-                    dup_annotation
-                );
+                println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
             }
             ApplyOutcome::Updated { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!(
-                    "{}{} {} {}{}",
-                    prefix,
-                    "~".yellow().bold(),
-                    kind,
-                    ns_name,
-                    dup_annotation
-                );
+                println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
             }
             ApplyOutcome::Unchanged { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!(
-                    "{}{} {} {}{}",
-                    prefix,
-                    "=".bright_black().bold(),
-                    kind,
-                    ns_name,
-                    dup_annotation
-                );
+                println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
             }
             ApplyOutcome::DryRun { would_be } => {
-                // Recursively print inner outcome
-                print_single_outcome(would_be, true, duplicates);
+                // This shouldn't happen anymore since we removed --dry-run
+                // But handle it anyway by unwrapping
+                print_single_outcome(would_be, duplicates);
             }
         }
     }
@@ -393,24 +364,7 @@ fn print_apply_summary(
         }
     }
 
-    if dry_run {
-        if failed_count > 0 {
-            println!(
-                "Summary: {} to create, {} to update, {} unchanged, {} failed",
-                created.to_string().green(),
-                updated.to_string().yellow(),
-                unchanged,
-                failed_count.to_string().red()
-            );
-        } else {
-            println!(
-                "Summary: {} to create, {} to update, {} unchanged",
-                created.to_string().green(),
-                updated.to_string().yellow(),
-                unchanged
-            );
-        }
-    } else if failed_count > 0 {
+    if failed_count > 0 {
         println!(
             "Summary: {} created, {} updated, {} unchanged, {} failed",
             created.to_string().green(),
@@ -429,12 +383,7 @@ fn print_apply_summary(
 
     println!();
 
-    if dry_run {
-        println!(
-            "[DRY RUN] Would create release {} revision {} in namespace {}",
-            release.release_name, release.revision, release.release_namespace
-        );
-    } else if release.status == ReleaseStatus::Deployed {
+    if release.status == ReleaseStatus::Deployed {
         println!(
             "Release: {} revision {} deployed successfully to namespace {}",
             release.release_name, release.revision, release.release_namespace
@@ -445,48 +394,25 @@ fn print_apply_summary(
 }
 
 /// Print a single outcome
-fn print_single_outcome(outcome: &ApplyOutcome, dry_run: bool, duplicates: &HashMap<ResourceKey, usize>) {
-    let prefix = if dry_run { "[DRY RUN] " } else { "" };
-
+fn print_single_outcome(outcome: &ApplyOutcome, duplicates: &HashMap<ResourceKey, usize>) {
     match outcome {
         ApplyOutcome::Created { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!(
-                "{}{} {} {}{}",
-                prefix,
-                "+".green().bold(),
-                kind,
-                ns_name,
-                dup_annotation
-            );
+            println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
         }
         ApplyOutcome::Updated { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!(
-                "{}{} {} {}{}",
-                prefix,
-                "~".yellow().bold(),
-                kind,
-                ns_name,
-                dup_annotation
-            );
+            println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
         }
         ApplyOutcome::Unchanged { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!(
-                "{}{} {} {}{}",
-                prefix,
-                "=".bright_black().bold(),
-                kind,
-                ns_name,
-                dup_annotation
-            );
+            println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
         }
         ApplyOutcome::DryRun { would_be } => {
-            print_single_outcome(would_be, true, duplicates);
+            print_single_outcome(would_be, duplicates);
         }
     }
 }
@@ -535,7 +461,7 @@ fn get_duplicate_annotation(
 }
 
 /// Ensure a namespace exists, creating it if necessary
-async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str, dry_run: bool) -> Result<()> {
+async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str) -> Result<()> {
     use crate::kubernetes::GroupVersionKind;
     use kube::api::DynamicObject;
     use serde_json::json;
@@ -564,11 +490,9 @@ async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str, dry_run
         }))?;
 
         // Apply the namespace
-        client.apply_resource(&ns_resource, "nyl", dry_run).await?;
+        client.apply_resource(&ns_resource, "nyl", false).await?;
 
-        if !dry_run {
-            tracing::info!("Created namespace '{}'", namespace);
-        }
+        tracing::info!("Created namespace '{}'", namespace);
 
         Ok(())
     }
