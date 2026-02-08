@@ -336,6 +336,14 @@ fn display_diff(diff: &DiffResult) {
         println!();
     }
 
+    // Show unchanged resources
+    for key in &diff.unchanged {
+        println!("{} {}", "=".bright_black().bold(), key);
+    }
+    if !diff.unchanged.is_empty() {
+        println!();
+    }
+
     // Summary with colors
     print_summary(diff);
 }
