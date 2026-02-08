@@ -3,21 +3,19 @@ use clap::Args;
 use kube::{api::DynamicObject, Client};
 
 use crate::{
-    cli::commands::render::render_manifests,
+    cli::commands::render::{render_manifests_complete, RenderOptions},
     kubernetes::{
         ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
         ResourceKey, ResourceOrdering,
     },
-    resources::extract_nyl_release,
     NylError, Result,
 };
 
 /// Apply rendered manifests to the cluster
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// Path to the project directory
-    #[arg(default_value = ".")]
-    pub path: String,
+    #[command(flatten)]
+    pub common: RenderOptions,
 
     /// Release name (required if no NylRelease in file)
     #[arg(long)]
@@ -27,14 +25,6 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Component to apply (if not specified, applies all)
-    #[arg(short, long)]
-    pub component: Option<String>,
-
-    /// Profile to use for applying
-    #[arg(short, long)]
-    pub profile: Option<String>,
-
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
@@ -42,40 +32,29 @@ pub struct ApplyArgs {
     /// Dry run mode
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Maximum evaluation depth for recursive resource expansion (default: 10)
-    #[arg(long, default_value = "10")]
-    pub max_depth: usize,
-
-    /// Track parent resource information in annotations
-    #[arg(long)]
-    pub track_parent: bool,
 }
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
-    // 1. Render desired manifests
-    let (raw_manifests, profile, _env_name) = render_manifests(
-        &args.path,
-        args.component.as_deref(),
-        args.profile.as_deref(),
+    // 1. Render desired manifests using complete pipeline
+    let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
+        &args.common.path,
+        args.common.component.as_deref(),
+        args.common.profile.as_deref(),
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
-        args.max_depth,
-        args.track_parent,
+        args.common.max_depth,
+        args.common.track_parent,
     )
     .await?;
 
-    if raw_manifests.is_empty() {
+    if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
         return Ok(());
     }
 
-    // 2. Extract NylRelease metadata and filter it from manifests
-    let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
-
-    // 3. Determine release name and namespace
+    // 2. Determine release name and namespace
     let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
         (release.metadata.name.clone(), release.metadata.namespace.clone())
     } else {
@@ -88,11 +67,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         })?;
         (name, namespace)
     };
-
-    if desired_manifests.is_empty() {
-        tracing::info!("No Kubernetes resources to apply (only NylRelease found)");
-        return Ok(());
-    }
 
     // 4. Initialize Kubernetes client
     let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;

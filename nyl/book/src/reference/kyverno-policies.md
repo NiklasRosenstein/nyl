@@ -57,7 +57,7 @@ Policies must include the `nyl.niklasrosenstein.github.com/apply-policy-scope` a
 
 #### Global (Currently Supported)
 
-Applies to all resources from all files in the render operation.
+Applies to all resources in the rendered file. Since Nyl processes single files, this means all resources from the manifest being rendered.
 
 ```yaml
 metadata:
@@ -72,7 +72,6 @@ metadata:
 
 #### Future Scopes (Not Yet Implemented)
 
-- **Root**: Applies to all resources from the same file
 - **Subtree**: Applies to siblings and all descendant resources
 - **Immediate**: Applies to sibling resources only
 

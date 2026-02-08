@@ -61,10 +61,10 @@ data:
     )
     .unwrap();
 
-    // Run render command
+    // Run render command with file path
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render");
+    cmd.arg("render").arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -87,9 +87,21 @@ profiles:
     )
     .unwrap();
 
+    // Create a simple resource file
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+"#,
+    )
+    .unwrap();
+
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("diff");
+    cmd.arg("diff").arg("test-resource.yaml");
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Profile 'default' not found"))
@@ -112,9 +124,21 @@ profiles:
     )
     .unwrap();
 
+    // Create a simple resource file
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+"#,
+    )
+    .unwrap();
+
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("apply");
+    cmd.arg("apply").arg("test-resource.yaml");
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Profile 'default' not found"))

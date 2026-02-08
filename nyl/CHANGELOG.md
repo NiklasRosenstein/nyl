@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING**: Restrict `render`, `apply`, and `diff` commands to single file processing
+  - Commands now require a file path argument (e.g., `nyl render manifest.yaml`)
+  - Directory paths are no longer supported and will return a clear error message
+  - This aligns with the NylRelease design where each release is tied to a single file
+
+  **Migration Guide:**
+
+  Update your commands to specify file paths:
+  ```bash
+  # Before (directory path)
+  nyl render .
+  nyl apply .
+  nyl diff .
+
+  # After (file path)
+  nyl render manifest.yaml
+  nyl apply manifest.yaml
+  nyl diff manifest.yaml
+  ```
+
+- **BREAKING**: Removed `Root` scope from Kyverno policy annotations
+  - `Root` and `Global` scopes would be identical since Nyl processes single files
+  - Only `Global`, `Subtree`, and `Immediate` scopes are now valid
+  - Policies with `Root` scope annotation will fail to parse
+
+  **Migration Guide:**
+
+  Update Kyverno policy annotations:
+  ```yaml
+  # Before
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Root
+
+  # After
+  annotations:
+    nyl.niklasrosenstein.github.com/apply-policy-scope: Global
+  ```
+
+- Extracted common CLI options into `RenderOptions` struct for consistency across `render`, `apply`, and `diff` commands
+
 - **BREAKING**: Migrated API version from `nyl.io/v1` and `inline.nyl.io/v1` to `nyl.niklasrosenstein.github.com/v1`
   - All Nyl resources (NylRelease, HelmChart, StatefulSecret, PostProcessor, etc.) now use the new API version
   - ArgoCD ApplicationGenerator continues to use `argocd.nyl.niklasrosenstein.github.com/v1` (unchanged)
