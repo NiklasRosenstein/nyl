@@ -491,5 +491,8 @@ fn test_git_manager_fetches_latest_version() {
 
     // Verify that we got the updated content
     let content2 = fs::read_to_string(result2.join("test.txt")).unwrap();
-    assert_eq!(content2, "Updated content!", "Should fetch and checkout the latest version");
+    assert_eq!(
+        content2, "Updated content!",
+        "Should fetch and checkout the latest version"
+    );
 }
