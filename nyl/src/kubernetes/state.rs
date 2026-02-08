@@ -1,11 +1,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::ByteString;
 use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 
 use crate::{
     constants::{LABEL_RELEASE, LABEL_REVISION, SECRET_TYPE_RELEASE},
@@ -109,6 +113,34 @@ impl KubernetesReleaseStorage {
         String::from_utf8(encoded.0.clone()).map_err(|e| NylError::Config(format!("Invalid UTF-8 in data: {}", e)))
     }
 
+    /// Compress and encode string to ByteString (for large manifest field)
+    fn compress_and_encode(data: &str) -> Result<ByteString> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+        encoder
+            .write_all(data.as_bytes())
+            .map_err(|e| NylError::Config(format!("Compression failed: {}", e)))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| NylError::Config(format!("Compression finish failed: {}", e)))?;
+
+        Ok(ByteString(compressed))
+    }
+
+    /// Decode and decompress ByteString to string
+    fn decode_and_decompress(encoded: &ByteString) -> Result<String> {
+        let mut decoder = GzDecoder::new(&encoded.0[..]);
+        let mut decompressed = String::new();
+        decoder.read_to_string(&mut decompressed).map_err(|e| {
+            NylError::Config(format!(
+                "Decompression failed: {}.\nHint: The release Secret may be corrupted.",
+                e
+            ))
+        })?;
+
+        tracing::debug!("Decompressed manifest: {} bytes", decompressed.len());
+        Ok(decompressed)
+    }
+
     /// Convert ReleaseState to Secret
     fn to_secret(release: &ReleaseState) -> Result<Secret> {
         let mut data: BTreeMap<String, ByteString> = BTreeMap::new();
@@ -119,7 +151,21 @@ impl KubernetesReleaseStorage {
             Self::encode_base64(&serde_json::to_string(&release.resource_keys)?),
         );
 
-        data.insert("manifest".to_string(), Self::encode_base64(&release.manifest));
+        let compressed_manifest = Self::compress_and_encode(&release.manifest)?;
+
+        // Log compression ratio for visibility
+        let original_size = release.manifest.len();
+        let compressed_size = compressed_manifest.0.len();
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = original_size as f64 / compressed_size as f64;
+        tracing::debug!(
+            "Compressed manifest: {} bytes → {} bytes ({:.1}x reduction)",
+            original_size,
+            compressed_size,
+            ratio
+        );
+
+        data.insert("manifest".to_string(), compressed_manifest);
 
         data.insert(
             "status".to_string(),
@@ -134,6 +180,18 @@ impl KubernetesReleaseStorage {
         }
         if let Some(error) = &release.error {
             data.insert("error".to_string(), Self::encode_base64(error));
+        }
+
+        // Validate total Secret size doesn't exceed 1MB
+        let total_size: usize = data.values().map(|v| v.0.len()).sum();
+        if total_size > 1_000_000 {
+            #[allow(clippy::cast_precision_loss)]
+            let size_mb = total_size as f64 / 1_000_000.0;
+            return Err(NylError::Kubernetes(format!(
+                "Release Secret exceeds 1MB limit even after compression ({:.2}MB).\n\
+                 Hint: Consider splitting your manifests into multiple releases or components.",
+                size_mb
+            )));
         }
 
         let mut labels = BTreeMap::new();
@@ -190,7 +248,7 @@ impl KubernetesReleaseStorage {
         )?;
         let resource_keys: Vec<ResourceKey> = serde_json::from_str(&resource_keys_str)?;
 
-        let manifest = Self::decode_base64(
+        let manifest = Self::decode_and_decompress(
             data.get("manifest")
                 .ok_or_else(|| NylError::Config("Secret missing manifest field".to_string()))?,
         )?;
@@ -566,5 +624,86 @@ mod tests {
         let encoded = KubernetesReleaseStorage::encode_base64(original);
         let decoded = KubernetesReleaseStorage::decode_base64(&encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_compression_roundtrip() {
+        let original = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n".repeat(100);
+        let compressed = KubernetesReleaseStorage::compress_and_encode(&original).unwrap();
+        let decompressed = KubernetesReleaseStorage::decode_and_decompress(&compressed).unwrap();
+        assert_eq!(original, decompressed);
+    }
+
+    #[test]
+    fn test_compression_reduces_size() {
+        let large_manifest =
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: value\n".repeat(1000);
+        let original_size = large_manifest.len();
+        let compressed = KubernetesReleaseStorage::compress_and_encode(&large_manifest).unwrap();
+        let compressed_size = compressed.0.len();
+
+        // Expect at least 5x compression for repetitive YAML
+        assert!(compressed_size < original_size / 5);
+    }
+
+    #[test]
+    fn test_unicode_compression_roundtrip() {
+        let unicode_data = "Hello 世界 🚀 café\n".repeat(50);
+        let compressed = KubernetesReleaseStorage::compress_and_encode(&unicode_data).unwrap();
+        let decompressed = KubernetesReleaseStorage::decode_and_decompress(&compressed).unwrap();
+        assert_eq!(unicode_data, decompressed);
+    }
+
+    #[test]
+    fn test_gzip_magic_header_detection() {
+        let data = "test data for compression";
+        let compressed = KubernetesReleaseStorage::compress_and_encode(data).unwrap();
+
+        // Verify gzip magic header is present
+        assert_eq!(compressed.0[0], 0x1f);
+        assert_eq!(compressed.0[1], 0x8b);
+    }
+
+    #[test]
+    fn test_corrupted_compressed_data_error() {
+        // Create corrupted data with gzip header but invalid payload
+        let mut corrupted = vec![0x1f, 0x8b, 0x08, 0x00];
+        corrupted.extend_from_slice(&[0xFF; 100]);
+        let corrupted_bytes = ByteString(corrupted);
+
+        let result = KubernetesReleaseStorage::decode_and_decompress(&corrupted_bytes);
+        assert!(result.is_err());
+        // Assert on the stable wrapper error message rather than backend-specific wording
+        assert!(result.unwrap_err().to_string().contains("Decompression failed"));
+    }
+
+    #[test]
+    fn test_empty_manifest_compression() {
+        let empty = "";
+        let compressed = KubernetesReleaseStorage::compress_and_encode(empty).unwrap();
+        let decompressed = KubernetesReleaseStorage::decode_and_decompress(&compressed).unwrap();
+        assert_eq!(empty, decompressed);
+    }
+
+    #[tokio::test]
+    async fn test_release_state_compression_roundtrip() {
+        let large_manifest = "apiVersion: v1\nkind: ConfigMap\ndata:\n  key: value\n".repeat(5000);
+        let release = ReleaseState {
+            release_name: "test-release".to_string(),
+            release_namespace: "default".to_string(),
+            revision: 1,
+            resource_keys: vec![],
+            manifest: large_manifest.clone(),
+            status: ReleaseStatus::Rendered,
+            rendered_at: Utc::now(),
+            applied_at: None,
+            error: None,
+        };
+
+        let secret = KubernetesReleaseStorage::to_secret(&release).unwrap();
+        let restored = KubernetesReleaseStorage::from_secret(&secret).unwrap();
+
+        assert_eq!(release.manifest, restored.manifest);
+        assert_eq!(release.release_name, restored.release_name);
     }
 }
