@@ -198,6 +198,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     // 12. Save release state (unless dry run)
     if !args.dry_run {
+        // Ensure the release namespace exists before saving the release state
+        ensure_namespace_exists(&kube_client, &release_namespace, args.dry_run).await?;
+
         storage.save_release(&release).await?;
 
         // Mark previous revision as superseded (if successful)
@@ -362,6 +365,46 @@ fn format_namespace_name(namespace: Option<&str>, name: &str) -> String {
         format!("{}/{}", ns, name)
     } else {
         name.to_string()
+    }
+}
+
+/// Ensure a namespace exists, creating it if necessary
+async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str, dry_run: bool) -> Result<()> {
+    use crate::kubernetes::GroupVersionKind;
+    use kube::api::DynamicObject;
+    use serde_json::json;
+
+    // Build namespace GVK
+    let ns_gvk = GroupVersionKind::from_api_version_kind("v1", "Namespace")?;
+
+    // Check if namespace exists
+    if let Some(_ns) = client.get_resource(&ns_gvk, None, namespace).await? {
+        // Namespace exists, nothing to do
+        Ok(())
+    } else {
+        // Namespace doesn't exist, create it
+        tracing::warn!(
+            "Namespace '{}' does not exist. Creating it to store release state.",
+            namespace
+        );
+
+        // Create bare namespace resource
+        let ns_resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace
+            }
+        }))?;
+
+        // Apply the namespace
+        client.apply_resource(&ns_resource, "nyl", dry_run).await?;
+
+        if !dry_run {
+            tracing::info!("Created namespace '{}'", namespace);
+        }
+
+        Ok(())
     }
 }
 
