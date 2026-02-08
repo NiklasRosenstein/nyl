@@ -10,6 +10,7 @@ use crate::constants::API_VERSION;
 ///
 /// Supports Git, OCI, traditional Helm repositories, and local filesystem paths
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ChartRef {
     /// Repository URL for Git, OCI, or traditional Helm repositories
     ///
@@ -58,6 +59,7 @@ pub struct ChartRef {
 
 /// Kubernetes object metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectMetadata {
     /// Resource name
     pub name: String,
@@ -89,6 +91,7 @@ impl ObjectMetadata {
 
 /// HelmChart specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelmChartSpec {
     /// Reference to the chart
     pub chart: ChartRef,
@@ -111,6 +114,7 @@ impl Default for HelmChartSpec {
 ///
 /// This is a Kubernetes-style resource that represents a Helm chart deployment
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelmChart {
     /// API version (e.g., "nyl.niklasrosenstein.github.com/v1")
     #[serde(rename = "apiVersion")]
@@ -275,5 +279,36 @@ mod tests {
     fn test_helm_chart_spec_defaults() {
         let spec = HelmChartSpec::default();
         assert!(spec.values.is_object());
+    }
+
+    #[test]
+    fn test_chart_ref_rejects_unknown_fields() {
+        let yaml = r#"
+name: mychart
+version: "1.0.0"
+unknownField: value
+"#;
+        let result: std::result::Result<ChartRef, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn test_helm_chart_rejects_unknown_fields() {
+        let yaml = r#"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  unknownField: value
+"#;
+        let result: std::result::Result<HelmChart, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
     }
 }

@@ -11,6 +11,7 @@ use crate::{NylError, Result};
 
 /// ApplicationGenerator resource for ArgoCD bootstrapping
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationGenerator {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
@@ -21,6 +22,7 @@ pub struct ApplicationGenerator {
 
 /// Metadata for ApplicationGenerator
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationGeneratorMetadata {
     /// Generator name
     pub name: String,
@@ -31,6 +33,7 @@ pub struct ApplicationGeneratorMetadata {
 
 /// Specification for ApplicationGenerator
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationGeneratorSpec {
     /// Destination for generated Applications
     pub destination: ApplicationDestination,
@@ -55,6 +58,7 @@ pub struct ApplicationGeneratorSpec {
 
 /// Destination configuration for ArgoCD Applications
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationDestination {
     /// Kubernetes server URL
     pub server: String,
@@ -64,6 +68,7 @@ pub struct ApplicationDestination {
 
 /// Source configuration for scanning
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationSource {
     /// Git repository URL
     #[serde(rename = "repoURL")]
@@ -83,6 +88,7 @@ pub struct ApplicationSource {
 
 /// ArgoCD sync policy
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SyncPolicy {
     /// Automated sync configuration
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +100,7 @@ pub struct SyncPolicy {
 
 /// Automated sync policy configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AutomatedSyncPolicy {
     /// Enable automatic pruning
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -573,5 +580,27 @@ mod tests {
                 annotations: HashMap::new(),
             },
         }
+    }
+
+    #[test]
+    fn test_application_generator_rejects_unknown_fields() {
+        let yaml = r#"
+apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
+kind: ApplicationGenerator
+metadata:
+  name: test
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: https://github.com/example/repo
+    path: clusters/default
+  unknownField: should-fail
+"#;
+        let result: std::result::Result<ApplicationGenerator, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
     }
 }

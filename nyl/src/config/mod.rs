@@ -198,8 +198,11 @@ impl ProjectConfig {
                 .map_err(|e| NylError::Config(format!("Failed to parse JSON config: {}", e)))?,
             Some("toml") => toml::from_str(&contents)
                 .map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?,
-            _ => serde_norway::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse YAML config: {}", e)))?,
+            _ => {
+                // Use SourceContext for better YAML error messages
+                let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
+                source_ctx.parse_yaml(&contents)?
+            }
         };
 
         // Resolve search paths relative to config file parent directory
@@ -431,7 +434,9 @@ settings:
 
         let result = ProjectConfig::load(Some(config_path));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse YAML"));
+        let err_msg = result.unwrap_err().to_string();
+        // Error message now includes file path and detailed context
+        assert!(err_msg.contains("Resource validation error") || err_msg.contains("resource parsing"));
     }
 
     #[test]

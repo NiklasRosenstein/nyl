@@ -15,6 +15,7 @@ fn default_spec() -> serde_json::Value {
 
 /// Component resource
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NylComponent {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
@@ -388,5 +389,22 @@ mod tests {
         assert_eq!(chart_ref.repository, None);
         assert_eq!(chart_ref.name, Some("path/to/my-chart".to_string()));
         assert_eq!(chart_ref.version, None);
+    }
+
+    #[test]
+    fn test_nyl_component_rejects_unknown_fields() {
+        let yaml = r#"
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: MyComponent
+metadata:
+  name: test
+spec:
+  key: value
+unknownField: should-fail
+"#;
+        let result: std::result::Result<NylComponent, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
     }
 }

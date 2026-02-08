@@ -87,8 +87,9 @@ fn generate_argocd_applications(
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read {}: {}", file_path.display(), e)))?;
 
-        // Parse YAML documents
-        let manifests: Vec<serde_json::Value> = parse_yaml_documents(&content)?;
+        // Parse YAML documents with source context for better error messages
+        let source_ctx = crate::util::SourceContext::new(file_path.clone());
+        let manifests: Vec<serde_json::Value> = source_ctx.parse_yaml_documents(&content)?;
 
         // Extract NylRelease metadata
         let (nyl_release, _) = extract_nyl_release(&manifests)?;
@@ -240,31 +241,8 @@ fn find_yaml_files(dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Parse YAML documents from a string (supports multi-document YAML)
-fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
-    let mut documents = Vec::new();
-
-    for doc in yaml_str.split("\n---\n") {
-        let trimmed = doc.trim();
-
-        // Skip empty or comment-only documents
-        if trimmed.is_empty()
-            || trimmed
-                .lines()
-                .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
-        {
-            continue;
-        }
-
-        let value: serde_json::Value = serde_norway::from_str(trimmed)?;
-
-        if !value.is_null() {
-            documents.push(value);
-        }
-    }
-
-    Ok(documents)
-}
+// Note: parse_yaml_documents is now replaced by SourceContext::parse_yaml_documents
+// to provide better error messages with file context
 
 #[cfg(test)]
 mod tests {
@@ -284,7 +262,8 @@ kind: ConfigMap
 metadata:
   name: config
 ";
-        let docs = parse_yaml_documents(yaml).unwrap();
+        let source_ctx = crate::util::SourceContext::new(std::path::PathBuf::from("test.yaml"));
+        let docs = source_ctx.parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "NylRelease");
         assert_eq!(docs[1]["kind"], "ConfigMap");

@@ -207,8 +207,9 @@ impl ProfileConfig {
             serde_json::from_str(&contents)
                 .map_err(|e| NylError::Config(format!("Failed to parse profile JSON: {}", e)))?
         } else {
-            serde_norway::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse profile YAML: {}", e)))?
+            // Use SourceContext for better YAML error messages
+            let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
+            source_ctx.parse_yaml(&contents)?
         };
 
         Ok(Self {

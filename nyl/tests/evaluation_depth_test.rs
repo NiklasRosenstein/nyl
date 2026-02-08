@@ -83,9 +83,6 @@ metadata:
 spec:
   chart:
     name: ./charts/test-chart
-  release:
-    name: nested
-    namespace: {{ .Release.Namespace }}
 "#,
     )
     .unwrap();
@@ -102,9 +99,6 @@ metadata:
 spec:
   chart:
     name: ./charts/test-chart
-  release:
-    name: top
-    namespace: default
 "#,
     )
     .unwrap();
@@ -224,9 +218,6 @@ metadata:
 spec:
   chart:
     name: ./charts/nginx
-  release:
-    name: nginx-release
-    namespace: default
 "#,
     )
     .unwrap();
