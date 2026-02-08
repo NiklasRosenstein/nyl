@@ -61,6 +61,9 @@ regex = "1.10"
 # Diff and output
 colored = "2.1"
 similar = "2.6"
+comfy-table = "7.1"
+dialoguer = "0.11"
+humantime = "2.1"
 
 [dev-dependencies]
 assert_cmd = "2.0"

@@ -31,6 +31,18 @@ pub enum ReleaseStatus {
     Superseded,
 }
 
+/// Summary information about a release (for list view)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub release_name: String,
+    pub release_namespace: String,
+    pub latest_revision: u32,
+    pub status: ReleaseStatus,
+    pub rendered_at: DateTime<Utc>,
+    pub applied_at: Option<DateTime<Utc>>,
+    pub resource_count: usize,
+}
+
 /// State of a release revision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseState {
@@ -78,6 +90,15 @@ pub trait ReleaseStorage: Send + Sync {
         status: ReleaseStatus,
         error: Option<String>,
     ) -> Result<()>;
+
+    /// List all releases in a namespace (or all namespaces if None)
+    async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>>;
+
+    /// Delete a specific release revision
+    async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<()>;
+
+    /// Delete all revisions of a release, returns count deleted
+    async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32>;
 }
 
 /// Kubernetes-based release storage using Secrets
@@ -390,6 +411,94 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         // Save updated release
         self.save_release(&release).await
     }
+
+    async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
+        use std::collections::HashMap;
+
+        // List all release secrets
+        let label_selector = format!("{}!=", LABEL_RELEASE); // All secrets with release label
+        let lp = ListParams::default().labels(&label_selector);
+
+        let secrets = if let Some(ns) = namespace {
+            let api: Api<Secret> = Api::namespaced(self.client.clone(), ns);
+            api.list(&lp).await?
+        } else {
+            let api: Api<Secret> = Api::all(self.client.clone());
+            api.list(&lp).await?
+        };
+
+        // Group by release name and namespace, keeping only latest revision
+        let mut releases: HashMap<(String, String), ReleaseState> = HashMap::new();
+
+        for secret in secrets.items {
+            match Self::from_secret(&secret) {
+                Ok(state) => {
+                    let key = (state.release_name.clone(), state.release_namespace.clone());
+                    releases
+                        .entry(key)
+                        .and_modify(|existing| {
+                            if state.revision > existing.revision {
+                                *existing = state.clone();
+                            }
+                        })
+                        .or_insert(state);
+                }
+                Err(e) => {
+                    // Log warning for corrupted secrets but continue
+                    tracing::warn!("Failed to parse release secret {:?}: {}", secret.metadata.name, e);
+                }
+            }
+        }
+
+        // Convert to ReleaseInfo
+        let mut result: Vec<ReleaseInfo> = releases
+            .into_values()
+            .map(|state| ReleaseInfo {
+                release_name: state.release_name,
+                release_namespace: state.release_namespace,
+                latest_revision: state.revision,
+                status: state.status,
+                rendered_at: state.rendered_at,
+                applied_at: state.applied_at,
+                resource_count: state.resource_keys.len(),
+            })
+            .collect();
+
+        // Sort by namespace then name for consistent output
+        result.sort_by(|a, b| {
+            a.release_namespace
+                .cmp(&b.release_namespace)
+                .then_with(|| a.release_name.cmp(&b.release_name))
+        });
+
+        Ok(result)
+    }
+
+    async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<()> {
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        let name = Self::secret_name(release_name, revision);
+
+        match api.delete(&name, &kube::api::DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                // Already deleted, consider it success
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32> {
+        let revisions = self.list_revisions(release_name, namespace).await?;
+        let mut count = 0;
+
+        for revision in revisions {
+            self.delete_release(release_name, namespace, revision).await?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -475,6 +584,74 @@ mod tests {
                 }
             }
             Ok(())
+        }
+
+        async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
+            use std::collections::HashMap;
+
+            let store = self.releases.lock().unwrap();
+            let mut releases: HashMap<(String, String), ReleaseState> = HashMap::new();
+
+            for ((key, revision), state) in store.iter() {
+                // Parse namespace/name from key
+                if let Some((ns, name)) = key.split_once('/') {
+                    // Filter by namespace if specified
+                    if let Some(filter_ns) = namespace {
+                        if ns != filter_ns {
+                            continue;
+                        }
+                    }
+
+                    let release_key = (name.to_string(), ns.to_string());
+                    releases
+                        .entry(release_key)
+                        .and_modify(|existing| {
+                            if revision > &existing.revision {
+                                *existing = state.clone();
+                            }
+                        })
+                        .or_insert_with(|| state.clone());
+                }
+            }
+
+            let mut result: Vec<ReleaseInfo> = releases
+                .into_values()
+                .map(|state| ReleaseInfo {
+                    release_name: state.release_name,
+                    release_namespace: state.release_namespace,
+                    latest_revision: state.revision,
+                    status: state.status,
+                    rendered_at: state.rendered_at,
+                    applied_at: state.applied_at,
+                    resource_count: state.resource_keys.len(),
+                })
+                .collect();
+
+            result.sort_by(|a, b| {
+                a.release_namespace
+                    .cmp(&b.release_namespace)
+                    .then_with(|| a.release_name.cmp(&b.release_name))
+            });
+
+            Ok(result)
+        }
+
+        async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<()> {
+            let mut store = self.releases.lock().unwrap();
+            let key = (format!("{}/{}", namespace, release_name), revision);
+            store.remove(&key);
+            Ok(())
+        }
+
+        async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32> {
+            let revisions = self.list_revisions(release_name, namespace).await?;
+            let count = revisions.len() as u32;
+
+            for revision in revisions {
+                self.delete_release(release_name, namespace, revision).await?;
+            }
+
+            Ok(count)
         }
     }
 
@@ -705,5 +882,116 @@ mod tests {
 
         assert_eq!(release.manifest, restored.manifest);
         assert_eq!(release.release_name, restored.release_name);
+    }
+
+    #[tokio::test]
+    async fn test_list_releases() {
+        let storage = MockReleaseStorage::new();
+
+        // Save releases in different namespaces
+        let releases = vec![
+            ("app1", "default", 1),
+            ("app1", "default", 2),
+            ("app2", "default", 1),
+            ("app3", "prod", 1),
+        ];
+
+        for (name, ns, rev) in releases {
+            let release = ReleaseState {
+                release_name: name.to_string(),
+                release_namespace: ns.to_string(),
+                revision: rev,
+                resource_keys: vec![],
+                manifest: "test".to_string(),
+                status: ReleaseStatus::Deployed,
+                rendered_at: Utc::now(),
+                applied_at: Some(Utc::now()),
+                error: None,
+            };
+            storage.save_release(&release).await.unwrap();
+        }
+
+        // List all releases
+        let all = storage.list_releases(None).await.unwrap();
+        assert_eq!(all.len(), 3); // app1, app2, app3
+        assert_eq!(all[0].release_name, "app1");
+        assert_eq!(all[0].latest_revision, 2); // Should pick latest
+
+        // List releases in default namespace
+        let default_ns = storage.list_releases(Some("default")).await.unwrap();
+        assert_eq!(default_ns.len(), 2); // app1, app2
+
+        // List releases in prod namespace
+        let prod_ns = storage.list_releases(Some("prod")).await.unwrap();
+        assert_eq!(prod_ns.len(), 1); // app3
+    }
+
+    #[tokio::test]
+    async fn test_delete_release() {
+        let storage = MockReleaseStorage::new();
+        let release = ReleaseState {
+            release_name: "myapp".to_string(),
+            release_namespace: "default".to_string(),
+            revision: 1,
+            resource_keys: vec![],
+            manifest: "test".to_string(),
+            status: ReleaseStatus::Deployed,
+            rendered_at: Utc::now(),
+            applied_at: Some(Utc::now()),
+            error: None,
+        };
+
+        storage.save_release(&release).await.unwrap();
+
+        // Verify it exists
+        let retrieved = storage.get_release("myapp", "default", 1).await.unwrap();
+        assert!(retrieved.is_some());
+
+        // Delete it
+        storage.delete_release("myapp", "default", 1).await.unwrap();
+
+        // Verify it's gone
+        let retrieved = storage.get_release("myapp", "default", 1).await.unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_all_revisions() {
+        let storage = MockReleaseStorage::new();
+
+        // Save multiple revisions
+        for i in 1..=3 {
+            let release = ReleaseState {
+                release_name: "myapp".to_string(),
+                release_namespace: "default".to_string(),
+                revision: i,
+                resource_keys: vec![],
+                manifest: format!("revision {}", i),
+                status: ReleaseStatus::Deployed,
+                rendered_at: Utc::now(),
+                applied_at: Some(Utc::now()),
+                error: None,
+            };
+            storage.save_release(&release).await.unwrap();
+        }
+
+        // Verify they exist
+        let revisions = storage.list_revisions("myapp", "default").await.unwrap();
+        assert_eq!(revisions.len(), 3);
+
+        // Delete all
+        let count = storage.delete_all_revisions("myapp", "default").await.unwrap();
+        assert_eq!(count, 3);
+
+        // Verify they're gone
+        let revisions = storage.list_revisions("myapp", "default").await.unwrap();
+        assert_eq!(revisions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_releases_empty() {
+        let storage = MockReleaseStorage::new();
+        let releases = storage.list_releases(None).await.unwrap();
+        assert_eq!(releases.len(), 0);
     }
 }
