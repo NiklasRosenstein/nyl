@@ -77,9 +77,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
-    // Display duplicate resources if any
+    // Display duplicate resources warning if any
     if !duplicates.is_empty() {
-        display_duplicates(&duplicates);
+        print_duplicate_warning(&duplicates);
     }
 
     if desired_manifests.is_empty() {
@@ -146,7 +146,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     if args.summary {
         display_summary(&diff_result);
     } else {
-        display_diff(&diff_result);
+        display_diff(&diff_result, &duplicates);
     }
 
     Ok(())
@@ -305,10 +305,11 @@ fn print_summary(diff: &DiffResult) {
 }
 
 /// Display diff results with kubectl-style unified diff output
-fn display_diff(diff: &DiffResult) {
+fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     // Show added resources
     for key in &diff.added {
-        println!("{} {}", "+".green().bold(), key);
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "+".green().bold(), key, dup_annotation);
     }
     if !diff.added.is_empty() {
         println!();
@@ -316,7 +317,8 @@ fn display_diff(diff: &DiffResult) {
 
     // Show modified resources with unified diff (kubectl-style)
     for (key, unified_diff) in &diff.modified {
-        println!("{} {}", "~".yellow().bold(), key);
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "~".yellow().bold(), key, dup_annotation);
 
         // Print unified diff with colors
         for line in unified_diff.lines() {
@@ -335,7 +337,8 @@ fn display_diff(diff: &DiffResult) {
 
     // Show deleted resources
     for key in &diff.deleted {
-        println!("{} {}", "-".red().bold(), key);
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "-".red().bold(), key, dup_annotation);
     }
     if !diff.deleted.is_empty() {
         println!();
@@ -343,7 +346,8 @@ fn display_diff(diff: &DiffResult) {
 
     // Show unchanged resources
     for key in &diff.unchanged {
-        println!("{} {}", "=".bright_black().bold(), key);
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "=".bright_black().bold(), key, dup_annotation);
     }
     if !diff.unchanged.is_empty() {
         println!();
@@ -358,14 +362,30 @@ fn display_summary(diff: &DiffResult) {
     print_summary(diff);
 }
 
-/// Display duplicate resources in a formatted list
-fn display_duplicates(duplicates: &[ResourceKey]) {
-    println!();
-    println!("{}", "Duplicate resources (last occurrence kept):".yellow().bold());
-    for key in duplicates {
-        println!("  {} {}", "!".yellow().bold(), key);
+/// Print a warning trace about duplicate resources
+fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
+    if duplicates.is_empty() {
+        return;
     }
-    println!();
+
+    let total_unique = duplicates.len();
+    let total_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+
+    tracing::warn!(
+        "Found {} unique resources with duplicates ({} total duplicates ignored, keeping last occurrence)",
+        total_unique,
+        total_ignored
+    );
+}
+
+/// Get duplicate annotation for a ResourceKey if it's a duplicate
+fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
+    if let Some(count) = duplicates.get(key) {
+        let ignored_count = count - 1;
+        let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
+        return format!(" {}", format!("({} ignored {})", ignored_count, plural).yellow());
+    }
+    String::new()
 }
 
 /// Merge current manifests with previous release's resources (for --append-release preview)

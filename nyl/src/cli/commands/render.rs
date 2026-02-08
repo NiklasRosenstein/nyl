@@ -103,7 +103,7 @@ pub async fn render_manifests_complete(
     Option<NylRelease>,
     Profile,
     String,
-    Vec<ResourceKey>,
+    std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
     let (manifests, profile, env_name, duplicates) = render_manifests(
@@ -170,7 +170,12 @@ pub async fn render_manifests(
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
-) -> Result<(Vec<serde_json::Value>, Profile, String, Vec<ResourceKey>)> {
+) -> Result<(
+    Vec<serde_json::Value>,
+    Profile,
+    String,
+    std::collections::HashMap<ResourceKey, usize>,
+)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
@@ -290,7 +295,7 @@ pub async fn render_manifests(
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let (mut final_manifests, _, _, _, _duplicates) = render_manifests_complete(
+    let (mut final_manifests, _, _, _, duplicates) = render_manifests_complete(
         &args.common.path,
         args.common.only_source_kind.as_deref(),
         args.common.profile.as_deref(),
@@ -308,6 +313,17 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         &args.common.only_kind,
         &args.common.exclude_kind,
     )?;
+
+    // Print duplicate warning summary if any
+    if !duplicates.is_empty() {
+        let total_unique = duplicates.len();
+        let total_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+        tracing::warn!(
+            "Found {} unique resources with duplicates ({} total duplicates ignored, keeping last occurrence)",
+            total_unique,
+            total_ignored
+        );
+    }
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())
@@ -391,14 +407,17 @@ fn filter_resources(
 ///
 /// When the same resource (same GVK + namespace + name) appears multiple times,
 /// keep only the last occurrence and warn about the duplicate.
-/// Returns (deduplicated_manifests, list_of_duplicate_keys)
-fn deduplicate_manifests(manifests: Vec<serde_json::Value>) -> Result<(Vec<serde_json::Value>, Vec<ResourceKey>)> {
+/// Returns (deduplicated_manifests, map_of_duplicate_keys_to_counts)
+/// The HashMap contains each duplicate ResourceKey mapped to its total occurrence count.
+fn deduplicate_manifests(
+    manifests: Vec<serde_json::Value>,
+) -> Result<(Vec<serde_json::Value>, std::collections::HashMap<ResourceKey, usize>)> {
     use crate::kubernetes::ResourceKey;
     use std::collections::HashMap;
 
     let mut seen: HashMap<ResourceKey, usize> = HashMap::new();
     let mut deduplicated = Vec::new();
-    let mut duplicates = Vec::new();
+    let mut duplicate_counts: HashMap<ResourceKey, usize> = HashMap::new();
 
     for manifest in manifests {
         let key = ResourceKey::from_json_value(&manifest)?;
@@ -407,13 +426,18 @@ fn deduplicate_manifests(manifests: Vec<serde_json::Value>) -> Result<(Vec<serde
             // Duplicate found - replace the previous one with this one (last occurrence wins)
             tracing::warn!("Duplicate resource: {} (keeping last occurrence)", key);
             deduplicated[*prev_index] = manifest.clone();
-            duplicates.push(key);
+            // Increment count for this duplicate
+            *duplicate_counts.entry(key).or_insert(1) += 1;
         } else {
-            // First occurrence
+            // First occurrence - initialize count to 1
+            duplicate_counts.insert(key.clone(), 1);
             seen.insert(key, deduplicated.len());
             deduplicated.push(manifest);
         }
     }
+
+    // Filter to only resources with count > 1 (actual duplicates)
+    let duplicates: HashMap<_, _> = duplicate_counts.into_iter().filter(|(_, count)| *count > 1).collect();
 
     Ok((deduplicated, duplicates))
 }

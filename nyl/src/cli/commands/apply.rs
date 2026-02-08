@@ -1,6 +1,7 @@
 use chrono::Utc;
 use clap::Args;
 use kube::{api::DynamicObject, Client};
+use std::collections::HashMap;
 
 use colored::Colorize;
 
@@ -64,9 +65,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
-    // Display duplicate resources if any
+    // Display duplicate resources warning if any
     if !duplicates.is_empty() {
-        display_duplicates(&duplicates);
+        print_duplicate_warning(&duplicates);
     }
 
     if desired_manifests.is_empty() {
@@ -278,7 +279,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 14. Print summary
-    print_apply_summary(&outcomes, &errors, &release, args.dry_run);
+    print_apply_summary(&outcomes, &errors, &release, args.dry_run, &duplicates);
 
     if !errors.is_empty() {
         return Err(NylError::Other(format!(
@@ -312,26 +313,35 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry
 }
 
 /// Print apply summary
-fn print_apply_summary(outcomes: &[ApplyOutcome], errors: &[String], release: &ReleaseState, dry_run: bool) {
+fn print_apply_summary(
+    outcomes: &[ApplyOutcome],
+    errors: &[String],
+    release: &ReleaseState,
+    dry_run: bool,
+    duplicates: &HashMap<ResourceKey, usize>,
+) {
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
     for outcome in outcomes {
         match outcome {
             ApplyOutcome::Created { name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                println!("{}✓ Created {}", prefix, ns_name);
+                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                println!("{}✓ Created {}{}", prefix, ns_name, dup_annotation);
             }
             ApplyOutcome::Updated { name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                println!("{}✓ Updated {}", prefix, ns_name);
+                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                println!("{}✓ Updated {}{}", prefix, ns_name, dup_annotation);
             }
             ApplyOutcome::Unchanged { name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                println!("{}✓ Unchanged {}", prefix, ns_name);
+                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                println!("{}✓ Unchanged {}{}", prefix, ns_name, dup_annotation);
             }
             ApplyOutcome::DryRun { would_be } => {
                 // Recursively print inner outcome
-                print_single_outcome(would_be, true);
+                print_single_outcome(would_be, true, duplicates);
             }
         }
     }
@@ -358,24 +368,27 @@ fn print_apply_summary(outcomes: &[ApplyOutcome], errors: &[String], release: &R
 }
 
 /// Print a single outcome
-fn print_single_outcome(outcome: &ApplyOutcome, dry_run: bool) {
+fn print_single_outcome(outcome: &ApplyOutcome, dry_run: bool, duplicates: &HashMap<ResourceKey, usize>) {
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
     match outcome {
         ApplyOutcome::Created { name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            println!("{}✓ Would create {}", prefix, ns_name);
+            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            println!("{}✓ Would create {}{}", prefix, ns_name, dup_annotation);
         }
         ApplyOutcome::Updated { name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            println!("{}✓ Would update {}", prefix, ns_name);
+            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            println!("{}✓ Would update {}{}", prefix, ns_name, dup_annotation);
         }
         ApplyOutcome::Unchanged { name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            println!("{}✓ Would leave unchanged {}", prefix, ns_name);
+            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            println!("{}✓ Would leave unchanged {}{}", prefix, ns_name, dup_annotation);
         }
         ApplyOutcome::DryRun { would_be } => {
-            print_single_outcome(would_be, true);
+            print_single_outcome(would_be, true, duplicates);
         }
     }
 }
@@ -389,14 +402,38 @@ fn format_namespace_name(namespace: Option<&str>, name: &str) -> String {
     }
 }
 
-/// Display duplicate resources in a formatted list
-fn display_duplicates(duplicates: &[ResourceKey]) {
-    println!();
-    println!("{}", "Duplicate resources (last occurrence kept):".yellow().bold());
-    for key in duplicates {
-        println!("  {} {}", "!".yellow().bold(), key);
+/// Print a warning trace about duplicate resources
+fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
+    if duplicates.is_empty() {
+        return;
     }
-    println!();
+
+    let total_unique = duplicates.len();
+    let total_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+
+    tracing::warn!(
+        "Found {} unique resources with duplicates ({} total duplicates ignored, keeping last occurrence)",
+        total_unique,
+        total_ignored
+    );
+}
+
+/// Get duplicate annotation for a resource if it's a duplicate
+fn get_duplicate_annotation(
+    name: &str,
+    namespace: Option<&String>,
+    duplicates: &HashMap<ResourceKey, usize>,
+) -> String {
+    // Try to find matching ResourceKey in duplicates
+    // We need to search through duplicates since we don't have the full GVK here
+    for (key, count) in duplicates {
+        if key.name == name && key.namespace.as_ref() == namespace {
+            let ignored_count = count - 1;
+            let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
+            return format!(" {}", format!("({} ignored {})", ignored_count, plural).yellow());
+        }
+    }
+    String::new()
 }
 
 /// Ensure a namespace exists, creating it if necessary
