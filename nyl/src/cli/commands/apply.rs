@@ -162,21 +162,35 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
             // Add previous resources not in current set
             let mut merged_keys = Vec::new();
+            let mut added_from_previous = 0;
             for prev_key in &previous_release.resource_keys {
                 if !current_keys.contains(prev_key) {
                     merged_keys.push(prev_key.clone());
+                    added_from_previous += 1;
                 }
             }
 
             // Add all current resources (current wins on duplicates)
             merged_keys.extend(release.resource_keys.clone());
 
-            tracing::info!(
-                "Append-release mode: merged {} previous resources with {} current resources (total: {})",
-                previous_release.resource_keys.len(),
-                release.resource_keys.len(),
-                merged_keys.len()
-            );
+            // Calculate overlap for better logging
+            let overlap = previous_release.resource_keys.len() - added_from_previous;
+            if overlap > 0 {
+                tracing::info!(
+                    "Append-release mode: merged {} from previous + {} current ({} overlap, {} total)",
+                    added_from_previous,
+                    release.resource_keys.len(),
+                    overlap,
+                    merged_keys.len()
+                );
+            } else {
+                tracing::info!(
+                    "Append-release mode: merged {} from previous + {} current ({} total)",
+                    added_from_previous,
+                    release.resource_keys.len(),
+                    merged_keys.len()
+                );
+            }
 
             release.resource_keys = merged_keys;
         } else {

@@ -384,12 +384,24 @@ async fn merge_with_previous_release(
         }
     }
 
-    tracing::info!(
-        "Append-release mode: merged {} resources from previous release with {} current resources (total: {})",
-        added_count,
-        current_keys.len(),
-        current_manifests.len()
-    );
+    // Calculate overlap for better logging
+    let overlap = previous_release.resource_keys.len() - added_count;
+    if overlap > 0 {
+        tracing::info!(
+            "Append-release mode: merged {} from previous + {} current ({} overlap, {} total)",
+            added_count,
+            current_keys.len(),
+            overlap,
+            current_manifests.len()
+        );
+    } else {
+        tracing::info!(
+            "Append-release mode: merged {} from previous + {} current ({} total)",
+            added_count,
+            current_keys.len(),
+            current_manifests.len()
+        );
+    }
 
     Ok(current_manifests)
 }

@@ -1,4 +1,9 @@
 # Create the argocd namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+---
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
