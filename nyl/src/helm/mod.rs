@@ -246,6 +246,11 @@ impl HelmChartResolver {
             )));
         }
 
+        // Run helm dependency build if the chart has dependencies
+        if chart_has_dependencies(&worktree_path)? {
+            build_helm_dependencies(&worktree_path)?;
+        }
+
         Ok(ResolvedChart {
             path: worktree_path,
             chart_ref: chart_ref.clone(),
@@ -261,6 +266,60 @@ impl std::fmt::Debug for HelmChartResolver {
             .field("cache_dir", &self.cache_dir)
             .finish()
     }
+}
+
+/// Check if a Helm chart has dependencies
+///
+/// Returns true if the chart has a Chart.lock file or dependencies defined in Chart.yaml
+fn chart_has_dependencies(chart_path: &Path) -> Result<bool> {
+    // Check for Chart.lock (existing dependency state)
+    let chart_lock = chart_path.join("Chart.lock");
+    if chart_lock.exists() {
+        return Ok(true);
+    }
+
+    // Check Chart.yaml for dependencies field
+    let chart_yaml = chart_path.join("Chart.yaml");
+    if !chart_yaml.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(&chart_yaml)
+        .map_err(|e| NylError::Config(format!("Failed to read Chart.yaml: {}", e)))?;
+
+    // Parse as YAML and check for dependencies field
+    let yaml: serde_json::Value =
+        serde_norway::from_str(&content).map_err(|e| NylError::Config(format!("Failed to parse Chart.yaml: {}", e)))?;
+
+    Ok(yaml.get("dependencies").is_some())
+}
+
+/// Run helm dependency build for a chart
+///
+/// Executes `helm dependency build` in the chart directory to fetch and build chart dependencies
+fn build_helm_dependencies(chart_path: &Path) -> Result<()> {
+    use std::process::Command;
+
+    tracing::debug!("Building Helm dependencies for chart at: {}", chart_path.display());
+
+    let output = Command::new("helm")
+        .arg("dependency")
+        .arg("build")
+        .arg(chart_path)
+        .output()
+        .map_err(|e| NylError::Process(format!("Failed to execute helm dependency build: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NylError::HelmChart(format!("helm dependency build failed: {}", stderr)));
+    }
+
+    tracing::debug!(
+        "Successfully built Helm dependencies for chart at: {}",
+        chart_path.display()
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -488,5 +547,74 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must have either 'repository' or 'name'"));
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_with_chart_lock() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml without dependencies
+        fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: test-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        // Create Chart.lock
+        fs::write(
+            chart_dir.join("Chart.lock"),
+            "dependencies:\n- name: nginx\n  version: 1.0.0\n",
+        )
+        .unwrap();
+
+        assert!(chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_in_chart_yaml() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml with dependencies
+        let chart_yaml = r#"apiVersion: v2
+name: test-chart
+version: 1.0.0
+dependencies:
+  - name: nginx
+    version: "1.0.0"
+    repository: "https://charts.bitnami.com/bitnami"
+"#;
+        fs::write(chart_dir.join("Chart.yaml"), chart_yaml).unwrap();
+
+        assert!(chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_no_dependencies() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create Chart.yaml without dependencies
+        fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: test-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        assert!(!chart_has_dependencies(&chart_dir).unwrap());
+    }
+
+    #[test]
+    fn test_chart_has_dependencies_no_chart_yaml() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // No Chart.yaml exists
+        assert!(!chart_has_dependencies(&chart_dir).unwrap());
     }
 }

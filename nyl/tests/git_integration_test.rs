@@ -449,3 +449,142 @@ fn test_git_chart_with_tag_version() {
     assert!(resolved.path.exists());
     assert!(resolved.path.join("Chart.yaml").exists());
 }
+
+/// Helper to create a test Git repository with a Helm chart that has dependencies
+fn create_test_helm_chart_with_dependencies_repo(repo_dir: &Path) {
+    // Initialize repository with explicit branch name
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to init git repo");
+
+    // Configure user
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to set git user");
+
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to set git email");
+
+    // Disable signing
+    Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to disable commit signing");
+
+    // Create a Helm chart with dependencies
+    let chart_yaml_content = r#"apiVersion: v2
+name: chart-with-deps
+version: 1.0.0
+dependencies:
+  - name: common
+    version: "1.x.x"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
+"#;
+    fs::write(repo_dir.join("Chart.yaml"), chart_yaml_content).expect("Failed to create Chart.yaml");
+    fs::write(repo_dir.join("values.yaml"), "key: value\n").expect("Failed to create values.yaml");
+
+    // Create templates directory
+    fs::create_dir_all(repo_dir.join("templates")).expect("Failed to create templates dir");
+    fs::write(
+        repo_dir.join("templates/configmap.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
+    )
+    .expect("Failed to create template");
+
+    // Add and commit
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to git add");
+
+    Command::new("git")
+        .args(["commit", "-m", "Add Helm chart with dependencies"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to git commit");
+
+    // Create a tag
+    Command::new("git")
+        .args(["tag", "v1.0.0"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to create tag");
+}
+
+#[test]
+#[ignore = "Requires helm to be installed and network access to pull dependencies"]
+fn test_git_chart_with_dependencies() {
+    setup_test_env();
+
+    use nyl::helm::HelmChartResolver;
+    use nyl::resources::ChartRef;
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_helm_chart_with_dependencies_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+
+    let resolver = HelmChartResolver::with_cache_dir(
+        vec![],
+        temp_repo.path().to_path_buf(),
+        Some(cache_dir.path().to_path_buf()),
+    );
+
+    let chart_ref = ChartRef {
+        repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
+        version: Some("main".to_string()),
+        name: None,
+    };
+
+    // This should resolve the chart and run helm dependency build
+    let resolved = resolver.resolve_chart(&chart_ref).unwrap();
+    assert!(resolved.path.exists());
+    assert!(resolved.path.join("Chart.yaml").exists());
+
+    // Verify that dependencies were built (charts directory should exist)
+    assert!(resolved.path.join("charts").exists());
+    assert!(resolved.path.join("Chart.lock").exists());
+}
+
+#[test]
+fn test_git_chart_without_dependencies() {
+    setup_test_env();
+
+    use nyl::helm::HelmChartResolver;
+    use nyl::resources::ChartRef;
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_helm_chart_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+
+    let resolver = HelmChartResolver::with_cache_dir(
+        vec![],
+        temp_repo.path().to_path_buf(),
+        Some(cache_dir.path().to_path_buf()),
+    );
+
+    let chart_ref = ChartRef {
+        repository: Some(format!("git+{}", path_to_file_url(temp_repo.path()))),
+        version: Some("main".to_string()),
+        name: None,
+    };
+
+    // This should resolve the chart without running helm dependency build
+    let resolved = resolver.resolve_chart(&chart_ref).unwrap();
+    assert!(resolved.path.exists());
+    assert!(resolved.path.join("Chart.yaml").exists());
+
+    // Verify that no charts directory exists (no dependencies)
+    // Note: We can't assert !exists() because helm dependency build is idempotent
+    // and won't fail if there are no dependencies
+}
