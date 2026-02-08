@@ -93,10 +93,10 @@ name: my-app
 version: 1.0.0
 dependencies:
   - name: common
-    version: "1.x.x"
+    version: "^1.0"
     repository: "oci://registry-1.docker.io/bitnamicharts"
   - name: postgresql
-    version: "12.x.x"
+    version: "~12.0"
     repository: "https://charts.bitnami.com/bitnami"
 ```
 

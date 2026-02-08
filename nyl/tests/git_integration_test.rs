@@ -485,7 +485,7 @@ name: chart-with-deps
 version: 1.0.0
 dependencies:
   - name: common
-    version: "1.x.x"
+    version: "^1.0"
     repository: "oci://registry-1.docker.io/bitnamicharts"
 "#;
     fs::write(repo_dir.join("Chart.yaml"), chart_yaml_content).expect("Failed to create Chart.yaml");
