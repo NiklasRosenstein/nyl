@@ -3,7 +3,7 @@ use clap::Args;
 use kube::{api::DynamicObject, Client};
 
 use crate::{
-    cli::commands::render::render_manifests_complete,
+    cli::commands::render::{render_manifests_complete, RenderOptions},
     kubernetes::{
         ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
         ResourceKey, ResourceOrdering,
@@ -14,9 +14,8 @@ use crate::{
 /// Apply rendered manifests to the cluster
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// Path to the project directory
-    #[arg(default_value = ".")]
-    pub path: String,
+    #[command(flatten)]
+    pub common: RenderOptions,
 
     /// Release name (required if no NylRelease in file)
     #[arg(long)]
@@ -26,14 +25,6 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Component to apply (if not specified, applies all)
-    #[arg(short, long)]
-    pub component: Option<String>,
-
-    /// Profile to use for applying
-    #[arg(short, long)]
-    pub profile: Option<String>,
-
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
@@ -41,28 +32,20 @@ pub struct ApplyArgs {
     /// Dry run mode
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Maximum evaluation depth for recursive resource expansion (default: 10)
-    #[arg(long, default_value = "10")]
-    pub max_depth: usize,
-
-    /// Track parent resource information in annotations
-    #[arg(long)]
-    pub track_parent: bool,
 }
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 1. Render desired manifests using complete pipeline
     let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
-        &args.path,
-        args.component.as_deref(),
-        args.profile.as_deref(),
+        &args.common.path,
+        args.common.component.as_deref(),
+        args.common.profile.as_deref(),
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
-        args.max_depth,
-        args.track_parent,
+        args.common.max_depth,
+        args.common.track_parent,
     )
     .await?;
 

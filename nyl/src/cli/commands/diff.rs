@@ -4,7 +4,7 @@ use kube::Client;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    cli::commands::render::render_manifests_complete,
+    cli::commands::render::{render_manifests_complete, RenderOptions},
     kubernetes::{
         extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStorage, ResourceKey,
     },
@@ -25,9 +25,8 @@ pub enum DiffMode {
 /// Show diff between rendered manifests and cluster state
 #[derive(Args, Debug)]
 pub struct DiffArgs {
-    /// Path to the project directory
-    #[arg(default_value = ".")]
-    pub path: String,
+    #[command(flatten)]
+    pub common: RenderOptions,
 
     /// Release name (required if no NylRelease in file)
     #[arg(long)]
@@ -36,14 +35,6 @@ pub struct DiffArgs {
     /// Release namespace (required if no NylRelease in file)
     #[arg(long)]
     pub namespace: Option<String>,
-
-    /// Component to diff (if not specified, diffs all)
-    #[arg(short, long)]
-    pub component: Option<String>,
-
-    /// Profile to use for diffing
-    #[arg(short, long)]
-    pub profile: Option<String>,
 
     /// Kubernetes context to use
     #[arg(long)]
@@ -57,27 +48,19 @@ pub struct DiffArgs {
     /// 'raw' compares manifests directly (may show server defaults)
     #[arg(long, default_value = "normalized")]
     pub mode: DiffMode,
-
-    /// Maximum evaluation depth for recursive resource expansion (default: 10)
-    #[arg(long, default_value = "10")]
-    pub max_depth: usize,
-
-    /// Track parent resource information in annotations
-    #[arg(long)]
-    pub track_parent: bool,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
     // 1. Render desired manifests using complete pipeline
     let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
-        &args.path,
-        args.component.as_deref(),
-        args.profile.as_deref(),
+        &args.common.path,
+        args.common.component.as_deref(),
+        args.common.profile.as_deref(),
         false, // offline
         None,  // cli_kube_version
         &[],   // cli_api_versions
-        args.max_depth,
-        args.track_parent,
+        args.common.max_depth,
+        args.common.track_parent,
     )
     .await?;
 

@@ -35,7 +35,7 @@ data:
     // Run render command with --max-depth
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--max-depth").arg("5");
+    cmd.arg("render").arg("--max-depth").arg("5").arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -119,7 +119,8 @@ spec:
         .arg("--kube-api-versions")
         .arg("v1,apps/v1")
         .arg("--max-depth")
-        .arg("1");
+        .arg("1")
+        .arg("test.yaml");
 
     cmd.assert()
         .success()
@@ -159,7 +160,7 @@ data:
     // Run render command with --track-parent
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--track-parent");
+    cmd.arg("render").arg("--track-parent").arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -240,7 +241,8 @@ spec:
         .arg("1.28.0")
         .arg("--kube-api-versions")
         .arg("v1,apps/v1")
-        .arg("--track-parent");
+        .arg("--track-parent")
+        .arg("test.yaml");
 
     cmd.assert()
         .success()
@@ -287,7 +289,11 @@ data:
     // Run render command with both flags
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--max-depth").arg("3").arg("--track-parent");
+    cmd.arg("render")
+        .arg("--max-depth")
+        .arg("3")
+        .arg("--track-parent")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -309,6 +315,15 @@ settings:
     )
     .unwrap();
 
+    // Create empty resource file
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        r#"
+# Empty file
+"#,
+    )
+    .unwrap();
+
     // The command will succeed with no manifests, but we're testing that flags are accepted
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
@@ -316,7 +331,8 @@ settings:
         .arg("--max-depth")
         .arg("5")
         .arg("--track-parent")
-        .arg("--dry-run");
+        .arg("--dry-run")
+        .arg("test-resource.yaml");
 
     // Should succeed but with no manifests message
     cmd.assert().success();
@@ -337,10 +353,23 @@ settings:
     )
     .unwrap();
 
+    // Create empty resource file
+    fs::write(
+        temp.path().join("test-resource.yaml"),
+        r#"
+# Empty file
+"#,
+    )
+    .unwrap();
+
     // The command will succeed with no manifests, but we're testing that flags are accepted
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("diff").arg("--max-depth").arg("5").arg("--track-parent");
+    cmd.arg("diff")
+        .arg("--max-depth")
+        .arg("5")
+        .arg("--track-parent")
+        .arg("test-resource.yaml");
 
     // Should succeed but with no manifests message
     cmd.assert().success();

@@ -138,7 +138,7 @@ jobs:
           NYL_REPO_URL: https://github.com/${{ github.repository }}.git
           NYL_TARGET_REVISION: ${{ steps.sha.outputs.full_sha }}
         run: |
-          nyl apply examples/argocd-bootstrap/
+          nyl apply examples/argocd-bootstrap/bootstrap.yaml
 
       - name: Wait for ArgoCD deployments
         run: |

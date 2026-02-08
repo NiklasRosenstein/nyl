@@ -16,9 +16,7 @@ pub enum KyvernoScope {
     Immediate,
     /// Applies to siblings and all descendant resources
     Subtree,
-    /// Applies to all resources from the same file
-    Root,
-    /// Applies to all resources from all files
+    /// Applies to all resources (equivalent to file scope since Nyl processes single files)
     Global,
 }
 
@@ -28,11 +26,10 @@ impl KyvernoScope {
         match value {
             "Immediate" => Ok(KyvernoScope::Immediate),
             "Subtree" => Ok(KyvernoScope::Subtree),
-            "Root" => Ok(KyvernoScope::Root),
             "Global" => Ok(KyvernoScope::Global),
             _ => Err(NylError::Config(format!(
                 "Invalid Kyverno scope annotation value: '{}'. \
-                 Valid values are: Immediate, Subtree, Root, Global",
+                 Valid values are: Immediate, Subtree, Global",
                 value
             ))),
         }
@@ -280,7 +277,6 @@ mod tests {
             KyvernoScope::Immediate
         );
         assert_eq!(KyvernoScope::from_annotation("Subtree").unwrap(), KyvernoScope::Subtree);
-        assert_eq!(KyvernoScope::from_annotation("Root").unwrap(), KyvernoScope::Root);
         assert_eq!(KyvernoScope::from_annotation("Global").unwrap(), KyvernoScope::Global);
     }
 
