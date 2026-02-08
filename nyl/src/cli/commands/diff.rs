@@ -208,7 +208,7 @@ pub fn extract_component_name(manifests: &[serde_json::Value]) -> Result<String>
 #[derive(Debug)]
 struct DiffResult {
     added: Vec<ResourceKey>,
-    modified: Vec<(ResourceKey, String)>, // (key, unified_diff_text)
+    modified: Vec<(ResourceKey, String, Option<String>)>, // (key, unified_diff_text, optional_error)
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
     errors: Vec<(ResourceKey, String)>, // (key, error_message)
@@ -281,12 +281,12 @@ async fn compute_diff_from_live(
                         }
                         Ok(false) => match DiffEngine::diff_yaml_with_server(manifest, live, client).await {
                             Ok(diff_text) => {
-                                modified.push((key, diff_text));
+                                modified.push((key, diff_text, None));
                             }
                             Err(e) => {
-                                tracing::warn!("Server-side diff failed for {}, falling back to raw: {}", key, e);
                                 let diff_text = DiffEngine::diff_yaml(manifest, live)?;
-                                modified.push((key, diff_text));
+                                let error_msg = format!("failed to normalize resource: {}", e);
+                                modified.push((key, diff_text, Some(error_msg)));
                             }
                         },
                         Err(e) => {
@@ -294,22 +294,18 @@ async fn compute_diff_from_live(
                                 // In strict mode, fail immediately on errors
                                 return Err(e);
                             } else {
-                                // In non-strict mode, collect error and try raw comparison
-                                tracing::warn!(
-                                    "Server-side normalization failed for {}, falling back to raw: {}",
-                                    key,
-                                    e
-                                );
+                                // In non-strict mode, try raw comparison and annotate with error
+                                let error_msg = format!("failed to normalize resource: {}", e);
                                 match DiffEngine::are_equivalent(manifest, live) {
                                     Ok(true) => unchanged.push(key),
                                     Ok(false) => match DiffEngine::diff_yaml(manifest, live) {
-                                        Ok(diff_text) => modified.push((key, diff_text)),
-                                        Err(diff_err) => {
-                                            errors.push((key, format!("{}", e)));
+                                        Ok(diff_text) => modified.push((key, diff_text, Some(error_msg))),
+                                        Err(_diff_err) => {
+                                            errors.push((key, error_msg));
                                         }
                                     },
-                                    Err(eq_err) => {
-                                        errors.push((key, format!("{}", e)));
+                                    Err(_eq_err) => {
+                                        errors.push((key, error_msg));
                                     }
                                 }
                             }
@@ -322,7 +318,7 @@ async fn compute_diff_from_live(
                         unchanged.push(key);
                     } else {
                         let diff_text = DiffEngine::diff_yaml(manifest, live)?;
-                        modified.push((key, diff_text));
+                        modified.push((key, diff_text, None));
                     }
                 }
             }
@@ -381,9 +377,14 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     }
 
     // Show modified resources with unified diff (kubectl-style)
-    for (key, unified_diff) in &diff.modified {
+    for (key, unified_diff, error) in &diff.modified {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
-        println!("{} {}{}", "~".yellow().bold(), key, dup_annotation);
+        let error_annotation = if let Some(err) = error {
+            format!(" {}", format!("({})", err).red())
+        } else {
+            String::new()
+        };
+        println!("{} {}{}{}", "~".yellow().bold(), key, dup_annotation, error_annotation);
 
         // Print unified diff with colors
         for line in unified_diff.lines() {
