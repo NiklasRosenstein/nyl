@@ -186,8 +186,9 @@ impl KubeClient for KubeRsClient {
             Api::all_with(self.client.clone(), &ar)
         };
 
-        // Check if resource exists
-        let exists = self.get_resource(&gvk, namespace.as_deref(), &name).await?.is_some();
+        // Check if resource exists and get its current resourceVersion
+        let existing = self.get_resource(&gvk, namespace.as_deref(), &name).await?;
+        let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
 
         // Setup patch parameters
         let mut patch_params = PatchParams::apply(field_manager).force();
@@ -197,17 +198,29 @@ impl KubeClient for KubeRsClient {
 
         // Apply the resource using server-side apply
         let patch = Patch::Apply(resource);
-        api.patch(&name, &patch_params, &patch).await?;
+        let updated = api.patch(&name, &patch_params, &patch).await?;
 
-        // Determine outcome
-        let base_outcome = if exists {
+        // Get new resourceVersion from the response
+        let new_resource_version = updated.metadata.resource_version.clone();
+
+        // Determine outcome based on existence and resourceVersion changes
+        let base_outcome = if existing.is_none() {
+            // Resource didn't exist - it was created
+            ApplyOutcome::Created {
+                kind: gvk.kind.clone(),
+                name: name.clone(),
+                namespace: namespace.clone(),
+            }
+        } else if old_resource_version != new_resource_version {
+            // Resource existed and resourceVersion changed - it was updated
             ApplyOutcome::Updated {
                 kind: gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
-            ApplyOutcome::Created {
+            // Resource existed but resourceVersion didn't change - it was unchanged
+            ApplyOutcome::Unchanged {
                 kind: gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
@@ -375,21 +388,38 @@ impl KubeClient for MockKubeClient {
         };
 
         let mut store = self.resources.lock().unwrap();
-        let exists = store.contains_key(&key);
+        let existing = store.get(&key).cloned();
+
+        // Check if resource actually changed by comparing the data
+        let changed = existing.as_ref().is_none_or(|old| {
+            // Compare the actual resource data (ignoring metadata differences)
+            let old_json = serde_json::to_value(old).unwrap_or_default();
+            let new_json = serde_json::to_value(resource).unwrap_or_default();
+            old_json != new_json
+        });
 
         // Only store if not dry run
         if !dry_run {
             store.insert(key.clone(), resource.clone());
         }
 
-        let base_outcome = if exists {
+        let base_outcome = if existing.is_none() {
+            // Resource didn't exist - created
+            ApplyOutcome::Created {
+                kind: key.gvk.kind.clone(),
+                name: name.clone(),
+                namespace: namespace.clone(),
+            }
+        } else if changed {
+            // Resource existed and changed - updated
             ApplyOutcome::Updated {
                 kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
-            ApplyOutcome::Created {
+            // Resource existed but didn't change - unchanged
+            ApplyOutcome::Unchanged {
                 kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
@@ -496,6 +526,9 @@ mod tests {
             "metadata": {
                 "name": "test",
                 "namespace": "default"
+            },
+            "data": {
+                "key": "value1"
             }
         });
 
@@ -504,8 +537,21 @@ mod tests {
         // First apply
         client.apply_resource(&resource, "nyl", false).await.unwrap();
 
-        // Second apply (update)
-        let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
+        // Second apply with different data (update)
+        let updated_json = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            },
+            "data": {
+                "key": "value2"  // Changed value
+            }
+        });
+
+        let updated_resource: DynamicObject = serde_json::from_value(updated_json).unwrap();
+        let outcome = client.apply_resource(&updated_resource, "nyl", false).await.unwrap();
 
         match outcome {
             ApplyOutcome::Updated { kind, name, namespace } => {
@@ -514,6 +560,40 @@ mod tests {
                 assert_eq!(namespace, Some("default".to_string()));
             }
             _ => panic!("Expected Updated outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_apply_unchanged() {
+        let client = MockKubeClient::new();
+
+        let json_data = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            },
+            "data": {
+                "key": "value"
+            }
+        });
+
+        let resource: DynamicObject = serde_json::from_value(json_data).unwrap();
+
+        // First apply
+        client.apply_resource(&resource, "nyl", false).await.unwrap();
+
+        // Second apply with same data (unchanged)
+        let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
+
+        match outcome {
+            ApplyOutcome::Unchanged { kind, name, namespace } => {
+                assert_eq!(kind, "ConfigMap");
+                assert_eq!(name, "test");
+                assert_eq!(namespace, Some("default".to_string()));
+            }
+            _ => panic!("Expected Unchanged outcome, got {:?}", outcome),
         }
     }
 
