@@ -291,7 +291,7 @@ async fn compute_diff_from_live(
 /// Display summary line with colored counts
 fn print_summary(diff: &DiffResult) {
     println!(
-        "Summary: {} added, {} modified, {} deleted, {} unchanged",
+        "Summary: {} to add, {} to modify, {} to delete, {} unchanged",
         diff.added.len().to_string().green(),
         diff.modified.len().to_string().yellow(),
         diff.deleted.len().to_string().red(),
