@@ -283,7 +283,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 14. Print summary
-    print_apply_summary(&outcomes, &release, args.dry_run, &duplicates);
+    print_apply_summary(&outcomes, &release, args.dry_run, &duplicates, failed_count);
 
     if failed_count > 0 {
         return Err(NylError::Other(format!(
@@ -317,11 +317,13 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry
 }
 
 /// Print apply summary
+#[allow(clippy::too_many_lines)]
 fn print_apply_summary(
     outcomes: &[ApplyOutcome],
     release: &ReleaseState,
     dry_run: bool,
     duplicates: &HashMap<ResourceKey, usize>,
+    failed_count: usize,
 ) {
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
@@ -392,11 +394,29 @@ fn print_apply_summary(
     }
 
     if dry_run {
+        if failed_count > 0 {
+            println!(
+                "Summary: {} to create, {} to update, {} unchanged, {} failed",
+                created.to_string().green(),
+                updated.to_string().yellow(),
+                unchanged,
+                failed_count.to_string().red()
+            );
+        } else {
+            println!(
+                "Summary: {} to create, {} to update, {} unchanged",
+                created.to_string().green(),
+                updated.to_string().yellow(),
+                unchanged
+            );
+        }
+    } else if failed_count > 0 {
         println!(
-            "Summary: {} to create, {} to update, {} unchanged",
+            "Summary: {} created, {} updated, {} unchanged, {} failed",
             created.to_string().green(),
             updated.to_string().yellow(),
-            unchanged
+            unchanged,
+            failed_count.to_string().red()
         );
     } else {
         println!(
