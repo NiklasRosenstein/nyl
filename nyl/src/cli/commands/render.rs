@@ -8,11 +8,12 @@ use crate::{
     generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient},
+    postprocess::apply_kyverno_policies,
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
-        component_kind_to_chart_ref, extract_application_generators, extract_nyl_release, is_nyl_component,
-        is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, NylComponent, NylRelease,
-        ReleaseMetadata,
+        component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
+        is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, KyvernoScope,
+        NylComponent, NylRelease, ReleaseMetadata,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -217,6 +218,33 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         let applications = process_application_generator(&generator, &args.path)?;
         final_manifests.extend(applications);
     }
+
+    // Extract and apply Kyverno policies (Global scope only in render for now)
+    let (policies_by_scope, final_manifests) = extract_all_kyverno_policies(&final_manifests)?;
+    let global_policies = policies_by_scope
+        .get(&KyvernoScope::Global)
+        .cloned()
+        .unwrap_or_default();
+
+    // Warn if non-Global policies are used (not yet supported)
+    let non_global_count: usize = policies_by_scope
+        .iter()
+        .filter(|(scope, _)| **scope != KyvernoScope::Global)
+        .map(|(_, policies)| policies.len())
+        .sum();
+    if non_global_count > 0 {
+        tracing::warn!(
+            "Found {} non-Global Kyverno policies. Only Global scope is currently supported in render command. \
+             Immediate, Subtree, and Root scopes will be supported in a future version.",
+            non_global_count
+        );
+    }
+
+    let final_manifests = if global_policies.is_empty() {
+        final_manifests
+    } else {
+        apply_kyverno_policies(&final_manifests, &global_policies)?
+    };
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())

@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -35,7 +33,7 @@ data:
     .unwrap();
 
     // Run render command with --max-depth
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render").arg("--max-depth").arg("5");
     cmd.assert()
@@ -112,7 +110,7 @@ spec:
     .unwrap();
 
     // Run with max-depth=1 - should succeed and return the nested HelmChart without expanding it
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render")
         .arg("--offline")
@@ -159,7 +157,7 @@ data:
     .unwrap();
 
     // Run render command with --track-parent
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render").arg("--track-parent");
     cmd.assert()
@@ -234,7 +232,7 @@ spec:
     .unwrap();
 
     // Run with --track-parent
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render")
         .arg("--offline")
@@ -287,7 +285,7 @@ data:
     .unwrap();
 
     // Run render command with both flags
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render").arg("--max-depth").arg("3").arg("--track-parent");
     cmd.assert()
@@ -312,7 +310,7 @@ settings:
     .unwrap();
 
     // The command will succeed with no manifests, but we're testing that flags are accepted
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("apply")
         .arg("--max-depth")
@@ -340,7 +338,7 @@ settings:
     .unwrap();
 
     // The command will succeed with no manifests, but we're testing that flags are accepted
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("diff").arg("--max-depth").arg("5").arg("--track-parent");
 

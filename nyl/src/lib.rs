@@ -29,6 +29,7 @@ pub mod generator;
 pub mod git;
 pub mod helm;
 pub mod kubernetes;
+pub mod postprocess;
 pub mod profiles;
 pub mod resources;
 pub mod secrets;

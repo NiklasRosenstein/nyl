@@ -29,3 +29,6 @@ pub const ANNOTATION_PARENT_NAME: &str = "nyl.niklasrosenstein.github.com/parent
 
 /// Annotation for tracking parent resource namespace
 pub const ANNOTATION_PARENT_NAMESPACE: &str = "nyl.niklasrosenstein.github.com/parent-namespace";
+
+/// Annotation for declaring Kyverno policy scope
+pub const ANNOTATION_KYVERNO_SCOPE: &str = "nyl.niklasrosenstein.github.com/apply-policy-scope";

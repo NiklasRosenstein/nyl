@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -7,7 +5,7 @@ use tempfile::TempDir;
 
 #[test]
 fn test_cli_help() {
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("--help");
     cmd.assert()
         .success()
@@ -16,7 +14,7 @@ fn test_cli_help() {
 
 #[test]
 fn test_cli_version() {
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("--version");
     cmd.assert().success().stdout(predicate::str::contains("nyl"));
 }
@@ -64,7 +62,7 @@ data:
     .unwrap();
 
     // Run render command
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render");
     cmd.assert()
@@ -89,7 +87,7 @@ profiles:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("diff");
     cmd.assert()
@@ -114,7 +112,7 @@ profiles:
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("apply");
     cmd.assert()
@@ -127,7 +125,7 @@ profiles:
 fn test_new_project_command() {
     let temp = TempDir::new().unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("new").arg("project").arg("test-project");
     cmd.assert()
@@ -145,7 +143,7 @@ fn test_new_project_command() {
 fn test_new_without_subcommand_shows_error() {
     let temp = TempDir::new().unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("new").arg("test-project");
     cmd.assert()
@@ -164,7 +162,7 @@ fn test_new_component_command() {
     let components_dir = temp.path().join("components");
     fs::create_dir(&components_dir).unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("new").arg("component").arg("v1.example.io").arg("MyApp");
     cmd.assert().success().stdout(predicate::str::contains(
@@ -191,7 +189,7 @@ fn test_validate_command_with_config() {
     let components_dir = temp.path().join("components");
     fs::create_dir(&components_dir).unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("validate");
     cmd.assert()
@@ -204,7 +202,7 @@ fn test_validate_command_with_config() {
 fn test_validate_command_no_config() {
     let temp = TempDir::new().unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("validate");
     cmd.assert()
@@ -220,7 +218,7 @@ fn test_validate_command_strict_mode() {
     let config_path = temp.path().join("nyl-project.yaml");
     fs::write(&config_path, "settings:\n  on_lookup_failure: InvalidValue").unwrap();
 
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("validate").arg("--strict");
     cmd.assert()
@@ -230,7 +228,7 @@ fn test_validate_command_strict_mode() {
 
 #[test]
 fn test_verbose_flag() {
-    let mut cmd = Command::cargo_bin("nyl").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("--verbose").arg("validate");
     // Should succeed and enable verbose logging
     cmd.assert().success();

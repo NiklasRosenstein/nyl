@@ -9,7 +9,7 @@ rust = "1.93.0"
 "cargo:cargo-audit" = "latest"
 
 # Kubernetes tools
-kyverno = "1.14.4"
+kyverno = "1.17.0"
 sops = "3.11.0"
 helm = "3.19.5"
 kubectl = "1.35.0"
@@ -18,7 +18,7 @@ kubectl = "1.35.0"
 [tasks.fmt]
 description = "Format Rust code"
 dir = "nyl"
-run = "cargo fmt"
+run = "cargo fmt && cargo clippy --all-targets --fix --allow-dirty"
 
 [tasks.fmt-check]
 description = "Check Rust formatting"

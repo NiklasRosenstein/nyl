@@ -45,7 +45,7 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 
 ```bash
 # Format code (REQUIRED before commit)
-mise run fmt              # or: cd nyl && cargo fmt
+mise run fmt              # or: cd nyl && cargo fmt && cargo clippy --all-targets --fix --allow-dirty
 
 # Lint code
 mise run lint             # or: cd nyl && cargo clippy -- -D warnings
