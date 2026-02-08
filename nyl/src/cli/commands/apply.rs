@@ -373,6 +373,43 @@ fn print_apply_summary(
 
     println!();
 
+    // Print summary counts
+    let mut created = 0;
+    let mut updated = 0;
+    let mut unchanged = 0;
+
+    for outcome in outcomes {
+        match outcome {
+            ApplyOutcome::Created { .. } => created += 1,
+            ApplyOutcome::Updated { .. } => updated += 1,
+            ApplyOutcome::Unchanged { .. } => unchanged += 1,
+            ApplyOutcome::DryRun { would_be } => match **would_be {
+                ApplyOutcome::Created { .. } => created += 1,
+                ApplyOutcome::Updated { .. } => updated += 1,
+                ApplyOutcome::Unchanged { .. } => unchanged += 1,
+                ApplyOutcome::DryRun { .. } => {} // shouldn't happen
+            },
+        }
+    }
+
+    if dry_run {
+        println!(
+            "Summary: {} to create, {} to update, {} unchanged",
+            created.to_string().green(),
+            updated.to_string().yellow(),
+            unchanged
+        );
+    } else {
+        println!(
+            "Summary: {} created, {} updated, {} unchanged",
+            created.to_string().green(),
+            updated.to_string().yellow(),
+            unchanged
+        );
+    }
+
+    println!();
+
     if dry_run {
         println!(
             "[DRY RUN] Would create release {} revision {} in namespace {}",

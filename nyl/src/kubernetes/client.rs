@@ -188,42 +188,72 @@ impl KubeClient for KubeRsClient {
 
         // Check if resource exists and get its current resourceVersion
         let existing = self.get_resource(&gvk, namespace.as_deref(), &name).await?;
-        let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
 
-        // Setup patch parameters
-        let mut patch_params = PatchParams::apply(field_manager).force();
-        if dry_run {
-            patch_params = patch_params.dry_run();
-        }
+        // Determine outcome based on dry_run mode
+        let base_outcome = if dry_run {
+            // In dry-run mode, resourceVersion won't change, so we need to compare resources
+            if let Some(ref existing_resource) = existing {
+                // Resource exists - check if it would change using diff comparison
+                let desired_json = serde_json::to_value(resource)?;
+                let existing_json = serde_json::to_value(existing_resource)?;
 
-        // Apply the resource using server-side apply
-        let patch = Patch::Apply(resource);
-        let updated = api.patch(&name, &patch_params, &patch).await?;
+                // Use DiffEngine to check if resources are equivalent (ignoring server-managed fields)
+                let would_change = !crate::kubernetes::diff::DiffEngine::are_equivalent(&desired_json, &existing_json)?;
 
-        // Get new resourceVersion from the response
-        let new_resource_version = updated.metadata.resource_version.clone();
-
-        // Determine outcome based on existence and resourceVersion changes
-        let base_outcome = if existing.is_none() {
-            // Resource didn't exist - it was created
-            ApplyOutcome::Created {
-                kind: gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
-            }
-        } else if old_resource_version != new_resource_version {
-            // Resource existed and resourceVersion changed - it was updated
-            ApplyOutcome::Updated {
-                kind: gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
+                if would_change {
+                    ApplyOutcome::Updated {
+                        kind: gvk.kind.clone(),
+                        name: name.clone(),
+                        namespace: namespace.clone(),
+                    }
+                } else {
+                    ApplyOutcome::Unchanged {
+                        kind: gvk.kind.clone(),
+                        name: name.clone(),
+                        namespace: namespace.clone(),
+                    }
+                }
+            } else {
+                // Resource doesn't exist - would be created
+                ApplyOutcome::Created {
+                    kind: gvk.kind.clone(),
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                }
             }
         } else {
-            // Resource existed but resourceVersion didn't change - it was unchanged
-            ApplyOutcome::Unchanged {
-                kind: gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
+            // In normal mode, apply and check resourceVersion
+            let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
+
+            // Setup patch parameters and apply
+            let patch_params = PatchParams::apply(field_manager).force();
+            let patch = Patch::Apply(resource);
+            let updated = api.patch(&name, &patch_params, &patch).await?;
+
+            // Get new resourceVersion from the response
+            let new_resource_version = updated.metadata.resource_version.clone();
+
+            if existing.is_none() {
+                // Resource didn't exist - it was created
+                ApplyOutcome::Created {
+                    kind: gvk.kind.clone(),
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                }
+            } else if old_resource_version != new_resource_version {
+                // Resource existed and resourceVersion changed - it was updated
+                ApplyOutcome::Updated {
+                    kind: gvk.kind.clone(),
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                }
+            } else {
+                // Resource existed but resourceVersion didn't change - it was unchanged
+                ApplyOutcome::Unchanged {
+                    kind: gvk.kind.clone(),
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                }
             }
         };
 
