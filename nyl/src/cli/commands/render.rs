@@ -64,6 +64,73 @@ enum OutputFormat {
     Json,
 }
 
+/// Complete manifest rendering pipeline used by render, diff, and apply.
+/// Returns final manifests ready for output/apply/diff, with all Nyl resources processed.
+/// Also returns the extracted NylRelease metadata (if present) for diff/apply commands.
+#[allow(clippy::too_many_arguments)]
+pub async fn render_manifests_complete(
+    path: &str,
+    component: Option<&str>,
+    environment: Option<&str>,
+    offline: bool,
+    cli_kube_version: Option<&str>,
+    cli_api_versions: &[String],
+    max_depth: usize,
+    track_parent: bool,
+) -> Result<(Vec<serde_json::Value>, Option<NylRelease>, Profile, String)> {
+    // 1. Render manifests (base pipeline)
+    let (manifests, profile, env_name) = render_manifests(
+        path,
+        component,
+        environment,
+        offline,
+        cli_kube_version,
+        cli_api_versions,
+        max_depth,
+        track_parent,
+    )
+    .await?;
+
+    // 2. Extract NylRelease metadata (before filtering it out)
+    let (nyl_release, manifests) = extract_nyl_release(&manifests)?;
+
+    // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
+    let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
+    for generator in generators {
+        let applications = process_application_generator(&generator, path)?;
+        final_manifests.extend(applications);
+    }
+
+    // 4. Extract and apply Kyverno policies (Global scope only for now)
+    let (policies_by_scope, final_manifests) = extract_all_kyverno_policies(&final_manifests)?;
+    let global_policies = policies_by_scope
+        .get(&KyvernoScope::Global)
+        .cloned()
+        .unwrap_or_default();
+
+    // Warn if non-Global policies are used (not yet supported)
+    let non_global_count: usize = policies_by_scope
+        .iter()
+        .filter(|(scope, _)| **scope != KyvernoScope::Global)
+        .map(|(_, policies)| policies.len())
+        .sum();
+    if non_global_count > 0 {
+        tracing::warn!(
+            "Found {} non-Global Kyverno policies. Only Global scope is currently supported. \
+             Immediate, Subtree, and Root scopes will be supported in a future version.",
+            non_global_count
+        );
+    }
+
+    let final_manifests = if global_policies.is_empty() {
+        final_manifests
+    } else {
+        apply_kyverno_policies(&final_manifests, &global_policies)?
+    };
+
+    Ok((final_manifests, nyl_release, profile, env_name))
+}
+
 /// Shared manifest rendering logic used by render, diff, and apply
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests(
@@ -192,7 +259,7 @@ pub async fn render_manifests(
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let (manifests, _, _) = render_manifests(
+    let (final_manifests, _, _, _) = render_manifests_complete(
         &args.path,
         args.component.as_deref(),
         args.profile.as_deref(),
@@ -203,48 +270,6 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         args.track_parent,
     )
     .await?;
-
-    // Filter out NylRelease (control resource, not applied to the cluster)
-    let manifests: Vec<_> = manifests
-        .into_iter()
-        .filter(|m| !NylRelease::is_nyl_release(m))
-        .collect();
-
-    // Extract ApplicationGenerator resources and filter them from output
-    let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
-
-    // Process each ApplicationGenerator
-    for generator in generators {
-        let applications = process_application_generator(&generator, &args.path)?;
-        final_manifests.extend(applications);
-    }
-
-    // Extract and apply Kyverno policies (Global scope only in render for now)
-    let (policies_by_scope, final_manifests) = extract_all_kyverno_policies(&final_manifests)?;
-    let global_policies = policies_by_scope
-        .get(&KyvernoScope::Global)
-        .cloned()
-        .unwrap_or_default();
-
-    // Warn if non-Global policies are used (not yet supported)
-    let non_global_count: usize = policies_by_scope
-        .iter()
-        .filter(|(scope, _)| **scope != KyvernoScope::Global)
-        .map(|(_, policies)| policies.len())
-        .sum();
-    if non_global_count > 0 {
-        tracing::warn!(
-            "Found {} non-Global Kyverno policies. Only Global scope is currently supported in render command. \
-             Immediate, Subtree, and Root scopes will be supported in a future version.",
-            non_global_count
-        );
-    }
-
-    let final_manifests = if global_policies.is_empty() {
-        final_manifests
-    } else {
-        apply_kyverno_policies(&final_manifests, &global_policies)?
-    };
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())

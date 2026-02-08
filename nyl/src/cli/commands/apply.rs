@@ -3,12 +3,11 @@ use clap::Args;
 use kube::{api::DynamicObject, Client};
 
 use crate::{
-    cli::commands::render::render_manifests,
+    cli::commands::render::render_manifests_complete,
     kubernetes::{
         ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
         ResourceKey, ResourceOrdering,
     },
-    resources::extract_nyl_release,
     NylError, Result,
 };
 
@@ -54,8 +53,8 @@ pub struct ApplyArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
-    // 1. Render desired manifests
-    let (raw_manifests, profile, _env_name) = render_manifests(
+    // 1. Render desired manifests using complete pipeline
+    let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
         &args.path,
         args.component.as_deref(),
         args.profile.as_deref(),
@@ -67,15 +66,12 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     )
     .await?;
 
-    if raw_manifests.is_empty() {
+    if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
         return Ok(());
     }
 
-    // 2. Extract NylRelease metadata and filter it from manifests
-    let (nyl_release, desired_manifests) = extract_nyl_release(&raw_manifests)?;
-
-    // 3. Determine release name and namespace
+    // 2. Determine release name and namespace
     let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
         (release.metadata.name.clone(), release.metadata.namespace.clone())
     } else {
@@ -88,11 +84,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         })?;
         (name, namespace)
     };
-
-    if desired_manifests.is_empty() {
-        tracing::info!("No Kubernetes resources to apply (only NylRelease found)");
-        return Ok(());
-    }
 
     // 4. Initialize Kubernetes client
     let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
