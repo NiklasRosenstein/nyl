@@ -137,7 +137,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     // 10. Apply each resource and track resource keys
     let mut outcomes = Vec::new();
-    let mut errors = Vec::new();
+    let mut failed_count = 0;
     let mut resource_keys = Vec::new();
 
     for manifest in &sorted_manifests {
@@ -150,7 +150,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                 resource_keys.push(key);
             }
             Err(e) => {
-                errors.push(format!("Failed to apply resource: {}", e));
+                // Print error immediately with resource info
+                let prefix = if args.dry_run { "[DRY RUN] " } else { "" };
+                let error_msg = format!("(failed to apply resource: {})", e);
+                println!("{}{} {} {}", prefix, "✗".red().bold(), key, error_msg.red());
+                failed_count += 1;
             }
         }
     }
@@ -210,12 +214,12 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 11. Update release status
-    if errors.is_empty() {
+    if failed_count == 0 {
         release.status = ReleaseStatus::Deployed;
         release.applied_at = Some(Utc::now());
     } else {
         release.status = ReleaseStatus::Failed;
-        release.error = Some(errors.join("; "));
+        release.error = Some(format!("{} resource(s) failed to apply", failed_count));
     }
 
     // 12. Save release state (unless dry run)
@@ -279,12 +283,12 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 14. Print summary
-    print_apply_summary(&outcomes, &errors, &release, args.dry_run, &duplicates);
+    print_apply_summary(&outcomes, &release, args.dry_run, &duplicates);
 
-    if !errors.is_empty() {
+    if failed_count > 0 {
         return Err(NylError::Other(format!(
             "Apply completed with {} error(s)",
-            errors.len()
+            failed_count
         )));
     }
 
@@ -315,7 +319,6 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value, dry
 /// Print apply summary
 fn print_apply_summary(
     outcomes: &[ApplyOutcome],
-    errors: &[String],
     release: &ReleaseState,
     dry_run: bool,
     duplicates: &HashMap<ResourceKey, usize>,
@@ -365,10 +368,6 @@ fn print_apply_summary(
                 print_single_outcome(would_be, true, duplicates);
             }
         }
-    }
-
-    for error in errors {
-        println!("{}✗ {}", prefix, error);
     }
 
     println!();
