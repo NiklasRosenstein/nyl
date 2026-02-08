@@ -37,16 +37,16 @@ impl HelmTemplateExecutor {
         self
     }
 
-    /// Build a helm template command
+    /// Build a Helm template command
     ///
-    /// Builds the helm template command with all necessary arguments.
+    /// Builds the Helm template command with all necessary arguments.
     /// Used internally by template() method and for testing.
     ///
     /// # Arguments
     /// * `resolved` - Resolved chart reference
     /// * `release_name` - Helm release name
     /// * `release_namespace` - Optional release namespace
-    /// * `values_file` - Optional path to values file to pass to helm via --values
+    /// * `values_file` - Optional path to values file to pass to Helm via --values
     ///
     /// # Returns
     /// The built Command (not yet executed)
