@@ -2,6 +2,8 @@ use chrono::Utc;
 use clap::Args;
 use kube::{api::DynamicObject, Client};
 
+use colored::Colorize;
+
 use crate::{
     cli::commands::render::{render_manifests_complete, RenderOptions},
     kubernetes::{
@@ -43,7 +45,7 @@ pub struct ApplyArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 1. Render desired manifests using complete pipeline
-    let (mut desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
+    let (mut desired_manifests, nyl_release, profile, _env_name, duplicates) = render_manifests_complete(
         &args.common.path,
         args.common.only_source_kind.as_deref(),
         args.common.profile.as_deref(),
@@ -61,6 +63,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         &args.common.only_kind,
         &args.common.exclude_kind,
     )?;
+
+    // Display duplicate resources if any
+    if !duplicates.is_empty() {
+        display_duplicates(&duplicates);
+    }
 
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
@@ -380,6 +387,16 @@ fn format_namespace_name(namespace: Option<&str>, name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// Display duplicate resources in a formatted list
+fn display_duplicates(duplicates: &[ResourceKey]) {
+    println!();
+    println!("{}", "Duplicate resources (last occurrence kept):".yellow().bold());
+    for key in duplicates {
+        println!("  {} {}", "!".yellow().bold(), key);
+    }
+    println!();
 }
 
 /// Ensure a namespace exists, creating it if necessary
