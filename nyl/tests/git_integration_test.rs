@@ -484,8 +484,8 @@ fn test_git_manager_fetches_latest_version() {
         .expect("Failed to git commit");
 
     // Second resolution - should fetch and get the latest version
-    let mut manager2 = GitManager::with_cache_dir(cache_dir.path());
-    let result2 = manager2
+    // Reuse the same manager to simulate continuous usage
+    let result2 = manager
         .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
         .unwrap();
 
