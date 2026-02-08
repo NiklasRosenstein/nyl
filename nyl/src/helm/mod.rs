@@ -296,8 +296,15 @@ fn chart_has_dependencies(chart_path: &Path) -> Result<bool> {
 
 /// Check if helm dependencies are already built
 ///
-/// Returns true if the charts/ directory exists and contains .tgz files
+/// Returns true if Chart.lock exists and the charts/ directory contains .tgz files.
+/// This ensures we only skip the build if dependencies were previously built successfully.
 fn dependencies_already_built(chart_path: &Path) -> bool {
+    // Check if Chart.lock exists - this is created only after successful dependency build
+    let chart_lock = chart_path.join("Chart.lock");
+    if !chart_lock.exists() {
+        return false;
+    }
+
     let charts_dir = chart_path.join("charts");
     if !charts_dir.exists() {
         return false;
@@ -657,12 +664,34 @@ dependencies:
         let chart_dir = temp.path().join("chart");
         fs::create_dir_all(&chart_dir).unwrap();
 
+        // Create Chart.lock (required for dependencies to be considered built)
+        fs::write(
+            chart_dir.join("Chart.lock"),
+            "dependencies:\n- name: test\n  version: 1.0.0\n",
+        )
+        .unwrap();
+
         // Create charts directory with a .tgz file
         let charts_dir = chart_dir.join("charts");
         fs::create_dir_all(&charts_dir).unwrap();
         fs::write(charts_dir.join("dependency-1.0.0.tgz"), "fake tgz content").unwrap();
 
         assert!(dependencies_already_built(&chart_dir));
+    }
+
+    #[test]
+    fn test_dependencies_not_built_no_chart_lock() {
+        let temp = TempDir::new().unwrap();
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+
+        // Create charts directory with a .tgz file but NO Chart.lock
+        let charts_dir = chart_dir.join("charts");
+        fs::create_dir_all(&charts_dir).unwrap();
+        fs::write(charts_dir.join("dependency-1.0.0.tgz"), "fake tgz content").unwrap();
+
+        // Should return false because Chart.lock doesn't exist
+        assert!(!dependencies_already_built(&chart_dir));
     }
 
     #[test]
