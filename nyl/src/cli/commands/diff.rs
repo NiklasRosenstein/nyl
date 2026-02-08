@@ -166,12 +166,11 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     }
 
     // 10. Determine exit code
-    // Exit 2 if there were errors
-    if !diff_result.errors.is_empty() {
-        return Err(NylError::Other(format!(
-            "Diff completed with {} error(s)",
-            diff_result.errors.len()
-        )));
+    // Exit 2 if there were errors (including normalization failures)
+    let total_errors = diff_result.total_error_count();
+    if total_errors > 0 {
+        tracing::error!("Diff completed with {} error(s)", total_errors);
+        std::process::exit(2);
     }
 
     // Exit 1 if --exit-code and there are changes
@@ -212,6 +211,14 @@ struct DiffResult {
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
     errors: Vec<(ResourceKey, String)>, // (key, error_message)
+}
+
+impl DiffResult {
+    /// Count total errors including normalization failures
+    fn total_error_count(&self) -> usize {
+        let normalization_errors = self.modified.iter().filter(|(_, _, err)| err.is_some()).count();
+        self.errors.len() + normalization_errors
+    }
 }
 
 /// Compute diff between desired manifests and LIVE cluster state
@@ -345,7 +352,8 @@ async fn compute_diff_from_live(
 
 /// Display summary line with colored counts
 fn print_summary(diff: &DiffResult) {
-    if diff.errors.is_empty() {
+    let total_errors = diff.total_error_count();
+    if total_errors == 0 {
         println!(
             "Summary: {} to add, {} to modify, {} to delete, {} unchanged",
             diff.added.len().to_string().green(),
@@ -360,7 +368,7 @@ fn print_summary(diff: &DiffResult) {
             diff.modified.len().to_string().yellow(),
             diff.deleted.len().to_string().red(),
             diff.unchanged.len(),
-            diff.errors.len().to_string().red()
+            total_errors.to_string().red()
         );
     }
 }
