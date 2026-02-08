@@ -87,41 +87,11 @@ impl ObjectMetadata {
     }
 }
 
-/// Helm release metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseMetadata {
-    /// Release name
-    pub name: String,
-
-    /// Release namespace (overrides metadata.namespace)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-
-    /// Create namespace if it doesn't exist
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub create_namespace: bool,
-}
-
-impl ReleaseMetadata {
-    /// Create release metadata with just a name
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            namespace: None,
-            create_namespace: false,
-        }
-    }
-}
-
 /// HelmChart specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelmChartSpec {
     /// Reference to the chart
     pub chart: ChartRef,
-
-    /// Release metadata
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release: Option<ReleaseMetadata>,
 
     /// Values to pass to the chart
     #[serde(default)]
@@ -132,7 +102,6 @@ impl Default for HelmChartSpec {
     fn default() -> Self {
         Self {
             chart: ChartRef::default(),
-            release: None,
             values: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
@@ -171,13 +140,6 @@ impl HelmChart {
         }
     }
 
-    /// Set the release metadata
-    #[must_use]
-    pub fn with_release(mut self, release: ReleaseMetadata) -> Self {
-        self.spec.release = Some(release);
-        self
-    }
-
     /// Set the values
     #[must_use]
     pub fn with_values(mut self, values: serde_json::Value) -> Self {
@@ -192,21 +154,14 @@ impl HelmChart {
         self
     }
 
-    /// Get the effective namespace (from release or metadata)
-    pub fn effective_namespace(&self) -> Option<&str> {
-        self.spec
-            .release
-            .as_ref()
-            .and_then(|r| r.namespace.as_deref())
-            .or(self.metadata.namespace.as_deref())
+    /// Get the release name (from metadata)
+    pub fn release_name(&self) -> &str {
+        &self.metadata.name
     }
 
-    /// Get the release name (from release metadata or resource name)
-    pub fn effective_release_name(&self) -> &str {
-        self.spec
-            .release
-            .as_ref()
-            .map_or(&self.metadata.name, |r| r.name.as_str())
+    /// Get the release namespace (from metadata)
+    pub fn release_namespace(&self) -> Option<&str> {
+        self.metadata.namespace.as_deref()
     }
 }
 
@@ -253,17 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn test_release_metadata() {
-        let mut release = ReleaseMetadata::new("my-release");
-        release.namespace = Some("prod".to_string());
-        release.create_namespace = true;
-
-        assert_eq!(release.name, "my-release");
-        assert_eq!(release.namespace, Some("prod".to_string()));
-        assert!(release.create_namespace);
-    }
-
-    #[test]
     fn test_helm_chart_new() {
         let chart_ref = ChartRef {
             name: Some("./charts/app".to_string()),
@@ -285,50 +229,15 @@ mod tests {
             ..Default::default()
         };
 
-        let values = serde_json::json!({"replicas": 3, "image": "nginx:latest"});
+        let values = serde_json::json!({"replicas": 3});
 
         let helm_chart = HelmChart::new("my-app", chart_ref)
             .with_namespace("production")
-            .with_release(ReleaseMetadata::new("my-release"))
             .with_values(values.clone());
 
-        assert_eq!(helm_chart.metadata.namespace, Some("production".to_string()));
-        assert_eq!(helm_chart.effective_release_name(), "my-release");
+        assert_eq!(helm_chart.release_name(), "my-app");
+        assert_eq!(helm_chart.release_namespace(), Some("production"));
         assert_eq!(helm_chart.spec.values, values);
-    }
-
-    #[test]
-    fn test_effective_namespace() {
-        let chart_ref = ChartRef::default();
-
-        // No namespace set
-        let chart1 = HelmChart::new("app", chart_ref.clone());
-        assert!(chart1.effective_namespace().is_none());
-
-        // Namespace in metadata
-        let chart2 = HelmChart::new("app", chart_ref.clone()).with_namespace("ns1");
-        assert_eq!(chart2.effective_namespace(), Some("ns1"));
-
-        // Namespace in release (takes priority)
-        let mut release = ReleaseMetadata::new("rel");
-        release.namespace = Some("ns2".to_string());
-        let chart3 = HelmChart::new("app", chart_ref)
-            .with_namespace("ns1")
-            .with_release(release);
-        assert_eq!(chart3.effective_namespace(), Some("ns2"));
-    }
-
-    #[test]
-    fn test_effective_release_name() {
-        let chart_ref = ChartRef::default();
-
-        // No release metadata - uses resource name
-        let chart1 = HelmChart::new("my-app", chart_ref.clone());
-        assert_eq!(chart1.effective_release_name(), "my-app");
-
-        // With release metadata
-        let chart2 = HelmChart::new("my-app", chart_ref).with_release(ReleaseMetadata::new("custom-release"));
-        assert_eq!(chart2.effective_release_name(), "custom-release");
     }
 
     #[test]
@@ -365,7 +274,6 @@ mod tests {
     #[test]
     fn test_helm_chart_spec_defaults() {
         let spec = HelmChartSpec::default();
-        assert!(spec.release.is_none());
         assert!(spec.values.is_object());
     }
 }

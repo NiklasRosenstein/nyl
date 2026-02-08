@@ -9,7 +9,7 @@
 /// Phase 3: Template rendering and full generation pipeline
 use crate::components::{Component, ComponentRegistry, HelmComponent};
 use crate::config::ProjectConfig;
-use crate::resources::{ChartRef, HelmChart, ReleaseMetadata};
+use crate::resources::{ChartRef, HelmChart};
 use crate::Result;
 use std::path::PathBuf;
 
@@ -109,10 +109,6 @@ impl Generator {
         // Set values
         helm_chart = helm_chart.with_values(values.clone());
 
-        // Create default release metadata
-        let release = ReleaseMetadata::new(name);
-        helm_chart = helm_chart.with_release(release);
-
         Ok(helm_chart)
     }
 
@@ -186,10 +182,6 @@ fn instantiate_helm_component(component: &HelmComponent, name: &str, values: &se
     // Set values
     helm_chart = helm_chart.with_values(values.clone());
 
-    // Create default release metadata
-    let release = ReleaseMetadata::new(name);
-    helm_chart = helm_chart.with_release(release);
-
     Ok(helm_chart)
 }
 
@@ -262,7 +254,7 @@ mod tests {
         assert_eq!(helm_chart.api_version, "v1.example.io");
         assert_eq!(helm_chart.kind, "WebApp");
         assert_eq!(helm_chart.spec.values["replicas"], 3);
-        assert_eq!(helm_chart.effective_release_name(), "my-webapp");
+        assert_eq!(helm_chart.release_name(), "my-webapp");
     }
 
     #[test]

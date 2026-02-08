@@ -91,7 +91,8 @@ See the [examples directory](../../../../examples/helm-chart-shortcuts/) for mor
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
-  name: string              # Chart instance name
+  name: string              # Helm release name
+  namespace: string         # Target namespace (optional, defaults to "default")
 spec:
   chart:                    # Chart reference (choose one method)
     # Universal fields:
@@ -104,10 +105,6 @@ spec:
     # - OCI: repository starts with "oci://" (e.g., "oci://ghcr.io/...")
     # - Helm: plain HTTPS URL (e.g., "https://charts.example.com")
     # - Local: no repository, name is filesystem path
-
-  release:                  # Optional release configuration
-    name: string            # Release name (default: metadata.name)
-    namespace: string       # Target namespace
 
   values: object            # Chart values (merged with profile values)
 
@@ -126,12 +123,10 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: default
 spec:
   chart:
     name: ./charts/nginx
-  release:
-    name: nginx
-    namespace: default
 ```
 
 ### Chart Name
@@ -143,12 +138,10 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: default
 spec:
   chart:
     name: nginx
-  release:
-    name: nginx
-    namespace: default
 ```
 
 Configure search paths in `nyl.toml`:
@@ -166,14 +159,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: default
 spec:
   chart:
     repository: git+https://github.com/bitnami/charts.git
     version: main
     name: bitnami/nginx
-  release:
-    name: nginx
-    namespace: default
 ```
 
 **Git Parameters:**
@@ -222,18 +213,49 @@ See [Git Integration](../../git-integration.md) for more details on Git support.
 
 ## Release Configuration
 
-The `release` section configures the Helm release:
+The Helm release is configured via the `metadata` fields:
 
 ```yaml
-spec:
-  release:
-    name: myapp           # Helm release name
-    namespace: production # Target namespace
+metadata:
+  name: myapp           # Helm release name
+  namespace: production # Target namespace
 ```
 
 **Defaults:**
-- `name`: Uses `metadata.name` if not specified
-- `namespace`: Uses `NylRelease.metadata.namespace` if present, otherwise `default`
+- `namespace`: Uses `default` if not specified
+
+### Creating Namespaces
+
+If you need to create the namespace before deploying the chart, add a Namespace resource:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+---
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: myapp
+  namespace: production
+spec:
+  chart:
+    name: ./charts/myapp
+  values:
+    replicas: 3
+```
+
+When using ArgoCD, you can alternatively enable automatic namespace creation:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+```
 
 ## Values
 
@@ -317,14 +339,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: myapp
+  namespace: production
 spec:
   chart:
     repository: git+https://github.com/company/charts.git
     version: v2.1.0
     name: applications/myapp
-  release:
-    name: myapp
-    namespace: production
   values:
     replicas: 3
     image:

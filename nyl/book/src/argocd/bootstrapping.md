@@ -72,6 +72,11 @@ metadata:
   name: argocd
   namespace: argocd
 ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+---
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
@@ -82,10 +87,6 @@ spec:
     repository: https://argoproj.github.io/argo-helm
     name: argo-cd
     version: "5.51.6"
-  release:
-    name: argocd
-    namespace: argocd
-    createNamespace: true
   values:
     # ArgoCD configuration
     server:
@@ -195,14 +196,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: default
 spec:
   chart:
     repository: https://charts.bitnami.com/bitnami
     name: nginx
     version: "15.4.4"
-  release:
-    name: nginx
-    namespace: default
   values:
     replicaCount: 2
     service:
@@ -222,14 +221,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: redis
+  namespace: default
 spec:
   chart:
     repository: https://charts.bitnami.com/bitnami
     name: redis
     version: "18.4.0"
-  release:
-    name: redis
-    namespace: default
   values:
     architecture: standalone
     auth:
@@ -413,19 +410,21 @@ metadata:
   name: postgres
   namespace: database
 ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+---
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: postgres
+  namespace: database
 spec:
   chart:
     repository: https://charts.bitnami.com/bitnami
     name: postgresql
     version: "13.2.24"
-  release:
-    name: postgres
-    namespace: database
-    createNamespace: true
   values:
     auth:
       username: myuser

@@ -331,14 +331,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: my-app
+  namespace: default
 spec:
   chart:
     repository: git+git@github.com:myorg/private-charts.git
     version: main
     name: charts/my-app
-  release:
-    name: my-app
-    namespace: default
 ```
 
 Nyl will:

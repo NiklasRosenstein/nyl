@@ -280,9 +280,9 @@ fn test_component_to_helmchart_flow() {
     assert_eq!(helm_chart.spec.values["image"], "nginx:1.21");
     assert_eq!(helm_chart.spec.values["port"], 8080);
 
-    // Verify release metadata
-    let release = helm_chart.spec.release.as_ref().unwrap();
-    assert_eq!(release.name, "my-webapp");
+    // Verify release name comes from metadata
+    assert_eq!(helm_chart.release_name(), "my-webapp");
+    assert_eq!(helm_chart.metadata.name, "my-webapp");
 
     // Verify chart name (path)
     assert!(helm_chart.spec.chart.name.is_some());
