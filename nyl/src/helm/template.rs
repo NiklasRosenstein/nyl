@@ -1,6 +1,5 @@
 /// Helm template command building and execution
 use super::ResolvedChart;
-use crate::resources::ReleaseMetadata;
 use crate::{NylError, Result};
 use std::process::Command;
 
@@ -45,7 +44,8 @@ impl HelmTemplateExecutor {
     ///
     /// # Arguments
     /// * `resolved` - Resolved chart reference
-    /// * `release` - Release metadata
+    /// * `release_name` - Helm release name
+    /// * `release_namespace` - Optional release namespace
     /// * `values` - Values to pass to the chart
     ///
     /// # Returns
@@ -53,23 +53,19 @@ impl HelmTemplateExecutor {
     pub fn build_command(
         &self,
         resolved: &ResolvedChart,
-        release: &ReleaseMetadata,
+        release_name: &str,
+        release_namespace: Option<&str>,
         values: &serde_json::Value,
     ) -> Result<Command> {
         let mut cmd = Command::new("helm");
         cmd.arg("template");
-        cmd.arg(&release.name);
+        cmd.arg(release_name);
         cmd.arg(&resolved.path);
 
         // Add namespace if specified
-        if let Some(ref namespace) = release.namespace {
+        if let Some(namespace) = release_namespace {
             cmd.arg("--namespace");
             cmd.arg(namespace);
-        }
-
-        // Add create-namespace flag if set
-        if release.create_namespace {
-            cmd.arg("--create-namespace");
         }
 
         // Add kube-version if specified
@@ -96,18 +92,19 @@ impl HelmTemplateExecutor {
 
     /// Execute the helm template command
     ///
-    /// Executes helm template with the given chart, release metadata, and values.
+    /// Executes helm template with the given chart, release name, namespace, and values.
     /// Returns a list of rendered Kubernetes manifests as JSON values.
     pub fn template(
         &self,
         resolved: &ResolvedChart,
-        release: &ReleaseMetadata,
+        release_name: &str,
+        release_namespace: Option<&str>,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
         tracing::debug!(
             "Rendering Helm chart: {} (release: {})",
             resolved.path.display(),
-            release.name
+            release_name
         );
 
         // Write values to temp file if not empty
@@ -120,18 +117,13 @@ impl HelmTemplateExecutor {
         // Build command (without --set-json, we'll use --values)
         let mut cmd = Command::new("helm");
         cmd.arg("template");
-        cmd.arg(&release.name);
+        cmd.arg(release_name);
         cmd.arg(&resolved.path);
 
         // Add namespace if specified
-        if let Some(ref namespace) = release.namespace {
+        if let Some(namespace) = release_namespace {
             cmd.arg("--namespace");
             cmd.arg(namespace);
-        }
-
-        // Add create-namespace flag if set
-        if release.create_namespace {
-            cmd.arg("--create-namespace");
         }
 
         // Add kube-version if specified
@@ -292,10 +284,9 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
+        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -313,38 +304,16 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let mut release = ReleaseMetadata::new("my-release");
-        release.namespace = Some("production".to_string());
-
         let values = serde_json::json!({});
 
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
+        let cmd = executor
+            .build_command(&resolved, "my-release", Some("production"), &values)
+            .unwrap();
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
         assert!(args.contains(&"--namespace".to_string()));
         assert!(args.contains(&"production".to_string()));
-    }
-
-    #[test]
-    fn test_build_command_with_create_namespace() {
-        let executor = HelmTemplateExecutor::new();
-
-        let resolved = ResolvedChart {
-            path: PathBuf::from("/charts/nginx"),
-            chart_ref: ChartRef::default(),
-        };
-
-        let mut release = ReleaseMetadata::new("my-release");
-        release.create_namespace = true;
-
-        let values = serde_json::json!({});
-
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
-
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
-
-        assert!(args.contains(&"--create-namespace".to_string()));
     }
 
     #[test]
@@ -356,10 +325,9 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
+        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -376,10 +344,9 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({});
 
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
+        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -397,7 +364,6 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let release = ReleaseMetadata::new("my-release");
         let values = serde_json::json!({
             "replicaCount": 3,
             "image": {
@@ -406,7 +372,7 @@ mod tests {
             }
         });
 
-        let cmd = executor.build_command(&resolved, &release, &values).unwrap();
+        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 

@@ -13,7 +13,7 @@ use crate::{
     resources::{
         component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
         is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, KyvernoScope,
-        NylComponent, NylRelease, ReleaseMetadata,
+        NylComponent, NylRelease,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -512,7 +512,6 @@ fn generate_resource(
 
             let chart_ref = component_kind_to_chart_ref(&parsed);
 
-            let release_name = component.metadata.name.clone();
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
             let component_kind = component.kind.clone();
@@ -524,11 +523,6 @@ fn generate_resource(
                 metadata: component.metadata,
                 spec: crate::resources::HelmChartSpec {
                     chart: chart_ref,
-                    release: Some(ReleaseMetadata {
-                        name: release_name,
-                        namespace: release_namespace.clone(),
-                        create_namespace: false,
-                    }),
                     values: component.spec,
                 },
             };
@@ -566,7 +560,6 @@ fn generate_resource(
                 )));
             }
 
-            let release_name = component.metadata.name.clone();
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
             let component_kind = component.kind.clone();
@@ -581,11 +574,6 @@ fn generate_resource(
                         name: Some(chart_dir.to_string_lossy().into_owned()),
                         ..Default::default()
                     },
-                    release: Some(ReleaseMetadata {
-                        name: release_name,
-                        namespace: release_namespace.clone(),
-                        create_namespace: false,
-                    }),
                     values: component.spec,
                 },
             };
@@ -659,17 +647,16 @@ fn render_helm_chart(
     // Merge context values into chart values
     let merged_values = deep_merge_value(Some(chart.spec.values.clone()), context.values.clone());
 
-    let release = chart
-        .spec
-        .release
-        .clone()
-        .unwrap_or_else(|| ReleaseMetadata::new(chart.effective_release_name()));
-
     let executor = HelmTemplateExecutor::new()
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec());
 
-    executor.template(&resolved, &release, &merged_values)
+    executor.template(
+        &resolved,
+        chart.release_name(),
+        chart.release_namespace(),
+        &merged_values,
+    )
 }
 
 /// Output manifests in the specified format

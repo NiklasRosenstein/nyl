@@ -9,13 +9,11 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: argocd
+  namespace: argocd
 spec:
   chart:
     repository: "oci://ghcr.io/{{ env.NYL_CHART_OWNER | default('niklasrosenstein') }}/nyl/chart"
     version: "{{ env.NYL_CHART_VERSION | default('0.1.0') }}"
-  release:
-    name: argocd
-    namespace: argocd
   values:
     nyl:
       image:

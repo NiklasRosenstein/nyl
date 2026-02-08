@@ -60,14 +60,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: default
 spec:
   chart:
     repository: git+https://github.com/bitnami/charts.git
     version: main
     name: bitnami/nginx
-  release:
-    name: nginx
-    namespace: default
 ```
 
 ### Parameters
@@ -184,14 +182,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: private-app
+  namespace: default
 spec:
   chart:
     repository: git+git@github.com:myorg/private-charts.git
     version: main
     name: charts/app
-  release:
-    name: private-app
-    namespace: default
 ```
 
 If an ArgoCD repository secret exists for `github.com`, Nyl will automatically use those credentials.
@@ -315,15 +311,13 @@ rm -rf $NYL_CACHE_DIR/git/worktrees/{hash}-*
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
-  name: app-production
+  name: myapp
+  namespace: production
 spec:
   chart:
     repository: git+https://github.com/company/charts.git
     version: stable
     name: applications/myapp
-  release:
-    name: myapp
-    namespace: production
   values:
     environment: production
     replicas: 5
@@ -335,15 +329,13 @@ spec:
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
-  name: app-development
+  name: myapp
+  namespace: development
 spec:
   chart:
     repository: git+https://github.com/company/charts.git
     version: develop
     name: applications/myapp
-  release:
-    name: myapp
-    namespace: development
   values:
     environment: development
     replicas: 1
@@ -355,15 +347,13 @@ spec:
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
-  name: app-stable
+  name: myapp
+  namespace: staging
 spec:
   chart:
     repository: git+https://github.com/company/charts.git
     version: v2.1.0
     name: applications/myapp
-  release:
-    name: myapp
-    namespace: staging
 ```
 
 ### ApplicationGenerator with Filtering

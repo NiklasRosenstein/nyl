@@ -122,14 +122,12 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: nginx
+  namespace: web
 spec:
   chart:
     repository: https://charts.bitnami.com/bitnami
     name: nginx
     version: "15.4.4"
-  release:
-    name: nginx      # Uses NylRelease.metadata.name if not specified
-    namespace: web   # Uses NylRelease.metadata.namespace if not specified
   values:
     replicaCount: 2
 ```
