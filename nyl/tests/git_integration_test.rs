@@ -472,16 +472,26 @@ fn test_git_manager_fetches_latest_version() {
 
     // Now update the repository with a new commit on main branch
     fs::write(temp_repo.path().join("test.txt"), "Updated content!").expect("Failed to update file");
-    Command::new("git")
+    let add_output = Command::new("git")
         .args(["add", "."])
         .current_dir(temp_repo.path())
         .output()
-        .expect("Failed to git add");
-    Command::new("git")
+        .expect("Failed to launch git add");
+    assert!(
+        add_output.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = Command::new("git")
         .args(["commit", "-m", "Update content"])
         .current_dir(temp_repo.path())
         .output()
-        .expect("Failed to git commit");
+        .expect("Failed to launch git commit");
+    assert!(
+        commit_output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
 
     // Second resolution - should fetch and get the latest version
     // Reuse the same manager to simulate continuous usage

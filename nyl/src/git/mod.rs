@@ -140,9 +140,12 @@ impl GitManager {
         let bare_repo = self.get_or_create_bare_repo(url)?;
 
         // Always fetch latest refs to ensure we have the most recent version
+        // Fall back to cached refs if fetch fails (e.g., offline scenarios)
         {
             let repo = bare_repo.lock().unwrap();
-            repo.fetch_refs()?;
+            if let Err(e) = repo.fetch_refs() {
+                tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
+            }
         }
 
         // Resolve ref to OID
