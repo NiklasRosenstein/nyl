@@ -3,6 +3,18 @@ use super::ResolvedChart;
 use crate::{NylError, Result};
 use std::process::Command;
 
+/// Parameters for building a Helm template command
+pub struct HelmTemplateParams<'a> {
+    /// Resolved chart reference
+    pub resolved: &'a ResolvedChart,
+    /// Helm release name
+    pub release_name: &'a str,
+    /// Optional release namespace
+    pub release_namespace: Option<&'a str>,
+    /// Optional path to values file to pass to Helm via --values
+    pub values_file: Option<&'a std::path::Path>,
+}
+
 /// Helm template command executor
 ///
 /// Builds helm template commands and executes them to generate Kubernetes manifests
@@ -37,33 +49,24 @@ impl HelmTemplateExecutor {
         self
     }
 
-    /// Build a helm template command
+    /// Build a Helm template command
     ///
-    /// Builds the helm template command with all necessary arguments.
-    /// Used internally by template() method.
+    /// Builds the Helm template command with all necessary arguments.
+    /// Used internally by template() method and for testing.
     ///
     /// # Arguments
-    /// * `resolved` - Resolved chart reference
-    /// * `release_name` - Helm release name
-    /// * `release_namespace` - Optional release namespace
-    /// * `values` - Values to pass to the chart
+    /// * `params` - Parameters for building the command
     ///
     /// # Returns
     /// The built Command (not yet executed)
-    pub fn build_command(
-        &self,
-        resolved: &ResolvedChart,
-        release_name: &str,
-        release_namespace: Option<&str>,
-        values: &serde_json::Value,
-    ) -> Result<Command> {
+    pub fn build_command(&self, params: HelmTemplateParams) -> Command {
         let mut cmd = Command::new("helm");
         cmd.arg("template");
-        cmd.arg(release_name);
-        cmd.arg(&resolved.path);
+        cmd.arg(params.release_name);
+        cmd.arg(&params.resolved.path);
 
         // Add namespace if specified
-        if let Some(namespace) = release_namespace {
+        if let Some(namespace) = params.release_namespace {
             cmd.arg("--namespace");
             cmd.arg(namespace);
         }
@@ -80,14 +83,13 @@ impl HelmTemplateExecutor {
             cmd.arg(api_version);
         }
 
-        // Note: build_command uses --set-json for testing
-        // The template() method uses --values with a temp file for better handling
-        if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
-            cmd.arg("--set-json");
-            cmd.arg(serde_json::to_string(values)?);
+        // Add values file if provided
+        if let Some(file_path) = params.values_file {
+            cmd.arg("--values");
+            cmd.arg(file_path);
         }
 
-        Ok(cmd)
+        cmd
     }
 
     /// Execute the helm template command
@@ -114,35 +116,13 @@ impl HelmTemplateExecutor {
             None
         };
 
-        // Build command (without --set-json, we'll use --values)
-        let mut cmd = Command::new("helm");
-        cmd.arg("template");
-        cmd.arg(release_name);
-        cmd.arg(&resolved.path);
-
-        // Add namespace if specified
-        if let Some(namespace) = release_namespace {
-            cmd.arg("--namespace");
-            cmd.arg(namespace);
-        }
-
-        // Add kube-version if specified
-        if let Some(ref version) = self.kube_version {
-            cmd.arg("--kube-version");
-            cmd.arg(version);
-        }
-
-        // Add API versions
-        for api_version in &self.api_versions {
-            cmd.arg("--api-versions");
-            cmd.arg(api_version);
-        }
-
-        // Add values file if we have one
-        if let Some(ref file) = values_file {
-            cmd.arg("--values");
-            cmd.arg(file.path());
-        }
+        // Build command using shared build_command method
+        let mut cmd = self.build_command(HelmTemplateParams {
+            resolved,
+            release_name,
+            release_namespace,
+            values_file: values_file.as_ref().map(|f| f.path()),
+        });
 
         // Log the command being executed
         tracing::debug!("Executing helm command: {:?}", cmd);
@@ -284,9 +264,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let values = serde_json::json!({});
-
-        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -304,11 +287,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let values = serde_json::json!({});
-
-        let cmd = executor
-            .build_command(&resolved, "my-release", Some("production"), &values)
-            .unwrap();
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: Some("production"),
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -325,9 +309,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let values = serde_json::json!({});
-
-        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -344,9 +331,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let values = serde_json::json!({});
-
-        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -357,6 +347,7 @@ mod tests {
 
     #[test]
     fn test_build_command_with_values() {
+        use std::io::Write;
         let executor = HelmTemplateExecutor::new();
 
         let resolved = ResolvedChart {
@@ -364,20 +355,23 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let values = serde_json::json!({
-            "replicaCount": 3,
-            "image": {
-                "repository": "nginx",
-                "tag": "1.21"
-            }
-        });
+        // Create a temporary values file
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        let values_yaml = "replicaCount: 3\nimage:\n  repository: nginx\n  tag: \"1.21\"\n";
+        temp_file.write_all(values_yaml.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
 
-        let cmd = executor.build_command(&resolved, "my-release", None, &values).unwrap();
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: Some(temp_file.path()),
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
-        // Using --set-json in build_command (template() uses --values)
-        assert!(args.contains(&"--set-json".to_string()));
+        // Now uses --values with file path instead of --set-json
+        assert!(args.contains(&"--values".to_string()));
     }
 
     #[test]
