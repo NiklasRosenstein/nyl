@@ -673,7 +673,8 @@ mod tests {
 
         let result = KubernetesReleaseStorage::decode_and_decompress(&corrupted_bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("corrupted"));
+        // Assert on the stable wrapper error message rather than backend-specific wording
+        assert!(result.unwrap_err().to_string().contains("Decompression failed"));
     }
 
     #[test]
