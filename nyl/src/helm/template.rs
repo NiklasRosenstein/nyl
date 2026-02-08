@@ -40,7 +40,7 @@ impl HelmTemplateExecutor {
     /// Build a helm template command
     ///
     /// Builds the helm template command with all necessary arguments.
-    /// Used internally by template() method.
+    /// Used internally by template() method and for testing.
     ///
     /// # Arguments
     /// * `resolved` - Resolved chart reference
@@ -57,6 +57,27 @@ impl HelmTemplateExecutor {
         release_namespace: Option<&str>,
         values: &serde_json::Value,
     ) -> Result<Command> {
+        let mut cmd = self.build_base_command(resolved, release_name, release_namespace);
+
+        // Note: build_command uses --set-json for testing
+        // The template() method uses --values with a temp file for better handling
+        if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
+            cmd.arg("--set-json");
+            cmd.arg(serde_json::to_string(values)?);
+        }
+
+        Ok(cmd)
+    }
+
+    /// Build base helm template command without values
+    ///
+    /// Internal helper to build the common parts of the helm template command.
+    fn build_base_command(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+    ) -> Command {
         let mut cmd = Command::new("helm");
         cmd.arg("template");
         cmd.arg(release_name);
@@ -80,14 +101,7 @@ impl HelmTemplateExecutor {
             cmd.arg(api_version);
         }
 
-        // Note: build_command uses --set-json for testing
-        // The template() method uses --values with a temp file for better handling
-        if !values.is_null() && values.as_object().is_some_and(|o| !o.is_empty()) {
-            cmd.arg("--set-json");
-            cmd.arg(serde_json::to_string(values)?);
-        }
-
-        Ok(cmd)
+        cmd
     }
 
     /// Execute the helm template command
@@ -114,31 +128,10 @@ impl HelmTemplateExecutor {
             None
         };
 
-        // Build command (without --set-json, we'll use --values)
-        let mut cmd = Command::new("helm");
-        cmd.arg("template");
-        cmd.arg(release_name);
-        cmd.arg(&resolved.path);
+        // Build base command (reusing common command construction)
+        let mut cmd = self.build_base_command(resolved, release_name, release_namespace);
 
-        // Add namespace if specified
-        if let Some(namespace) = release_namespace {
-            cmd.arg("--namespace");
-            cmd.arg(namespace);
-        }
-
-        // Add kube-version if specified
-        if let Some(ref version) = self.kube_version {
-            cmd.arg("--kube-version");
-            cmd.arg(version);
-        }
-
-        // Add API versions
-        for api_version in &self.api_versions {
-            cmd.arg("--api-versions");
-            cmd.arg(api_version);
-        }
-
-        // Add values file if we have one
+        // Add values file if we have one (instead of --set-json)
         if let Some(ref file) = values_file {
             cmd.arg("--values");
             cmd.arg(file.path());

@@ -651,12 +651,10 @@ fn render_helm_chart(
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec());
 
-    executor.template(
-        &resolved,
-        chart.release_name(),
-        chart.release_namespace(),
-        &merged_values,
-    )
+    // Default namespace to "default" for deterministic rendering
+    let namespace = chart.release_namespace().or(Some("default"));
+
+    executor.template(&resolved, chart.release_name(), namespace, &merged_values)
 }
 
 /// Output manifests in the specified format

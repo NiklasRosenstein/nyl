@@ -92,7 +92,7 @@ apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
   name: string              # Helm release name
-  namespace: string         # Target namespace (optional, default: "default")
+  namespace: string         # Target namespace (optional, defaults to "default")
 spec:
   chart:                    # Chart reference (choose one method)
     # Universal fields:
