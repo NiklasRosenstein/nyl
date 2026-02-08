@@ -3,6 +3,18 @@ use super::ResolvedChart;
 use crate::{NylError, Result};
 use std::process::Command;
 
+/// Parameters for building a Helm template command
+pub struct HelmTemplateParams<'a> {
+    /// Resolved chart reference
+    pub resolved: &'a ResolvedChart,
+    /// Helm release name
+    pub release_name: &'a str,
+    /// Optional release namespace
+    pub release_namespace: Option<&'a str>,
+    /// Optional path to values file to pass to Helm via --values
+    pub values_file: Option<&'a std::path::Path>,
+}
+
 /// Helm template command executor
 ///
 /// Builds helm template commands and executes them to generate Kubernetes manifests
@@ -43,27 +55,18 @@ impl HelmTemplateExecutor {
     /// Used internally by template() method and for testing.
     ///
     /// # Arguments
-    /// * `resolved` - Resolved chart reference
-    /// * `release_name` - Helm release name
-    /// * `release_namespace` - Optional release namespace
-    /// * `values_file` - Optional path to values file to pass to Helm via --values
+    /// * `params` - Parameters for building the command
     ///
     /// # Returns
     /// The built Command (not yet executed)
-    pub fn build_command(
-        &self,
-        resolved: &ResolvedChart,
-        release_name: &str,
-        release_namespace: Option<&str>,
-        values_file: Option<&std::path::Path>,
-    ) -> Command {
+    pub fn build_command(&self, params: HelmTemplateParams) -> Command {
         let mut cmd = Command::new("helm");
         cmd.arg("template");
-        cmd.arg(release_name);
-        cmd.arg(&resolved.path);
+        cmd.arg(params.release_name);
+        cmd.arg(&params.resolved.path);
 
         // Add namespace if specified
-        if let Some(namespace) = release_namespace {
+        if let Some(namespace) = params.release_namespace {
             cmd.arg("--namespace");
             cmd.arg(namespace);
         }
@@ -81,7 +84,7 @@ impl HelmTemplateExecutor {
         }
 
         // Add values file if provided
-        if let Some(file_path) = values_file {
+        if let Some(file_path) = params.values_file {
             cmd.arg("--values");
             cmd.arg(file_path);
         }
@@ -114,12 +117,12 @@ impl HelmTemplateExecutor {
         };
 
         // Build command using shared build_command method
-        let mut cmd = self.build_command(
+        let mut cmd = self.build_command(HelmTemplateParams {
             resolved,
             release_name,
             release_namespace,
-            values_file.as_ref().map(|f| f.path()),
-        );
+            values_file: values_file.as_ref().map(|f| f.path()),
+        });
 
         // Log the command being executed
         tracing::debug!("Executing helm command: {:?}", cmd);
@@ -261,7 +264,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let cmd = executor.build_command(&resolved, "my-release", None, None);
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -279,7 +287,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let cmd = executor.build_command(&resolved, "my-release", Some("production"), None);
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: Some("production"),
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -296,7 +309,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let cmd = executor.build_command(&resolved, "my-release", None, None);
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -313,7 +331,12 @@ mod tests {
             chart_ref: ChartRef::default(),
         };
 
-        let cmd = executor.build_command(&resolved, "my-release", None, None);
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
@@ -338,7 +361,12 @@ mod tests {
         temp_file.write_all(values_yaml.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        let cmd = executor.build_command(&resolved, "my-release", None, Some(temp_file.path()));
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: Some(temp_file.path()),
+        });
 
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
 
