@@ -139,20 +139,19 @@ impl GitManager {
         // Get or create bare repository
         let bare_repo = self.get_or_create_bare_repo(url)?;
 
+        // Always fetch latest refs to ensure we have the most recent version
+        // Fall back to cached refs if fetch fails (e.g., offline scenarios)
+        {
+            let repo = bare_repo.lock().unwrap();
+            if let Err(e) = repo.fetch_refs() {
+                tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
+            }
+        }
+
         // Resolve ref to OID
         let oid = {
             let repo = bare_repo.lock().unwrap();
-
-            // Try to resolve the ref
-            match repo.resolve_ref(git_ref) {
-                Ok(oid) => oid,
-                Err(GitError::RefNotFound { .. }) => {
-                    // Ref might be new, fetch all refs and try again
-                    repo.fetch_refs()?;
-                    repo.resolve_ref(git_ref)?
-                }
-                Err(e) => return Err(e),
-            }
+            repo.resolve_ref(git_ref)?
         };
 
         // Check if we have the commit objects, fetch if needed

@@ -449,3 +449,60 @@ fn test_git_chart_with_tag_version() {
     assert!(resolved.path.exists());
     assert!(resolved.path.join("Chart.yaml").exists());
 }
+
+#[test]
+fn test_git_manager_fetches_latest_version() {
+    setup_test_env();
+
+    // Create a test repository
+    let temp_repo = TempDir::new().unwrap();
+    create_test_git_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+
+    // First resolution - this will cache the repository
+    let mut manager = GitManager::with_cache_dir(cache_dir.path());
+    let result1 = manager
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
+        .unwrap();
+
+    // Verify initial content
+    let content1 = fs::read_to_string(result1.join("test.txt")).unwrap();
+    assert_eq!(content1, "Hello, World!");
+
+    // Now update the repository with a new commit on main branch
+    fs::write(temp_repo.path().join("test.txt"), "Updated content!").expect("Failed to update file");
+    let add_output = Command::new("git")
+        .args(["add", "."])
+        .current_dir(temp_repo.path())
+        .output()
+        .expect("Failed to launch git add");
+    assert!(
+        add_output.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = Command::new("git")
+        .args(["commit", "-m", "Update content"])
+        .current_dir(temp_repo.path())
+        .output()
+        .expect("Failed to launch git commit");
+    assert!(
+        commit_output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Second resolution - should fetch and get the latest version
+    // Reuse the same manager to simulate continuous usage
+    let result2 = manager
+        .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
+        .unwrap();
+
+    // Verify that we got the updated content
+    let content2 = fs::read_to_string(result2.join("test.txt")).unwrap();
+    assert_eq!(
+        content2, "Updated content!",
+        "Should fetch and checkout the latest version"
+    );
+}
