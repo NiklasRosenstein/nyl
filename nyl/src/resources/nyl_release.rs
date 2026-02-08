@@ -10,6 +10,7 @@ use crate::{NylError, Result};
 
 /// NylRelease resource for specifying release metadata
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct NylRelease {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
@@ -21,6 +22,7 @@ pub struct NylRelease {
 
 /// Metadata for NylRelease
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct NylReleaseMetadata {
     /// Release name
     pub name: String,
@@ -30,6 +32,7 @@ pub struct NylReleaseMetadata {
 
 /// Spec for NylRelease (currently empty, reserved for future use)
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct NylReleaseSpec {
     // Future: additional metadata like labels, annotations
 }
@@ -235,5 +238,21 @@ mod tests {
         let result = extract_nyl_release(&manifests);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Multiple NylRelease"));
+    }
+
+    #[test]
+    fn test_nyl_release_rejects_unknown_fields() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: test
+  namespace: default
+unknownField: should-fail
+";
+        let result: std::result::Result<NylRelease, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
     }
 }

@@ -7,7 +7,10 @@
 use sha2::{Digest, Sha256};
 
 pub mod fs;
+pub mod source_context;
+
 pub use fs::{find_config_file, resolve_path, resolve_paths};
+pub use source_context::SourceContext;
 
 /// Compute SHA256 hash of a string
 pub fn compute_hash(input: &str) -> String {

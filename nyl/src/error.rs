@@ -39,6 +39,13 @@ pub enum NylError {
     #[error("Validation error: {0}\nHint: Fix the validation issues listed above. Use 'nyl validate' to see detailed validation results.")]
     Validation(String),
 
+    #[error("Resource validation error in {file}: {message}\nHint: {hint}")]
+    ResourceValidation {
+        file: String,
+        message: String,
+        hint: String,
+    },
+
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 
@@ -73,6 +80,15 @@ impl NylError {
     /// Create a Kubernetes error with context
     pub fn kubernetes(msg: impl Into<String>) -> Self {
         NylError::Kubernetes(msg.into())
+    }
+
+    /// Create a resource validation error with file context
+    pub fn resource_validation(file: impl Into<String>, message: impl Into<String>, hint: impl Into<String>) -> Self {
+        NylError::ResourceValidation {
+            file: file.into(),
+            message: message.into(),
+            hint: hint.into(),
+        }
     }
 
     /// Returns true if this error is related to configuration
@@ -182,5 +198,19 @@ mod tests {
         let display = format!("{}", helm_err);
         assert!(display.contains("Hint:"));
         assert!(display.contains("helm version"));
+    }
+
+    #[test]
+    fn test_resource_validation_error() {
+        let err = NylError::resource_validation(
+            "manifests/app.yaml",
+            "Unknown field 'spec.unknownField'",
+            "Check the HelmChart API reference",
+        );
+        let display = format!("{}", err);
+        assert!(display.contains("manifests/app.yaml"));
+        assert!(display.contains("Unknown field"));
+        assert!(display.contains("Hint:"));
+        assert!(display.contains("HelmChart API reference"));
     }
 }
