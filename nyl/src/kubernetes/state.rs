@@ -638,7 +638,7 @@ mod tests {
     fn test_compression_reduces_size() {
         let large_manifest =
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: value\n".repeat(1000);
-        let original_size = large_manifest.as_bytes().len();
+        let original_size = large_manifest.len();
         let compressed = KubernetesReleaseStorage::compress_and_encode(&large_manifest).unwrap();
         let compressed_size = compressed.0.len();
 
