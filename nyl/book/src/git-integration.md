@@ -117,8 +117,6 @@ spec:
     namespace: default
 ```
 
-**Note**: Dependency resolution requires `helm` to be installed and accessible in your PATH.
-
 ### Supported Ref Types
 
 You can reference different types of Git refs:
