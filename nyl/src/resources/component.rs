@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_nyl_component_rejects_unknown_fields() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: components.nyl.niklasrosenstein.github.com/v1
 kind: MyComponent
 metadata:
@@ -401,7 +401,7 @@ metadata:
 spec:
   key: value
 unknownField: should-fail
-"#;
+";
         let result: std::result::Result<NylComponent, _> = serde_norway::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

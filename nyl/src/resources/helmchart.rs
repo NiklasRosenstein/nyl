@@ -296,7 +296,7 @@ unknownField: value
 
     #[test]
     fn test_helm_chart_rejects_unknown_fields() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: HelmChart
 metadata:
@@ -305,7 +305,7 @@ spec:
   chart:
     name: mychart
   unknownField: value
-"#;
+";
         let result: std::result::Result<HelmChart, _> = serde_norway::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

@@ -218,12 +218,12 @@ mod tests {
     #[test]
     fn test_parse_yaml_documents_valid() {
         let ctx = SourceContext::new(PathBuf::from("test.yaml"));
-        let yaml = r#"
+        let yaml = r"
 ---
 key: value
 ---
 another: doc
-"#;
+";
         let result = ctx.parse_yaml_documents(yaml);
         if let Err(e) = &result {
             eprintln!("Parse error: {}", e);

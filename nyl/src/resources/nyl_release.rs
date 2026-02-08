@@ -242,14 +242,14 @@ mod tests {
 
     #[test]
     fn test_nyl_release_rejects_unknown_fields() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: test
   namespace: default
 unknownField: should-fail
-"#;
+";
         let result: std::result::Result<NylRelease, _> = serde_norway::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_application_generator_rejects_unknown_fields() {
-        let yaml = r#"
+        let yaml = r"
 apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
 kind: ApplicationGenerator
 metadata:
@@ -597,7 +597,7 @@ spec:
     repoURL: https://github.com/example/repo
     path: clusters/default
   unknownField: should-fail
-"#;
+";
         let result: std::result::Result<ApplicationGenerator, _> = serde_norway::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
