@@ -55,10 +55,6 @@ pub struct DiffArgs {
     #[arg(long)]
     pub append_release: bool,
 
-    /// Strict mode: fail immediately on first error (exit code 2)
-    #[arg(long)]
-    pub strict: bool,
-
     /// Exit with code 1 if changes are found, 0 if no changes (like git diff --exit-code)
     #[arg(long)]
     pub exit_code: bool,
@@ -148,7 +144,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 7. Compute diff against LIVE cluster state
     let diff_result =
-        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode, args.strict).await?;
+        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode).await?;
 
     // 8. Display errors if any
     if !diff_result.errors.is_empty() {
@@ -227,7 +223,6 @@ async fn compute_diff_from_live(
     desired_manifests: &[serde_json::Value],
     previous_state: Option<&crate::kubernetes::ReleaseState>,
     mode: DiffMode,
-    strict: bool,
 ) -> Result<DiffResult> {
     // Build set of desired resource keys
     let desired_keys: HashSet<ResourceKey> = desired_manifests
@@ -297,23 +292,18 @@ async fn compute_diff_from_live(
                             }
                         },
                         Err(e) => {
-                            if strict {
-                                // In strict mode, fail immediately on errors
-                                return Err(e);
-                            } else {
-                                // In non-strict mode, try raw comparison and annotate with error
-                                let error_msg = format!("failed to normalize resource: {}", e);
-                                match DiffEngine::are_equivalent(manifest, live) {
-                                    Ok(true) => unchanged.push(key),
-                                    Ok(false) => match DiffEngine::diff_yaml(manifest, live) {
-                                        Ok(diff_text) => modified.push((key, diff_text, Some(error_msg))),
-                                        Err(_diff_err) => {
-                                            errors.push((key, error_msg));
-                                        }
-                                    },
-                                    Err(_eq_err) => {
+                            // Try raw comparison and annotate with error
+                            let error_msg = format!("failed to normalize resource: {}", e);
+                            match DiffEngine::are_equivalent(manifest, live) {
+                                Ok(true) => unchanged.push(key),
+                                Ok(false) => match DiffEngine::diff_yaml(manifest, live) {
+                                    Ok(diff_text) => modified.push((key, diff_text, Some(error_msg))),
+                                    Err(_diff_err) => {
                                         errors.push((key, error_msg));
                                     }
+                                },
+                                Err(_eq_err) => {
+                                    errors.push((key, error_msg));
                                 }
                             }
                         }
