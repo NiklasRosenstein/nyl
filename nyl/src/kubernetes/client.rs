@@ -202,11 +202,13 @@ impl KubeClient for KubeRsClient {
         // Determine outcome
         let base_outcome = if exists {
             ApplyOutcome::Updated {
+                kind: gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
             ApplyOutcome::Created {
+                kind: gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
@@ -377,16 +379,18 @@ impl KubeClient for MockKubeClient {
 
         // Only store if not dry run
         if !dry_run {
-            store.insert(key, resource.clone());
+            store.insert(key.clone(), resource.clone());
         }
 
         let base_outcome = if exists {
             ApplyOutcome::Updated {
+                kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
         } else {
             ApplyOutcome::Created {
+                kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
             }
@@ -473,7 +477,8 @@ mod tests {
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
         match outcome {
-            ApplyOutcome::Created { name, namespace } => {
+            ApplyOutcome::Created { kind, name, namespace } => {
+                assert_eq!(kind, "ConfigMap");
                 assert_eq!(name, "test");
                 assert_eq!(namespace, Some("default".to_string()));
             }
@@ -503,7 +508,8 @@ mod tests {
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
         match outcome {
-            ApplyOutcome::Updated { name, namespace } => {
+            ApplyOutcome::Updated { kind, name, namespace } => {
+                assert_eq!(kind, "ConfigMap");
                 assert_eq!(name, "test");
                 assert_eq!(namespace, Some("default".to_string()));
             }

@@ -105,16 +105,38 @@ impl std::fmt::Display for ResourceKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// Resource was created
-    Created { name: String, namespace: Option<String> },
+    Created {
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+    },
     /// Resource was updated
-    Updated { name: String, namespace: Option<String> },
+    Updated {
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+    },
     /// Resource was unchanged
-    Unchanged { name: String, namespace: Option<String> },
+    Unchanged {
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+    },
     /// Dry run mode - shows what would happen
     DryRun { would_be: Box<ApplyOutcome> },
 }
 
 impl ApplyOutcome {
+    /// Get the resource kind
+    pub fn kind(&self) -> &str {
+        match self {
+            ApplyOutcome::Created { kind, .. }
+            | ApplyOutcome::Updated { kind, .. }
+            | ApplyOutcome::Unchanged { kind, .. } => kind,
+            ApplyOutcome::DryRun { would_be } => would_be.kind(),
+        }
+    }
+
     /// Get the resource name
     pub fn name(&self) -> &str {
         match self {
@@ -343,8 +365,19 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_outcome_kind() {
+        let outcome = ApplyOutcome::Created {
+            kind: "ConfigMap".to_string(),
+            name: "test".to_string(),
+            namespace: Some("default".to_string()),
+        };
+        assert_eq!(outcome.kind(), "ConfigMap");
+    }
+
+    #[test]
     fn test_apply_outcome_name() {
         let outcome = ApplyOutcome::Created {
+            kind: "ConfigMap".to_string(),
             name: "test".to_string(),
             namespace: Some("default".to_string()),
         };
@@ -354,6 +387,7 @@ mod tests {
     #[test]
     fn test_apply_outcome_namespace() {
         let outcome = ApplyOutcome::Updated {
+            kind: "Deployment".to_string(),
             name: "test".to_string(),
             namespace: Some("default".to_string()),
         };
@@ -364,6 +398,7 @@ mod tests {
     fn test_apply_outcome_is_dry_run() {
         let outcome = ApplyOutcome::DryRun {
             would_be: Box::new(ApplyOutcome::Created {
+                kind: "Namespace".to_string(),
                 name: "test".to_string(),
                 namespace: None,
             }),
@@ -371,6 +406,7 @@ mod tests {
         assert!(outcome.is_dry_run());
 
         let outcome2 = ApplyOutcome::Created {
+            kind: "Namespace".to_string(),
             name: "test".to_string(),
             namespace: None,
         };

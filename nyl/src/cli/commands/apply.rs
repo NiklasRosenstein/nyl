@@ -324,20 +324,41 @@ fn print_apply_summary(
 
     for outcome in outcomes {
         match outcome {
-            ApplyOutcome::Created { name, namespace } => {
+            ApplyOutcome::Created { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!("{}✓ Created {}{}", prefix, ns_name, dup_annotation);
+                println!(
+                    "{}{} {} {}{}",
+                    prefix,
+                    "+".green().bold(),
+                    kind,
+                    ns_name,
+                    dup_annotation
+                );
             }
-            ApplyOutcome::Updated { name, namespace } => {
+            ApplyOutcome::Updated { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!("{}✓ Updated {}{}", prefix, ns_name, dup_annotation);
+                println!(
+                    "{}{} {} {}{}",
+                    prefix,
+                    "~".yellow().bold(),
+                    kind,
+                    ns_name,
+                    dup_annotation
+                );
             }
-            ApplyOutcome::Unchanged { name, namespace } => {
+            ApplyOutcome::Unchanged { kind, name, namespace } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-                println!("{}✓ Unchanged {}{}", prefix, ns_name, dup_annotation);
+                println!(
+                    "{}{} {} {}{}",
+                    prefix,
+                    "=".bright_black().bold(),
+                    kind,
+                    ns_name,
+                    dup_annotation
+                );
             }
             ApplyOutcome::DryRun { would_be } => {
                 // Recursively print inner outcome
@@ -372,20 +393,41 @@ fn print_single_outcome(outcome: &ApplyOutcome, dry_run: bool, duplicates: &Hash
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
     match outcome {
-        ApplyOutcome::Created { name, namespace } => {
+        ApplyOutcome::Created { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!("{}✓ Would create {}{}", prefix, ns_name, dup_annotation);
+            println!(
+                "{}{} {} {}{}",
+                prefix,
+                "+".green().bold(),
+                kind,
+                ns_name,
+                dup_annotation
+            );
         }
-        ApplyOutcome::Updated { name, namespace } => {
+        ApplyOutcome::Updated { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!("{}✓ Would update {}{}", prefix, ns_name, dup_annotation);
+            println!(
+                "{}{} {} {}{}",
+                prefix,
+                "~".yellow().bold(),
+                kind,
+                ns_name,
+                dup_annotation
+            );
         }
-        ApplyOutcome::Unchanged { name, namespace } => {
+        ApplyOutcome::Unchanged { kind, name, namespace } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
-            println!("{}✓ Would leave unchanged {}{}", prefix, ns_name, dup_annotation);
+            println!(
+                "{}{} {} {}{}",
+                prefix,
+                "=".bright_black().bold(),
+                kind,
+                ns_name,
+                dup_annotation
+            );
         }
         ApplyOutcome::DryRun { would_be } => {
             print_single_outcome(would_be, true, duplicates);
