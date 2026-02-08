@@ -521,7 +521,6 @@ dependencies:
 }
 
 #[test]
-#[ignore = "Requires helm to be installed and network access to pull dependencies"]
 fn test_git_chart_with_dependencies() {
     setup_test_env();
 
