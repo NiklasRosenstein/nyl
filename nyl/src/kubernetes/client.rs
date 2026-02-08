@@ -188,10 +188,22 @@ impl KubeClient for KubeRsClient {
 
         // Check if resource exists and get its current resourceVersion
         let existing = self.get_resource(&gvk, namespace.as_deref(), &name).await?;
+        let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
 
-        // Determine outcome based on dry_run mode
+        // Setup patch parameters
+        let mut patch_params = PatchParams::apply(field_manager).force();
+        if dry_run {
+            patch_params = patch_params.dry_run();
+        }
+
+        // Apply the resource (with or without dry-run) to validate and get server response
+        let patch = Patch::Apply(resource);
+        let updated = api.patch(&name, &patch_params, &patch).await?;
+
+        // Determine outcome
         let base_outcome = if dry_run {
-            // In dry-run mode, resourceVersion won't change, so we need to compare resources
+            // In dry-run mode, resourceVersion won't change even if resource would be modified
+            // So we need to compare resources to detect actual changes
             if let Some(ref existing_resource) = existing {
                 // Resource exists - check if it would change using diff comparison
                 let desired_json = serde_json::to_value(resource)?;
@@ -222,15 +234,7 @@ impl KubeClient for KubeRsClient {
                 }
             }
         } else {
-            // In normal mode, apply and check resourceVersion
-            let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
-
-            // Setup patch parameters and apply
-            let patch_params = PatchParams::apply(field_manager).force();
-            let patch = Patch::Apply(resource);
-            let updated = api.patch(&name, &patch_params, &patch).await?;
-
-            // Get new resourceVersion from the response
+            // In normal mode, check resourceVersion to detect changes
             let new_resource_version = updated.metadata.resource_version.clone();
 
             if existing.is_none() {
