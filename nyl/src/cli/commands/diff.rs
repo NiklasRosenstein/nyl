@@ -48,6 +48,12 @@ pub struct DiffArgs {
     /// 'raw' compares manifests directly (may show server defaults)
     #[arg(long, default_value = "normalized")]
     pub mode: DiffMode,
+
+    /// Preview append-release mode: show diff as if merging with previous release.
+    /// When enabled, the diff will show resources from both the current apply and previous release,
+    /// simulating what --append-release would do in the apply command.
+    #[arg(long)]
+    pub append_release: bool,
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
@@ -114,6 +120,18 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 6. Fetch previous release for tracking resource deletions
     let previous_release = storage.get_latest_release(&release_name, &release_namespace).await?;
+
+    // 6.5. Append-release mode: include previous release's resources in desired state
+    let desired_manifests = if args.append_release {
+        if let Some(ref prev_release) = previous_release {
+            merge_with_previous_release(&kube_client, desired_manifests, prev_release).await?
+        } else {
+            tracing::info!("Append-release mode: no previous release found, showing diff as initial release");
+            desired_manifests
+        }
+    } else {
+        desired_manifests
+    };
 
     // 7. Compute diff against LIVE cluster state
     let diff_result =
@@ -325,6 +343,47 @@ fn display_diff(diff: &DiffResult) {
 /// Display summary only (counts, no detailed diff)
 fn display_summary(diff: &DiffResult) {
     print_summary(diff);
+}
+
+/// Merge current manifests with previous release's resources (for --append-release preview)
+async fn merge_with_previous_release(
+    client: &dyn KubeClient,
+    mut current_manifests: Vec<serde_json::Value>,
+    previous_release: &crate::kubernetes::ReleaseState,
+) -> Result<Vec<serde_json::Value>> {
+    // Build set of current resource keys
+    let current_keys: HashSet<ResourceKey> = current_manifests
+        .iter()
+        .map(ResourceKey::from_json_value)
+        .collect::<Result<_>>()?;
+
+    // Fetch previous resources that are not in current manifests
+    let mut added_count = 0;
+    for prev_key in &previous_release.resource_keys {
+        if !current_keys.contains(prev_key) {
+            // This resource is in previous release but not in current - fetch it from cluster
+            if let Some(resource) = client
+                .get_resource(&prev_key.gvk, prev_key.namespace.as_deref(), &prev_key.name)
+                .await?
+            {
+                // Convert DynamicObject to JSON
+                let resource_json = serde_json::to_value(&resource)?;
+                current_manifests.push(resource_json);
+                added_count += 1;
+            } else {
+                tracing::debug!("Previous resource {} no longer exists in cluster, skipping", prev_key);
+            }
+        }
+    }
+
+    tracing::info!(
+        "Append-release mode: merged {} resources from previous release with {} current resources (total: {})",
+        added_count,
+        current_keys.len(),
+        current_manifests.len()
+    );
+
+    Ok(current_manifests)
 }
 
 #[cfg(test)]
