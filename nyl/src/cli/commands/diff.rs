@@ -52,9 +52,9 @@ pub struct DiffArgs {
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
     // 1. Render desired manifests using complete pipeline
-    let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
+    let (mut desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
         &args.common.path,
-        args.common.component.as_deref(),
+        args.common.only_source_kind.as_deref(),
         args.common.profile.as_deref(),
         false, // offline
         None,  // cli_kube_version
@@ -63,6 +63,13 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         args.common.track_parent,
     )
     .await?;
+
+    // Apply post-render kind filtering
+    desired_manifests = crate::cli::filter::filter_manifests_by_kind(
+        desired_manifests,
+        &args.common.only_kind,
+        &args.common.exclude_kind,
+    )?;
 
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to diff");

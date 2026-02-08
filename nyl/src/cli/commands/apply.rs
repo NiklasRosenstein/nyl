@@ -32,14 +32,20 @@ pub struct ApplyArgs {
     /// Dry run mode
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Append to previous release instead of replacing it.
+    /// Merges current resources with previous release (union, current wins on duplicates).
+    /// Skips pruning to preserve resources from previous releases.
+    #[arg(long)]
+    pub append_release: bool,
 }
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 1. Render desired manifests using complete pipeline
-    let (desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
+    let (mut desired_manifests, nyl_release, profile, _env_name) = render_manifests_complete(
         &args.common.path,
-        args.common.component.as_deref(),
+        args.common.only_source_kind.as_deref(),
         args.common.profile.as_deref(),
         false, // offline
         None,  // cli_kube_version
@@ -48,6 +54,13 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         args.common.track_parent,
     )
     .await?;
+
+    // Apply post-render kind filtering
+    desired_manifests = crate::cli::filter::filter_manifests_by_kind(
+        desired_manifests,
+        &args.common.only_kind,
+        &args.common.exclude_kind,
+    )?;
 
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
@@ -137,6 +150,43 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 10. Update release state with resource keys
     release.resource_keys = resource_keys;
 
+    // 10.5. Append-release mode: merge with previous release
+    if args.append_release && next_revision > 1 {
+        // Fetch previous release
+        if let Ok(Some(previous_release)) = storage
+            .get_release(&release_name, &release_namespace, next_revision - 1)
+            .await
+        {
+            // Use HashSet for deduplication
+            let current_keys: std::collections::HashSet<_> = release.resource_keys.iter().cloned().collect();
+
+            // Add previous resources not in current set
+            let mut merged_keys = Vec::new();
+            for prev_key in &previous_release.resource_keys {
+                if !current_keys.contains(prev_key) {
+                    merged_keys.push(prev_key.clone());
+                }
+            }
+
+            // Add all current resources (current wins on duplicates)
+            merged_keys.extend(release.resource_keys.clone());
+
+            tracing::info!(
+                "Append-release mode: merged {} previous resources with {} current resources (total: {})",
+                previous_release.resource_keys.len(),
+                release.resource_keys.len(),
+                merged_keys.len()
+            );
+
+            release.resource_keys = merged_keys;
+        } else {
+            tracing::warn!(
+                "Append-release mode: no previous release found (revision {}), treating as initial apply",
+                next_revision - 1
+            );
+        }
+    }
+
     // 11. Update release status
     if errors.is_empty() {
         release.status = ReleaseStatus::Deployed;
@@ -168,7 +218,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
 
     // 13. Prune resources from previous release that are no longer desired
     let mut pruned_keys = Vec::new();
-    if !args.dry_run && release.status == ReleaseStatus::Deployed && next_revision > 1 {
+    if !args.dry_run && !args.append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
         // Get previous release's resource keys
         if let Ok(Some(previous_release)) = storage
             .get_release(&release_name, &release_namespace, next_revision - 1)
