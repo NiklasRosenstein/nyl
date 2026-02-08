@@ -364,22 +364,23 @@ fn print_apply_summary(
         }
     }
 
-    if failed_count > 0 {
-        println!(
-            "Summary: {} created, {} updated, {} unchanged, {} failed",
-            created.to_string().green(),
-            updated.to_string().yellow(),
-            unchanged,
-            failed_count.to_string().red()
-        );
-    } else {
-        println!(
-            "Summary: {} created, {} updated, {} unchanged",
-            created.to_string().green(),
-            updated.to_string().yellow(),
-            unchanged
-        );
+    let total_duplicates_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+
+    let mut parts = vec![
+        format!("{} created", created.to_string().green()),
+        format!("{} updated", updated.to_string().yellow()),
+        format!("{} unchanged", unchanged),
+    ];
+
+    if total_duplicates_ignored > 0 {
+        parts.push(format!("{} duplicates ignored", total_duplicates_ignored.to_string().bright_black()));
     }
+
+    if failed_count > 0 {
+        parts.push(format!("{} failed", failed_count.to_string().red()));
+    }
+
+    println!("Summary: {}", parts.join(", "));
 
     println!();
 

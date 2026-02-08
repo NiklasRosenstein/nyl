@@ -156,7 +156,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 9. Display diff
     if args.summary {
-        display_summary(&diff_result);
+        display_summary(&diff_result, &duplicates);
     } else {
         display_diff(&diff_result, &duplicates);
     }
@@ -341,26 +341,26 @@ async fn compute_diff_from_live(
 }
 
 /// Display summary line with colored counts
-fn print_summary(diff: &DiffResult) {
+fn print_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     let total_errors = diff.total_error_count();
-    if total_errors == 0 {
-        println!(
-            "Summary: {} to add, {} to modify, {} to delete, {} unchanged",
-            diff.added.len().to_string().green(),
-            diff.modified.len().to_string().yellow(),
-            diff.deleted.len().to_string().red(),
-            diff.unchanged.len()
-        );
-    } else {
-        println!(
-            "Summary: {} to add, {} to modify, {} to delete, {} unchanged, {} failed",
-            diff.added.len().to_string().green(),
-            diff.modified.len().to_string().yellow(),
-            diff.deleted.len().to_string().red(),
-            diff.unchanged.len(),
-            total_errors.to_string().red()
-        );
+    let total_duplicates_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+
+    let mut parts = vec![
+        format!("{} to add", diff.added.len().to_string().green()),
+        format!("{} to modify", diff.modified.len().to_string().yellow()),
+        format!("{} to delete", diff.deleted.len().to_string().red()),
+        format!("{} unchanged", diff.unchanged.len()),
+    ];
+
+    if total_duplicates_ignored > 0 {
+        parts.push(format!("{} duplicates ignored", total_duplicates_ignored.to_string().bright_black()));
     }
+
+    if total_errors > 0 {
+        parts.push(format!("{} failed", total_errors.to_string().red()));
+    }
+
+    println!("Summary: {}", parts.join(", "));
 }
 
 /// Display diff results with kubectl-style unified diff output
@@ -418,12 +418,12 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     }
 
     // Summary with colors
-    print_summary(diff);
+    print_summary(diff, duplicates);
 }
 
 /// Display summary only (counts, no detailed diff)
-fn display_summary(diff: &DiffResult) {
-    print_summary(diff);
+fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
+    print_summary(diff, duplicates);
 }
 
 /// Print a warning trace about duplicate resources
