@@ -125,6 +125,45 @@ Run tests with coverage:
 mise run coverage  # Generates HTML report in nyl/coverage/
 ```
 
+### Test Organization and Patterns
+
+**Test structure:**
+- Unit tests: In the same file as the code using `#[cfg(test)] mod tests`
+- Integration tests: In `tests/` directory
+- Test fixtures: Place in `tests/fixtures/` or create in `TempDir`
+
+**Common patterns:**
+```rust
+// Arrange-Act-Assert pattern
+#[test]
+fn test_parse_config_with_valid_yaml() {
+    // Arrange
+    let yaml = "key: value";
+    
+    // Act
+    let result = parse_config(yaml);
+    
+    // Assert
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().key, "value");
+}
+
+// Using Result<()> for cleaner error handling in tests
+#[test]
+fn test_operation() -> Result<()> {
+    let value = may_fail()?;
+    assert_eq!(value, expected);
+    Ok(())
+}
+```
+
+**Mock and stub guidelines:**
+- Use dependency injection to allow test doubles
+- Create test-specific implementations of traits
+- Prefer real implementations over mocks when practical
+- Use `TempDir` for filesystem operations instead of mocking
+
+
 ## Code Style and Architecture
 
 ### Style Guidelines
@@ -134,11 +173,47 @@ mise run coverage  # Generates HTML report in nyl/coverage/
 - Use descriptive variable and function names
 - Add documentation comments (`///`) for public APIs
 
+### Naming Conventions
+- **Functions and methods:** `snake_case` (e.g., `render_manifest`, `get_config`)
+- **Types and structs:** `PascalCase` (e.g., `HelmChart`, `GitManager`)
+- **Constants:** `SCREAMING_SNAKE_CASE` (e.g., `DEFAULT_CACHE_DIR`, `MAX_RETRIES`)
+- **Test functions:** `test_<function>_<scenario>` (e.g., `test_render_with_profile`, `test_git_clone_fails`)
+- **Modules:** `snake_case` (e.g., `helm_resolver`, `template_engine`)
+- **Trait names:** Descriptive nouns or adjectives in `PascalCase` (e.g., `Resolver`, `Renderable`)
+
+### Clippy Policy
+- Zero warnings enforced with `-D warnings` flag
+- All clippy warnings treated as errors in CI
+- Use `#[allow(...)]` sparingly and always with a comment explaining why
+- Common acceptable suppressions (with justification):
+  - `#[allow(clippy::too_many_arguments)]` - when builder pattern is impractical
+  - `#[allow(clippy::module_inception)]` - for module re-exports
+
 ### Error Handling
 - Use custom error types in `src/error.rs`
 - Provide context with `.context()` or `.with_context()`
 - Return `Result<T, NylError>` from functions that can fail
 - Use `anyhow::Result` sparingly, prefer typed errors
+
+### API Design Guidelines
+- **Return types:**
+  - Use `Result<T, E>` for operations that can fail
+  - Use `Option<T>` for values that may be absent (not errors)
+  - Return references (`&T`) when ownership transfer is not needed
+  - Return owned types (`T`) when the caller needs ownership
+- **Function parameters:**
+  - Take references (`&T`, `&str`) for read-only access
+  - Use `impl Trait` for parameters to accept any type implementing a trait
+  - Prefer `&str` over `&String` and `&[T]` over `&Vec<T>`
+- **Public API stability:**
+  - Mark unstable APIs with `#[doc(hidden)]` or feature flags
+  - Use semantic versioning: breaking changes require major version bump
+  - Add deprecation warnings before removing public APIs: `#[deprecated(since = "x.y.z", note = "use X instead")]`
+- **Trait design:**
+  - Keep traits focused and composable (single responsibility)
+  - Provide default implementations where sensible
+  - Use associated types for type relationships
+  - Consider `Send + Sync` bounds for concurrent usage
 
 ### Architecture Patterns
 - **Dependency Injection:** Pass dependencies (cache dirs, config paths) explicitly
@@ -193,6 +268,20 @@ src/
 3. Run `cargo check` and `cargo test` to verify
 4. Check for deprecation warnings with `cargo clippy`
 5. Update `Cargo.lock` (committed to repo)
+
+### Adding New Dependencies
+- **Evaluation criteria:**
+  - Active maintenance and community support
+  - Minimal transitive dependencies
+  - Compatible license (MIT, Apache-2.0)
+  - Good test coverage and documentation
+- **Process:**
+  1. Check if functionality can be implemented without external dependency
+  2. Review crate on crates.io for download count, recent updates, and open issues
+  3. Add dependency with minimal features: `dependency = { version = "x.y", default-features = false, features = ["needed-feature"] }`
+  4. Document why the dependency is needed in commit message or code comments
+  5. Run `cargo tree` to check for dependency bloat
+- **Avoid:** Dependencies with long build times, large binary size impact, or many transitive deps
 
 ## Performance Considerations
 
