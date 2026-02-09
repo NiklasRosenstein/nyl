@@ -29,9 +29,9 @@ pub struct DeleteArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Also delete resources from cluster
+    /// Skip deleting resources from cluster (default: purge resources)
     #[arg(long)]
-    pub purge: bool,
+    pub no_purge: bool,
 
     /// Kubernetes context to use
     #[arg(long)]
@@ -71,7 +71,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
             args.revision,
             args.yes,
             args.dry_run,
-            args.purge,
+            !args.no_purge,
         )
         .await?;
     }

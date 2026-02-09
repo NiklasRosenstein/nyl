@@ -75,7 +75,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
     // Output based on format
     match args.output {
         OutputFormat::Table => {
-            // Text format - human-readable
+            // Table format - human-readable structured output
             println!("Release: {}", release.release_name);
             println!("Namespace: {}", release.release_namespace);
             println!("Revision: {}", release.revision);
@@ -165,7 +165,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
             let mut new_args = args;
             new_args.output = OutputFormat::Table;
 
-            // Text format - human-readable
+            // Table format - human-readable structured output
             println!("Release: {}", release.release_name);
             println!("Namespace: {}", release.release_namespace);
             println!("Revision: {}", release.revision);
