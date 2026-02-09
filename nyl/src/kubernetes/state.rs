@@ -646,7 +646,7 @@ mod tests {
         async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32> {
             let revisions = self.list_revisions(release_name, namespace).await?;
             let count = u32::try_from(revisions.len())
-                .map_err(|_| NylError::Other("Too many revisions to count".to_string()))?;
+                .map_err(|e| NylError::Other(format!("Too many revisions to count: {}", e)))?;
 
             for revision in revisions {
                 self.delete_release(release_name, namespace, revision).await?;
