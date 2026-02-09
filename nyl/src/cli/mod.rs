@@ -39,6 +39,9 @@ enum Commands {
 
     /// Display Kubernetes cluster version information
     ClusterInfo(commands::cluster_info::ClusterInfoArgs),
+
+    /// Manage releases
+    Release(commands::release::ReleaseArgs),
 }
 
 impl Cli {
@@ -52,6 +55,7 @@ impl Cli {
             Commands::New(args) => commands::new::execute(args),
             Commands::Validate(args) => commands::validate::execute(args),
             Commands::ClusterInfo(args) => commands::cluster_info::execute(args).await,
+            Commands::Release(args) => commands::release::execute(args).await,
         }
     }
 }

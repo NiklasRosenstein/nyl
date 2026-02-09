@@ -107,6 +107,12 @@ impl KubeRsClient {
         Ok(Self { client, discovery })
     }
 
+    /// Create a new Kubernetes client from an existing kube::Client
+    pub async fn from_client(client: Client) -> Result<Self> {
+        let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
+        Ok(Self { client, discovery })
+    }
+
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
         // Search through all groups for matching resource
