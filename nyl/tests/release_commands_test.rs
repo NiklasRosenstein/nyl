@@ -392,7 +392,7 @@ async fn test_get_release_with_different_statuses() {
             assert!(release.error.is_some());
         }
 
-        if statuses[i] == ReleaseStatus::Deployed {
+        if *status == ReleaseStatus::Deployed {
             assert!(release.applied_at.is_some());
         }
     }

@@ -416,7 +416,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         use std::collections::HashMap;
 
         // List all release secrets
-        let label_selector = format!("{}!=", LABEL_RELEASE); // All secrets with release label
+        let label_selector = LABEL_RELEASE.to_string(); // All secrets with release label (label existence selector)
         let lp = ListParams::default().labels(&label_selector);
 
         let secrets = if let Some(ns) = namespace {
