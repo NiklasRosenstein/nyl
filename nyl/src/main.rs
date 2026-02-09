@@ -8,7 +8,12 @@ async fn main() {
     let cli = Cli::parse();
 
     // Initialize tracing based on verbose flag
-    let log_level = if cli.verbose { "nyl=debug,info" } else { "nyl=info,warn" };
+    // Suppress kube_client::client::builder errors since we handle and display them ourselves
+    let log_level = if cli.verbose {
+        "nyl=debug,kube_client::client::builder=off,info"
+    } else {
+        "nyl=info,kube_client::client::builder=off,warn"
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))

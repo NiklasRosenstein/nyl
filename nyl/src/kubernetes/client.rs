@@ -180,6 +180,14 @@ impl KubeClient for KubeRsClient {
         // Extract GVK from resource - use data field which is a serde_json::Value
         let resource_json = serde_json::to_value(resource)?;
         let gvk = crate::kubernetes::resource::extract_gvk(&resource_json)?;
+
+        // Create ResourceKey
+        let resource_key = ResourceKey {
+            gvk: gvk.clone(),
+            namespace: namespace.clone(),
+            name: name.clone(),
+        };
+
         let (ar, caps) = self.discover_api_resource(&gvk)?;
 
         // Create API client
@@ -192,8 +200,9 @@ impl KubeClient for KubeRsClient {
             Api::all_with(self.client.clone(), &ar)
         };
 
-        // Check if resource exists
-        let exists = self.get_resource(&gvk, namespace.as_deref(), &name).await?.is_some();
+        // Check if resource exists and get its current resourceVersion
+        let existing = self.get_resource(&gvk, namespace.as_deref(), &name).await?;
+        let old_resource_version = existing.as_ref().and_then(|r| r.metadata.resource_version.clone());
 
         // Setup patch parameters
         let mut patch_params = PatchParams::apply(field_manager).force();
@@ -201,20 +210,56 @@ impl KubeClient for KubeRsClient {
             patch_params = patch_params.dry_run();
         }
 
-        // Apply the resource using server-side apply
+        // Apply the resource (with or without dry-run) to validate and get server response
         let patch = Patch::Apply(resource);
-        api.patch(&name, &patch_params, &patch).await?;
+        let updated = api.patch(&name, &patch_params, &patch).await?;
 
         // Determine outcome
-        let base_outcome = if exists {
-            ApplyOutcome::Updated {
-                name: name.clone(),
-                namespace: namespace.clone(),
+        let base_outcome = if dry_run {
+            // In dry-run mode, resourceVersion won't change even if resource would be modified
+            // So we need to compare resources to detect actual changes
+            if let Some(ref existing_resource) = existing {
+                // Resource exists - check if it would change using diff comparison
+                let desired_json = serde_json::to_value(resource)?;
+                let existing_json = serde_json::to_value(existing_resource)?;
+
+                // Use DiffEngine to check if resources are equivalent (ignoring server-managed fields)
+                let would_change = !crate::kubernetes::diff::DiffEngine::are_equivalent(&desired_json, &existing_json)?;
+
+                if would_change {
+                    ApplyOutcome::Updated {
+                        resource_key: resource_key.clone(),
+                    }
+                } else {
+                    ApplyOutcome::Unchanged {
+                        resource_key: resource_key.clone(),
+                    }
+                }
+            } else {
+                // Resource doesn't exist - would be created
+                ApplyOutcome::Created {
+                    resource_key: resource_key.clone(),
+                }
             }
         } else {
-            ApplyOutcome::Created {
-                name: name.clone(),
-                namespace: namespace.clone(),
+            // In normal mode, check resourceVersion to detect changes
+            let new_resource_version = updated.metadata.resource_version.clone();
+
+            if existing.is_none() {
+                // Resource didn't exist - it was created
+                ApplyOutcome::Created {
+                    resource_key: resource_key.clone(),
+                }
+            } else if old_resource_version != new_resource_version {
+                // Resource existed and resourceVersion changed - it was updated
+                ApplyOutcome::Updated {
+                    resource_key: resource_key.clone(),
+                }
+            } else {
+                // Resource existed but resourceVersion didn't change - it was unchanged
+                ApplyOutcome::Unchanged {
+                    resource_key: resource_key.clone(),
+                }
             }
         };
 
@@ -379,22 +424,35 @@ impl KubeClient for MockKubeClient {
         };
 
         let mut store = self.resources.lock().unwrap();
-        let exists = store.contains_key(&key);
+        let existing = store.get(&key).cloned();
+
+        // Check if resource actually changed by comparing the data
+        let changed = existing.as_ref().is_none_or(|old| {
+            // Compare the full resource data (including metadata)
+            let old_json = serde_json::to_value(old).unwrap_or_default();
+            let new_json = serde_json::to_value(resource).unwrap_or_default();
+            old_json != new_json
+        });
 
         // Only store if not dry run
         if !dry_run {
-            store.insert(key, resource.clone());
+            store.insert(key.clone(), resource.clone());
         }
 
-        let base_outcome = if exists {
+        let base_outcome = if existing.is_none() {
+            // Resource didn't exist - created
+            ApplyOutcome::Created {
+                resource_key: key.clone(),
+            }
+        } else if changed {
+            // Resource existed and changed - updated
             ApplyOutcome::Updated {
-                name: name.clone(),
-                namespace: namespace.clone(),
+                resource_key: key.clone(),
             }
         } else {
-            ApplyOutcome::Created {
-                name: name.clone(),
-                namespace: namespace.clone(),
+            // Resource existed but didn't change - unchanged
+            ApplyOutcome::Unchanged {
+                resource_key: key.clone(),
             }
         };
 
@@ -478,10 +536,11 @@ mod tests {
 
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
-        match outcome {
-            ApplyOutcome::Created { name, namespace } => {
-                assert_eq!(name, "test");
-                assert_eq!(namespace, Some("default".to_string()));
+        match &outcome {
+            ApplyOutcome::Created { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
             }
             _ => panic!("Expected Created outcome"),
         }
@@ -497,6 +556,9 @@ mod tests {
             "metadata": {
                 "name": "test",
                 "namespace": "default"
+            },
+            "data": {
+                "key": "value1"
             }
         });
 
@@ -505,15 +567,63 @@ mod tests {
         // First apply
         client.apply_resource(&resource, "nyl", false).await.unwrap();
 
-        // Second apply (update)
-        let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
+        // Second apply with different data (update)
+        let updated_json = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            },
+            "data": {
+                "key": "value2"  // Changed value
+            }
+        });
 
-        match outcome {
-            ApplyOutcome::Updated { name, namespace } => {
-                assert_eq!(name, "test");
-                assert_eq!(namespace, Some("default".to_string()));
+        let updated_resource: DynamicObject = serde_json::from_value(updated_json).unwrap();
+        let outcome = client.apply_resource(&updated_resource, "nyl", false).await.unwrap();
+
+        match &outcome {
+            ApplyOutcome::Updated { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
             }
             _ => panic!("Expected Updated outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_apply_unchanged() {
+        let client = MockKubeClient::new();
+
+        let json_data = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            },
+            "data": {
+                "key": "value"
+            }
+        });
+
+        let resource: DynamicObject = serde_json::from_value(json_data).unwrap();
+
+        // First apply
+        client.apply_resource(&resource, "nyl", false).await.unwrap();
+
+        // Second apply with same data (unchanged)
+        let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
+
+        match &outcome {
+            ApplyOutcome::Unchanged { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
+            }
+            _ => panic!("Expected Unchanged outcome, got {:?}", outcome),
         }
     }
 

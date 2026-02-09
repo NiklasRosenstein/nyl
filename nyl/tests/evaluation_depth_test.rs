@@ -322,7 +322,6 @@ settings:
         .arg("--max-depth")
         .arg("5")
         .arg("--track-parent")
-        .arg("--dry-run")
         .arg("test-resource.yaml");
 
     // Should succeed but with no manifests message
