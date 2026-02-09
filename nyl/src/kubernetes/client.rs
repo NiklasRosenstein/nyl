@@ -426,7 +426,7 @@ impl KubeClient for MockKubeClient {
 
         // Check if resource actually changed by comparing the data
         let changed = existing.as_ref().is_none_or(|old| {
-            // Compare the actual resource data (ignoring metadata differences)
+            // Compare the full resource data (including metadata)
             let old_json = serde_json::to_value(old).unwrap_or_default();
             let new_json = serde_json::to_value(resource).unwrap_or_default();
             old_json != new_json
