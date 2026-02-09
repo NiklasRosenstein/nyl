@@ -317,7 +317,6 @@ fn print_apply_summary(
     duplicates: &HashMap<ResourceKey, usize>,
     failed_count: usize,
 ) {
-
     for outcome in outcomes {
         match outcome {
             ApplyOutcome::Created { kind, name, namespace } => {
@@ -373,8 +372,16 @@ fn print_apply_summary(
     ];
 
     if total_duplicates_ignored > 0 {
-        let plural = if total_duplicates_ignored == 1 { "duplicate" } else { "duplicates" };
-        parts.push(format!("{} {} ignored", total_duplicates_ignored.to_string().bright_black(), plural));
+        let plural = if total_duplicates_ignored == 1 {
+            "duplicate"
+        } else {
+            "duplicates"
+        };
+        parts.push(format!(
+            "{} {} ignored",
+            total_duplicates_ignored.to_string().bright_black(),
+            plural
+        ));
     }
 
     if failed_count > 0 {

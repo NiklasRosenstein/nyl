@@ -171,9 +171,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Exit 1 if --exit-code and there are changes
     if args.exit_code {
-        let has_changes = !diff_result.added.is_empty()
-            || !diff_result.modified.is_empty()
-            || !diff_result.deleted.is_empty();
+        let has_changes =
+            !diff_result.added.is_empty() || !diff_result.modified.is_empty() || !diff_result.deleted.is_empty();
 
         if has_changes {
             // Use a special error type to indicate "changes found" vs actual error
@@ -353,8 +352,16 @@ fn print_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     ];
 
     if total_duplicates_ignored > 0 {
-        let plural = if total_duplicates_ignored == 1 { "duplicate" } else { "duplicates" };
-        parts.push(format!("{} {} ignored", total_duplicates_ignored.to_string().bright_black(), plural));
+        let plural = if total_duplicates_ignored == 1 {
+            "duplicate"
+        } else {
+            "duplicates"
+        };
+        parts.push(format!(
+            "{} {} ignored",
+            total_duplicates_ignored.to_string().bright_black(),
+            plural
+        ));
     }
 
     if total_errors > 0 {
