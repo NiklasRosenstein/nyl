@@ -25,7 +25,7 @@ pub struct ShowArgs {
     pub manifest: bool,
 
     /// Output format
-    #[arg(short, long, default_value = "text")]
+    #[arg(short, long, default_value = "table")]
     pub output: OutputFormat,
 
     /// Kubernetes context to use
@@ -96,8 +96,15 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
 
             println!("Resources ({}):", release.resource_keys.len());
             for key in &release.resource_keys {
-                let namespace = key.namespace.as_deref().unwrap_or("default");
-                println!("  - {} {}/{}", key.gvk.kind, namespace, key.name);
+                match key.namespace.as_deref() {
+                    Some(namespace) => {
+                        println!("  - {} {}/{}", key.gvk.kind, namespace, key.name);
+                    }
+                    None => {
+                        // Cluster-scoped resource: no namespace
+                        println!("  - {} <cluster>/{}", key.gvk.kind, key.name);
+                    }
+                }
             }
             println!();
 
@@ -179,8 +186,15 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
 
             println!("Resources ({}):", release.resource_keys.len());
             for key in &release.resource_keys {
-                let namespace = key.namespace.as_deref().unwrap_or("default");
-                println!("  - {} {}/{}", key.gvk.kind, namespace, key.name);
+                match key.namespace.as_deref() {
+                    Some(namespace) => {
+                        println!("  - {} {}/{}", key.gvk.kind, namespace, key.name);
+                    }
+                    None => {
+                        // Cluster-scoped resource: no namespace
+                        println!("  - {} <cluster>/{}", key.gvk.kind, key.name);
+                    }
+                }
             }
             println!();
 

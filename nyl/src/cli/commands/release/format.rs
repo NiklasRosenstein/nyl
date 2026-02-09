@@ -19,7 +19,7 @@ pub fn format_age(timestamp: &DateTime<Utc>) -> String {
     }
 }
 
-/// Format a timestamp as ISO 8601 string
+/// Format a timestamp as `YYYY-MM-DD HH:MM:SS UTC` string
 pub fn format_timestamp(timestamp: &DateTime<Utc>) -> String {
     timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }

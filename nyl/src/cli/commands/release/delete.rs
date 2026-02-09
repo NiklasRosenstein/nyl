@@ -90,9 +90,10 @@ async fn delete_release(
     dry_run: bool,
     purge: bool,
 ) -> Result<()> {
-    // Get revisions to delete
-    let revisions: Vec<u32> = if let Some(rev) = revision {
-        // Check if revision exists
+    // Get revisions to delete and the relevant release state
+    let (revisions, relevant_release): (Vec<u32>, Option<crate::kubernetes::ReleaseState>) = if let Some(rev) = revision
+    {
+        // Check if the specified revision exists
         let release_opt: Option<crate::kubernetes::ReleaseState> = storage.get_release(name, namespace, rev).await?;
         if release_opt.is_none() {
             return Err(NylError::Config(format!(
@@ -100,8 +101,9 @@ async fn delete_release(
                 name, rev, namespace
             )));
         }
-        vec![rev]
+        (vec![rev], release_opt)
     } else {
+        // Delete all revisions; ensure the release exists and get the latest state
         let all_revisions: Vec<u32> = storage.list_revisions(name, namespace).await?;
         if all_revisions.is_empty() {
             return Err(NylError::Config(format!(
@@ -109,12 +111,13 @@ async fn delete_release(
                 name, namespace
             )));
         }
-        all_revisions
+        let latest_release: Option<crate::kubernetes::ReleaseState> =
+            storage.get_latest_release(name, namespace).await?;
+        (all_revisions, latest_release)
     };
 
-    // Get latest deployed release for warnings and purge
-    let latest_release: Option<crate::kubernetes::ReleaseState> = storage.get_latest_release(name, namespace).await?;
-    let is_deployed = latest_release
+    // Determine if the relevant release is currently deployed (for warnings and purge)
+    let is_deployed = relevant_release
         .as_ref()
         .is_some_and(|r| r.status == ReleaseStatus::Deployed);
 
@@ -141,7 +144,7 @@ async fn delete_release(
     }
 
     if purge {
-        if let Some(release) = &latest_release {
+        if let Some(release) = &relevant_release {
             println!(
                 "{} This will also delete {} resource(s) from the cluster.",
                 "⚠".yellow(),
@@ -183,7 +186,7 @@ async fn delete_release(
 
     // Purge resources first if requested
     if purge {
-        if let Some(release) = &latest_release {
+        if let Some(release) = &relevant_release {
             purge_resources(client, release).await?;
         }
     }
@@ -207,15 +210,13 @@ async fn delete_release(
     Ok(())
 }
 
-async fn purge_resources(_client: kube::Client, release: &crate::kubernetes::ReleaseState) -> Result<()> {
+async fn purge_resources(client: kube::Client, release: &crate::kubernetes::ReleaseState) -> Result<()> {
     use crate::kubernetes::{KubeClient, KubeRsClient};
-    use crate::profiles::Profile;
 
     println!("Purging resources from cluster...");
 
-    // Create KubeRsClient for resource deletion
-    let profile = Profile::default();
-    let kube_client = KubeRsClient::from_profile(&profile, None).await?;
+    // Create KubeRsClient from the provided client
+    let kube_client = KubeRsClient::from_client(client).await?;
 
     let mut deleted = 0;
     let mut failed = 0;
@@ -228,15 +229,6 @@ async fn purge_resources(_client: kube::Client, release: &crate::kubernetes::Rel
             Ok(()) => {
                 println!("  {} Deleted {} {}/{}", "✓".green(), key.gvk.kind, display_ns, key.name);
                 deleted += 1;
-            }
-            Err(e) if e.to_string().contains("404") => {
-                println!(
-                    "  {} {} {}/{} (already deleted)",
-                    "○".dimmed(),
-                    key.gvk.kind,
-                    display_ns,
-                    key.name
-                );
             }
             Err(e) => {
                 println!(

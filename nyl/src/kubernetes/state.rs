@@ -416,7 +416,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         use std::collections::HashMap;
 
         // List all release secrets
-        let label_selector = format!("{}!=", LABEL_RELEASE); // All secrets with release label
+        let label_selector = LABEL_RELEASE.to_string(); // All secrets with release label (label existence selector)
         let lp = ListParams::default().labels(&label_selector);
 
         let secrets = if let Some(ns) = namespace {
@@ -645,7 +645,8 @@ mod tests {
 
         async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32> {
             let revisions = self.list_revisions(release_name, namespace).await?;
-            let count = revisions.len() as u32;
+            let count = u32::try_from(revisions.len())
+                .map_err(|_| NylError::Other("Too many revisions to count".to_string()))?;
 
             for revision in revisions {
                 self.delete_release(release_name, namespace, revision).await?;

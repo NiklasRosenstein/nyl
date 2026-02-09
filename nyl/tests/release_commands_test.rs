@@ -1,6 +1,6 @@
 use chrono::Utc;
-use nyl::kubernetes::{ReleaseInfo, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey};
 use nyl::kubernetes::GroupVersionKind;
+use nyl::kubernetes::{ReleaseInfo, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -29,11 +29,7 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(())
     }
 
-    async fn get_latest_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-    ) -> nyl::Result<Option<ReleaseState>> {
+    async fn get_latest_release(&self, release_name: &str, namespace: &str) -> nyl::Result<Option<ReleaseState>> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         if revisions.is_empty() {
             return Ok(None);
@@ -86,10 +82,7 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(())
     }
 
-    async fn list_releases(
-        &self,
-        namespace: Option<&str>,
-    ) -> nyl::Result<Vec<ReleaseInfo>> {
+    async fn list_releases(&self, namespace: Option<&str>) -> nyl::Result<Vec<ReleaseInfo>> {
         use std::collections::HashMap;
 
         let store = self.releases.lock().unwrap();
@@ -139,23 +132,14 @@ impl ReleaseStorage for MockReleaseStorage {
         Ok(result)
     }
 
-    async fn delete_release(
-        &self,
-        release_name: &str,
-        namespace: &str,
-        revision: u32,
-    ) -> nyl::Result<()> {
+    async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> nyl::Result<()> {
         let mut store = self.releases.lock().unwrap();
         let key = (format!("{}/{}", namespace, release_name), revision);
         store.remove(&key);
         Ok(())
     }
 
-    async fn delete_all_revisions(
-        &self,
-        release_name: &str,
-        namespace: &str,
-    ) -> nyl::Result<u32> {
+    async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> nyl::Result<u32> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         let count = revisions.len() as u32;
 
@@ -197,11 +181,7 @@ fn create_test_release(
         manifest: format!("# Test manifest for {} revision {}", name, revision),
         status,
         rendered_at: Utc::now(),
-        applied_at: if is_deployed {
-            Some(Utc::now())
-        } else {
-            None
-        },
+        applied_at: if is_deployed { Some(Utc::now()) } else { None },
         error: None,
     }
 }
@@ -219,33 +199,15 @@ async fn test_list_releases_single_namespace() {
 
     // Create releases in different namespaces
     storage
-        .save_release(&create_test_release(
-            "app1",
-            "default",
-            1,
-            ReleaseStatus::Deployed,
-            5,
-        ))
+        .save_release(&create_test_release("app1", "default", 1, ReleaseStatus::Deployed, 5))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "app2",
-            "default",
-            1,
-            ReleaseStatus::Deployed,
-            3,
-        ))
+        .save_release(&create_test_release("app2", "default", 1, ReleaseStatus::Deployed, 3))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "app3",
-            "prod",
-            1,
-            ReleaseStatus::Deployed,
-            10,
-        ))
+        .save_release(&create_test_release("app3", "prod", 1, ReleaseStatus::Deployed, 10))
         .await
         .unwrap();
 
@@ -295,33 +257,15 @@ async fn test_list_releases_sorted_by_namespace_then_name() {
 
     // Create releases in non-alphabetical order
     storage
-        .save_release(&create_test_release(
-            "zebra",
-            "prod",
-            1,
-            ReleaseStatus::Deployed,
-            1,
-        ))
+        .save_release(&create_test_release("zebra", "prod", 1, ReleaseStatus::Deployed, 1))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "alpha",
-            "default",
-            1,
-            ReleaseStatus::Deployed,
-            1,
-        ))
+        .save_release(&create_test_release("alpha", "default", 1, ReleaseStatus::Deployed, 1))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "beta",
-            "default",
-            1,
-            ReleaseStatus::Deployed,
-            1,
-        ))
+        .save_release(&create_test_release("beta", "default", 1, ReleaseStatus::Deployed, 1))
         .await
         .unwrap();
 
@@ -342,13 +286,7 @@ async fn test_delete_release_single_revision() {
     let storage = MockReleaseStorage::new();
 
     storage
-        .save_release(&create_test_release(
-            "myapp",
-            "default",
-            1,
-            ReleaseStatus::Deployed,
-            5,
-        ))
+        .save_release(&create_test_release("myapp", "default", 1, ReleaseStatus::Deployed, 5))
         .await
         .unwrap();
 
@@ -357,10 +295,7 @@ async fn test_delete_release_single_revision() {
     assert!(release.is_some());
 
     // Delete it
-    storage
-        .delete_release("myapp", "default", 1)
-        .await
-        .unwrap();
+    storage.delete_release("myapp", "default", 1).await.unwrap();
 
     // Verify it's gone
     let release = storage.get_release("myapp", "default", 1).await.unwrap();
@@ -390,10 +325,7 @@ async fn test_delete_all_revisions() {
     assert_eq!(revisions.len(), 5);
 
     // Delete all
-    let count = storage
-        .delete_all_revisions("myapp", "default")
-        .await
-        .unwrap();
+    let count = storage.delete_all_revisions("myapp", "default").await.unwrap();
     assert_eq!(count, 5);
 
     // Verify they're gone
@@ -420,10 +352,7 @@ async fn test_delete_specific_revision_keeps_others() {
     }
 
     // Delete only revision 2
-    storage
-        .delete_release("myapp", "default", 2)
-        .await
-        .unwrap();
+    storage.delete_release("myapp", "default", 2).await.unwrap();
 
     // Verify revisions 1 and 3 still exist
     let revisions = storage.list_revisions("myapp", "default").await.unwrap();
@@ -435,7 +364,7 @@ async fn test_get_release_with_different_statuses() {
     let storage = MockReleaseStorage::new();
 
     // Create releases with different statuses
-    let statuses = vec![
+    let statuses = [
         ReleaseStatus::Rendered,
         ReleaseStatus::Deployed,
         ReleaseStatus::Failed,
@@ -443,13 +372,7 @@ async fn test_get_release_with_different_statuses() {
     ];
 
     for (i, status) in statuses.iter().enumerate() {
-        let mut release = create_test_release(
-            &format!("app{}", i),
-            "default",
-            1,
-            status.clone(),
-            5,
-        );
+        let mut release = create_test_release(&format!("app{}", i), "default", 1, status.clone(), 5);
         if status == &ReleaseStatus::Failed {
             release.error = Some("Test error message".to_string());
         }
@@ -457,19 +380,19 @@ async fn test_get_release_with_different_statuses() {
     }
 
     // Verify each release has correct status
-    for i in 0..statuses.len() {
+    for (i, status) in statuses.iter().enumerate() {
         let release = storage
             .get_release(&format!("app{}", i), "default", 1)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(release.status, statuses[i]);
+        assert_eq!(release.status, *status);
 
-        if statuses[i] == ReleaseStatus::Failed {
+        if *status == ReleaseStatus::Failed {
             assert!(release.error.is_some());
         }
 
-        if statuses[i] == ReleaseStatus::Deployed {
+        if *status == ReleaseStatus::Deployed {
             assert!(release.applied_at.is_some());
         }
     }
@@ -502,13 +425,7 @@ async fn test_release_info_structure() {
     let storage = MockReleaseStorage::new();
 
     storage
-        .save_release(&create_test_release(
-            "myapp",
-            "default",
-            3,
-            ReleaseStatus::Deployed,
-            10,
-        ))
+        .save_release(&create_test_release("myapp", "default", 3, ReleaseStatus::Deployed, 10))
         .await
         .unwrap();
 
@@ -530,33 +447,15 @@ async fn test_multiple_releases_different_namespaces() {
 
     // Create same release name in different namespaces
     storage
-        .save_release(&create_test_release(
-            "webapp",
-            "dev",
-            1,
-            ReleaseStatus::Deployed,
-            5,
-        ))
+        .save_release(&create_test_release("webapp", "dev", 1, ReleaseStatus::Deployed, 5))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "webapp",
-            "staging",
-            1,
-            ReleaseStatus::Deployed,
-            5,
-        ))
+        .save_release(&create_test_release("webapp", "staging", 1, ReleaseStatus::Deployed, 5))
         .await
         .unwrap();
     storage
-        .save_release(&create_test_release(
-            "webapp",
-            "prod",
-            1,
-            ReleaseStatus::Deployed,
-            5,
-        ))
+        .save_release(&create_test_release("webapp", "prod", 1, ReleaseStatus::Deployed, 5))
         .await
         .unwrap();
 
@@ -586,9 +485,6 @@ async fn test_delete_nonexistent_release_succeeds() {
 async fn test_delete_all_revisions_of_nonexistent_release() {
     let storage = MockReleaseStorage::new();
 
-    let count = storage
-        .delete_all_revisions("nonexistent", "default")
-        .await
-        .unwrap();
+    let count = storage.delete_all_revisions("nonexistent", "default").await.unwrap();
     assert_eq!(count, 0);
 }
