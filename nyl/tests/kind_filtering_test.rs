@@ -20,14 +20,6 @@ profiles:
     )
     .unwrap();
 
-    fs::write(
-        temp.path().join("secrets.yaml"),
-        r#"
-provider: null
-"#,
-    )
-    .unwrap();
-
     // Create a manifest with multiple resource types
     fs::write(
         temp.path().join("multi-resource.yaml"),

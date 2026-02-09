@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     cli::commands::render::{render_manifests_complete, RenderOptions},
     kubernetes::{
-        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStorage, ResourceKey,
+        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
+        ResourceKey,
     },
     NylError, Result,
 };
@@ -133,6 +134,15 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     // 6.5. Append-release mode: include previous release's resources in desired state
     let desired_manifests = if args.append_release {
         if let Some(ref prev_release) = previous_release {
+            // Validate that previous release was successfully deployed
+            // Only Deployed releases have complete resource sets safe to merge from
+            if prev_release.status != ReleaseStatus::Deployed {
+                return Err(NylError::Config(format!(
+                    "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
+                     The previous release must be in Deployed state to safely merge resources.",
+                    prev_release.revision, prev_release.status
+                )));
+            }
             merge_with_previous_release(&kube_client, desired_manifests, prev_release).await?
         } else {
             tracing::info!("Append-release mode: no previous release found, showing diff as initial release");
