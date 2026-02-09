@@ -106,18 +106,21 @@ impl std::fmt::Display for ResourceKey {
 pub enum ApplyOutcome {
     /// Resource was created
     Created {
+        resource_key: ResourceKey,
         kind: String,
         name: String,
         namespace: Option<String>,
     },
     /// Resource was updated
     Updated {
+        resource_key: ResourceKey,
         kind: String,
         name: String,
         namespace: Option<String>,
     },
     /// Resource was unchanged
     Unchanged {
+        resource_key: ResourceKey,
         kind: String,
         name: String,
         namespace: Option<String>,
@@ -127,6 +130,16 @@ pub enum ApplyOutcome {
 }
 
 impl ApplyOutcome {
+    /// Get the resource key
+    pub fn resource_key(&self) -> &ResourceKey {
+        match self {
+            ApplyOutcome::Created { resource_key, .. }
+            | ApplyOutcome::Updated { resource_key, .. }
+            | ApplyOutcome::Unchanged { resource_key, .. } => resource_key,
+            ApplyOutcome::DryRun { would_be } => would_be.resource_key(),
+        }
+    }
+
     /// Get the resource kind
     pub fn kind(&self) -> &str {
         match self {
@@ -366,7 +379,17 @@ mod tests {
 
     #[test]
     fn test_apply_outcome_kind() {
+        let resource_key = ResourceKey {
+            gvk: GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ConfigMap".to_string(),
+            },
+            namespace: Some("default".to_string()),
+            name: "test".to_string(),
+        };
         let outcome = ApplyOutcome::Created {
+            resource_key,
             kind: "ConfigMap".to_string(),
             name: "test".to_string(),
             namespace: Some("default".to_string()),
@@ -376,7 +399,17 @@ mod tests {
 
     #[test]
     fn test_apply_outcome_name() {
+        let resource_key = ResourceKey {
+            gvk: GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ConfigMap".to_string(),
+            },
+            namespace: Some("default".to_string()),
+            name: "test".to_string(),
+        };
         let outcome = ApplyOutcome::Created {
+            resource_key,
             kind: "ConfigMap".to_string(),
             name: "test".to_string(),
             namespace: Some("default".to_string()),
@@ -386,7 +419,17 @@ mod tests {
 
     #[test]
     fn test_apply_outcome_namespace() {
+        let resource_key = ResourceKey {
+            gvk: GroupVersionKind {
+                group: "apps".to_string(),
+                version: "v1".to_string(),
+                kind: "Deployment".to_string(),
+            },
+            namespace: Some("default".to_string()),
+            name: "test".to_string(),
+        };
         let outcome = ApplyOutcome::Updated {
+            resource_key,
             kind: "Deployment".to_string(),
             name: "test".to_string(),
             namespace: Some("default".to_string()),
@@ -396,8 +439,18 @@ mod tests {
 
     #[test]
     fn test_apply_outcome_is_dry_run() {
+        let resource_key = ResourceKey {
+            gvk: GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "Namespace".to_string(),
+            },
+            namespace: None,
+            name: "test".to_string(),
+        };
         let outcome = ApplyOutcome::DryRun {
             would_be: Box::new(ApplyOutcome::Created {
+                resource_key: resource_key.clone(),
                 kind: "Namespace".to_string(),
                 name: "test".to_string(),
                 namespace: None,
@@ -406,6 +459,7 @@ mod tests {
         assert!(outcome.is_dry_run());
 
         let outcome2 = ApplyOutcome::Created {
+            resource_key,
             kind: "Namespace".to_string(),
             name: "test".to_string(),
             namespace: None,

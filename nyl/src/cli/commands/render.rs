@@ -425,7 +425,7 @@ fn deduplicate_manifests(
         if let Some(prev_index) = seen.get(&key) {
             // Duplicate found - replace the previous one with this one (last occurrence wins)
             tracing::warn!("Duplicate resource: {} (keeping last occurrence)", key);
-            deduplicated[*prev_index] = manifest.clone();
+            deduplicated[*prev_index] = manifest;
             // Increment count for this duplicate
             *duplicate_counts.entry(key).or_insert(1) += 1;
         } else {

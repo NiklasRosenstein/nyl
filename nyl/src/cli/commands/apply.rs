@@ -319,19 +319,34 @@ fn print_apply_summary(
 ) {
     for outcome in outcomes {
         match outcome {
-            ApplyOutcome::Created { kind, name, namespace } => {
+            ApplyOutcome::Created {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
             }
-            ApplyOutcome::Updated { kind, name, namespace } => {
+            ApplyOutcome::Updated {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
             }
-            ApplyOutcome::Unchanged { kind, name, namespace } => {
+            ApplyOutcome::Unchanged {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
-                let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+                let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
             }
             ApplyOutcome::DryRun { would_be } => {
@@ -405,19 +420,34 @@ fn print_apply_summary(
 /// Print a single outcome
 fn print_single_outcome(outcome: &ApplyOutcome, duplicates: &HashMap<ResourceKey, usize>) {
     match outcome {
-        ApplyOutcome::Created { kind, name, namespace } => {
+        ApplyOutcome::Created {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
         }
-        ApplyOutcome::Updated { kind, name, namespace } => {
+        ApplyOutcome::Updated {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
         }
-        ApplyOutcome::Unchanged { kind, name, namespace } => {
+        ApplyOutcome::Unchanged {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
-            let dup_annotation = get_duplicate_annotation(name, namespace.as_ref(), duplicates);
+            let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
         }
         ApplyOutcome::DryRun { would_be } => {
@@ -452,19 +482,13 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
 }
 
 /// Get duplicate annotation for a resource if it's a duplicate
-fn get_duplicate_annotation(
-    name: &str,
-    namespace: Option<&String>,
-    duplicates: &HashMap<ResourceKey, usize>,
-) -> String {
-    // Try to find matching ResourceKey in duplicates
-    // We need to search through duplicates since we don't have the full GVK here
-    for (key, count) in duplicates {
-        if key.name == name && key.namespace.as_ref() == namespace {
-            let ignored_count = count - 1;
-            let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
-            return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
-        }
+fn get_duplicate_annotation(resource_key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
+    // Use direct HashMap lookup with the full ResourceKey (including apiVersion/kind)
+    // to avoid incorrectly matching resources with the same kind from different API versions
+    if let Some(count) = duplicates.get(resource_key) {
+        let ignored_count = count - 1;
+        let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
+        return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
     }
     String::new()
 }

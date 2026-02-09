@@ -174,6 +174,14 @@ impl KubeClient for KubeRsClient {
         // Extract GVK from resource - use data field which is a serde_json::Value
         let resource_json = serde_json::to_value(resource)?;
         let gvk = crate::kubernetes::resource::extract_gvk(&resource_json)?;
+
+        // Create ResourceKey
+        let resource_key = ResourceKey {
+            gvk: gvk.clone(),
+            namespace: namespace.clone(),
+            name: name.clone(),
+        };
+
         let (ar, caps) = self.discover_api_resource(&gvk)?;
 
         // Create API client
@@ -214,12 +222,14 @@ impl KubeClient for KubeRsClient {
 
                 if would_change {
                     ApplyOutcome::Updated {
+                        resource_key: resource_key.clone(),
                         kind: gvk.kind.clone(),
                         name: name.clone(),
                         namespace: namespace.clone(),
                     }
                 } else {
                     ApplyOutcome::Unchanged {
+                        resource_key: resource_key.clone(),
                         kind: gvk.kind.clone(),
                         name: name.clone(),
                         namespace: namespace.clone(),
@@ -228,6 +238,7 @@ impl KubeClient for KubeRsClient {
             } else {
                 // Resource doesn't exist - would be created
                 ApplyOutcome::Created {
+                    resource_key: resource_key.clone(),
                     kind: gvk.kind.clone(),
                     name: name.clone(),
                     namespace: namespace.clone(),
@@ -240,6 +251,7 @@ impl KubeClient for KubeRsClient {
             if existing.is_none() {
                 // Resource didn't exist - it was created
                 ApplyOutcome::Created {
+                    resource_key: resource_key.clone(),
                     kind: gvk.kind.clone(),
                     name: name.clone(),
                     namespace: namespace.clone(),
@@ -247,6 +259,7 @@ impl KubeClient for KubeRsClient {
             } else if old_resource_version != new_resource_version {
                 // Resource existed and resourceVersion changed - it was updated
                 ApplyOutcome::Updated {
+                    resource_key: resource_key.clone(),
                     kind: gvk.kind.clone(),
                     name: name.clone(),
                     namespace: namespace.clone(),
@@ -254,6 +267,7 @@ impl KubeClient for KubeRsClient {
             } else {
                 // Resource existed but resourceVersion didn't change - it was unchanged
                 ApplyOutcome::Unchanged {
+                    resource_key: resource_key.clone(),
                     kind: gvk.kind.clone(),
                     name: name.clone(),
                     namespace: namespace.clone(),
@@ -426,7 +440,7 @@ impl KubeClient for MockKubeClient {
 
         // Check if resource actually changed by comparing the data
         let changed = existing.as_ref().is_none_or(|old| {
-            // Compare the actual resource data (ignoring metadata differences)
+            // Compare the full resource data (including metadata)
             let old_json = serde_json::to_value(old).unwrap_or_default();
             let new_json = serde_json::to_value(resource).unwrap_or_default();
             old_json != new_json
@@ -440,6 +454,7 @@ impl KubeClient for MockKubeClient {
         let base_outcome = if existing.is_none() {
             // Resource didn't exist - created
             ApplyOutcome::Created {
+                resource_key: key.clone(),
                 kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
@@ -447,6 +462,7 @@ impl KubeClient for MockKubeClient {
         } else if changed {
             // Resource existed and changed - updated
             ApplyOutcome::Updated {
+                resource_key: key.clone(),
                 kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
@@ -454,6 +470,7 @@ impl KubeClient for MockKubeClient {
         } else {
             // Resource existed but didn't change - unchanged
             ApplyOutcome::Unchanged {
+                resource_key: key.clone(),
                 kind: key.gvk.kind.clone(),
                 name: name.clone(),
                 namespace: namespace.clone(),
@@ -541,7 +558,9 @@ mod tests {
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
         match outcome {
-            ApplyOutcome::Created { kind, name, namespace } => {
+            ApplyOutcome::Created {
+                kind, name, namespace, ..
+            } => {
                 assert_eq!(kind, "ConfigMap");
                 assert_eq!(name, "test");
                 assert_eq!(namespace, Some("default".to_string()));
@@ -588,7 +607,9 @@ mod tests {
         let outcome = client.apply_resource(&updated_resource, "nyl", false).await.unwrap();
 
         match outcome {
-            ApplyOutcome::Updated { kind, name, namespace } => {
+            ApplyOutcome::Updated {
+                kind, name, namespace, ..
+            } => {
                 assert_eq!(kind, "ConfigMap");
                 assert_eq!(name, "test");
                 assert_eq!(namespace, Some("default".to_string()));
@@ -622,7 +643,9 @@ mod tests {
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
         match outcome {
-            ApplyOutcome::Unchanged { kind, name, namespace } => {
+            ApplyOutcome::Unchanged {
+                kind, name, namespace, ..
+            } => {
                 assert_eq!(kind, "ConfigMap");
                 assert_eq!(name, "test");
                 assert_eq!(namespace, Some("default".to_string()));

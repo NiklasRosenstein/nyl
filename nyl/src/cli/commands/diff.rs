@@ -474,6 +474,7 @@ async fn merge_with_previous_release(
 
     // Fetch previous resources that are not in current manifests
     let mut added_count = 0;
+    let mut missing_count = 0;
     for prev_key in &previous_release.resource_keys {
         if !current_keys.contains(prev_key) {
             // This resource is in previous release but not in current - fetch it from cluster
@@ -487,12 +488,13 @@ async fn merge_with_previous_release(
                 added_count += 1;
             } else {
                 tracing::debug!("Previous resource {} no longer exists in cluster, skipping", prev_key);
+                missing_count += 1;
             }
         }
     }
 
-    // Calculate overlap for better logging
-    let overlap = previous_release.resource_keys.len() - added_count;
+    // Calculate overlap (resources in both previous and current)
+    let overlap = previous_release.resource_keys.len() - added_count - missing_count;
     if overlap > 0 {
         tracing::info!(
             "Append-release mode: merged {} from previous + {} current ({} overlap, {} total)",
