@@ -28,6 +28,7 @@ Each test is a standalone bash script that:
 
 ```bash
 ./test-kind-filtering-append-release.sh
+./test-argocd-bootstrap.sh
 ```
 
 ### Run with fresh cluster (recommended for CI)
@@ -58,6 +59,24 @@ Tests phased deployment with kind filtering and append-release mode:
 
 **Duration:** ~30 seconds
 **Resources:** 1 namespace, 1 CRD, 1 ConfigMap, 1 Deployment
+
+### test-argocd-bootstrap.sh
+
+Tests ArgoCD deployment using the Nyl Helm chart OCI image with staged deployment:
+- **Phase 1:** Applies CRDs only with `--only-kind=CustomResourceDefinition`
+- Waits for CRDs to be established
+- **Phase 2:** Applies remaining resources with `--exclude-kind=CustomResourceDefinition --append-release`
+- Waits for ArgoCD deployments (server, repo-server, application-controller)
+- Verifies Nyl CMP sidecar is running in the repo-server pod
+- Installs ArgoCD CLI
+- Logs into ArgoCD and verifies self-managed Application
+- Syncs the Application and validates health
+- Verifies CRDs were not pruned during Phase 2
+
+**Duration:** ~5-10 minutes (includes ArgoCD installation)
+**Resources:** ArgoCD namespace with full ArgoCD installation (~10 deployments/statefulsets)
+**Prerequisites:** Helm CLI installed
+**Optional:** `GITHUB_TOKEN` and `GITHUB_ACTOR` environment variables for OCI registry authentication
 
 ## Writing New Tests
 

@@ -1,10 +1,13 @@
 # Integration Tests for Helm Chart and ArgoCD
 #
-# This workflow validates the Nyl Helm chart deployment in Minikube.
-# It tests:
-# - OCI chart pulling and installation via nyl apply
+# This workflow validates Nyl integration tests in Minikube:
+# - Kind filtering and append-release mode (phased deployments)
+# - ArgoCD bootstrap with OCI chart pulling via nyl apply
 # - ArgoCD deployment with Nyl CMP sidecar
 # - Self-managed ArgoCD Application sync
+#
+# Tests are run individually (not via run-all.sh) to provide CI-specific
+# environment variables for ArgoCD testing (SHA, chart version, etc.)
 
 name: Integration CI
 
@@ -117,135 +120,25 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
-      - name: Run integration tests
+      - name: Run basic integration tests
         run: |
           cd integrationtests
-          ./run-all.sh
+          ./test-kind-filtering-append-release.sh
 
-      - name: Login to Helm OCI registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Create pull secret
-        run: |
-          kubectl create namespace argocd
-          kubectl create secret docker-registry ghcr-pull-secret \
-            --namespace=argocd \
-            --docker-server=ghcr.io \
-            --docker-username=${{ github.actor }} \
-            --docker-password=${{ secrets.GITHUB_TOKEN }}
-
-      - name: Bootstrap ArgoCD with nyl apply
+      - name: Run ArgoCD bootstrap integration test
         env:
           NYL_CHART_OWNER: ${{ steps.sha.outputs.owner }}
           NYL_CHART_VERSION: ${{ steps.sha.outputs.chart_version }}
           NYL_IMAGE_TAG: ${{ steps.sha.outputs.image_tag }}
           NYL_REPO_URL: https://github.com/${{ github.repository }}.git
           NYL_TARGET_REVISION: ${{ steps.sha.outputs.full_sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          DEPLOYMENT_TIMEOUT: ${{ env.DEPLOYMENT_TIMEOUT }}
+          SYNC_TIMEOUT: ${{ env.SYNC_TIMEOUT }}
         run: |
-          nyl apply examples/argocd-bootstrap/bootstrap.yaml
-
-      - name: Wait for ArgoCD deployments
-        run: |
-          echo "Waiting for ArgoCD components..."
-
-          for deployment in argocd-server argocd-repo-server argocd-application-controller; do
-            echo "Waiting for ${deployment}..."
-            kubectl rollout status deployment/${deployment} -n argocd \
-              --timeout=${DEPLOYMENT_TIMEOUT}s || {
-              echo "Deployment ${deployment} failed"
-              kubectl describe deployment/${deployment} -n argocd
-              kubectl logs deployment/${deployment} -n argocd --tail=50 || true
-              exit 1
-            }
-          done
-
-      - name: Verify Nyl sidecar
-        run: |
-          REPO_POD=$(kubectl get pods -n argocd \
-            -l app.kubernetes.io/component=repo-server \
-            -o jsonpath='{.items[0].metadata.name}')
-
-          echo "Repo-server pod: ${REPO_POD}"
-          echo "Containers:"
-          kubectl get pod ${REPO_POD} -n argocd \
-            -o jsonpath='{.spec.containers[*].name}' | tr ' ' '\n'
-
-          NYL_READY=$(kubectl get pod ${REPO_POD} -n argocd \
-            -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v1")].ready}')
-
-          if [ "$NYL_READY" != "true" ]; then
-            echo "ERROR: nyl-v1 sidecar not ready"
-            kubectl describe pod ${REPO_POD} -n argocd
-            kubectl logs ${REPO_POD} -n argocd -c nyl-v1 --tail=50 || true
-            exit 1
-          fi
-
-          echo "SUCCESS: nyl-v1 sidecar is ready"
-
-      - name: Install ArgoCD CLI
-        run: |
-          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x argocd
-          sudo mv argocd /usr/local/bin/argocd
-          argocd version --client
-
-      - name: Login to ArgoCD
-        run: |
-          for i in $(seq 1 30); do
-            if kubectl get secret argocd-initial-admin-secret -n argocd &>/dev/null; then
-              break
-            fi
-            echo "Waiting for admin secret... ($i/30)"
-            sleep 5
-          done
-
-          PASSWORD=$(kubectl get secret argocd-initial-admin-secret -n argocd \
-            -o jsonpath='{.data.password}' | base64 -d)
-
-          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
-          sleep 5
-
-          argocd login localhost:8080 \
-            --username admin \
-            --password "$PASSWORD" \
-            --insecure
-
-      - name: Verify and sync ArgoCD Application
-        run: |
-          echo "=== ArgoCD Applications ==="
-          argocd app list
-
-          if ! argocd app get argocd &>/dev/null; then
-            echo "ERROR: ArgoCD self-managed application not found"
-            kubectl get applications -n argocd -o yaml
-            exit 1
-          fi
-
-          echo "Syncing ArgoCD application..."
-          argocd app sync argocd --timeout ${SYNC_TIMEOUT} || {
-            echo "Sync failed"
-            argocd app get argocd --show-operation
-            exit 1
-          }
-
-          echo "Waiting for healthy status..."
-          argocd app wait argocd --timeout ${SYNC_TIMEOUT} --health || {
-            echo "Application not healthy"
-            argocd app get argocd --show-operation
-            exit 1
-          }
-
-          echo "SUCCESS: ArgoCD self-managed application is healthy"
-
-      - name: Final verification
-        run: |
-          echo "=== Final State ==="
-          kubectl get deployments -n argocd
-          kubectl get pods -n argocd
-          argocd app list
-          argocd app get argocd
-          echo "Integration test completed successfully!"
+          cd integrationtests
+          ./test-argocd-bootstrap.sh
 
       - name: Debug on failure
         if: failure()
