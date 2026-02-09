@@ -164,13 +164,13 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .get_release(&release_name, &release_namespace, next_revision - 1)
             .await
         {
-            // Validate that previous release is in a successful state
-            if previous_release.status != ReleaseStatus::Deployed
-                && previous_release.status != ReleaseStatus::Superseded
-            {
+            // Validate that previous release is in Deployed state
+            // Note: Superseded releases may have originally been Failed before being superseded,
+            // so we only allow merging from actively Deployed releases
+            if previous_release.status != ReleaseStatus::Deployed {
                 return Err(NylError::Config(format!(
                     "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
-                     The previous release must be in Deployed or Superseded state to safely merge resources.",
+                     The previous release must be in Deployed state to safely merge resources.",
                     previous_release.revision, previous_release.status
                 )));
             }

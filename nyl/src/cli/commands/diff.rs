@@ -134,11 +134,13 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     // 6.5. Append-release mode: include previous release's resources in desired state
     let desired_manifests = if args.append_release {
         if let Some(ref prev_release) = previous_release {
-            // Validate that previous release is in a successful state
-            if prev_release.status != ReleaseStatus::Deployed && prev_release.status != ReleaseStatus::Superseded {
+            // Validate that previous release is in Deployed state
+            // Note: Superseded releases may have originally been Failed before being superseded,
+            // so we only allow merging from actively Deployed releases
+            if prev_release.status != ReleaseStatus::Deployed {
                 return Err(NylError::Config(format!(
                     "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
-                     The previous release must be in Deployed or Superseded state to safely merge resources.",
+                     The previous release must be in Deployed state to safely merge resources.",
                     prev_release.revision, prev_release.status
                 )));
             }
