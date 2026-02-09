@@ -373,7 +373,8 @@ fn print_apply_summary(
     ];
 
     if total_duplicates_ignored > 0 {
-        parts.push(format!("{} duplicates ignored", total_duplicates_ignored.to_string().bright_black()));
+        let plural = if total_duplicates_ignored == 1 { "duplicate" } else { "duplicates" };
+        parts.push(format!("{} {} ignored", total_duplicates_ignored.to_string().bright_black(), plural));
     }
 
     if failed_count > 0 {
@@ -455,7 +456,7 @@ fn get_duplicate_annotation(
         if key.name == name && key.namespace.as_ref() == namespace {
             let ignored_count = count - 1;
             let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
-            return format!(" {}", format!("({} ignored {})", ignored_count, plural).yellow());
+            return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
         }
     }
     String::new()
