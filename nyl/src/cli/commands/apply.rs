@@ -164,6 +164,17 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .get_release(&release_name, &release_namespace, next_revision - 1)
             .await
         {
+            // Validate that previous release is in a successful state
+            if previous_release.status != ReleaseStatus::Deployed
+                && previous_release.status != ReleaseStatus::Superseded
+            {
+                return Err(NylError::Config(format!(
+                    "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
+                     The previous release must be in Deployed or Superseded state to safely merge resources.",
+                    previous_release.revision, previous_release.status
+                )));
+            }
+
             // Use HashSet for deduplication
             let current_keys: std::collections::HashSet<_> = release.resource_keys.iter().cloned().collect();
 
@@ -319,35 +330,38 @@ fn print_apply_summary(
 ) {
     for outcome in outcomes {
         match outcome {
-            ApplyOutcome::Created {
-                resource_key,
-                kind,
-                name,
-                namespace,
-            } => {
-                let ns_name = format_namespace_name(namespace.as_deref(), name);
+            ApplyOutcome::Created { resource_key } => {
+                let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-                println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
+                println!(
+                    "{} {} {}{}",
+                    "+".green().bold(),
+                    outcome.kind(),
+                    ns_name,
+                    dup_annotation
+                );
             }
-            ApplyOutcome::Updated {
-                resource_key,
-                kind,
-                name,
-                namespace,
-            } => {
-                let ns_name = format_namespace_name(namespace.as_deref(), name);
+            ApplyOutcome::Updated { resource_key } => {
+                let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-                println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
+                println!(
+                    "{} {} {}{}",
+                    "~".yellow().bold(),
+                    outcome.kind(),
+                    ns_name,
+                    dup_annotation
+                );
             }
-            ApplyOutcome::Unchanged {
-                resource_key,
-                kind,
-                name,
-                namespace,
-            } => {
-                let ns_name = format_namespace_name(namespace.as_deref(), name);
+            ApplyOutcome::Unchanged { resource_key } => {
+                let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-                println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
+                println!(
+                    "{} {} {}{}",
+                    "=".bright_black().bold(),
+                    outcome.kind(),
+                    ns_name,
+                    dup_annotation
+                );
             }
             ApplyOutcome::DryRun { would_be } => {
                 // This shouldn't happen anymore since we removed --dry-run
@@ -420,35 +434,38 @@ fn print_apply_summary(
 /// Print a single outcome
 fn print_single_outcome(outcome: &ApplyOutcome, duplicates: &HashMap<ResourceKey, usize>) {
     match outcome {
-        ApplyOutcome::Created {
-            resource_key,
-            kind,
-            name,
-            namespace,
-        } => {
-            let ns_name = format_namespace_name(namespace.as_deref(), name);
+        ApplyOutcome::Created { resource_key } => {
+            let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-            println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
+            println!(
+                "{} {} {}{}",
+                "+".green().bold(),
+                outcome.kind(),
+                ns_name,
+                dup_annotation
+            );
         }
-        ApplyOutcome::Updated {
-            resource_key,
-            kind,
-            name,
-            namespace,
-        } => {
-            let ns_name = format_namespace_name(namespace.as_deref(), name);
+        ApplyOutcome::Updated { resource_key } => {
+            let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-            println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
+            println!(
+                "{} {} {}{}",
+                "~".yellow().bold(),
+                outcome.kind(),
+                ns_name,
+                dup_annotation
+            );
         }
-        ApplyOutcome::Unchanged {
-            resource_key,
-            kind,
-            name,
-            namespace,
-        } => {
-            let ns_name = format_namespace_name(namespace.as_deref(), name);
+        ApplyOutcome::Unchanged { resource_key } => {
+            let ns_name = format_namespace_name(outcome.namespace(), outcome.name());
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
-            println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
+            println!(
+                "{} {} {}{}",
+                "=".bright_black().bold(),
+                outcome.kind(),
+                ns_name,
+                dup_annotation
+            );
         }
         ApplyOutcome::DryRun { would_be } => {
             print_single_outcome(would_be, duplicates);

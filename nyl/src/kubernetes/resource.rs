@@ -105,26 +105,11 @@ impl std::fmt::Display for ResourceKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// Resource was created
-    Created {
-        resource_key: ResourceKey,
-        kind: String,
-        name: String,
-        namespace: Option<String>,
-    },
+    Created { resource_key: ResourceKey },
     /// Resource was updated
-    Updated {
-        resource_key: ResourceKey,
-        kind: String,
-        name: String,
-        namespace: Option<String>,
-    },
+    Updated { resource_key: ResourceKey },
     /// Resource was unchanged
-    Unchanged {
-        resource_key: ResourceKey,
-        kind: String,
-        name: String,
-        namespace: Option<String>,
-    },
+    Unchanged { resource_key: ResourceKey },
     /// Dry run mode - shows what would happen
     DryRun { would_be: Box<ApplyOutcome> },
 }
@@ -133,41 +118,26 @@ impl ApplyOutcome {
     /// Get the resource key
     pub fn resource_key(&self) -> &ResourceKey {
         match self {
-            ApplyOutcome::Created { resource_key, .. }
-            | ApplyOutcome::Updated { resource_key, .. }
-            | ApplyOutcome::Unchanged { resource_key, .. } => resource_key,
+            ApplyOutcome::Created { resource_key }
+            | ApplyOutcome::Updated { resource_key }
+            | ApplyOutcome::Unchanged { resource_key } => resource_key,
             ApplyOutcome::DryRun { would_be } => would_be.resource_key(),
         }
     }
 
     /// Get the resource kind
     pub fn kind(&self) -> &str {
-        match self {
-            ApplyOutcome::Created { kind, .. }
-            | ApplyOutcome::Updated { kind, .. }
-            | ApplyOutcome::Unchanged { kind, .. } => kind,
-            ApplyOutcome::DryRun { would_be } => would_be.kind(),
-        }
+        &self.resource_key().gvk.kind
     }
 
     /// Get the resource name
     pub fn name(&self) -> &str {
-        match self {
-            ApplyOutcome::Created { name, .. }
-            | ApplyOutcome::Updated { name, .. }
-            | ApplyOutcome::Unchanged { name, .. } => name,
-            ApplyOutcome::DryRun { would_be } => would_be.name(),
-        }
+        &self.resource_key().name
     }
 
     /// Get the resource namespace
     pub fn namespace(&self) -> Option<&str> {
-        match self {
-            ApplyOutcome::Created { namespace, .. }
-            | ApplyOutcome::Updated { namespace, .. }
-            | ApplyOutcome::Unchanged { namespace, .. } => namespace.as_deref(),
-            ApplyOutcome::DryRun { would_be } => would_be.namespace(),
-        }
+        self.resource_key().namespace.as_deref()
     }
 
     /// Check if this is a dry run outcome
@@ -388,12 +358,7 @@ mod tests {
             namespace: Some("default".to_string()),
             name: "test".to_string(),
         };
-        let outcome = ApplyOutcome::Created {
-            resource_key,
-            kind: "ConfigMap".to_string(),
-            name: "test".to_string(),
-            namespace: Some("default".to_string()),
-        };
+        let outcome = ApplyOutcome::Created { resource_key };
         assert_eq!(outcome.kind(), "ConfigMap");
     }
 
@@ -408,12 +373,7 @@ mod tests {
             namespace: Some("default".to_string()),
             name: "test".to_string(),
         };
-        let outcome = ApplyOutcome::Created {
-            resource_key,
-            kind: "ConfigMap".to_string(),
-            name: "test".to_string(),
-            namespace: Some("default".to_string()),
-        };
+        let outcome = ApplyOutcome::Created { resource_key };
         assert_eq!(outcome.name(), "test");
     }
 
@@ -428,12 +388,7 @@ mod tests {
             namespace: Some("default".to_string()),
             name: "test".to_string(),
         };
-        let outcome = ApplyOutcome::Updated {
-            resource_key,
-            kind: "Deployment".to_string(),
-            name: "test".to_string(),
-            namespace: Some("default".to_string()),
-        };
+        let outcome = ApplyOutcome::Updated { resource_key };
         assert_eq!(outcome.namespace(), Some("default"));
     }
 
@@ -451,19 +406,11 @@ mod tests {
         let outcome = ApplyOutcome::DryRun {
             would_be: Box::new(ApplyOutcome::Created {
                 resource_key: resource_key.clone(),
-                kind: "Namespace".to_string(),
-                name: "test".to_string(),
-                namespace: None,
             }),
         };
         assert!(outcome.is_dry_run());
 
-        let outcome2 = ApplyOutcome::Created {
-            resource_key,
-            kind: "Namespace".to_string(),
-            name: "test".to_string(),
-            namespace: None,
-        };
+        let outcome2 = ApplyOutcome::Created { resource_key };
         assert!(!outcome2.is_dry_run());
     }
 }

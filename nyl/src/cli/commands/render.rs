@@ -106,7 +106,7 @@ pub async fn render_manifests_complete(
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, profile, env_name, duplicates) = render_manifests(
+    let (manifests, profile, env_name) = render_manifests(
         path,
         only_source_kind,
         environment,
@@ -155,11 +155,14 @@ pub async fn render_manifests_complete(
         apply_kyverno_policies(&final_manifests, &global_policies)?
     };
 
+    // 5. Detect and deduplicate resources (after all generation/transformation is complete)
+    let (final_manifests, duplicates) = deduplicate_manifests(final_manifests)?;
+
     Ok((final_manifests, nyl_release, profile, env_name, duplicates))
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-/// Returns: (manifests, profile, env_name, duplicate_resources)
+/// Returns: (manifests, profile, env_name)
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests(
     path: &str,
@@ -170,12 +173,7 @@ pub async fn render_manifests(
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
-) -> Result<(
-    Vec<serde_json::Value>,
-    Profile,
-    String,
-    std::collections::HashMap<ResourceKey, usize>,
-)> {
+) -> Result<(Vec<serde_json::Value>, Profile, String)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
@@ -288,10 +286,7 @@ pub async fn render_manifests(
     // This happens when max_depth is reached before all resources are expanded
     all_manifests.extend(pending);
 
-    // Detect and deduplicate resources (warn about duplicates)
-    let (all_manifests, duplicates) = deduplicate_manifests(all_manifests)?;
-
-    Ok((all_manifests, profile, env_name, duplicates))
+    Ok((all_manifests, profile, env_name))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {

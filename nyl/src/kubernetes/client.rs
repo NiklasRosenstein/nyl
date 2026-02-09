@@ -223,25 +223,16 @@ impl KubeClient for KubeRsClient {
                 if would_change {
                     ApplyOutcome::Updated {
                         resource_key: resource_key.clone(),
-                        kind: gvk.kind.clone(),
-                        name: name.clone(),
-                        namespace: namespace.clone(),
                     }
                 } else {
                     ApplyOutcome::Unchanged {
                         resource_key: resource_key.clone(),
-                        kind: gvk.kind.clone(),
-                        name: name.clone(),
-                        namespace: namespace.clone(),
                     }
                 }
             } else {
                 // Resource doesn't exist - would be created
                 ApplyOutcome::Created {
                     resource_key: resource_key.clone(),
-                    kind: gvk.kind.clone(),
-                    name: name.clone(),
-                    namespace: namespace.clone(),
                 }
             }
         } else {
@@ -252,25 +243,16 @@ impl KubeClient for KubeRsClient {
                 // Resource didn't exist - it was created
                 ApplyOutcome::Created {
                     resource_key: resource_key.clone(),
-                    kind: gvk.kind.clone(),
-                    name: name.clone(),
-                    namespace: namespace.clone(),
                 }
             } else if old_resource_version != new_resource_version {
                 // Resource existed and resourceVersion changed - it was updated
                 ApplyOutcome::Updated {
                     resource_key: resource_key.clone(),
-                    kind: gvk.kind.clone(),
-                    name: name.clone(),
-                    namespace: namespace.clone(),
                 }
             } else {
                 // Resource existed but resourceVersion didn't change - it was unchanged
                 ApplyOutcome::Unchanged {
                     resource_key: resource_key.clone(),
-                    kind: gvk.kind.clone(),
-                    name: name.clone(),
-                    namespace: namespace.clone(),
                 }
             }
         };
@@ -455,25 +437,16 @@ impl KubeClient for MockKubeClient {
             // Resource didn't exist - created
             ApplyOutcome::Created {
                 resource_key: key.clone(),
-                kind: key.gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
             }
         } else if changed {
             // Resource existed and changed - updated
             ApplyOutcome::Updated {
                 resource_key: key.clone(),
-                kind: key.gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
             }
         } else {
             // Resource existed but didn't change - unchanged
             ApplyOutcome::Unchanged {
                 resource_key: key.clone(),
-                kind: key.gvk.kind.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
             }
         };
 
@@ -557,13 +530,11 @@ mod tests {
 
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
-        match outcome {
-            ApplyOutcome::Created {
-                kind, name, namespace, ..
-            } => {
-                assert_eq!(kind, "ConfigMap");
-                assert_eq!(name, "test");
-                assert_eq!(namespace, Some("default".to_string()));
+        match &outcome {
+            ApplyOutcome::Created { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
             }
             _ => panic!("Expected Created outcome"),
         }
@@ -606,13 +577,11 @@ mod tests {
         let updated_resource: DynamicObject = serde_json::from_value(updated_json).unwrap();
         let outcome = client.apply_resource(&updated_resource, "nyl", false).await.unwrap();
 
-        match outcome {
-            ApplyOutcome::Updated {
-                kind, name, namespace, ..
-            } => {
-                assert_eq!(kind, "ConfigMap");
-                assert_eq!(name, "test");
-                assert_eq!(namespace, Some("default".to_string()));
+        match &outcome {
+            ApplyOutcome::Updated { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
             }
             _ => panic!("Expected Updated outcome"),
         }
@@ -642,13 +611,11 @@ mod tests {
         // Second apply with same data (unchanged)
         let outcome = client.apply_resource(&resource, "nyl", false).await.unwrap();
 
-        match outcome {
-            ApplyOutcome::Unchanged {
-                kind, name, namespace, ..
-            } => {
-                assert_eq!(kind, "ConfigMap");
-                assert_eq!(name, "test");
-                assert_eq!(namespace, Some("default".to_string()));
+        match &outcome {
+            ApplyOutcome::Unchanged { .. } => {
+                assert_eq!(outcome.kind(), "ConfigMap");
+                assert_eq!(outcome.name(), "test");
+                assert_eq!(outcome.namespace(), Some("default"));
             }
             _ => panic!("Expected Unchanged outcome, got {:?}", outcome),
         }
