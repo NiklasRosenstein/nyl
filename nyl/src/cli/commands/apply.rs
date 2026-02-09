@@ -317,25 +317,34 @@ fn print_apply_summary(
     duplicates: &HashMap<ResourceKey, usize>,
     failed_count: usize,
 ) {
-    // Use resource_keys from release for matching with outcomes
-    let resource_keys = &release.resource_keys;
-
-    for (i, outcome) in outcomes.iter().enumerate() {
-        // Get the corresponding ResourceKey for this outcome
-        let resource_key = &resource_keys[i];
-
+    for outcome in outcomes {
         match outcome {
-            ApplyOutcome::Created { kind, name, namespace } => {
+            ApplyOutcome::Created {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
             }
-            ApplyOutcome::Updated { kind, name, namespace } => {
+            ApplyOutcome::Updated {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
             }
-            ApplyOutcome::Unchanged { kind, name, namespace } => {
+            ApplyOutcome::Unchanged {
+                resource_key,
+                kind,
+                name,
+                namespace,
+            } => {
                 let ns_name = format_namespace_name(namespace.as_deref(), name);
                 let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
                 println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
@@ -343,7 +352,7 @@ fn print_apply_summary(
             ApplyOutcome::DryRun { would_be } => {
                 // This shouldn't happen anymore since we removed --dry-run
                 // But handle it anyway by unwrapping
-                print_single_outcome(would_be, resource_key, duplicates);
+                print_single_outcome(would_be, duplicates);
             }
         }
     }
@@ -409,25 +418,40 @@ fn print_apply_summary(
 }
 
 /// Print a single outcome
-fn print_single_outcome(outcome: &ApplyOutcome, resource_key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) {
+fn print_single_outcome(outcome: &ApplyOutcome, duplicates: &HashMap<ResourceKey, usize>) {
     match outcome {
-        ApplyOutcome::Created { kind, name, namespace } => {
+        ApplyOutcome::Created {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "+".green().bold(), kind, ns_name, dup_annotation);
         }
-        ApplyOutcome::Updated { kind, name, namespace } => {
+        ApplyOutcome::Updated {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "~".yellow().bold(), kind, ns_name, dup_annotation);
         }
-        ApplyOutcome::Unchanged { kind, name, namespace } => {
+        ApplyOutcome::Unchanged {
+            resource_key,
+            kind,
+            name,
+            namespace,
+        } => {
             let ns_name = format_namespace_name(namespace.as_deref(), name);
             let dup_annotation = get_duplicate_annotation(resource_key, duplicates);
             println!("{} {} {}{}", "=".bright_black().bold(), kind, ns_name, dup_annotation);
         }
         ApplyOutcome::DryRun { would_be } => {
-            print_single_outcome(would_be, resource_key, duplicates);
+            print_single_outcome(would_be, duplicates);
         }
     }
 }
