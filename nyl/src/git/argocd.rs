@@ -20,20 +20,20 @@ pub struct ArgoCDCredentialDiscovery {
 
 impl ArgoCDCredentialDiscovery {
     /// Create a new ArgoCD credential discovery client
-    /// 
+    ///
     /// If `namespace` is None, attempts to detect the namespace from the pod's service account.
     /// Falls back to "argocd" if detection fails.
     pub fn new(client: Client) -> Result<Self> {
         let namespace = Self::detect_namespace().unwrap_or_else(|| "argocd".to_string());
         tracing::debug!("Using namespace '{}' for ArgoCD credential discovery", namespace);
-        
+
         Ok(Self {
             client,
             namespace,
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    
+
     /// Create a new ArgoCD credential discovery client with an explicit namespace
     pub fn with_namespace(client: Client, namespace: String) -> Result<Self> {
         Ok(Self {
@@ -42,9 +42,9 @@ impl ArgoCDCredentialDiscovery {
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    
+
     /// Detect the current namespace from the pod's service account
-    /// 
+    ///
     /// Reads from /var/run/secrets/kubernetes.io/serviceaccount/namespace
     fn detect_namespace() -> Option<String> {
         let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";

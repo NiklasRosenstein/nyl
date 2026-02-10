@@ -42,10 +42,7 @@ impl std::fmt::Debug for GitCredential {
                 .field("username", username)
                 .field("token", &"<redacted>")
                 .finish(),
-            GitCredential::SshAgent { username } => f
-                .debug_struct("SshAgent")
-                .field("username", username)
-                .finish(),
+            GitCredential::SshAgent { username } => f.debug_struct("SshAgent").field("username", username).finish(),
         }
     }
 }

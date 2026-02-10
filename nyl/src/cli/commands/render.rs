@@ -228,12 +228,12 @@ pub async fn render_manifests(
     let needs_git_credentials = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        
+
         // Check for ApplicationGenerator
         if kind == Some("ApplicationGenerator") && api_version == Some(API_VERSION_ARGOCD) {
             return true;
         }
-        
+
         // Check for HelmChart with git+ repository
         if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
             if let Some(spec) = r.get("spec") {
@@ -244,7 +244,7 @@ pub async fn render_manifests(
                 }
             }
         }
-        
+
         false
     });
 
