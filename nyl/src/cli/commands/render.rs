@@ -218,44 +218,15 @@ pub async fn render_manifests(
     // 4. Build template context
     let context = TemplateContext::build(&profile, &secrets_config, &env_name)?;
 
+    let credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
+
     // 5. Create generator
 
     // 6. Load and filter resources (rendering Jinja templates in manifest files)
     let resources = load_resources(path, &context)?;
     let filtered = filter_resources(resources, only_source_kind)?;
 
-    // 7. Check if any resources need Git operations (ApplicationGenerator or git-based Helm charts)
-    let needs_git_credentials = filtered.iter().any(|r| {
-        let kind = r.get("kind").and_then(|k| k.as_str());
-        let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-
-        // Check for ApplicationGenerator
-        if kind == Some("ApplicationGenerator") && api_version == Some(API_VERSION_ARGOCD) {
-            return true;
-        }
-
-        // Check for HelmChart with git+ repository
-        if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
-            if let Some(spec) = r.get("spec") {
-                if let Some(repo) = spec.get("repository").and_then(|r| r.as_str()) {
-                    if repo.starts_with("git+") {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
-    });
-
-    // Discover credentials only if Git operations are needed
-    let credential_provider = if needs_git_credentials {
-        crate::git::argocd_credential_provider_from_cluster().await
-    } else {
-        None
-    };
-
-    // 8. Check if any resources need Helm rendering (HelmChart or Component)
+    // 7. Check if any resources need Helm rendering (HelmChart or Component)
     let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
