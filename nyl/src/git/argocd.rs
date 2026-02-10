@@ -14,16 +14,43 @@ use super::error::{GitError, Result};
 /// ArgoCD credential discovery from Kubernetes secrets
 pub struct ArgoCDCredentialDiscovery {
     client: Client,
+    namespace: String,
     secret_cache: Arc<Mutex<HashMap<String, Secret>>>,
 }
 
 impl ArgoCDCredentialDiscovery {
     /// Create a new ArgoCD credential discovery client
+    /// 
+    /// If `namespace` is None, attempts to detect the namespace from the pod's service account.
+    /// Falls back to "argocd" if detection fails.
     pub fn new(client: Client) -> Result<Self> {
+        let namespace = Self::detect_namespace().unwrap_or_else(|| "argocd".to_string());
+        tracing::debug!("Using namespace '{}' for ArgoCD credential discovery", namespace);
+        
         Ok(Self {
             client,
+            namespace,
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+    
+    /// Create a new ArgoCD credential discovery client with an explicit namespace
+    pub fn with_namespace(client: Client, namespace: String) -> Result<Self> {
+        Ok(Self {
+            client,
+            namespace,
+            secret_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    
+    /// Detect the current namespace from the pod's service account
+    /// 
+    /// Reads from /var/run/secrets/kubernetes.io/serviceaccount/namespace
+    fn detect_namespace() -> Option<String> {
+        let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+        std::fs::read_to_string(namespace_path)
+            .ok()
+            .map(|ns| ns.trim().to_string())
     }
 
     /// Discover all credentials from ArgoCD repository secrets
@@ -112,7 +139,7 @@ impl ArgoCDCredentialDiscovery {
             }
         }
 
-        let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), "argocd");
+        let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
 
         // Query repository secrets
         let repo_lp = kube::api::ListParams::default().labels("argocd.argoproj.io/secret-type=repository");
