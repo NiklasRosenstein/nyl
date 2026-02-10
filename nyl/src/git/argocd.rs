@@ -11,6 +11,12 @@ use std::sync::{Arc, Mutex};
 use super::auth::GitCredential;
 use super::error::{GitError, Result};
 
+/// Path to the service account namespace file in a Kubernetes pod
+const SERVICE_ACCOUNT_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+/// Default namespace for ArgoCD installation
+const DEFAULT_ARGOCD_NAMESPACE: &str = "argocd";
+
 /// ArgoCD credential discovery from Kubernetes secrets
 pub struct ArgoCDCredentialDiscovery {
     client: Client,
@@ -24,7 +30,7 @@ impl ArgoCDCredentialDiscovery {
     /// If `namespace` is None, attempts to detect the namespace from the pod's service account.
     /// Falls back to "argocd" if detection fails.
     pub fn new(client: Client) -> Result<Self> {
-        let namespace = Self::detect_namespace().unwrap_or_else(|| "argocd".to_string());
+        let namespace = Self::detect_namespace().unwrap_or_else(|| DEFAULT_ARGOCD_NAMESPACE.to_string());
         tracing::debug!("Using namespace '{}' for ArgoCD credential discovery", namespace);
 
         Ok(Self {
@@ -45,10 +51,9 @@ impl ArgoCDCredentialDiscovery {
 
     /// Detect the current namespace from the pod's service account
     ///
-    /// Reads from /var/run/secrets/kubernetes.io/serviceaccount/namespace
+    /// Reads from the service account namespace file mounted in Kubernetes pods
     fn detect_namespace() -> Option<String> {
-        let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
-        std::fs::read_to_string(namespace_path)
+        std::fs::read_to_string(SERVICE_ACCOUNT_NAMESPACE_PATH)
             .ok()
             .map(|ns| ns.trim().to_string())
     }
