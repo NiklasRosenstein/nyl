@@ -133,7 +133,7 @@ The Rust binary is **pre-built by CI** and provided in the Docker build context.
 2. **`docker/plugin.yaml`** (line 37)
    ```yaml
    # OLD:
-   nyl template .
+   nyl template --in-cluster .
 
    # NEW:
    nyl render .
