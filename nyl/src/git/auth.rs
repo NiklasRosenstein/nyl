@@ -49,6 +49,7 @@ impl GitCredential {
 }
 
 /// Provides credentials for Git operations
+#[derive(Debug)]
 pub struct CredentialProvider {
     credentials: Arc<Mutex<HashMap<String, GitCredential>>>,
 }

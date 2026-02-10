@@ -58,6 +58,49 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+fn is_argocd_env() -> bool {
+    std::env::var_os("ARGOCD_APP_NAME").is_some() || std::env::var_os("ARGOCD_APP_NAMESPACE").is_some()
+}
+
+pub async fn argocd_credential_provider_from_cluster() -> Option<Arc<CredentialProvider>> {
+    if !is_argocd_env() {
+        return None;
+    }
+
+    let Ok(config) = kube::Config::incluster_env() else {
+        return None;
+    };
+
+    let client = match kube::Client::try_from(config) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("Failed to create in-cluster Kubernetes client: {}", e);
+            return None;
+        }
+    };
+
+    let discovery = match ArgoCDCredentialDiscovery::new(client) {
+        Ok(discovery) => discovery,
+        Err(e) => {
+            tracing::warn!("Failed to initialize ArgoCD credential discovery: {}", e);
+            return None;
+        }
+    };
+
+    match discovery.discover_credentials().await {
+        Ok(credentials) => {
+            if credentials.is_empty() {
+                return None;
+            }
+            Some(Arc::new(CredentialProvider::with_credentials(credentials)))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to discover ArgoCD credentials: {}", e);
+            None
+        }
+    }
+}
+
 /// Main Git manager for resolving Git references to local paths
 pub struct GitManager {
     cache: CacheLayout,
@@ -80,10 +123,25 @@ impl GitManager {
     /// This is useful for testing where you want to avoid environment variable
     /// race conditions between parallel tests.
     pub fn with_cache_dir(cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_cache_dir_and_provider(cache_dir, None)
+    }
+
+    pub fn with_credential_provider(credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
+        Ok(Self {
+            cache: CacheLayout::new()?,
+            bare_repos: HashMap::new(),
+            credential_provider,
+        })
+    }
+
+    pub fn with_cache_dir_and_provider(
+        cache_dir: impl Into<PathBuf>,
+        credential_provider: Option<Arc<CredentialProvider>>,
+    ) -> Self {
         Self {
             cache: CacheLayout::with_path(cache_dir),
             bare_repos: HashMap::new(),
-            credential_provider: None,
+            credential_provider,
         }
     }
 

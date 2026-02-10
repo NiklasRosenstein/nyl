@@ -1,11 +1,11 @@
 use clap::Args;
 use std::path::Path;
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
-    generator::Generator,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient, ResourceKey},
     postprocess::apply_kyverno_policies,
@@ -106,7 +106,7 @@ pub async fn render_manifests_complete(
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, profile, env_name) = render_manifests(
+    let (manifests, profile, env_name, credential_provider) = render_manifests(
         path,
         only_source_kind,
         environment,
@@ -124,7 +124,7 @@ pub async fn render_manifests_complete(
     // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
     for generator in generators {
-        let applications = process_application_generator(&generator, path)?;
+        let applications = process_application_generator(&generator, path, credential_provider.clone())?;
         final_manifests.extend(applications);
     }
 
@@ -173,7 +173,12 @@ pub async fn render_manifests(
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
-) -> Result<(Vec<serde_json::Value>, Profile, String)> {
+) -> Result<(
+    Vec<serde_json::Value>,
+    Profile,
+    String,
+    Option<Arc<crate::git::CredentialProvider>>,
+)> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
@@ -213,8 +218,9 @@ pub async fn render_manifests(
     // 4. Build template context
     let context = TemplateContext::build(&profile, &secrets_config, &env_name)?;
 
+    let credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
+
     // 5. Create generator
-    let generator = Generator::new(project_config.clone());
 
     // 6. Load and filter resources (rendering Jinja templates in manifest files)
     let resources = load_resources(path, &context)?;
@@ -260,12 +266,12 @@ pub async fn render_manifests(
         let mut next_pending = Vec::new();
         for resource in pending {
             let manifests = generate_resource(
-                &generator,
                 &resource,
                 &context,
                 &project_config,
                 &kube_version,
                 &api_versions,
+                credential_provider.clone(),
                 track_parent,
             )?;
             for manifest in manifests {
@@ -286,7 +292,7 @@ pub async fn render_manifests(
     // This happens when max_depth is reached before all resources are expanded
     all_manifests.extend(pending);
 
-    Ok((all_manifests, profile, env_name))
+    Ok((all_manifests, profile, env_name, credential_provider))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
@@ -548,12 +554,12 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
 /// Generate manifests from a resource
 #[allow(clippy::too_many_lines)]
 fn generate_resource(
-    _generator: &Generator,
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
@@ -564,7 +570,14 @@ fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
+        let manifests = render_helm_chart(
+            &chart,
+            context,
+            config,
+            kube_version,
+            api_versions,
+            credential_provider.clone(),
+        )?;
 
         // Add parent tracking annotations if enabled
         if track_parent {
@@ -620,7 +633,14 @@ fn generate_resource(
                 },
             };
 
-            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
+            let manifests = render_helm_chart(
+                &chart,
+                context,
+                config,
+                kube_version,
+                api_versions,
+                credential_provider.clone(),
+            )?;
 
             // Add parent tracking annotations if enabled
             if track_parent {
@@ -671,7 +691,14 @@ fn generate_resource(
                 },
             };
 
-            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions)?;
+            let manifests = render_helm_chart(
+                &chart,
+                context,
+                config,
+                kube_version,
+                api_versions,
+                credential_provider.clone(),
+            )?;
 
             // Add parent tracking annotations if enabled
             if track_parent {
@@ -730,11 +757,17 @@ fn render_helm_chart(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
     let working_dir =
         std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
 
-    let resolver = HelmChartResolver::new(config.config.settings.search_path.clone(), working_dir);
+    let resolver = HelmChartResolver::with_cache_dir_and_provider(
+        config.config.settings.search_path.clone(),
+        working_dir,
+        None,
+        credential_provider,
+    );
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
     // Merge context values into chart values
@@ -775,9 +808,10 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
 fn process_application_generator(
     generator: &crate::resources::ApplicationGenerator,
     _base_dir: &str,
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
     // Clone Git repository and resolve to local path
-    let mut git_manager = crate::git::GitManager::new()?;
+    let mut git_manager = crate::git::GitManager::with_credential_provider(credential_provider)?;
 
     let source_path = git_manager.resolve_ref(
         &generator.spec.source.repo_url,
