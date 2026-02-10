@@ -11,19 +11,51 @@ use std::sync::{Arc, Mutex};
 use super::auth::GitCredential;
 use super::error::{GitError, Result};
 
+/// Path to the service account namespace file in a Kubernetes pod
+const SERVICE_ACCOUNT_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+/// Default namespace for ArgoCD installation
+const DEFAULT_ARGOCD_NAMESPACE: &str = "argocd";
+
 /// ArgoCD credential discovery from Kubernetes secrets
 pub struct ArgoCDCredentialDiscovery {
     client: Client,
+    namespace: String,
     secret_cache: Arc<Mutex<HashMap<String, Secret>>>,
 }
 
 impl ArgoCDCredentialDiscovery {
     /// Create a new ArgoCD credential discovery client
+    ///
+    /// If `namespace` is None, attempts to detect the namespace from the pod's service account.
+    /// Falls back to "argocd" if detection fails.
     pub fn new(client: Client) -> Result<Self> {
+        let namespace = Self::detect_namespace().unwrap_or_else(|| DEFAULT_ARGOCD_NAMESPACE.to_string());
+        tracing::debug!("Using namespace '{}' for ArgoCD credential discovery", namespace);
+
         Ok(Self {
             client,
+            namespace,
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Create a new ArgoCD credential discovery client with an explicit namespace
+    pub fn with_namespace(client: Client, namespace: String) -> Result<Self> {
+        Ok(Self {
+            client,
+            namespace,
+            secret_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Detect the current namespace from the pod's service account
+    ///
+    /// Reads from the service account namespace file mounted in Kubernetes pods
+    fn detect_namespace() -> Option<String> {
+        std::fs::read_to_string(SERVICE_ACCOUNT_NAMESPACE_PATH)
+            .ok()
+            .map(|ns| ns.trim().to_string())
     }
 
     /// Discover all credentials from ArgoCD repository secrets
@@ -112,7 +144,7 @@ impl ArgoCDCredentialDiscovery {
             }
         }
 
-        let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), "argocd");
+        let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
 
         // Query repository secrets
         let repo_lp = kube::api::ListParams::default().labels("argocd.argoproj.io/secret-type=repository");
