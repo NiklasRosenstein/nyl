@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Git credential types for authentication
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum GitCredential {
     /// SSH key authentication
     SshKey {
@@ -24,6 +24,30 @@ pub enum GitCredential {
     },
     /// SSH agent authentication (use SSH agent for key)
     SshAgent { username: String },
+}
+
+// Custom Debug implementation that redacts sensitive data
+impl std::fmt::Debug for GitCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitCredential::SshKey { username, .. } => f
+                .debug_struct("SshKey")
+                .field("username", username)
+                .field("private_key", &"<redacted>")
+                .field("public_key", &"<redacted>")
+                .field("passphrase", &"<redacted>")
+                .finish(),
+            GitCredential::HttpsToken { username, .. } => f
+                .debug_struct("HttpsToken")
+                .field("username", username)
+                .field("token", &"<redacted>")
+                .finish(),
+            GitCredential::SshAgent { username } => f
+                .debug_struct("SshAgent")
+                .field("username", username)
+                .finish(),
+        }
+    }
 }
 
 impl GitCredential {
@@ -49,9 +73,19 @@ impl GitCredential {
 }
 
 /// Provides credentials for Git operations
-#[derive(Debug)]
 pub struct CredentialProvider {
     credentials: Arc<Mutex<HashMap<String, GitCredential>>>,
+}
+
+// Custom Debug implementation that doesn't expose credential values
+impl std::fmt::Debug for CredentialProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let creds = self.credentials.lock().unwrap();
+        f.debug_struct("CredentialProvider")
+            .field("credential_count", &creds.len())
+            .field("urls", &creds.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl CredentialProvider {

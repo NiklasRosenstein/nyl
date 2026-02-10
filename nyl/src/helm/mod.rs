@@ -278,7 +278,10 @@ impl std::fmt::Debug for HelmChartResolver {
             .field("search_paths", &self.search_paths)
             .field("working_dir", &self.working_dir)
             .field("cache_dir", &self.cache_dir)
-            .field("credential_provider", &self.credential_provider)
+            .field(
+                "credential_provider",
+                &self.credential_provider.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
