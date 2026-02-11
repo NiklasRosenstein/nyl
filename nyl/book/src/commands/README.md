@@ -26,6 +26,30 @@ nyl --verbose validate
 nyl -v new project my-app
 ```
 
+### `--color <COLOR>`
+
+Control when to use colored output. Accepts three values:
+
+- `auto` (default) - Automatically detect if colors should be used based on TTY detection
+- `always` - Always use colors, even when output is redirected to a file or pipe
+- `never` - Never use colors
+
+This flag is particularly useful when:
+- Redirecting output to a file where ANSI color codes are not desired
+- Working in environments where terminal color support is inconsistent
+- Forcing colored output in CI/CD pipelines that support ANSI colors
+
+```bash
+# Disable colors when piping to a file
+nyl --color never diff | tee output.txt
+
+# Force colors in CI/CD
+nyl --color always diff
+
+# Auto-detect (default behavior)
+nyl diff
+```
+
 ### `--help` / `-h`
 
 Show help information for any command.
