@@ -4,8 +4,11 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    // Parse CLI first to get verbose flag
+    // Parse CLI first to get verbose flag and color choice
     let cli = Cli::parse();
+
+    // Apply color choice before any output
+    cli.color.apply();
 
     // Initialize tracing based on verbose flag
     // Suppress kube_client::client::builder errors since we handle and display them ourselves

@@ -28,6 +28,14 @@ pub fn format_timestamp(timestamp: &DateTime<Utc>) -> String {
 pub fn create_table() -> Table {
     let mut table = Table::new();
     table.load_preset(UTF8_FULL).apply_modifier(UTF8_ROUND_CORNERS);
+
+    // Force no TTY mode if colors are disabled
+    // comfy_table respects the colored crate's control settings,
+    // but we explicitly force no TTY when colors are disabled to be safe
+    if !colored::control::SHOULD_COLORIZE.should_colorize() {
+        table.force_no_tty();
+    }
+
     table
 }
 
