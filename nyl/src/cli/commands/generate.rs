@@ -166,11 +166,7 @@ fn create_argocd_application(
     // Calculate relative path from base_dir
     let base_path = std::fs::canonicalize(base_dir)?;
     let file_abs = std::fs::canonicalize(file_path)?;
-    let rel_path = file_abs
-        .strip_prefix(&base_path)
-        .unwrap_or(file_path)
-        .to_str()
-        .ok_or_else(|| NylError::Config("Invalid file path encoding".to_string()))?;
+    let rel_path = normalize_relative_path_to_posix(file_abs.strip_prefix(&base_path).unwrap_or(file_path));
 
     Ok(serde_json::json!({
         "apiVersion": "argoproj.io/v1alpha1",
@@ -196,6 +192,10 @@ fn create_argocd_application(
                             "name": "NYL_RELEASE_NAMESPACE",
                             "value": release.metadata.namespace,
                         },
+                        {
+                            "name": "NYL_CMP_TEMPLATE_INPUT",
+                            "value": rel_path,
+                        },
                     ],
                 },
             },
@@ -211,6 +211,20 @@ fn create_argocd_application(
             },
         },
     }))
+}
+
+/// Normalize a relative path to POSIX-style separators.
+fn normalize_relative_path_to_posix(path: &Path) -> String {
+    let mut normalized = String::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(os_str) = component {
+            if !normalized.is_empty() {
+                normalized.push('/');
+            }
+            normalized.push_str(&os_str.to_string_lossy());
+        }
+    }
+    normalized
 }
 
 /// Find all YAML files in a directory (recursively)
@@ -310,5 +324,13 @@ metadata:
         assert_eq!(app["spec"]["source"]["repoURL"], "https://github.com/example/repo");
         assert_eq!(app["spec"]["destination"]["namespace"], "production");
         assert_eq!(app["spec"]["source"]["path"], "test-manifest.yaml");
+
+        let env = app["spec"]["source"]["plugin"]["env"].as_array().unwrap();
+        let template_input = env
+            .iter()
+            .find(|v| v["name"] == "NYL_CMP_TEMPLATE_INPUT")
+            .and_then(|v| v["value"].as_str())
+            .unwrap();
+        assert_eq!(template_input, "test-manifest.yaml");
     }
 }

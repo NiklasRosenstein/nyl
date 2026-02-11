@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nyl diff manifest.yaml
   ```
 
+- **BREAKING**: ArgoCD Nyl plugin now requires `NYL_CMP_TEMPLATE_INPUT` to select a single manifest file
+  - Plugin command no longer falls back to `nyl render .`
+  - `ApplicationGenerator` and `nyl generate` now set `NYL_CMP_TEMPLATE_INPUT` in generated ArgoCD `Application` plugin env
+
+  **Migration Guide:**
+
+  If you manage ArgoCD Applications manually, add:
+  ```yaml
+  spec:
+    source:
+      plugin:
+        name: nyl
+        env:
+          - name: NYL_CMP_TEMPLATE_INPUT
+            value: apps.yaml
+  ```
+
 - **BREAKING**: Removed `Root` scope from Kyverno policy annotations
   - `Root` and `Global` scopes would be identical since Nyl processes single files
   - Only `Global`, `Subtree`, and `Immediate` scopes are now valid

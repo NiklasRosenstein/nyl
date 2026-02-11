@@ -939,15 +939,11 @@ fn create_argocd_application_from_generator(
         .unwrap_or(Path::new(""));
 
     // Normalize the relative directory to POSIX-style separators for ArgoCD.
-    let mut rel_dir_normalized = String::new();
-    for component in rel_dir.components() {
-        if let std::path::Component::Normal(os_str) = component {
-            if !rel_dir_normalized.is_empty() {
-                rel_dir_normalized.push('/');
-            }
-            rel_dir_normalized.push_str(&os_str.to_string_lossy());
-        }
-    }
+    let rel_dir_normalized = normalize_relative_path_to_posix(rel_dir);
+    let template_input = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| NylError::Config(format!("Invalid file name: {}", file_path.display())))?;
 
     // Application path must be relative to the repo root, not the worktree.
     // Start from the generator's source.path and append any subdirectory.
@@ -976,6 +972,7 @@ fn create_argocd_application_from_generator(
                     "env": [
                         {"name": "NYL_RELEASE_NAME", "value": release.metadata.name},
                         {"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace},
+                        {"name": "NYL_CMP_TEMPLATE_INPUT", "value": template_input},
                     ],
                 },
             },
@@ -1002,6 +999,20 @@ fn create_argocd_application_from_generator(
     }
 
     Ok(app)
+}
+
+/// Normalize a relative path to POSIX-style separators.
+fn normalize_relative_path_to_posix(path: &Path) -> String {
+    let mut normalized = String::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(os_str) = component {
+            if !normalized.is_empty() {
+                normalized.push('/');
+            }
+            normalized.push_str(&os_str.to_string_lossy());
+        }
+    }
+    normalized
 }
 
 /// Add parent resource tracking annotations to a manifest
@@ -1137,21 +1148,72 @@ metadata:
     }
 
     #[test]
+    fn test_create_argocd_application_from_generator_sets_template_input() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource, NylReleaseMetadata, NylReleaseSpec,
+        };
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        let release = NylRelease {
+            api_version: API_VERSION.to_string(),
+            kind: "NylRelease".to_string(),
+            metadata: NylReleaseMetadata {
+                name: "nginx".to_string(),
+                namespace: "web".to_string(),
+            },
+            spec: NylReleaseSpec::default(),
+        };
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "HEAD".to_string(),
+                    path: "clusters/default".to_string(),
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+            },
+        };
+
+        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
+        let base_path = Path::new("/tmp/worktree/clusters/default");
+        let app = create_argocd_application_from_generator(&release, file_path, base_path, &generator).unwrap();
+
+        assert_eq!(app["spec"]["source"]["path"], "clusters/default/addons");
+
+        let env = app["spec"]["source"]["plugin"]["env"].as_array().unwrap();
+        let template_input = env
+            .iter()
+            .find(|v| v["name"] == "NYL_CMP_TEMPLATE_INPUT")
+            .and_then(|v| v["value"].as_str())
+            .unwrap();
+        assert_eq!(template_input, "nginx.yaml");
+    }
+
+    #[test]
     fn test_path_normalization_posix() {
         use std::path::Path;
 
-        // Simulate the path normalization logic in create_argocd_application_from_generator
         let rel_dir = Path::new("subdir/nested");
-        let mut rel_dir_normalized = String::new();
-        for component in rel_dir.components() {
-            if let std::path::Component::Normal(os_str) = component {
-                if !rel_dir_normalized.is_empty() {
-                    rel_dir_normalized.push('/');
-                }
-                rel_dir_normalized.push_str(&os_str.to_string_lossy());
-            }
-        }
-
+        let rel_dir_normalized = normalize_relative_path_to_posix(rel_dir);
         assert_eq!(rel_dir_normalized, "subdir/nested");
     }
 
@@ -1161,15 +1223,7 @@ metadata:
 
         // Test with platform-native path construction
         let rel_dir = Path::new("subdir").join("nested");
-        let mut rel_dir_normalized = String::new();
-        for component in rel_dir.components() {
-            if let std::path::Component::Normal(os_str) = component {
-                if !rel_dir_normalized.is_empty() {
-                    rel_dir_normalized.push('/');
-                }
-                rel_dir_normalized.push_str(&os_str.to_string_lossy());
-            }
-        }
+        let rel_dir_normalized = normalize_relative_path_to_posix(&rel_dir);
 
         // Should always produce POSIX-style paths regardless of platform
         assert_eq!(rel_dir_normalized, "subdir/nested");
@@ -1181,15 +1235,7 @@ metadata:
 
         // Test empty path handling
         let rel_dir = Path::new("");
-        let mut rel_dir_normalized = String::new();
-        for component in rel_dir.components() {
-            if let std::path::Component::Normal(os_str) = component {
-                if !rel_dir_normalized.is_empty() {
-                    rel_dir_normalized.push('/');
-                }
-                rel_dir_normalized.push_str(&os_str.to_string_lossy());
-            }
-        }
+        let rel_dir_normalized = normalize_relative_path_to_posix(rel_dir);
 
         assert_eq!(rel_dir_normalized, "");
     }

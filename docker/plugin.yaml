@@ -34,7 +34,12 @@ spec:
       - sh
       - -c
       - |
-        nyl render .
+        TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
+        if [ -z "$TEMPLATE_INPUT" ]; then
+          echo "NYL_CMP_TEMPLATE_INPUT is required. Set it via Application source.plugin.env." >&2
+          exit 1
+        fi
+        nyl render "$TEMPLATE_INPUT"
 
   parameters: {}
 

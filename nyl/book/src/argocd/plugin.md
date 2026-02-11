@@ -90,8 +90,9 @@ data:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          # Render manifests with Nyl
-          nyl render .
+          TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
+          test -n "$TEMPLATE_INPUT" || { echo "NYL_CMP_TEMPLATE_INPUT is required" >&2; exit 1; }
+          nyl render "$TEMPLATE_INPUT"
 ```
 
 ## Verification
@@ -141,6 +142,8 @@ source:
   plugin:
     name: nyl
     env:
+    - name: NYL_CMP_TEMPLATE_INPUT
+      value: apps.yaml
     - name: NYL_RELEASE_NAME
       value: my-app
     - name: NYL_RELEASE_NAMESPACE

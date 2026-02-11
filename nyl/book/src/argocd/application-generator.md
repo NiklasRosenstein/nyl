@@ -363,6 +363,8 @@ spec:
     plugin:
       name: nyl
       env:
+        - name: NYL_CMP_TEMPLATE_INPUT
+          value: nginx.yaml
         - name: NYL_RELEASE_NAME
           value: nginx
         - name: NYL_RELEASE_NAMESPACE
