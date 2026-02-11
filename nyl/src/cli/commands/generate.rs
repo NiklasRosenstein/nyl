@@ -182,7 +182,7 @@ fn create_argocd_application(
                 "path": rel_path,
                 "targetRevision": revision,
                 "plugin": {
-                    "name": "nyl",
+                    "name": "nyl-v2",
                     "env": [
                         {
                             "name": "NYL_RELEASE_NAME",
@@ -324,6 +324,7 @@ metadata:
         assert_eq!(app["spec"]["source"]["repoURL"], "https://github.com/example/repo");
         assert_eq!(app["spec"]["destination"]["namespace"], "production");
         assert_eq!(app["spec"]["source"]["path"], "test-manifest.yaml");
+        assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
 
         let env = app["spec"]["source"]["plugin"]["env"].as_array().unwrap();
         let template_input = env

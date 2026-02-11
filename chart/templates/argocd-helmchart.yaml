@@ -23,7 +23,7 @@ spec:
     
     {{- /* Build Nyl container configuration */ -}}
     {{- $nylContainer := dict 
-      "name" "nyl-v1"
+      "name" "nyl-v2"
       "image" (printf "%s:%s" .Values.nyl.image.repository .Values.nyl.image.tag)
       "imagePullPolicy" .Values.nyl.image.pullPolicy
       "securityContext" .Values.nyl.securityContext

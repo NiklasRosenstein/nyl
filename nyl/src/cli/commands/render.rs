@@ -968,7 +968,7 @@ fn create_argocd_application_from_generator(
                 "path": path_str,
                 "targetRevision": generator.spec.source.target_revision,
                 "plugin": {
-                    "name": "nyl",
+                    "name": "nyl-v2",
                     "env": [
                         {"name": "NYL_RELEASE_NAME", "value": release.metadata.name},
                         {"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace},
@@ -1198,6 +1198,7 @@ metadata:
         let app = create_argocd_application_from_generator(&release, file_path, base_path, &generator).unwrap();
 
         assert_eq!(app["spec"]["source"]["path"], "clusters/default/addons");
+        assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
 
         let env = app["spec"]["source"]["plugin"]["env"].as_array().unwrap();
         let template_input = env

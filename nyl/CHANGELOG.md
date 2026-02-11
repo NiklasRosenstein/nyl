@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING**: ArgoCD Nyl plugin now requires `NYL_CMP_TEMPLATE_INPUT` to select a single manifest file
   - Plugin command no longer falls back to `nyl render .`
   - `ApplicationGenerator` and `nyl generate` now set `NYL_CMP_TEMPLATE_INPUT` in generated ArgoCD `Application` plugin env
+  - Plugin name is now `nyl-v2` (legacy `nyl`/`nyl-v1` references are no longer supported)
 
   **Migration Guide:**
 
@@ -40,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec:
     source:
       plugin:
-        name: nyl
+        name: nyl-v2
         env:
           - name: NYL_CMP_TEMPLATE_INPUT
             value: apps.yaml

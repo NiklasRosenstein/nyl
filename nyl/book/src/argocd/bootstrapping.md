@@ -122,7 +122,7 @@ spec:
     configs:
       cm:
         configManagementPlugins: |
-          - name: nyl
+          - name: nyl-v2
             generate:
               command: ["/bin/sh", "-c"]
               args:
@@ -262,7 +262,7 @@ spec:
     targetRevision: HEAD
     path: argocd
     plugin:
-      name: nyl
+      name: nyl-v2
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -288,7 +288,7 @@ spec:
     targetRevision: HEAD
     path: .
     plugin:
-      name: nyl
+      name: nyl-v2
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd

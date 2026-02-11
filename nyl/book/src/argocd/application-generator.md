@@ -361,7 +361,7 @@ spec:
     path: clusters/default       # Directory of the file
     targetRevision: HEAD         # From generator.spec.source.targetRevision
     plugin:
-      name: nyl
+      name: nyl-v2
       env:
         - name: NYL_CMP_TEMPLATE_INPUT
           value: nginx.yaml

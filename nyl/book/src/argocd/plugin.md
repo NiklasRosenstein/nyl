@@ -85,7 +85,7 @@ metadata:
   namespace: argocd
 data:
   configManagementPlugins: |
-    - name: nyl
+    - name: nyl-v2
       generate:
         command: ["/bin/sh", "-c"]
         args:
@@ -114,7 +114,7 @@ spec:
     targetRevision: HEAD
     path: path/to/nyl/manifests
     plugin:
-      name: nyl
+      name: nyl-v2
   destination:
     server: https://kubernetes.default.svc
     namespace: default
@@ -140,7 +140,7 @@ You can pass environment variables to the Nyl plugin for configuration:
 ```yaml
 source:
   plugin:
-    name: nyl
+    name: nyl-v2
     env:
     - name: NYL_CMP_TEMPLATE_INPUT
       value: apps.yaml
@@ -156,7 +156,7 @@ source:
 
 If ArgoCD reports "plugin not found", check:
 
-1. The plugin name matches exactly: `nyl`
+1. The plugin name matches exactly: `nyl-v2`
 2. The argocd-cm ConfigMap is in the `argocd` namespace
 3. The repo-server pods have been restarted after configuration changes
 
