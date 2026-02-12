@@ -53,7 +53,14 @@ impl WorktreeManager {
             .arg("--detach")
             .arg(worktree_path)
             .arg(&oid_str)
-            .output()?;
+            .output()
+            .map_err(|e| {
+                GitError::WorktreeFailed(format!(
+                    "Failed to spawn 'git worktree add' for bare repo {}: {}. Ensure the 'git' CLI is installed and in PATH.",
+                    bare_repo_path.display(),
+                    e
+                ))
+            })?;
 
         if !output.status.success() {
             return Err(GitError::WorktreeFailed(format!(

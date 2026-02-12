@@ -16,8 +16,10 @@ impl BareRepository {
     /// Get or create a bare repository at the specified path
     pub fn get_or_create(url: &str, path: &Path, credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
         let repo = if path.exists() {
+            tracing::debug!("Reusing cached bare repository for {} at {}", url, path.display());
             Repository::open(path)?
         } else {
+            tracing::debug!("Creating bare repository cache for {} at {}", url, path.display());
             Self::clone_bare(url, path, credential_provider.as_deref())?
         };
 
@@ -35,6 +37,8 @@ impl BareRepository {
             std::fs::create_dir_all(parent)?;
         }
 
+        tracing::trace!("Starting bare clone for {} into {}", url, path.display());
+        tracing::debug!("Initializing bare Git repository for {} at {}", url, path.display());
         // Initialize bare repository
         let repo = Repository::init_bare(path).map_err(|e| GitError::CloneFailed {
             url: url.to_string(),
@@ -47,8 +51,11 @@ impl BareRepository {
             source: e,
         })?;
 
+        tracing::debug!("Fetching initial refs for {}", url);
         // Fetch refs only (no objects yet - lazy loading)
         Self::fetch_refs_with_auth(&repo, url, credential_provider)?;
+        tracing::debug!("Initial ref fetch complete for {}", url);
+        tracing::trace!("Bare clone completed successfully for {}", url);
 
         Ok(repo)
     }
@@ -59,6 +66,15 @@ impl BareRepository {
         url: &str,
         credential_provider: Option<&CredentialProvider>,
     ) -> Result<()> {
+        tracing::trace!(
+            "Fetching refs for {} (credential_provider={})",
+            url,
+            if credential_provider.is_some() {
+                "present"
+            } else {
+                "absent"
+            }
+        );
         let callbacks = if let Some(provider) = credential_provider {
             provider.build_callbacks(url)
         } else {
@@ -81,6 +97,7 @@ impl BareRepository {
             )
             .map_err(|e| GitError::Command(format!("git fetch failed: {}", e)))?;
 
+        tracing::trace!("Fetch refs completed for {}", url);
         Ok(())
     }
 
@@ -100,6 +117,7 @@ impl BareRepository {
 
     /// Update refs from the remote
     pub fn fetch_refs(&self) -> Result<()> {
+        tracing::debug!("Refreshing remote refs for {}", self.url);
         Self::fetch_refs_with_auth(&self.repo, &self.url, self.credential_provider.as_deref())
     }
 
@@ -166,6 +184,7 @@ impl BareRepository {
     /// Fetch specific objects for a commit
     pub fn fetch_objects(&self, oid: Oid) -> Result<()> {
         let oid_str = oid.to_string();
+        tracing::debug!("Fetching commit objects for {} at {}", self.url, oid_str);
 
         let callbacks = if let Some(provider) = &self.credential_provider {
             provider.build_callbacks(&self.url)
@@ -181,6 +200,7 @@ impl BareRepository {
             .fetch(&[&oid_str], Some(&mut fetch_options), None)
             .map_err(|e| GitError::Command(format!("git fetch {} failed: {}", oid_str, e)))?;
 
+        tracing::debug!("Fetched commit objects for {} at {}", self.url, oid_str);
         Ok(())
     }
 

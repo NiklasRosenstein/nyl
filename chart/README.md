@@ -154,7 +154,7 @@ If you're upgrading from the Python version of Nyl, here's what you need to know
 
 4. **Test your manifests** with the Rust version:
    ```bash
-   nyl render . > /tmp/output.yaml
+   nyl render manifest.yaml > /tmp/output.yaml
    kubectl diff -f /tmp/output.yaml
    ```
 

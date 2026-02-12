@@ -136,7 +136,7 @@ The Rust binary is **pre-built by CI** and provided in the Docker build context.
    nyl template --in-cluster .
 
    # NEW:
-   nyl render --in-cluster .
+   nyl render .
    ```
 
 3. **`chart/` (formerly `argocd-with-nyl/`)**

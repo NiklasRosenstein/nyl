@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Git credential types for authentication
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum GitCredential {
     /// SSH key authentication
     SshKey {
@@ -24,6 +24,27 @@ pub enum GitCredential {
     },
     /// SSH agent authentication (use SSH agent for key)
     SshAgent { username: String },
+}
+
+// Custom Debug implementation that redacts sensitive data
+impl std::fmt::Debug for GitCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitCredential::SshKey { username, .. } => f
+                .debug_struct("SshKey")
+                .field("username", username)
+                .field("private_key", &"<redacted>")
+                .field("public_key", &"<redacted>")
+                .field("passphrase", &"<redacted>")
+                .finish(),
+            GitCredential::HttpsToken { username, .. } => f
+                .debug_struct("HttpsToken")
+                .field("username", username)
+                .field("token", &"<redacted>")
+                .finish(),
+            GitCredential::SshAgent { username } => f.debug_struct("SshAgent").field("username", username).finish(),
+        }
+    }
 }
 
 impl GitCredential {
@@ -53,6 +74,17 @@ pub struct CredentialProvider {
     credentials: Arc<Mutex<HashMap<String, GitCredential>>>,
 }
 
+// Custom Debug implementation that doesn't expose credential values
+impl std::fmt::Debug for CredentialProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let creds = self.credentials.lock().unwrap();
+        f.debug_struct("CredentialProvider")
+            .field("credential_count", &creds.len())
+            .field("urls", &creds.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 impl CredentialProvider {
     /// Create a new credential provider
     pub fn new() -> Self {
@@ -80,6 +112,11 @@ impl CredentialProvider {
 
         // Try exact match first
         if let Some(cred) = creds.get(url) {
+            tracing::debug!(
+                "Matched Git credential via exact URL for {} (type={})",
+                url,
+                Self::credential_kind(cred)
+            );
             return Some(cred.clone());
         }
 
@@ -89,12 +126,19 @@ impl CredentialProvider {
             for (stored_url, credential) in creds.iter() {
                 if let Some(stored_host) = extract_hostname(stored_url) {
                     if host == stored_host {
+                        tracing::debug!(
+                            "Matched Git credential via hostname fallback for {} using stored URL {} (type={})",
+                            url,
+                            stored_url,
+                            Self::credential_kind(credential)
+                        );
                         return Some(credential.clone());
                     }
                 }
             }
         }
 
+        tracing::debug!("No stored Git credential matched URL {}", url);
         None
     }
 
@@ -106,6 +150,12 @@ impl CredentialProvider {
         callbacks.credentials(move |url, username_from_url, allowed_types| {
             // If we have a stored credential, use it
             if let Some(ref cred) = credential {
+                tracing::trace!(
+                    "Using stored Git credential for {} (type={}, username_from_url={})",
+                    url,
+                    Self::credential_kind(cred),
+                    username_from_url.unwrap_or("<none>")
+                );
                 return cred.to_git2_cred(url, username_from_url);
             }
 
@@ -113,15 +163,25 @@ impl CredentialProvider {
             if allowed_types.contains(CredentialType::SSH_KEY) {
                 let username = username_from_url.unwrap_or("git");
                 if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                    tracing::trace!("Using SSH agent fallback for {} as {}", url, username);
                     return Ok(cred);
                 }
             }
 
             // No credential available
+            tracing::trace!("No Git credentials available for {}", url);
             Err(git2::Error::from_str("No credentials available"))
         });
 
         callbacks
+    }
+
+    fn credential_kind(credential: &GitCredential) -> &'static str {
+        match credential {
+            GitCredential::SshKey { .. } => "ssh-key",
+            GitCredential::HttpsToken { .. } => "https-token",
+            GitCredential::SshAgent { .. } => "ssh-agent",
+        }
     }
 }
 

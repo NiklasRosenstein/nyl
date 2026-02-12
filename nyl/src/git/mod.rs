@@ -58,6 +58,54 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+fn is_argocd_env() -> bool {
+    std::env::var_os("ARGOCD_APP_NAME").is_some() || std::env::var_os("ARGOCD_APP_NAMESPACE").is_some()
+}
+
+pub async fn argocd_credential_provider_from_cluster() -> Option<Arc<CredentialProvider>> {
+    if !is_argocd_env() {
+        tracing::trace!("Not running in ArgoCD environment; skipping credential discovery");
+        return None;
+    }
+    tracing::debug!("ArgoCD environment detected, attempting credential discovery from cluster");
+
+    let Ok(config) = kube::Config::incluster_env() else {
+        tracing::debug!("In-cluster Kubernetes config not available; skipping ArgoCD credential discovery");
+        return None;
+    };
+
+    let client = match kube::Client::try_from(config) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("Failed to create in-cluster Kubernetes client: {}", e);
+            return None;
+        }
+    };
+
+    let discovery = match ArgoCDCredentialDiscovery::new(client) {
+        Ok(discovery) => discovery,
+        Err(e) => {
+            tracing::warn!("Failed to initialize ArgoCD credential discovery: {}", e);
+            return None;
+        }
+    };
+
+    match discovery.discover_credentials().await {
+        Ok(credentials) => {
+            if credentials.is_empty() {
+                tracing::debug!("No ArgoCD Git credentials discovered");
+                return None;
+            }
+            tracing::debug!("Loaded {} ArgoCD Git credentials", credentials.len());
+            Some(Arc::new(CredentialProvider::with_credentials(credentials)))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to discover ArgoCD credentials: {}", e);
+            None
+        }
+    }
+}
+
 /// Main Git manager for resolving Git references to local paths
 pub struct GitManager {
     cache: CacheLayout,
@@ -80,10 +128,25 @@ impl GitManager {
     /// This is useful for testing where you want to avoid environment variable
     /// race conditions between parallel tests.
     pub fn with_cache_dir(cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_cache_dir_and_provider(cache_dir, None)
+    }
+
+    pub fn with_credential_provider(credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
+        Ok(Self {
+            cache: CacheLayout::new()?,
+            bare_repos: HashMap::new(),
+            credential_provider,
+        })
+    }
+
+    pub fn with_cache_dir_and_provider(
+        cache_dir: impl Into<PathBuf>,
+        credential_provider: Option<Arc<CredentialProvider>>,
+    ) -> Self {
         Self {
             cache: CacheLayout::with_path(cache_dir),
             bare_repos: HashMap::new(),
-            credential_provider: None,
+            credential_provider,
         }
     }
 
@@ -141,17 +204,42 @@ impl GitManager {
 
         // Always fetch latest refs to ensure we have the most recent version
         // Fall back to cached refs if fetch fails (e.g., offline scenarios)
-        {
+        let fetch_error = {
             let repo = bare_repo.lock().unwrap();
             if let Err(e) = repo.fetch_refs() {
                 tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
+                Some(e)
+            } else {
+                None
             }
-        }
+        };
 
         // Resolve ref to OID
         let oid = {
             let repo = bare_repo.lock().unwrap();
-            repo.resolve_ref(git_ref)?
+            match repo.resolve_ref(git_ref) {
+                Ok(oid) => {
+                    if fetch_error.is_some() {
+                        tracing::debug!("Using cached ref '{}' for {} after fetch failure", git_ref, url);
+                    }
+                    oid
+                }
+                Err(resolve_error) => {
+                    if let Some(fetch_error) = &fetch_error {
+                        tracing::warn!(
+                            "Fetch fallback unavailable for {} at ref '{}': no cached ref found after fetch failure",
+                            url,
+                            git_ref
+                        );
+                        return Err(GitError::FetchFailedNoCachedRef {
+                            url: url.to_string(),
+                            ref_name: git_ref.to_string(),
+                            fetch_error: fetch_error.to_string(),
+                        });
+                    }
+                    return Err(resolve_error);
+                }
+            }
         };
 
         // Check if we have the commit objects, fetch if needed
@@ -209,6 +297,9 @@ impl Default for GitManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git2::Repository;
+    use repository::BareRepository;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     #[test]
@@ -218,5 +309,60 @@ mod tests {
         let manager = GitManager::with_cache_dir(temp_cache.path());
         // Verify it was created (with_cache_dir doesn't return Result)
         assert!(manager.bare_repos.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_ref_uses_cached_ref_when_fetch_fails() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = {
+            let mut index = source_repo.index().unwrap();
+            index.write_tree().unwrap()
+        };
+        let tree = source_repo.find_tree(tree_id).unwrap();
+        source_repo
+            .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+            .unwrap();
+
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = source_dir.path().to_string_lossy().to_string();
+
+        let first_path = manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
+        assert!(first_path.exists());
+
+        std::fs::remove_dir_all(source_dir.path()).unwrap();
+
+        let second_path = manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
+        assert!(second_path.exists());
+    }
+
+    #[test]
+    fn test_resolve_ref_errors_when_fetch_fails_and_no_cached_ref() {
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = "/tmp/nyl-does-not-exist-cred-test".to_string();
+
+        let bare_repo_path = manager.cache.bare_repo_path(&url);
+        let raw_repo = Repository::init_bare(&bare_repo_path).unwrap();
+        raw_repo.remote("origin", &url).unwrap();
+        let bare_repo = BareRepository::get_or_create(&url, &bare_repo_path, None).unwrap();
+        manager.bare_repos.insert(url.clone(), Arc::new(Mutex::new(bare_repo)));
+
+        let err = manager.resolve_ref(&url, Some("HEAD"), None).unwrap_err();
+        match err {
+            GitError::FetchFailedNoCachedRef {
+                url: err_url,
+                ref_name,
+                fetch_error,
+            } => {
+                assert_eq!(err_url, url);
+                assert_eq!(ref_name, "HEAD");
+                assert!(fetch_error.contains("git fetch failed"));
+            }
+            other => panic!("Expected FetchFailedNoCachedRef, got {other:?}"),
+        }
     }
 }

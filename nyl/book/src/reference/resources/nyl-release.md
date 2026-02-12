@@ -156,7 +156,7 @@ kind: Application
 spec:
   source:
     plugin:
-      name: nyl
+      name: nyl-v2
       env:
         - name: NYL_RELEASE_NAME
           value: myapp          # From NylRelease.metadata.name

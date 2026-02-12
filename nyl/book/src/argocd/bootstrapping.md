@@ -122,11 +122,14 @@ spec:
     configs:
       cm:
         configManagementPlugins: |
-          - name: nyl
+          - name: nyl-v2
             generate:
               command: ["/bin/sh", "-c"]
               args:
-                - nyl render .
+                - |
+                  TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
+                  test -n "$TEMPLATE_INPUT" || { echo "NYL_CMP_TEMPLATE_INPUT is required" >&2; exit 1; }
+                  nyl render "$TEMPLATE_INPUT"
 ```
 
 ## Step 3: Create ApplicationGenerator
@@ -259,7 +262,7 @@ spec:
     targetRevision: HEAD
     path: argocd
     plugin:
-      name: nyl
+      name: nyl-v2
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -285,7 +288,7 @@ spec:
     targetRevision: HEAD
     path: .
     plugin:
-      name: nyl
+      name: nyl-v2
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -352,7 +355,7 @@ When you apply `bootstrap.yaml`:
 
 1. **ArgoCD Namespace Created**: The `argocd` namespace is created
 2. **ArgoCD Application Syncs**: ArgoCD installs itself via the Nyl plugin
-3. **Apps Application Syncs**: The "apps" Application runs `nyl render .`
+3. **Apps Application Syncs**: The "apps" Application runs `nyl render "$NYL_CMP_TEMPLATE_INPUT"` (for example `apps.yaml`)
 4. **ApplicationGenerator Processes**: Nyl finds `apps.yaml`, sees ApplicationGenerator
 5. **Directory Scanned**: Nyl scans `clusters/default/` for YAML files
 6. **Applications Generated**: For each NylRelease found (nginx, redis), Nyl generates an ArgoCD Application

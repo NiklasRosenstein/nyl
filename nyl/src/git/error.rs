@@ -16,6 +16,15 @@ pub enum GitError {
     #[error("Reference '{ref_name}' not found in repository\nHint: Check that the branch, tag, or commit exists. Use 'git ls-remote <url>' to list available refs.")]
     RefNotFound { ref_name: String },
 
+    #[error(
+        "Failed to fetch refs for {url}, and no cached ref '{ref_name}' was available: {fetch_error}\nHint: Verify repository credentials and network access, or use a resolvable targetRevision."
+    )]
+    FetchFailedNoCachedRef {
+        url: String,
+        ref_name: String,
+        fetch_error: String,
+    },
+
     #[error("Worktree operation failed: {0}\nHint: Ensure the worktree directory is writable and not already in use.")]
     WorktreeFailed(String),
 
@@ -127,6 +136,16 @@ mod tests {
         let display = format!("{}", ref_err);
         assert!(display.contains("Hint:"));
         assert!(display.contains("git ls-remote"));
+
+        let fetch_cache_err = GitError::FetchFailedNoCachedRef {
+            url: "https://github.com/user/repo.git".to_string(),
+            ref_name: "HEAD".to_string(),
+            fetch_error: "git fetch failed: auth".to_string(),
+        };
+        let display = format!("{}", fetch_cache_err);
+        assert!(display.contains("Hint:"));
+        assert!(display.contains("credentials"));
+        assert!(display.contains("HEAD"));
     }
 
     #[test]
