@@ -93,6 +93,19 @@ impl ColorChoice {
             }
         }
     }
+
+    /// Check if ANSI colors should be used based on this choice
+    /// This is used for tracing_subscriber configuration
+    pub fn should_use_ansi(&self) -> bool {
+        match self {
+            ColorChoice::Auto => {
+                // Check if stderr is a TTY (tracing writes to stderr)
+                std::io::IsTerminal::is_terminal(&std::io::stderr())
+            }
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,14 +122,14 @@ mod tests {
     fn test_color_choice_apply_always() {
         // Save current state
         let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-        
+
         ColorChoice::Always.apply();
         // When set to always, colored output should be enabled
         assert!(colored::control::SHOULD_COLORIZE.should_colorize());
-        
+
         // Restore to auto to avoid interfering with other tests
         colored::control::unset_override();
-        
+
         // Best effort restoration - may not be exact if initial was based on TTY
         let _ = initial;
     }
@@ -125,14 +138,14 @@ mod tests {
     fn test_color_choice_apply_never() {
         // Save current state
         let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-        
+
         ColorChoice::Never.apply();
         // When set to never, colored output should be disabled
         assert!(!colored::control::SHOULD_COLORIZE.should_colorize());
-        
+
         // Restore to auto to avoid interfering with other tests
         colored::control::unset_override();
-        
+
         // Best effort restoration - may not be exact if initial was based on TTY
         let _ = initial;
     }
