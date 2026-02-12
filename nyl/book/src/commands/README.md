@@ -34,6 +34,10 @@ Control when to use colored output. Accepts three values:
 - `always` - Always use colors, even when output is redirected to a file or pipe
 - `never` - Never use colors
 
+This applies to both:
+- Colored output from commands (diffs, status indicators, etc.)
+- Log messages from `tracing` (INFO, WARN, ERROR)
+
 This flag is particularly useful when:
 - Redirecting output to a file where ANSI color codes are not desired
 - Working in environments where terminal color support is inconsistent
