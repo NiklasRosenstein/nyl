@@ -321,9 +321,7 @@ mise run docs-rustdoc      # Opens in browser
 ## CI/CD Pipelines
 
 ### Workflows
-- **ci-rust.yaml:** Rust lint, test, format checks
-- **ci-integration.yaml:** Integration tests with Kubernetes
-- **ci-docker.yaml:** Docker image builds
+- **ci.yaml:** Unified CI for quality checks, cross-platform tests, image/chart packaging, and develop integration tests
 - **docs.yaml:** Deploy documentation to GitHub Pages
 - **release.yml:** Binary releases with cargo-dist
 

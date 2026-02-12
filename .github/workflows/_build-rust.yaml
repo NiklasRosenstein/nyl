@@ -1,6 +1,6 @@
 # Reusable workflow for building Rust binaries across all platforms
 # This is the SINGLE SOURCE OF TRUTH for binary building logic
-# Used by: ci-rust.yaml (primary CI), potentially release workflows
+# Used by: ci.yaml (primary CI), potentially release workflows
 #
 # Key features:
 # - Cross-compilation support (Linux, macOS, Windows)
