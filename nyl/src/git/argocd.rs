@@ -61,6 +61,11 @@ impl ArgoCDCredentialDiscovery {
     /// Discover all credentials from ArgoCD repository secrets
     pub async fn discover_credentials(&self) -> Result<HashMap<String, GitCredential>> {
         let secrets = self.query_repository_secrets().await?;
+        tracing::debug!(
+            "Discovered {} ArgoCD repository secret candidates in namespace {}",
+            secrets.len(),
+            self.namespace
+        );
         let mut credentials = HashMap::new();
 
         for (name, secret) in secrets {
@@ -79,6 +84,11 @@ impl ArgoCDCredentialDiscovery {
             }
         }
 
+        tracing::debug!(
+            "Extracted {} usable Git credentials from ArgoCD secrets in namespace {}",
+            credentials.len(),
+            self.namespace
+        );
         Ok(credentials)
     }
 
@@ -152,6 +162,11 @@ impl ArgoCDCredentialDiscovery {
             .list(&repo_lp)
             .await
             .map_err(|e| GitError::ArgoCDSecretQueryFailed(e.to_string()))?;
+        tracing::trace!(
+            "Found {} secrets labeled repository in namespace {}",
+            repo_secrets.items.len(),
+            self.namespace
+        );
 
         // Query repo-creds secrets
         let creds_lp = kube::api::ListParams::default().labels("argocd.argoproj.io/secret-type=repo-creds");
@@ -159,6 +174,11 @@ impl ArgoCDCredentialDiscovery {
             .list(&creds_lp)
             .await
             .map_err(|e| GitError::ArgoCDSecretQueryFailed(e.to_string()))?;
+        tracing::trace!(
+            "Found {} secrets labeled repo-creds in namespace {}",
+            creds_secrets.items.len(),
+            self.namespace
+        );
 
         // Combine both sets of secrets, filtering for type="git" only
         let mut secrets = HashMap::new();

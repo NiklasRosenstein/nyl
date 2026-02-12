@@ -123,8 +123,20 @@ pub async fn render_manifests_complete(
 
     // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
+    if !generators.is_empty() {
+        tracing::debug!(
+            "Found {} ApplicationGenerator resource(s) in {}",
+            generators.len(),
+            path
+        );
+    }
     for generator in generators {
         let applications = process_application_generator(&generator, path, credential_provider.clone())?;
+        tracing::debug!(
+            "ApplicationGenerator {} produced {} ArgoCD Application(s)",
+            generator.metadata.name,
+            applications.len()
+        );
         final_manifests.extend(applications);
     }
 
@@ -810,6 +822,14 @@ fn process_application_generator(
     _base_dir: &str,
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
+    tracing::debug!(
+        "Processing ApplicationGenerator {}: repoURL={}, targetRevision={}, source.path={}",
+        generator.metadata.name,
+        generator.spec.source.repo_url,
+        generator.spec.source.target_revision,
+        generator.spec.source.path
+    );
+
     // Clone Git repository and resolve to local path
     let mut git_manager = crate::git::GitManager::with_credential_provider(credential_provider)?;
 
@@ -818,6 +838,11 @@ fn process_application_generator(
         Some(&generator.spec.source.target_revision),
         Some(&generator.spec.source.path),
     )?;
+    tracing::debug!(
+        "ApplicationGenerator {} resolved source path to {}",
+        generator.metadata.name,
+        source_path.display()
+    );
 
     // Find YAML files matching filters
     let yaml_files = find_yaml_files_filtered(
@@ -825,6 +850,11 @@ fn process_application_generator(
         &generator.spec.source.include,
         &generator.spec.source.exclude,
     )?;
+    tracing::debug!(
+        "ApplicationGenerator {} discovered {} YAML file(s) after include/exclude filters",
+        generator.metadata.name,
+        yaml_files.len()
+    );
 
     let mut applications = Vec::new();
 
@@ -843,11 +873,22 @@ fn process_application_generator(
         if let Some(release) = nyl_release {
             // Generate ArgoCD Application
             let app = create_argocd_application_from_generator(&release, &file_path, &source_path, generator)?;
+            tracing::debug!(
+                "Generated ArgoCD Application {} from NylRelease in {}",
+                release.metadata.name,
+                file_path.display()
+            );
             applications.push(app);
+        } else {
+            tracing::trace!("No NylRelease found in {}, skipping", file_path.display());
         }
-        // Skip files without NylRelease (no warning to avoid noise)
     }
 
+    tracing::debug!(
+        "ApplicationGenerator {} generated {} ArgoCD Application(s) total",
+        generator.metadata.name,
+        applications.len()
+    );
     Ok(applications)
 }
 
