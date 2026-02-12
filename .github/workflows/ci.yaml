@@ -80,7 +80,6 @@ jobs:
 
   build-linux-musl:
     name: Build Linux musl binaries
-    needs: [quality, test-matrix]
     uses: ./.github/workflows/_build-rust.yaml
     with:
       targets: |
