@@ -129,17 +129,18 @@ jobs:
       - name: Compute build metadata
         id: vars
         run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             FULL_SHA="${{ github.event.pull_request.head.sha }}"
             PR_NUMBER="${{ github.event.number }}"
             IMAGE_TAG="pr-${PR_NUMBER}-${FULL_SHA:0:7}"
             CAN_PUSH=$([ "${{ github.event.pull_request.head.repo.fork }}" = "true" ] && echo "false" || echo "true")
-            IMAGE_TAGS=$'ghcr.io/${{ github.repository }}:'"${IMAGE_TAG}"$'\n''ghcr.io/${{ github.repository }}:sha-'"${FULL_SHA:0:7}"
+            IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':'"${IMAGE_TAG}"$'\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
           else
             FULL_SHA="${{ github.sha }}"
             IMAGE_TAG="develop"
             CAN_PUSH="true"
-            IMAGE_TAGS=$'ghcr.io/${{ github.repository }}:develop\n''ghcr.io/${{ github.repository }}:sha-'"${FULL_SHA:0:7}"
+            IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':develop\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
           fi
 
           SHORT_SHA="${FULL_SHA:0:7}"
