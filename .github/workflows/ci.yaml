@@ -1,0 +1,311 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nyl
+
+      - name: Format check
+        working-directory: nyl
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: nyl
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Security audit
+        run: cargo audit
+
+  test-matrix:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nyl
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: Run tests
+        working-directory: nyl
+        run: cargo test --all-features
+
+  build-linux-musl:
+    name: Build Linux musl binaries
+    needs: [quality, test-matrix]
+    uses: ./.github/workflows/_build-rust.yaml
+    with:
+      targets: |
+        [
+          {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-musl"},
+          {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-musl"}
+        ]
+      upload-artifacts: true
+
+  package-image-and-chart:
+    name: Build image and chart
+    needs: [build-linux-musl]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      full_sha: ${{ steps.vars.outputs.full_sha }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      chart_version: ${{ steps.vars.outputs.chart_version }}
+      owner_lc: ${{ steps.vars.outputs.owner_lc }}
+      can_push: ${{ steps.vars.outputs.can_push }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download x86_64 musl binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nyl-x86_64-unknown-linux-musl
+          path: ./artifacts/amd64
+
+      - name: Download aarch64 musl binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nyl-aarch64-unknown-linux-musl
+          path: ./artifacts/arm64
+
+      - name: Prepare binaries
+        run: |
+          mv artifacts/amd64/nyl nyl-amd64
+          mv artifacts/arm64/nyl nyl-arm64
+          chmod +x nyl-amd64 nyl-arm64
+          ls -lh nyl-amd64 nyl-arm64
+
+      - name: Compute build metadata
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FULL_SHA="${{ github.event.pull_request.head.sha }}"
+            PR_NUMBER="${{ github.event.number }}"
+            IMAGE_TAG="pr-${PR_NUMBER}-${FULL_SHA:0:7}"
+            CAN_PUSH=$([ "${{ github.event.pull_request.head.repo.fork }}" = "true" ] && echo "false" || echo "true")
+            IMAGE_TAGS=$'ghcr.io/${{ github.repository }}:'"${IMAGE_TAG}"$'\n''ghcr.io/${{ github.repository }}:sha-'"${FULL_SHA:0:7}"
+          else
+            FULL_SHA="${{ github.sha }}"
+            IMAGE_TAG="develop"
+            CAN_PUSH="true"
+            IMAGE_TAGS=$'ghcr.io/${{ github.repository }}:develop\n''ghcr.io/${{ github.repository }}:sha-'"${FULL_SHA:0:7}"
+          fi
+
+          SHORT_SHA="${FULL_SHA:0:7}"
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          BASE_VERSION=$(awk '/^version:/ {print $2}' chart/Chart.yaml)
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHART_VERSION="${BASE_VERSION}-pr.${{ github.event.number }}.sha.${SHORT_SHA}"
+          else
+            CHART_VERSION="${BASE_VERSION}-sha.${SHORT_SHA}"
+          fi
+
+          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          echo "can_push=${CAN_PUSH}" >> "$GITHUB_OUTPUT"
+          echo "image_tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${IMAGE_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.vars.outputs.can_push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and optionally push image
+        uses: docker/build-push-action@v6
+        with:
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.vars.outputs.can_push == 'true' }}
+          tags: ${{ steps.vars.outputs.image_tags }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Package Helm chart
+        run: |
+          cp -r chart "$RUNNER_TEMP/chart"
+          sed -i "s|tag: .*|tag: ${{ steps.vars.outputs.image_tag }}|" "$RUNNER_TEMP/chart/values.yaml"
+          helm package "$RUNNER_TEMP/chart" --version="${{ steps.vars.outputs.chart_version }}" -d "$RUNNER_TEMP"
+          ls -lh "$RUNNER_TEMP"/chart-*.tgz
+
+      - name: Push Helm chart
+        if: steps.vars.outputs.can_push == 'true'
+        run: |
+          helm push "$RUNNER_TEMP"/chart-*.tgz oci://ghcr.io/${{ steps.vars.outputs.owner_lc }}/nyl
+
+      - name: Upload packaged chart
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart-package
+          path: ${{ runner.temp }}/chart-*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-all-platform-binaries:
+    name: Build all platform binaries
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [build-linux-musl]
+    uses: ./.github/workflows/_build-rust.yaml
+    with:
+      targets: |
+        [
+          {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu"},
+          {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-gnu"},
+          {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-musl"},
+          {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-musl"},
+          {"os": "macos-latest", "target": "x86_64-apple-darwin"},
+          {"os": "macos-latest", "target": "aarch64-apple-darwin"},
+          {"os": "windows-latest", "target": "x86_64-pc-windows-msvc"}
+        ]
+      upload-artifacts: true
+
+  integration-minikube:
+    name: Integration tests (Minikube)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [package-image-and-chart, build-all-platform-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+    env:
+      DEPLOYMENT_TIMEOUT: 300
+      SYNC_TIMEOUT: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.package-image-and-chart.outputs.full_sha }}
+
+      - name: Download Nyl x86_64 musl binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nyl-x86_64-unknown-linux-musl
+          path: ./nyl-bin
+
+      - name: Install Nyl
+        run: |
+          chmod +x ./nyl-bin/nyl
+          sudo mv ./nyl-bin/nyl /usr/local/bin/nyl
+          nyl --version
+
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@v0.0.18
+        with:
+          cpus: 2
+          memory: 4096
+          kubernetes-version: v1.29.0
+          driver: docker
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Run kind filtering and append-release test
+        run: |
+          cd integrationtests
+          ./test-kind-filtering-append-release.sh
+
+      - name: Run ArgoCD bootstrap test
+        env:
+          NYL_CHART_OWNER: ${{ needs.package-image-and-chart.outputs.owner_lc }}
+          NYL_CHART_VERSION: ${{ needs.package-image-and-chart.outputs.chart_version }}
+          NYL_IMAGE_TAG: ${{ needs.package-image-and-chart.outputs.image_tag }}
+          NYL_REPO_URL: https://github.com/${{ github.repository }}.git
+          NYL_TARGET_REVISION: ${{ needs.package-image-and-chart.outputs.full_sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          DEPLOYMENT_TIMEOUT: ${{ env.DEPLOYMENT_TIMEOUT }}
+          SYNC_TIMEOUT: ${{ env.SYNC_TIMEOUT }}
+        run: |
+          cd integrationtests
+          ./test-argocd-bootstrap.sh
+
+      - name: Run ArgoCD credential lookup test
+        env:
+          NYL_BIN: /usr/local/bin/nyl
+          TEST_REPO_URL: ${{ secrets.TEST_REPO_URL }}
+          TEST_REPO_USERNAME: ${{ secrets.TEST_REPO_USERNAME }}
+          TEST_REPO_PASSWORD: ${{ secrets.TEST_REPO_PASSWORD }}
+          REQUIRE_PRIVATE_REPO: true
+        run: |
+          cd integrationtests
+          ./test-argocd-credential-lookup-local.sh
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== DEBUG: Integration tests failed ==="
+          kubectl get events -A --sort-by='.lastTimestamp' | tail -50 || true
+          kubectl get pods -A -o wide || true
+          kubectl describe pods -A || true
