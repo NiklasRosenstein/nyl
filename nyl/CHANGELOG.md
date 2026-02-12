@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `--color` global flag to control colored output
+  - `auto` (default): Automatically detect if colors should be used based on TTY detection
+  - `always`: Always use colors, even when output is redirected
+  - `never`: Never use colors
+  - Colors are now automatically disabled when output is piped or redirected to a file
+
 ### Changed
 
 - **BREAKING**: Restrict `render`, `apply`, and `diff` commands to single file processing
