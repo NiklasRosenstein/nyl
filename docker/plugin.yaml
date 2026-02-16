@@ -6,36 +6,27 @@ kind: ConfigManagementPlugin
 metadata:
   name: nyl
 spec:
-  # note: Plugin name in ArgoCD is `nyl-v2`.
-  version: v2
+  version: v2 #  note: Plugin name in ArgoCD is `nyl-v2`.
 
-  # init:
-  #   command:
-  #     - sh
-  #     - -c
-  #     - |
-  #       nyl version >&2
-  #       argocd version --client >&2
-
-  # We expect that the NYL_CMP_TEMPLATE_INPUT environment variable points to the file to be templated
-  # for the current invocation. This is necessary because Argo CD lacks native support for referring to a single file;
-  # it only supports directories via the `.spec.source.path` field in the Application resource.
   generate:
     command:
       - sh
       - -c
       - |
         TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
+        SOURCE_PATH="${ARGOCD_APP_SOURCE_PATH:-}"
         if [ -z "$TEMPLATE_INPUT" ]; then
           echo "NYL_CMP_TEMPLATE_INPUT is required. Set it via Application source.plugin.env." >&2
           exit 1
         fi
-        if [ ! -f "$TEMPLATE_INPUT" ] && [ -n "${ARGOCD_APP_SOURCE_PATH:-}" ]; then
-          CANDIDATE="${ARGOCD_APP_SOURCE_PATH%/}/$TEMPLATE_INPUT"
-          if [ -f "$CANDIDATE" ]; then
-            TEMPLATE_INPUT="$CANDIDATE"
-          fi
-        fi
+        case "$TEMPLATE_INPUT" in
+          /*) ;;
+          *)
+            if [ -n "$SOURCE_PATH" ]; then
+              TEMPLATE_INPUT="${SOURCE_PATH%/}/$TEMPLATE_INPUT"
+            fi
+            ;;
+        esac
         nyl render "$TEMPLATE_INPUT"
 
   parameters: {}
