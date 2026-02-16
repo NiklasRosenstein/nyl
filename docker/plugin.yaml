@@ -9,15 +9,6 @@ spec:
   # note: Plugin name in ArgoCD is `nyl-v2`.
   version: v2
 
-  discover:
-    find:
-      command:
-        - sh
-        - -c
-        - |
-          cd $(git rev-parse --show-toplevel)
-          (find . -name 'nyl-secrets.*' | grep .) || (find . -name 'nyl-project.*' | grep .)
-
   # init:
   #   command:
   #     - sh
