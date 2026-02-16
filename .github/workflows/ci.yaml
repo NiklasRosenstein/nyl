@@ -138,7 +138,7 @@ jobs:
             IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':'"${IMAGE_TAG}"$'\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
           else
             FULL_SHA="${{ github.sha }}"
-            IMAGE_TAG="develop"
+            IMAGE_TAG="sha-${FULL_SHA:0:7}"
             CAN_PUSH="true"
             IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':develop'$'\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
           fi
