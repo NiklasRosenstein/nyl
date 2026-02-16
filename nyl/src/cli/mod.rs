@@ -62,6 +62,14 @@ enum Commands {
 }
 
 impl Cli {
+    /// Return the render input path if this invocation is `nyl render`.
+    pub fn render_input_path(&self) -> Option<&str> {
+        match &self.command {
+            Commands::Render(args) => Some(args.common.path.as_str()),
+            _ => None,
+        }
+    }
+
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
         match self.command {
