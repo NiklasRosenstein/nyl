@@ -84,6 +84,7 @@ nyl render -p staging --max-depth 3 --track-parent manifest.yaml
 - Nyl processes single files only. Directory paths are not supported.
 - Global Kyverno policies are applied automatically if present in the manifest.
 - Immediate and Subtree Kyverno scope support coming in a future version.
+- In ArgoCD plugin runs, Git-based `ApplicationGenerator` source resolution reuses the local ArgoCD checkout when `repoURL` and `targetRevision` exactly match `ARGOCD_APP_SOURCE_REPO_URL` and `ARGOCD_APP_SOURCE_TARGET_REVISION`.
 - Local ApplicationGenerator testing override: set `NYL_APPGEN_REPO_PATH_OVERRIDE` to a local repository root to make ApplicationGenerator scan the local filesystem instead of cloning. This affects `render`, `diff`, and `apply` (all use the same render pipeline).
 - ApplicationGenerator discovery semantics: `source.path` scans non-recursively by default; use glob selectors (or `source.paths`) for recursive discovery, and include/exclude patterns match relative paths.
 - **Component filter behavior**: The `-c/--component` filter applies to top-level resources in the file before expansion. For example:

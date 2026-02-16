@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Optimized Git source resolution in ArgoCD plugin context to reuse ArgoCD's local checkout for matching `repoURL` + exact `targetRevision`, falling back to cache/worktree cloning on mismatch
+
 - **BREAKING**: Restrict `render`, `apply`, and `diff` commands to single file processing
   - Commands now require a file path argument (e.g., `nyl render manifest.yaml`)
   - Directory paths are no longer supported and will return a clear error message

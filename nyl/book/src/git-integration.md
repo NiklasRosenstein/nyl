@@ -181,11 +181,22 @@ spec:
 ```
 
 When rendered, Nyl will:
-1. Clone the Git repository to cache
+1. Resolve repository source location (reuse ArgoCD local checkout when possible)
 2. Check out the `main` branch
 3. Navigate to the `apps/` directory
 4. Scan for YAML files matching the include/exclude patterns
 5. Generate ArgoCD Application manifests for each NylRelease found
+
+### ArgoCD Local Checkout Reuse
+
+When running in ArgoCD plugin context, Nyl can skip clone/worktree operations and reuse the local checkout that ArgoCD already prepared.
+
+Reuse is enabled only when all of these conditions match exactly:
+- `spec.source.repoURL` equals `ARGOCD_APP_SOURCE_REPO_URL` (normalized URL comparison)
+- `spec.source.targetRevision` equals `ARGOCD_APP_SOURCE_TARGET_REVISION` (exact string match)
+- `ARGOCD_APP_SOURCE_PATH` can be resolved relative to the current working directory
+
+If any condition does not match, Nyl falls back to normal Git cache/worktree resolution.
 
 ### Local Worktree Override (Testing)
 

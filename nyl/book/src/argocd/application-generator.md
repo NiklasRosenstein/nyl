@@ -411,6 +411,13 @@ spec:
 
 By default, `source.path` is resolved from `source.repoURL` + `source.targetRevision` using Nyl's Git cache/worktree flow.
 
+When Nyl runs inside ArgoCD plugin context, it first tries to reuse ArgoCD's local checkout instead of cloning:
+- `source.repoURL` must match `ARGOCD_APP_SOURCE_REPO_URL` (normalized URL comparison)
+- `source.targetRevision` must exactly match `ARGOCD_APP_SOURCE_TARGET_REVISION`
+- `ARGOCD_APP_SOURCE_PATH` must be resolvable to a local source directory
+
+If these checks fail, Nyl falls back to normal Git cache/worktree resolution.
+
 For local testing, set:
 
 ```bash

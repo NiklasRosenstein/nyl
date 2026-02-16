@@ -55,7 +55,7 @@ use repository::BareRepository;
 use worktree::WorktreeManager;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 fn is_argocd_env() -> bool {
@@ -104,6 +104,153 @@ pub async fn argocd_credential_provider_from_cluster() -> Option<Arc<CredentialP
             None
         }
     }
+}
+
+fn try_resolve_ref_from_argocd_env(url: &str, git_ref: &str, subpath: Option<&str>) -> Option<PathBuf> {
+    let env_repo_url = std::env::var("ARGOCD_APP_SOURCE_REPO_URL").ok()?;
+    let env_target_revision = std::env::var("ARGOCD_APP_SOURCE_TARGET_REVISION").ok()?;
+    let env_source_path = std::env::var("ARGOCD_APP_SOURCE_PATH").ok()?;
+
+    let requested_ref = git_ref.trim();
+    let target_revision = env_target_revision.trim();
+    if requested_ref != target_revision {
+        tracing::trace!(
+            "Skipping ArgoCD local checkout reuse: targetRevision mismatch (requested={}, argocd={})",
+            requested_ref,
+            target_revision
+        );
+        return None;
+    }
+
+    let requested_url = normalize_git_url_for_equality(url);
+    let source_url = normalize_git_url_for_equality(&env_repo_url);
+    if requested_url != source_url {
+        tracing::trace!(
+            "Skipping ArgoCD local checkout reuse: repoURL mismatch (requested={}, argocd={})",
+            crate::util::sanitize_url(url),
+            crate::util::sanitize_url(&env_repo_url)
+        );
+        return None;
+    }
+
+    let repo_root = derive_repo_root_from_source_path(&env_source_path)?;
+    if !repo_root.is_dir() {
+        tracing::debug!(
+            "Skipping ArgoCD local checkout reuse: derived repo root is not a directory: {}",
+            repo_root.display()
+        );
+        return None;
+    }
+
+    let path = if let Some(sub) = subpath {
+        repo_root.join(sub)
+    } else {
+        repo_root
+    };
+
+    tracing::debug!(
+        "Reusing ArgoCD local checkout for {} at {} (targetRevision={})",
+        crate::util::sanitize_url(url),
+        path.display(),
+        target_revision
+    );
+    Some(path)
+}
+
+fn derive_repo_root_from_source_path(raw_source_path: &str) -> Option<PathBuf> {
+    let source_path_raw = raw_source_path.trim();
+    if source_path_raw.is_empty() {
+        return None;
+    }
+
+    let source_path = Path::new(source_path_raw);
+    if source_path.is_absolute() {
+        tracing::trace!(
+            "Skipping ArgoCD local checkout reuse: ARGOCD_APP_SOURCE_PATH must be relative, got {}",
+            source_path.display()
+        );
+        return None;
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    let source_dir_from_cwd = cwd.join(source_path);
+    if source_dir_from_cwd.is_dir() {
+        return Some(cwd);
+    }
+
+    let source_components = relative_normal_components(source_path)?;
+    let cwd_components = normal_components(&cwd);
+    if ends_with_components(&cwd_components, &source_components) {
+        let mut repo_root = cwd.clone();
+        for _ in 0..source_components.len() {
+            repo_root.pop();
+        }
+        if repo_root.join(source_path).is_dir() {
+            return Some(repo_root);
+        }
+    }
+
+    tracing::trace!(
+        "Skipping ArgoCD local checkout reuse: could not derive repo root from cwd={} and sourcePath={}",
+        cwd.display(),
+        source_path.display()
+    );
+    None
+}
+
+fn normalize_git_url_for_equality(url: &str) -> String {
+    let mut normalized = url.trim().to_lowercase();
+
+    if let Some(at_pos) = normalized.find('@') {
+        if !normalized.starts_with("http") && !normalized.starts_with("ssh://") {
+            if let Some(colon_pos) = normalized[at_pos..].find(':') {
+                let username_host = &normalized[..at_pos + colon_pos];
+                let path = &normalized[at_pos + colon_pos + 1..];
+                normalized = format!("ssh://{}/{}", username_host, path);
+            }
+        }
+    }
+
+    if normalized.ends_with('/') {
+        normalized.truncate(normalized.len() - 1);
+    }
+
+    if std::path::Path::new(&normalized)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("git"))
+    {
+        normalized.truncate(normalized.len() - 4);
+    }
+
+    normalized
+}
+
+fn relative_normal_components(path: &Path) -> Option<Vec<String>> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => components.push(part.to_string_lossy().to_string()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(components)
+}
+
+fn normal_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| {
+            if let Component::Normal(part) = component {
+                Some(part.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn ends_with_components(path: &[String], suffix: &[String]) -> bool {
+    path.len() >= suffix.len() && path[path.len() - suffix.len()..] == *suffix
 }
 
 /// Main Git manager for resolving Git references to local paths
@@ -198,6 +345,9 @@ impl GitManager {
     /// ```
     pub fn resolve_ref(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
         let git_ref = git_ref.unwrap_or("HEAD");
+        if let Some(path) = try_resolve_ref_from_argocd_env(url, git_ref, subpath) {
+            return Ok(path);
+        }
 
         // Get or create bare repository
         let bare_repo = self.get_or_create_bare_repo(url)?;
@@ -299,8 +449,47 @@ mod tests {
     use super::*;
     use git2::Repository;
     use repository::BareRepository;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    static ARGOCD_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvCwdGuard {
+        old_repo_url: Option<String>,
+        old_target_revision: Option<String>,
+        old_source_path: Option<String>,
+        old_cwd: PathBuf,
+    }
+
+    impl EnvCwdGuard {
+        fn new() -> Self {
+            Self {
+                old_repo_url: std::env::var("ARGOCD_APP_SOURCE_REPO_URL").ok(),
+                old_target_revision: std::env::var("ARGOCD_APP_SOURCE_TARGET_REVISION").ok(),
+                old_source_path: std::env::var("ARGOCD_APP_SOURCE_PATH").ok(),
+                old_cwd: std::env::current_dir().expect("current dir should be available"),
+            }
+        }
+    }
+
+    impl Drop for EnvCwdGuard {
+        fn drop(&mut self) {
+            match &self.old_repo_url {
+                Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", v),
+                None => std::env::remove_var("ARGOCD_APP_SOURCE_REPO_URL"),
+            }
+            match &self.old_target_revision {
+                Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", v),
+                None => std::env::remove_var("ARGOCD_APP_SOURCE_TARGET_REVISION"),
+            }
+            match &self.old_source_path {
+                Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_PATH", v),
+                None => std::env::remove_var("ARGOCD_APP_SOURCE_PATH"),
+            }
+            let _ = std::env::set_current_dir(&self.old_cwd);
+        }
+    }
 
     #[test]
     fn test_git_manager_creation() {
@@ -364,5 +553,96 @@ mod tests {
             }
             other => panic!("Expected FetchFailedNoCachedRef, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_try_resolve_ref_from_argocd_env_reuses_checkout_on_exact_match() {
+        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _env_guard = EnvCwdGuard::new();
+
+        let repo_root = TempDir::new().unwrap();
+        std::fs::create_dir_all(repo_root.path().join("clusters/default")).unwrap();
+        std::env::set_current_dir(repo_root.path()).unwrap();
+        std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/repo.git");
+        std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "HEAD");
+        std::env::set_var("ARGOCD_APP_SOURCE_PATH", "clusters/default");
+
+        let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo", "HEAD", None).unwrap();
+        assert_eq!(resolved, repo_root.path());
+    }
+
+    #[test]
+    fn test_try_resolve_ref_from_argocd_env_reuses_checkout_with_subpath() {
+        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _env_guard = EnvCwdGuard::new();
+
+        let repo_root = TempDir::new().unwrap();
+        std::fs::create_dir_all(repo_root.path().join("apps")).unwrap();
+        std::fs::create_dir_all(repo_root.path().join("charts/service")).unwrap();
+        std::env::set_current_dir(repo_root.path()).unwrap();
+        std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "git@github.com:example/repo.git");
+        std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "main");
+        std::env::set_var("ARGOCD_APP_SOURCE_PATH", "apps");
+
+        let resolved = try_resolve_ref_from_argocd_env(
+            "ssh://git@github.com/example/repo",
+            "main",
+            Some("charts/service"),
+        )
+        .unwrap();
+        assert_eq!(resolved, repo_root.path().join("charts/service"));
+    }
+
+    #[test]
+    fn test_try_resolve_ref_from_argocd_env_skips_on_target_revision_mismatch() {
+        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _env_guard = EnvCwdGuard::new();
+
+        std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/repo.git");
+        std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "main");
+        std::env::set_var("ARGOCD_APP_SOURCE_PATH", "apps");
+
+        let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo.git", "HEAD", None);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_try_resolve_ref_from_argocd_env_skips_on_repo_mismatch() {
+        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _env_guard = EnvCwdGuard::new();
+
+        std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/other.git");
+        std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "HEAD");
+        std::env::set_var("ARGOCD_APP_SOURCE_PATH", "apps");
+
+        let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo.git", "HEAD", None);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_try_resolve_ref_from_argocd_env_skips_on_unresolvable_source_path() {
+        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _env_guard = EnvCwdGuard::new();
+
+        let repo_root = TempDir::new().unwrap();
+        std::env::set_current_dir(repo_root.path()).unwrap();
+        std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/repo.git");
+        std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "HEAD");
+        std::env::set_var("ARGOCD_APP_SOURCE_PATH", "missing/path");
+
+        let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo.git", "HEAD", None);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_normalize_git_url_for_equality_normalizes_https_and_ssh_forms() {
+        assert_eq!(
+            normalize_git_url_for_equality("https://github.com/example/repo.git"),
+            normalize_git_url_for_equality("https://github.com/example/repo/")
+        );
+        assert_eq!(
+            normalize_git_url_for_equality("git@github.com:example/repo.git"),
+            normalize_git_url_for_equality("ssh://git@github.com/example/repo/")
+        );
     }
 }
