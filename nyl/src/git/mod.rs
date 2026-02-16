@@ -456,38 +456,38 @@ mod tests {
     static ARGOCD_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvCwdGuard {
-        old_repo_url: Option<String>,
-        old_target_revision: Option<String>,
-        old_source_path: Option<String>,
-        old_cwd: PathBuf,
+        repo_url: Option<String>,
+        target_revision: Option<String>,
+        source_path: Option<String>,
+        original_cwd: PathBuf,
     }
 
     impl EnvCwdGuard {
         fn new() -> Self {
             Self {
-                old_repo_url: std::env::var("ARGOCD_APP_SOURCE_REPO_URL").ok(),
-                old_target_revision: std::env::var("ARGOCD_APP_SOURCE_TARGET_REVISION").ok(),
-                old_source_path: std::env::var("ARGOCD_APP_SOURCE_PATH").ok(),
-                old_cwd: std::env::current_dir().expect("current dir should be available"),
+                repo_url: std::env::var("ARGOCD_APP_SOURCE_REPO_URL").ok(),
+                target_revision: std::env::var("ARGOCD_APP_SOURCE_TARGET_REVISION").ok(),
+                source_path: std::env::var("ARGOCD_APP_SOURCE_PATH").ok(),
+                original_cwd: std::env::current_dir().expect("current dir should be available"),
             }
         }
     }
 
     impl Drop for EnvCwdGuard {
         fn drop(&mut self) {
-            match &self.old_repo_url {
+            match &self.repo_url {
                 Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", v),
                 None => std::env::remove_var("ARGOCD_APP_SOURCE_REPO_URL"),
             }
-            match &self.old_target_revision {
+            match &self.target_revision {
                 Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", v),
                 None => std::env::remove_var("ARGOCD_APP_SOURCE_TARGET_REVISION"),
             }
-            match &self.old_source_path {
+            match &self.source_path {
                 Some(v) => std::env::set_var("ARGOCD_APP_SOURCE_PATH", v),
                 None => std::env::remove_var("ARGOCD_APP_SOURCE_PATH"),
             }
-            let _ = std::env::set_current_dir(&self.old_cwd);
+            let _ = std::env::set_current_dir(&self.original_cwd);
         }
     }
 
