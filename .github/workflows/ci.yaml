@@ -140,7 +140,7 @@ jobs:
             FULL_SHA="${{ github.sha }}"
             IMAGE_TAG="develop"
             CAN_PUSH="true"
-            IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':develop\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
+            IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':develop'$'\n''ghcr.io/'"${REPO_LC}"':sha-'"${FULL_SHA:0:7}"
           fi
 
           SHORT_SHA="${FULL_SHA:0:7}"
