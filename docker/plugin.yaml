@@ -30,6 +30,12 @@ spec:
           echo "NYL_CMP_TEMPLATE_INPUT is required. Set it via Application source.plugin.env." >&2
           exit 1
         fi
+        if [ ! -f "$TEMPLATE_INPUT" ] && [ -n "${ARGOCD_APP_SOURCE_PATH:-}" ]; then
+          CANDIDATE="${ARGOCD_APP_SOURCE_PATH%/}/$TEMPLATE_INPUT"
+          if [ -f "$CANDIDATE" ]; then
+            TEMPLATE_INPUT="$CANDIDATE"
+          fi
+        fi
         nyl render "$TEMPLATE_INPUT"
 
   parameters: {}
