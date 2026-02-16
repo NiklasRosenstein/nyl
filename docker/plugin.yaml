@@ -4,9 +4,10 @@
 apiVersion: argoproj.io/v1alpha1
 kind: ConfigManagementPlugin
 metadata:
-  name: nyl-v2
+  name: nyl
 spec:
   # note: Plugin name in ArgoCD is `nyl-v2`.
+  version: v2
 
   discover:
     find:
