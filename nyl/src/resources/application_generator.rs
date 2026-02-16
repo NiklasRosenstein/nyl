@@ -76,8 +76,12 @@ pub struct ApplicationSource {
     /// Target revision (branch, tag, commit)
     #[serde(default = "default_target_revision", rename = "targetRevision")]
     pub target_revision: String,
-    /// Directory path to scan
-    pub path: String,
+    /// Path selector to scan (mutually exclusive with paths)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Multiple path selectors to scan (mutually exclusive with path)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
     /// Include patterns for file filtering
     #[serde(default = "default_include")]
     pub include: Vec<String>,
@@ -124,7 +128,7 @@ fn default_include() -> Vec<String> {
 }
 
 fn default_exclude() -> Vec<String> {
-    vec![".*".to_string(), "_*".to_string()]
+    vec![".*".to_string(), "_*".to_string(), ".nyl/**".to_string()]
 }
 
 fn default_application_name_template() -> String {
@@ -150,8 +154,29 @@ impl ApplicationGenerator {
         if self.spec.source.repo_url.is_empty() {
             return Err(NylError::Config("spec.source.repoURL is required".to_string()));
         }
-        if self.spec.source.path.is_empty() {
-            return Err(NylError::Config("spec.source.path is required".to_string()));
+        match (&self.spec.source.path, &self.spec.source.paths) {
+            (Some(path), None) => {
+                if path.trim().is_empty() {
+                    return Err(NylError::Config("spec.source.path must not be empty".to_string()));
+                }
+            }
+            (None, Some(paths)) => {
+                if paths.is_empty() || paths.iter().all(|p| p.trim().is_empty()) {
+                    return Err(NylError::Config(
+                        "spec.source.paths must contain at least one non-empty selector".to_string(),
+                    ));
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(NylError::Config(
+                    "spec.source.path and spec.source.paths are mutually exclusive".to_string(),
+                ))
+            }
+            (None, None) => {
+                return Err(NylError::Config(
+                    "Exactly one of spec.source.path or spec.source.paths is required".to_string(),
+                ))
+            }
         }
         if self.spec.destination.server.is_empty() {
             return Err(NylError::Config("spec.destination.server is required".to_string()));
@@ -263,13 +288,14 @@ mod tests {
         assert_eq!(gen.spec.destination.server, "https://kubernetes.default.svc");
         assert_eq!(gen.spec.destination.namespace, "argocd");
         assert_eq!(gen.spec.source.repo_url, "https://github.com/example/repo.git");
-        assert_eq!(gen.spec.source.path, "clusters/default");
+        assert_eq!(gen.spec.source.path, Some("clusters/default".to_string()));
+        assert_eq!(gen.spec.source.paths, None);
 
         // Check defaults
         assert_eq!(gen.spec.project, "default");
         assert_eq!(gen.spec.source.target_revision, "HEAD");
         assert_eq!(gen.spec.source.include, vec!["*.yaml", "*.yml"]);
-        assert_eq!(gen.spec.source.exclude, vec![".*", "_*"]);
+        assert_eq!(gen.spec.source.exclude, vec![".*", "_*", ".nyl/**"]);
     }
 
     #[test]
@@ -360,7 +386,8 @@ mod tests {
                 source: ApplicationSource {
                     repo_url: "https://github.com/example/repo.git".to_string(),
                     target_revision: "HEAD".to_string(),
-                    path: "clusters/default".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
                 },
@@ -388,11 +415,35 @@ mod tests {
     #[test]
     fn test_validate_empty_path() {
         let mut gen = create_test_generator();
-        gen.spec.source.path = String::new();
+        gen.spec.source.path = Some(String::new());
 
         let result = gen.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("path"));
+    }
+
+    #[test]
+    fn test_validate_rejects_both_path_and_paths() {
+        let mut gen = create_test_generator();
+        gen.spec.source.paths = Some(vec!["clusters/other".to_string()]);
+
+        let result = gen.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_validate_rejects_missing_path_and_paths() {
+        let mut gen = create_test_generator();
+        gen.spec.source.path = None;
+        gen.spec.source.paths = None;
+
+        let result = gen.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Exactly one of spec.source.path or spec.source.paths"));
     }
 
     #[test]
@@ -569,7 +620,8 @@ mod tests {
                 source: ApplicationSource {
                     repo_url: "https://github.com/example/repo.git".to_string(),
                     target_revision: "HEAD".to_string(),
-                    path: "clusters/default".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
                 },

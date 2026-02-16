@@ -187,6 +187,25 @@ When rendered, Nyl will:
 4. Scan for YAML files matching the include/exclude patterns
 5. Generate ArgoCD Application manifests for each NylRelease found
 
+### Local Worktree Override (Testing)
+
+For local testing, you can bypass Git clone/worktree resolution and force all `ApplicationGenerator` resources to read from a local repository root:
+
+```bash
+export NYL_APPGEN_REPO_PATH_OVERRIDE=/path/to/local/repo
+nyl render apps.yaml
+```
+
+Behavior:
+- If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set, Nyl resolves `spec.source.path`/`spec.source.paths` selectors under that local path.
+- If unset, Nyl uses normal Git clone/cache/worktree resolution from `spec.source.repoURL` and `spec.source.targetRevision`.
+- If the override path is invalid, rendering fails immediately.
+
+Selector behavior:
+- `source.path` scans the selected directory non-recursively by default.
+- Use glob selectors (for example `**/*.yaml`) or `source.paths` for multi-selector/recursive workflows.
+- Include/exclude patterns are matched against paths relative to the repository root.
+
 ## Performance Characteristics
 
 ### Initial Clone

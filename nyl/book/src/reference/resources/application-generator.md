@@ -19,7 +19,8 @@ spec:
   source:
     repoURL: https://github.com/org/repo.git
     targetRevision: HEAD
-    path: clusters/default
+    path: clusters/default       # Exactly one of path or paths is required
+    # paths: ["clusters/*/apps", "shared/apps/*.yaml"]
   project: default
   syncPolicy:
     automated:
@@ -28,5 +29,11 @@ spec:
 ```
 
 The ApplicationGenerator resource enables automatic generation of ArgoCD Applications from NylRelease files in a directory.
+
+Key behavior:
+- `source.path` and `source.paths` are mutually exclusive.
+- A directory selector is scanned non-recursively by default.
+- Use glob selectors in `path`/`paths` when you want recursive discovery.
+- `include`/`exclude` patterns are matched against file paths relative to the repository root.
 
 See the [full guide](../../argocd/application-generator.md) for complete field reference, examples, and usage patterns.

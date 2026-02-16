@@ -1,7 +1,7 @@
 use clap::Args;
-use std::path::Path;
+use glob::{glob, Pattern};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use walkdir::WalkDir;
 
 use crate::{
     config::ProjectConfig,
@@ -822,31 +822,26 @@ fn process_application_generator(
     _base_dir: &str,
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
+    let source_selectors = application_generator_source_selectors(generator);
     tracing::debug!(
-        "Processing ApplicationGenerator {}: repoURL={}, targetRevision={}, source.path={}",
+        "Processing ApplicationGenerator {}: repoURL={}, targetRevision={}, selectors={}",
         generator.metadata.name,
         generator.spec.source.repo_url,
         generator.spec.source.target_revision,
-        generator.spec.source.path
+        source_selectors.join(", ")
     );
 
-    // Clone Git repository and resolve to local path
-    let mut git_manager = crate::git::GitManager::with_credential_provider(credential_provider)?;
-
-    let source_path = git_manager.resolve_ref(
-        &generator.spec.source.repo_url,
-        Some(&generator.spec.source.target_revision),
-        Some(&generator.spec.source.path),
-    )?;
+    let source_root = resolve_application_generator_source_path(generator, credential_provider)?;
     tracing::debug!(
-        "ApplicationGenerator {} resolved source path to {}",
+        "ApplicationGenerator {} resolved source root to {}",
         generator.metadata.name,
-        source_path.display()
+        source_root.display()
     );
 
-    // Find YAML files matching filters
+    // Discover candidate files from path/paths selectors, then apply include/exclude filters.
     let yaml_files = find_yaml_files_filtered(
-        &source_path,
+        &source_root,
+        &source_selectors,
         &generator.spec.source.include,
         &generator.spec.source.exclude,
     )?;
@@ -872,7 +867,7 @@ fn process_application_generator(
 
         if let Some(release) = nyl_release {
             // Generate ArgoCD Application
-            let app = create_argocd_application_from_generator(&release, &file_path, &source_path, generator)?;
+            let app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
             tracing::debug!(
                 "Generated ArgoCD Application {} from NylRelease in {}",
                 release.metadata.name,
@@ -892,76 +887,252 @@ fn process_application_generator(
     Ok(applications)
 }
 
-/// Find YAML files matching include/exclude patterns
-fn find_yaml_files_filtered(dir: &Path, include: &[String], exclude: &[String]) -> Result<Vec<std::path::PathBuf>> {
-    let mut files = Vec::new();
+fn application_generator_source_selectors(generator: &crate::resources::ApplicationGenerator) -> Vec<String> {
+    if let Some(path) = &generator.spec.source.path {
+        return vec![path.clone()];
+    }
+    generator.spec.source.paths.clone().unwrap_or_default()
+}
 
-    if !dir.exists() {
+/// Resolve ApplicationGenerator source to a local path.
+///
+/// If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set, all ApplicationGenerators are resolved
+/// against that local repository root and no Git clone/worktree is used.
+/// Otherwise, falls back to Git resolution via repoURL + targetRevision.
+fn resolve_application_generator_source_path(
+    generator: &crate::resources::ApplicationGenerator,
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+) -> Result<PathBuf> {
+    const APPGEN_REPO_PATH_OVERRIDE: &str = "NYL_APPGEN_REPO_PATH_OVERRIDE";
+
+    if let Ok(override_root_raw) = std::env::var(APPGEN_REPO_PATH_OVERRIDE) {
+        let override_root_raw = override_root_raw.trim();
+        if !override_root_raw.is_empty() {
+            let override_root = resolve_override_root_path(override_root_raw)?;
+            if !override_root.exists() {
+                return Err(NylError::Config(format!(
+                    "Environment variable {} points to a path that does not exist: {}",
+                    APPGEN_REPO_PATH_OVERRIDE,
+                    override_root.display()
+                )));
+            }
+            if !override_root.is_dir() {
+                return Err(NylError::Config(format!(
+                    "Environment variable {} must point to a directory, got: {}",
+                    APPGEN_REPO_PATH_OVERRIDE,
+                    override_root.display()
+                )));
+            }
+
+            tracing::debug!(
+                "Using {} for ApplicationGenerator {} (repoURL={}, targetRevision={})",
+                APPGEN_REPO_PATH_OVERRIDE,
+                generator.metadata.name,
+                generator.spec.source.repo_url,
+                generator.spec.source.target_revision
+            );
+            return Ok(override_root);
+        }
+    }
+
+    let mut git_manager = crate::git::GitManager::with_credential_provider(credential_provider)?;
+    Ok(git_manager.resolve_ref(
+        &generator.spec.source.repo_url,
+        Some(&generator.spec.source.target_revision),
+        None,
+    )?)
+}
+
+/// Resolve override root path from env var value.
+///
+/// Relative values are resolved against shell `PWD` if present, otherwise
+/// against the process current directory.
+fn resolve_override_root_path(raw: &str) -> Result<PathBuf> {
+    let candidate = PathBuf::from(raw);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+
+    if let Ok(pwd) = std::env::var("PWD") {
+        let pwd_path = PathBuf::from(pwd);
+        if pwd_path.is_absolute() {
+            return Ok(pwd_path.join(candidate));
+        }
+    }
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| NylError::Config(format!("Failed to get current directory for path resolution: {}", e)))?;
+    Ok(cwd.join(candidate))
+}
+
+/// Find YAML files matching path/paths selectors and include/exclude patterns.
+fn find_yaml_files_filtered(
+    source_root: &Path,
+    selectors: &[String],
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<std::path::PathBuf>> {
+    if !source_root.exists() {
         return Err(NylError::Config(format!(
             "Source path does not exist: {}",
-            dir.display()
+            source_root.display()
+        )));
+    }
+    if !source_root.is_dir() {
+        return Err(NylError::Config(format!(
+            "Source path must be a directory: {}",
+            source_root.display()
         )));
     }
 
-    for entry in WalkDir::new(dir).follow_links(true) {
-        let entry = entry.map_err(|e| NylError::Config(format!("Failed to walk directory: {}", e)))?;
-        let path = entry.path();
+    let mut warnings = ScanWarnings::default();
+    let mut candidates = std::collections::BTreeSet::new();
 
-        // Skip if not a file
-        if !path.is_file() {
+    for selector in selectors {
+        collect_selector_candidates(source_root, selector, &mut candidates, &mut warnings)?;
+    }
+
+    let mut files = Vec::new();
+    for candidate in candidates {
+        let rel = candidate.strip_prefix(source_root).map_err(|e| {
+            NylError::Config(format!(
+                "Failed to compute relative path for {} under {}: {}",
+                candidate.display(),
+                source_root.display(),
+                e
+            ))
+        })?;
+
+        if !matches_glob_patterns(rel, include)? {
             continue;
         }
-
-        // Skip if doesn't match include patterns
-        if !matches_glob_patterns(path, include)? {
+        if matches_glob_patterns(rel, exclude)? {
             continue;
         }
+        files.push(candidate);
+    }
 
-        // Skip if matches exclude patterns
-        if matches_glob_patterns(path, exclude)? {
-            continue;
-        }
-
-        files.push(path.to_path_buf());
+    if warnings.unreadable_entries > 0 {
+        let examples = if warnings.examples.is_empty() {
+            String::new()
+        } else {
+            format!(" Examples: {}", warnings.examples.join(" | "))
+        };
+        tracing::warn!(
+            "Skipped {} unreadable path(s) while scanning {}.{}",
+            warnings.unreadable_entries,
+            source_root.display(),
+            examples
+        );
     }
 
     Ok(files)
 }
 
-/// Check if path matches any glob pattern
-fn matches_glob_patterns(path: &Path, patterns: &[String]) -> Result<bool> {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+#[derive(Default)]
+struct ScanWarnings {
+    unreadable_entries: usize,
+    examples: Vec<String>,
+}
+
+fn collect_selector_candidates(
+    source_root: &Path,
+    selector: &str,
+    candidates: &mut std::collections::BTreeSet<PathBuf>,
+    warnings: &mut ScanWarnings,
+) -> Result<()> {
+    if selector_has_glob(selector) {
+        let pattern_path = source_root.join(selector);
+        let pattern_str = pattern_path.to_string_lossy().to_string();
+        let entries = glob(&pattern_str)
+            .map_err(|e| NylError::Config(format!("Invalid source selector glob '{}': {}", selector, e)))?;
+
+        for entry in entries {
+            match entry {
+                Ok(path) => collect_path_candidate(path, candidates, warnings),
+                Err(e) => record_scan_warning(warnings, format!("{}", e)),
+            }
+        }
+        return Ok(());
+    }
+
+    let selected = source_root.join(selector);
+    if !selected.exists() {
+        return Err(NylError::Config(format!(
+            "Source selector '{}' does not exist under {}",
+            selector,
+            source_root.display()
+        )));
+    }
+    collect_path_candidate(selected, candidates, warnings);
+    Ok(())
+}
+
+fn collect_path_candidate(
+    path: PathBuf,
+    candidates: &mut std::collections::BTreeSet<PathBuf>,
+    warnings: &mut ScanWarnings,
+) {
+    if path.is_file() {
+        candidates.insert(path);
+        return;
+    }
+
+    if path.is_dir() {
+        let read_dir = match std::fs::read_dir(&path) {
+            Ok(read_dir) => read_dir,
+            Err(e) => {
+                record_scan_warning(warnings, format!("{}: {}", path.display(), e));
+                return;
+            }
+        };
+
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => {
+                    let child = entry.path();
+                    if child.is_file() {
+                        candidates.insert(child);
+                    }
+                }
+                Err(e) => {
+                    record_scan_warning(warnings, format!("{}: {}", path.display(), e));
+                }
+            }
+        }
+    }
+}
+
+fn record_scan_warning(warnings: &mut ScanWarnings, message: String) {
+    warnings.unreadable_entries += 1;
+    if warnings.examples.len() < 3 {
+        warnings.examples.push(message);
+    }
+}
+
+fn selector_has_glob(selector: &str) -> bool {
+    selector.contains('*') || selector.contains('?') || selector.contains('[')
+}
+
+/// Check if relative path matches any glob pattern.
+/// Patterns with path separators match the full relative path.
+/// Patterns without separators match basename only.
+fn matches_glob_patterns(relative_path: &Path, patterns: &[String]) -> Result<bool> {
+    let rel_posix = normalize_relative_path_to_posix(relative_path);
+    let file_name = relative_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     for pattern in patterns {
-        // Simple glob matching (*.yaml, .*, _*, etc.)
-        if let Some(ext) = pattern.strip_prefix("*.") {
-            // Extension match: *.yaml
-            if file_name.ends_with(ext) {
-                return Ok(true);
-            }
-        } else if pattern == ".*" {
-            // Hidden files: .*
-            if file_name.starts_with('.') {
-                return Ok(true);
-            }
-        } else if pattern.starts_with('_') && pattern.ends_with('*') {
-            // Prefix match: _*
-            let prefix = &pattern[..pattern.len() - 1];
-            if file_name.starts_with(prefix) {
-                return Ok(true);
-            }
-        } else if pattern.ends_with('*') {
-            // Generic prefix match: test*
-            let prefix = &pattern[..pattern.len() - 1];
-            if file_name.starts_with(prefix) {
-                return Ok(true);
-            }
-        } else if file_name == pattern {
-            // Exact match
+        let glob_pattern = Pattern::new(pattern)
+            .map_err(|e| NylError::Config(format!("Invalid include/exclude glob pattern '{}': {}", pattern, e)))?;
+        let target = if pattern.contains('/') || pattern.contains('\\') {
+            rel_posix.as_str()
+        } else {
+            file_name
+        };
+        if glob_pattern.matches(target) {
             return Ok(true);
         }
     }
-
     Ok(false)
 }
 
@@ -969,12 +1140,12 @@ fn matches_glob_patterns(path: &Path, patterns: &[String]) -> Result<bool> {
 fn create_argocd_application_from_generator(
     release: &NylRelease,
     file_path: &Path,
-    base_path: &Path,
+    source_root: &Path,
     generator: &crate::resources::ApplicationGenerator,
 ) -> Result<serde_json::Value> {
-    // Calculate subdirectory relative to the scanned base path
+    // Calculate subdirectory relative to repository root
     let rel_dir = file_path
-        .strip_prefix(base_path)
+        .strip_prefix(source_root)
         .unwrap_or(file_path)
         .parent()
         .unwrap_or(Path::new(""));
@@ -986,12 +1157,11 @@ fn create_argocd_application_from_generator(
         .and_then(|n| n.to_str())
         .ok_or_else(|| NylError::Config(format!("Invalid file name: {}", file_path.display())))?;
 
-    // Application path must be relative to the repo root, not the worktree.
-    // Start from the generator's source.path and append any subdirectory.
+    // Application path is the directory containing the NylRelease, relative to repository root.
     let path_str = if rel_dir_normalized.is_empty() {
-        generator.spec.source.path.clone()
+        ".".to_string()
     } else {
-        format!("{}/{}", generator.spec.source.path, rel_dir_normalized)
+        rel_dir_normalized
     };
 
     // Build the Application manifest
@@ -1100,6 +1270,9 @@ fn add_parent_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_parse_yaml_documents_single() {
@@ -1222,7 +1395,8 @@ metadata:
                 source: ApplicationSource {
                     repo_url: "https://github.com/example/repo.git".to_string(),
                     target_revision: "HEAD".to_string(),
-                    path: "clusters/default".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
                 },
@@ -1235,8 +1409,8 @@ metadata:
         };
 
         let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
-        let base_path = Path::new("/tmp/worktree/clusters/default");
-        let app = create_argocd_application_from_generator(&release, file_path, base_path, &generator).unwrap();
+        let source_root = Path::new("/tmp/worktree");
+        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
 
         assert_eq!(app["spec"]["source"]["path"], "clusters/default/addons");
         assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
@@ -1248,6 +1422,295 @@ metadata:
             .and_then(|v| v["value"].as_str())
             .unwrap();
         assert_eq!(template_input, "nginx.yaml");
+    }
+
+    #[test]
+    fn test_resolve_application_generator_source_path_uses_local_override() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use std::collections::HashMap;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("clusters/default");
+        fs::create_dir_all(&source_dir).unwrap();
+        std::env::set_var("NYL_APPGEN_REPO_PATH_OVERRIDE", temp.path());
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "main".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+            },
+        };
+
+        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        assert_eq!(resolved, temp.path());
+
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+    }
+
+    #[test]
+    fn test_resolve_application_generator_source_path_errors_when_override_root_missing() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use std::collections::HashMap;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        std::env::set_var("NYL_APPGEN_REPO_PATH_OVERRIDE", "/definitely/not/a/real/path");
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "main".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+            },
+        };
+
+        let err = resolve_application_generator_source_path(&generator, None).unwrap_err();
+        assert!(err.to_string().contains("NYL_APPGEN_REPO_PATH_OVERRIDE"));
+
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+    }
+
+    #[test]
+    fn test_find_yaml_files_filtered_errors_when_source_selector_missing_under_override() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("NYL_APPGEN_REPO_PATH_OVERRIDE", temp.path());
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "main".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+            },
+        };
+
+        let source_root = resolve_application_generator_source_path(&generator, None).unwrap();
+        let selectors = application_generator_source_selectors(&generator);
+        let err = find_yaml_files_filtered(
+            &source_root,
+            &selectors,
+            &generator.spec.source.include,
+            &generator.spec.source.exclude,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+    }
+
+    #[test]
+    fn test_resolve_application_generator_source_path_falls_back_to_git_resolution() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use git2::Repository;
+        use std::collections::HashMap;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init(repo_dir.path()).unwrap();
+        fs::create_dir_all(repo_dir.path().join("clusters/default")).unwrap();
+        fs::write(
+            repo_dir.path().join("clusters/default/example.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
+        )
+        .unwrap();
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: repo_dir.path().to_string_lossy().to_string(),
+                    target_revision: "HEAD".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+            },
+        };
+
+        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        assert!(resolved.exists());
+        assert!(resolved.join("clusters/default/example.yaml").exists());
+    }
+
+    #[test]
+    fn test_resolve_override_root_path_prefers_pwd_for_relative_paths() {
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::env::set_var("PWD", temp.path());
+
+        let resolved = resolve_override_root_path("repo").unwrap();
+        assert_eq!(resolved, repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_find_yaml_files_filtered_ignores_broken_symlink_entries() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let good = root.join("good.yaml");
+        std::fs::write(&good, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n").unwrap();
+
+        let broken_target = root.join("does-not-exist");
+        let broken_link = root.join("broken-link");
+        symlink(&broken_target, &broken_link).unwrap();
+
+        let files = find_yaml_files_filtered(root, &[".".to_string()], &["*.yaml".to_string()], &[]).unwrap();
+        assert!(files.contains(&good));
+    }
+
+    #[test]
+    fn test_find_yaml_files_filtered_directory_selector_is_non_recursive() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("top.yaml"), "apiVersion: v1\nkind: ConfigMap\n").unwrap();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/deep.yaml"), "apiVersion: v1\nkind: ConfigMap\n").unwrap();
+
+        let files = find_yaml_files_filtered(root, &[".".to_string()], &["*.yaml".to_string()], &[]).unwrap();
+        assert!(files.contains(&root.join("top.yaml")));
+        assert!(!files.contains(&root.join("nested/deep.yaml")));
+    }
+
+    #[test]
+    fn test_find_yaml_files_filtered_applies_relative_exclude_pattern() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("top.yaml"), "apiVersion: v1\nkind: ConfigMap\n").unwrap();
+        std::fs::create_dir_all(root.join(".nyl/cache")).unwrap();
+        std::fs::write(
+            root.join(".nyl/cache/ignored.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\n",
+        )
+        .unwrap();
+
+        let files = find_yaml_files_filtered(
+            root,
+            &["**/*.yaml".to_string()],
+            &["*.yaml".to_string()],
+            &[".nyl/**".to_string()],
+        )
+        .unwrap();
+        assert!(files.contains(&root.join("top.yaml")));
+        assert!(!files.contains(&root.join(".nyl/cache/ignored.yaml")));
     }
 
     #[test]

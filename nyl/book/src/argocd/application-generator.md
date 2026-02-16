@@ -19,9 +19,10 @@ spec:
   source:                   # Required
     repoURL: string         # Git repository URL
     targetRevision: string  # Branch, tag, or commit (default: "HEAD")
-    path: string            # Directory to scan
+    path: string            # Single selector to scan (mutually exclusive with paths)
+    paths: [string]         # Multiple selectors to scan (mutually exclusive with path)
     include: [string]       # Include patterns (default: ["*.yaml", "*.yml"])
-    exclude: [string]       # Exclude patterns (default: [".*", "_*"])
+    exclude: [string]       # Exclude patterns (default: [".*", "_*", ".nyl/**"])
   project: string           # ArgoCD project (default: "default")
   syncPolicy:               # Optional sync policy for generated Applications
     automated:
@@ -67,18 +68,24 @@ Configures the Git repository and directory scanning behavior.
   - Tag: `v1.0.0`
   - Commit: `abc123def456`
 
-- **path** (required): Directory path to scan for YAML files
+- **path** (required if `paths` is not set): Single selector to scan
   - Relative to repository root
-  - Example: `clusters/production`
-  - Example: `apps`
+  - Can be a file, directory, or glob selector
+  - Directory selectors are scanned non-recursively by default
+
+- **paths** (required if `path` is not set): Multiple selectors to scan
+  - Relative to repository root
+  - Can include glob selectors (for example `clusters/*/apps` or `**/*.yaml`)
+  - Mutually exclusive with `path`
 
 - **include** (optional, default: `["*.yaml", "*.yml"]`): Glob patterns for files to include
-  - Supports simple glob syntax: `*.yaml`, `*.yml`, `app*.yaml`
+  - Patterns without `/` match basename
+  - Patterns with `/` match relative path from repository root
   - Multiple patterns are OR'd together
 
-- **exclude** (optional, default: `[".*", "_*"]`): Glob patterns for files to exclude
+- **exclude** (optional, default: `[".*", "_*", ".nyl/**"]`): Glob patterns for files to exclude
   - Takes precedence over include patterns
-  - Default excludes hidden files (`.`) and underscore-prefixed files (`_`)
+  - Default excludes hidden files (`.`), underscore-prefixed files (`_`), and Nyl cache directories
   - Example: `["test_*", ".*", "backup*"]`
 
 ### spec.project
@@ -136,7 +143,7 @@ The ApplicationGenerator scans the configured directory and applies include/excl
 
 ### Pattern Matching
 
-Patterns use simple glob syntax:
+Patterns use standard glob syntax:
 
 - `*.yaml` - Matches files ending with `.yaml`
 - `*.yml` - Matches files ending with `.yml`
@@ -144,11 +151,12 @@ Patterns use simple glob syntax:
 - `.*` - Matches hidden files (starting with `.`)
 - `_*` - Matches files starting with underscore
 - `test_*.yaml` - Matches `test_*.yaml` files
+- `**/*.yaml` - Recursive match for YAML files
 - Exact match: `apps.yaml` - Matches only `apps.yaml`
 
 ### Filtering Logic
 
-1. File must be a regular file (not directory)
+1. Expand selectors from `path`/`paths` into candidate files
 2. File must match at least one `include` pattern
 3. File must NOT match any `exclude` pattern
 4. Nyl parses the file and looks for a NylRelease resource
@@ -158,7 +166,7 @@ Patterns use simple glob syntax:
 
 By default:
 - **Include**: `["*.yaml", "*.yml"]` - All YAML files
-- **Exclude**: `[".*", "_*"]` - Hidden files and underscore-prefixed files
+- **Exclude**: `[".*", "_*", ".nyl/**"]` - Hidden files, underscore-prefixed files, and Nyl cache paths
 
 This prevents accidental inclusion of:
 - Hidden files like `.secrets.yaml`, `.git/`
@@ -386,7 +394,8 @@ spec:
 
 1. When `nyl render` encounters an ApplicationGenerator resource:
    - The ApplicationGenerator is extracted and NOT included in output
-   - The source path is scanned for YAML files
+   - The source path is resolved (from Git by default, or from local override path if configured)
+   - The resolved source path is scanned for YAML files
    - Files are filtered by include/exclude patterns
    - Each file is parsed for a NylRelease resource
    - An ArgoCD Application is generated for each NylRelease
@@ -400,11 +409,17 @@ spec:
 
 ### Path Resolution
 
-The `source.path` in ApplicationGenerator is resolved relative to the base directory:
+By default, `source.path` is resolved from `source.repoURL` + `source.targetRevision` using Nyl's Git cache/worktree flow.
 
-- If rendering a file: `/path/to/apps.yaml` → base is `/path/to`
-- If rendering a directory: `/path/to/project` → base is `/path/to/project`
-- Source path `clusters/default` → scans `/path/to/clusters/default`
+For local testing, set:
+
+```bash
+export NYL_APPGEN_REPO_PATH_OVERRIDE=/path/to/local/repo
+```
+
+When this env var is set, selectors from `source.path`/`source.paths` are resolved under that local directory and no clone/worktree checkout is performed for ApplicationGenerator processing.
+
+If the override path is missing/invalid, or the resulting source path does not exist, `nyl render` fails with a configuration error.
 
 For generated Applications:
 - The `path` field points to the directory containing the NylRelease file
@@ -417,7 +432,8 @@ ApplicationGenerator is validated when parsed:
 - `spec.destination.server` must not be empty
 - `spec.destination.namespace` must not be empty
 - `spec.source.repoURL` must not be empty
-- `spec.source.path` must not be empty
+- Exactly one of `spec.source.path` or `spec.source.paths` must be set
+- `spec.source.path` / `spec.source.paths` selectors must not be empty
 
 Invalid ApplicationGenerator resources cause `nyl render` to fail with a clear error message.
 
@@ -425,8 +441,6 @@ Invalid ApplicationGenerator resources cause `nyl render` to fail with a clear e
 
 Current limitations:
 
-- **No Git cloning**: Repositories must be pre-cloned (suitable for ArgoCD plugin use)
-- **Simple glob patterns**: No full glob library support (e.g., `**/*.yaml` not supported)
 - **No templating**: `applicationNameTemplate` only supports basic substitution
 - **Single repository**: Cannot scan multiple Git repositories in one generator
 

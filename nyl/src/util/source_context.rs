@@ -66,16 +66,13 @@ impl SourceContext {
     /// Enhance a serde error with file context and helpful hints
     fn enhance_serde_error(&self, error: serde_norway::Error, context: &str) -> NylError {
         let error_msg = error.to_string();
-
-        // Extract field path from error message if possible
-        let field_info = Self::extract_field_info(&error_msg);
-
-        // Build the error message
-        let message = if let Some((field_path, error_type)) = field_info {
-            format!("{} in {}: {}", error_type, context, field_path)
+        let classification = Self::classify_error(&error_msg);
+        let location_suffix = if let Some(location) = error.location() {
+            format!(" (line {}, column {})", location.line(), location.column())
         } else {
-            format!("{}: {}", context, error_msg)
+            String::new()
         };
+        let message = format!("{} in {}{}: {}", classification, context, location_suffix, error_msg);
 
         // Generate helpful hints based on error type
         let hint = Self::generate_hint(&error_msg);
@@ -83,28 +80,21 @@ impl SourceContext {
         NylError::resource_validation(self.file_path.display().to_string(), message, hint)
     }
 
-    /// Extract field path and error type from serde error message
-    ///
-    /// Examples:
-    /// - "unknown field `xyz`" -> Some(("xyz", "Unknown field"))
-    /// - "invalid type: string, expected u32" -> Some(("", "Type mismatch"))
-    fn extract_field_info(error_msg: &str) -> Option<(String, &'static str)> {
-        if let Some(field) = Self::extract_unknown_field(error_msg) {
-            return Some((format!("'{}'", field), "Unknown field"));
+    /// Classify parser errors into stable buckets for readable diagnostics.
+    fn classify_error(error_msg: &str) -> &'static str {
+        if Self::extract_unknown_field(error_msg).is_some() {
+            return "Unknown field";
         }
 
         if error_msg.contains("invalid type:") {
-            return Some((String::new(), "Type mismatch"));
+            return "Type mismatch";
         }
 
         if error_msg.contains("missing field") {
-            if let Some(field) = Self::extract_quoted_field(error_msg) {
-                return Some((format!("'{}'", field), "Missing required field"));
-            }
-            return Some((String::new(), "Missing required field"));
+            return "Missing required field";
         }
 
-        None
+        "YAML parse error"
     }
 
     /// Extract field name from "unknown field `name`" error messages
@@ -114,17 +104,6 @@ impl SourceContext {
             let after_prefix = &error_msg[start + 15..];
             if let Some(end) = after_prefix.find('`') {
                 return Some(after_prefix[..end].to_string());
-            }
-        }
-        None
-    }
-
-    /// Extract field name from quoted text
-    fn extract_quoted_field(error_msg: &str) -> Option<String> {
-        if let Some(start) = error_msg.find('`') {
-            let after_start = &error_msg[start + 1..];
-            if let Some(end) = after_start.find('`') {
-                return Some(after_start[..end].to_string());
             }
         }
         None
@@ -168,24 +147,24 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_field_info_unknown_field() {
+    fn test_classify_error_unknown_field() {
         let msg = "unknown field `xyz`";
-        let result = SourceContext::extract_field_info(msg);
-        assert_eq!(result, Some(("'xyz'".to_string(), "Unknown field")));
+        let result = SourceContext::classify_error(msg);
+        assert_eq!(result, "Unknown field");
     }
 
     #[test]
-    fn test_extract_field_info_type_mismatch() {
+    fn test_classify_error_type_mismatch() {
         let msg = "invalid type: string \"abc\", expected u32";
-        let result = SourceContext::extract_field_info(msg);
-        assert_eq!(result, Some((String::new(), "Type mismatch")));
+        let result = SourceContext::classify_error(msg);
+        assert_eq!(result, "Type mismatch");
     }
 
     #[test]
-    fn test_extract_field_info_missing_field() {
+    fn test_classify_error_missing_field() {
         let msg = "missing field `chart`";
-        let result = SourceContext::extract_field_info(msg);
-        assert_eq!(result, Some(("'chart'".to_string(), "Missing required field")));
+        let result = SourceContext::classify_error(msg);
+        assert_eq!(result, "Missing required field");
     }
 
     #[test]
@@ -243,6 +222,24 @@ another: doc
         let err = result.unwrap_err();
         let err_msg = format!("{}", err);
         assert!(err_msg.contains("test.yaml"));
+        assert!(err_msg.contains("line"));
         assert!(err_msg.contains("Hint:"));
+    }
+
+    #[test]
+    fn test_parse_yaml_preserves_raw_invalid_type_detail() {
+        #[allow(dead_code)]
+        #[derive(Debug, serde::Deserialize)]
+        struct Typed {
+            replicas: u32,
+        }
+
+        let ctx = SourceContext::new(PathBuf::from("typed.yaml"));
+        let result: Result<Typed> = ctx.parse_yaml("replicas: \"abc\"");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Type mismatch"));
+        assert!(err_msg.contains("invalid type"));
+        assert!(err_msg.contains("expected u32"));
     }
 }
