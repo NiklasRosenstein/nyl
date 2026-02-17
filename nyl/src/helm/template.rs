@@ -203,31 +203,9 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
 
 /// Parse YAML multi-document stream into JSON values
 ///
-/// Handles Helm's output which can contain multiple YAML documents separated by "---".
-/// Filters out empty documents and comment-only documents.
+/// Handles Helm's output with Kubernetes-compatible scalar semantics.
 fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
-    let mut documents = Vec::new();
-
-    for doc in yaml_str.split("\n---\n") {
-        let trimmed = doc.trim();
-
-        // Skip empty or comment-only documents
-        if trimmed.is_empty()
-            || trimmed
-                .lines()
-                .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
-        {
-            continue;
-        }
-
-        let value: serde_json::Value = serde_norway::from_str(trimmed).map_err(NylError::Yaml)?;
-
-        if !value.is_null() {
-            documents.push(value);
-        }
-    }
-
-    Ok(documents)
+    crate::yaml::parse_yaml_documents_k8s_compatible(yaml_str).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -453,6 +431,35 @@ metadata:
         let yaml = "";
         let docs = parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_k8s_boolean_scalars() {
+        let yaml = r"
+apiVersion: v1
+kind: ConfigMap
+data:
+  args:
+    - --appendonly
+    - no
+";
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs[0]["data"]["args"][0], "--appendonly");
+        assert_eq!(docs[0]["data"]["args"][1], false);
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_k8s_quoted_boolean_like_strings() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+data:
+  args:
+    - --appendonly
+    - "no"
+"#;
+        let docs = parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs[0]["data"]["args"][1], "no");
     }
 
     #[test]

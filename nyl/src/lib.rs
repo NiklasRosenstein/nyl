@@ -35,6 +35,7 @@ pub mod resources;
 pub mod secrets;
 pub mod template;
 pub mod util;
+pub mod yaml;
 
 // Re-export commonly used types
 pub use error::{NylError, Result};

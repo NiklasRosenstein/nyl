@@ -308,9 +308,9 @@ mod tests {
         let config_path = temp.path().join("nyl.toml");
 
         let toml = format!(
-            r#"[project]
+            r"[project]
 components_search_paths = ['{}']
-"#,
+",
             temp.path().join("lib").display(),
         );
 

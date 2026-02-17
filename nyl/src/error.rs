@@ -21,6 +21,12 @@ pub enum NylError {
     #[error("YAML parsing error: {0}\nHint: Check YAML syntax, indentation, and special characters. Use a YAML linter to verify correctness.")]
     Yaml(#[from] serde_norway::Error),
 
+    #[error("YAML parsing error: {0}\nHint: Check YAML syntax, indentation, and special characters. Use a YAML linter to verify correctness.")]
+    YamlCompat(#[from] serde_yaml::Error),
+
+    #[error("YAML serialization error: {0}\nHint: Check for unsupported values in rendered manifests.")]
+    YamlEmit(#[from] serde_yml::Error),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

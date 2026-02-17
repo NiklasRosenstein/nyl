@@ -812,7 +812,7 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
                 if i > 0 {
                     println!("---");
                 }
-                let yaml = serde_norway::to_string(manifest).map_err(NylError::Yaml)?;
+                let yaml = crate::yaml::serialize_yaml_document(manifest).map_err(NylError::YamlEmit)?;
                 print!("{}", yaml);
             }
         }

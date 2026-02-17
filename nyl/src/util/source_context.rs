@@ -27,32 +27,11 @@ impl SourceContext {
 
     /// Parse YAML documents with source context
     ///
-    /// This wraps serde_norway parsing to provide better error messages
+    /// This wraps YAML parsing to provide better error messages
     /// with file context and field path information.
     pub fn parse_yaml_documents(&self, yaml: &str) -> Result<Vec<serde_json::Value>> {
-        let mut documents = Vec::new();
-
-        for doc in yaml.split("\n---\n") {
-            let trimmed = doc.trim();
-
-            // Skip empty or comment-only documents
-            if trimmed.is_empty()
-                || trimmed
-                    .lines()
-                    .all(|line| line.trim().starts_with('#') || line.trim().is_empty())
-            {
-                continue;
-            }
-
-            let value: serde_json::Value =
-                serde_norway::from_str(trimmed).map_err(|e| self.enhance_serde_error(e, "YAML parsing"))?;
-
-            if !value.is_null() {
-                documents.push(value);
-            }
-        }
-
-        Ok(documents)
+        crate::yaml::parse_yaml_documents_k8s_compatible(yaml)
+            .map_err(|e| self.enhance_serde_yaml_error(e, "YAML parsing"))
     }
 
     /// Parse a single YAML/JSON value with source context
@@ -60,11 +39,14 @@ impl SourceContext {
     where
         T: serde::de::DeserializeOwned,
     {
-        serde_norway::from_str(yaml).map_err(|e| self.enhance_serde_error(e, "resource parsing"))
+        let parsed = crate::yaml::parse_yaml_value_k8s_compatible(yaml)
+            .map_err(|e| self.enhance_serde_yaml_error(e, "resource parsing"))?;
+
+        serde_json::from_value(parsed).map_err(|e| self.enhance_serde_json_error(e, "resource parsing"))
     }
 
     /// Enhance a serde error with file context and helpful hints
-    fn enhance_serde_error(&self, error: serde_norway::Error, context: &str) -> NylError {
+    fn enhance_serde_yaml_error(&self, error: serde_yaml::Error, context: &str) -> NylError {
         let error_msg = error.to_string();
         let classification = Self::classify_error(&error_msg);
         let location_suffix = if let Some(location) = error.location() {
@@ -77,6 +59,15 @@ impl SourceContext {
         // Generate helpful hints based on error type
         let hint = Self::generate_hint(&error_msg);
 
+        NylError::resource_validation(self.file_path.display().to_string(), message, hint)
+    }
+
+    /// Enhance a serde_json error with file context and helpful hints.
+    fn enhance_serde_json_error(&self, error: serde_json::Error, context: &str) -> NylError {
+        let error_msg = error.to_string();
+        let classification = Self::classify_error(&error_msg);
+        let message = format!("{} in {}: {}", classification, context, error_msg);
+        let hint = Self::generate_hint(&error_msg);
         NylError::resource_validation(self.file_path.display().to_string(), message, hint)
     }
 
@@ -210,6 +201,19 @@ another: doc
         assert!(result.is_ok());
         let docs = result.unwrap();
         assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_k8s_boolean_scalar() {
+        let ctx = SourceContext::new(PathBuf::from("test.yaml"));
+        let yaml = r"
+---
+args:
+  - no
+";
+        let docs = ctx.parse_yaml_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["args"][0], false);
     }
 
     #[test]

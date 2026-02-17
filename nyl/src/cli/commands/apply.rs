@@ -303,7 +303,7 @@ fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
     let mut yaml_parts = Vec::new();
 
     for manifest in manifests {
-        let yaml = serde_norway::to_string(manifest)?;
+        let yaml = crate::yaml::serialize_yaml_document(manifest).map_err(NylError::YamlEmit)?;
         yaml_parts.push(yaml);
     }
 
