@@ -91,7 +91,7 @@ fn emit_argocd_file_not_found_diagnostics(error: &NylError, render_input_path: &
     }
 
     eprintln!(
-        "[nyl-debug] hint=Verify ARGOCD_APP_SOURCE_PATH + NYL_CMP_TEMPLATE_INPUT resolve to an existing file in the repo-server checkout."
+        "[nyl-debug] hint=Verify NYL_CMP_TEMPLATE_INPUT uses source-path-relative format, or starts with '/' for repo-root-relative format."
     );
     eprintln!("[nyl-debug] ---- end argocd file-not-found diagnostics ----");
 }

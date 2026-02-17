@@ -134,6 +134,8 @@ spec:
                   nyl render "$TEMPLATE_INPUT"
 ```
 
+`NYL_CMP_TEMPLATE_INPUT` should usually be source-path-relative (for example `apps.yaml` when `spec.source.path` points at that directory). A leading `/` marks a repository-root-relative path.
+
 ## Step 3: Create ApplicationGenerator
 
 Create `apps.yaml` with the ApplicationGenerator resource:

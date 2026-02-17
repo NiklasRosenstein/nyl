@@ -184,10 +184,24 @@ fn create_argocd_application(
     argocd_namespace: &str,
     project: &str,
 ) -> Result<serde_json::Value> {
-    // Calculate relative path from base_dir
+    // Calculate path and template input relative to base_dir.
     let base_path = std::fs::canonicalize(base_dir)?;
     let file_abs = std::fs::canonicalize(file_path)?;
-    let rel_path = normalize_relative_path_to_posix(file_abs.strip_prefix(&base_path).unwrap_or(file_path));
+    let rel_dir = file_abs
+        .strip_prefix(&base_path)
+        .unwrap_or(file_path)
+        .parent()
+        .unwrap_or(Path::new(""));
+    let rel_dir_normalized = normalize_relative_path_to_posix(rel_dir);
+    let source_path = if rel_dir_normalized.is_empty() {
+        ".".to_string()
+    } else {
+        rel_dir_normalized
+    };
+    let template_input = file_abs
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| NylError::Config(format!("Invalid file name: {}", file_path.display())))?;
 
     Ok(serde_json::json!({
         "apiVersion": "argoproj.io/v1alpha1",
@@ -200,7 +214,7 @@ fn create_argocd_application(
             "project": project,
             "source": {
                 "repoURL": repo_url,
-                "path": rel_path,
+                "path": source_path,
                 "targetRevision": revision,
                 "plugin": {
                     "name": "nyl-v2",
@@ -215,7 +229,7 @@ fn create_argocd_application(
                         },
                         {
                             "name": "NYL_CMP_TEMPLATE_INPUT",
-                            "value": rel_path,
+                            "value": template_input,
                         },
                     ],
                 },
@@ -344,7 +358,7 @@ metadata:
         assert_eq!(app["metadata"]["namespace"], "argocd");
         assert_eq!(app["spec"]["source"]["repoURL"], "https://github.com/example/repo");
         assert_eq!(app["spec"]["destination"]["namespace"], "production");
-        assert_eq!(app["spec"]["source"]["path"], "test-manifest.yaml");
+        assert_eq!(app["spec"]["source"]["path"], ".");
         assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
 
         let env = app["spec"]["source"]["plugin"]["env"].as_array().unwrap();

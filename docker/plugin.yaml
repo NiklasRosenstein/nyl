@@ -61,15 +61,32 @@ spec:
         TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
         RAW_TEMPLATE_INPUT="$TEMPLATE_INPUT"
         SOURCE_PATH="${ARGOCD_APP_SOURCE_PATH:-}"
+        REPO_ROOT="$(pwd)"
         if [ -z "$TEMPLATE_INPUT" ]; then
           echo "NYL_CMP_TEMPLATE_INPUT is required. Set it via Application source.plugin.env." >&2
           exit 1
         fi
+
+        # In ArgoCD CMP runs, cwd is typically repo-root/sourcePath.
+        # Recover repo root from cwd and ARGOCD_APP_SOURCE_PATH when possible.
+        if [ -n "$SOURCE_PATH" ] && [ "$SOURCE_PATH" != "." ]; then
+          SOURCE_PATH="${SOURCE_PATH#/}"
+          SOURCE_PATH="${SOURCE_PATH%/}"
+          if [ -n "$SOURCE_PATH" ] && [ "${REPO_ROOT%"/$SOURCE_PATH"}" != "$REPO_ROOT" ]; then
+            REPO_ROOT="${REPO_ROOT%"/$SOURCE_PATH"}"
+          fi
+        fi
+
         case "$TEMPLATE_INPUT" in
-          /*) ;;
+          /*)
+            # Leading "/" means repo-root-relative (not filesystem absolute).
+            TEMPLATE_INPUT="${REPO_ROOT}/${TEMPLATE_INPUT#/}"
+            ;;
           *)
-            if [ -n "$SOURCE_PATH" ]; then
-              TEMPLATE_INPUT="${SOURCE_PATH%/}/$TEMPLATE_INPUT"
+            if [ -n "$SOURCE_PATH" ] && [ "$SOURCE_PATH" != "." ]; then
+              TEMPLATE_INPUT="${REPO_ROOT}/${SOURCE_PATH}/${TEMPLATE_INPUT}"
+            else
+              TEMPLATE_INPUT="${REPO_ROOT}/${TEMPLATE_INPUT}"
             fi
             ;;
         esac

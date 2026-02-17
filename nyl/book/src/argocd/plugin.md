@@ -95,6 +95,11 @@ data:
           nyl render "$TEMPLATE_INPUT"
 ```
 
+`NYL_CMP_TEMPLATE_INPUT` path semantics:
+
+- Values that start with `/` are treated as repository-root-relative (for example: `/gitops/system/argocd.yaml`).
+- Values without a leading `/` are treated as relative to `spec.source.path` (recommended, usually just the file name).
+
 ## Verification
 
 Test the plugin installation:
@@ -149,6 +154,8 @@ source:
     - name: NYL_RELEASE_NAMESPACE
       value: production
 ```
+
+Use `apps.yaml` (source-path-relative) in most cases. Use a leading `/` only when you intentionally need a repository-root-relative path.
 
 ## Troubleshooting
 
