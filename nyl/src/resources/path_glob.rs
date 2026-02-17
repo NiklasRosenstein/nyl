@@ -73,11 +73,19 @@ fn parse_pattern(pattern: &str) -> Result<Vec<PatternSegment>> {
     }
 
     let mut parsed = Vec::with_capacity(segments.len());
+    let mut previous_was_double_star = false;
     for segment in segments {
         if segment == "**" {
+            if previous_was_double_star {
+                return Err(NylError::Config(
+                    "Invalid path pattern: consecutive '**' segments are not allowed".to_string(),
+                ));
+            }
             parsed.push(PatternSegment::DoubleStar);
+            previous_was_double_star = true;
             continue;
         }
+        previous_was_double_star = false;
         if segment.contains("**") {
             return Err(NylError::Config(format!(
                 "Invalid path pattern segment '{}': '**' must be a standalone segment",
@@ -207,5 +215,11 @@ mod tests {
             "pref.argocd.argoproj.io/foo".to_string(),
         ]);
         assert_eq!(joined, "metadata.annotations.\"pref.argocd.argoproj.io/foo\"");
+    }
+
+    #[test]
+    fn test_validate_path_glob_pattern_rejects_consecutive_double_star() {
+        let err = validate_path_glob_pattern("spec.**.**.syncPolicy").unwrap_err();
+        assert!(err.to_string().contains("consecutive '**' segments are not allowed"));
     }
 }

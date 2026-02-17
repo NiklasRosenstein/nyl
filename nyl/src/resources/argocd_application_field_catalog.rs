@@ -34,14 +34,15 @@ const VALID_APPLICATION_PATH_PATTERNS: &[&str] = &[
 ];
 
 pub fn is_supported_application_field_path(path: &str) -> bool {
-    VALID_APPLICATION_PATH_PATTERNS.iter().any(|pattern| {
-        path_matches_glob(path, pattern).unwrap_or_else(|_| panic!("invalid field catalog pattern: {}", pattern))
-    })
+    VALID_APPLICATION_PATH_PATTERNS
+        .iter()
+        .any(|pattern| path_matches_glob(path, pattern).unwrap_or(false))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::path_glob::validate_path_glob_pattern;
 
     #[test]
     fn test_supported_field_path() {
@@ -54,5 +55,14 @@ mod tests {
     #[test]
     fn test_unsupported_field_path() {
         assert!(!is_supported_application_field_path("spec.notRealField.foo"));
+    }
+
+    #[test]
+    fn test_field_catalog_patterns_are_valid() {
+        for pattern in VALID_APPLICATION_PATH_PATTERNS {
+            validate_path_glob_pattern(pattern).unwrap_or_else(|e| {
+                panic!("invalid field catalog pattern '{}': {}", pattern, e);
+            });
+        }
     }
 }
