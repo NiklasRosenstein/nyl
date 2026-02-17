@@ -249,7 +249,7 @@ jobs:
             echo "error: Chart.yaml appVersion mismatch" >&2
             exit 1
           fi
-          if ! grep -Fxq "tag: ${IMAGE_TAG}" "$RUNNER_TEMP/chart/values.yaml"; then
+          if ! grep -Eq "^[[:space:]]*tag: ${IMAGE_TAG}$" "$RUNNER_TEMP/chart/values.yaml"; then
             echo "error: values.yaml image tag mismatch" >&2
             exit 1
           fi
