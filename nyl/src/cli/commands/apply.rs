@@ -76,7 +76,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 2. Initialize Kubernetes client
-    let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
+    let config = KubeRsClient::load_kube_config_from_profile(&profile, args.context.as_deref()).await?;
+    let client = Client::try_from(config)?;
+    let kube_client = KubeRsClient::from_client(client.clone()).await?;
 
     // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
     let mut sorted_manifests = desired_manifests.clone();
@@ -111,20 +113,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     };
 
     // 6. Initialize release storage
-    let config = if let Some(ctx) = &args.context {
-        let kubeconfig = kube::config::Kubeconfig::read()?;
-        kube::Config::from_custom_kubeconfig(
-            kubeconfig,
-            &kube::config::KubeConfigOptions {
-                context: Some(ctx.clone()),
-                ..Default::default()
-            },
-        )
-        .await?
-    } else {
-        kube::Config::infer().await?
-    };
-    let client = Client::try_from(config)?;
     let storage = KubernetesReleaseStorage::new(client);
 
     // 7. Determine next revision number

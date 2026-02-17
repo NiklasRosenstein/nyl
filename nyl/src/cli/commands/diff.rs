@@ -107,23 +107,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     };
 
     // 4. Initialize Kubernetes client
-    let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
-
-    // Also get raw client for state storage
-    let config = if let Some(ctx) = &args.context {
-        let kubeconfig = kube::config::Kubeconfig::read()?;
-        kube::Config::from_custom_kubeconfig(
-            kubeconfig,
-            &kube::config::KubeConfigOptions {
-                context: Some(ctx.clone()),
-                ..Default::default()
-            },
-        )
-        .await?
-    } else {
-        kube::Config::infer().await?
-    };
+    let config = KubeRsClient::load_kube_config_from_profile(&profile, args.context.as_deref()).await?;
     let client = Client::try_from(config)?;
+    let kube_client = KubeRsClient::from_client(client.clone()).await?;
 
     // 5. Initialize state storage
     let storage = KubernetesReleaseStorage::new(client);
