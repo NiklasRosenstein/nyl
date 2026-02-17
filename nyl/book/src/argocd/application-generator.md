@@ -152,7 +152,7 @@ Controls project-level `NylRelease.spec.argocd.applicationOverride` customizatio
 - If `allowedPaths` is omitted or null, defaults are used:
   - `metadata.annotations."pref.argocd.argoproj.io/*"`
   - `spec.info.**`
-  - `syncPolicy.**`
+  - `spec.syncPolicy.**`
 - If `allowedPaths` is an empty list, no fields are allowed.
 
 Ignored fields (unsupported/disallowed) are not applied and are reported in generated `Application.spec.info`.
