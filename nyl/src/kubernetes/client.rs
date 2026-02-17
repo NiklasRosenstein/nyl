@@ -64,6 +64,12 @@ impl KubeRsClient {
     /// - kube-client is responsible for spawning the exec plugin
     /// - when supported by kube-client, plugin stderr should be visible in CLI stderr
     pub async fn load_kube_config(path: Option<&Path>, context: Option<&str>) -> Result<kube::Config> {
+        tracing::debug!(
+            kubeconfig_path = %path.map_or_else(|| "<default>".to_string(), |p| p.display().to_string()),
+            kubeconfig_context = %context.unwrap_or("<default>"),
+            "Starting Kubernetes config load (may invoke kubeconfig exec auth plugin)"
+        );
+
         if let Some(ctx) = context {
             let kubeconfig = if let Some(path) = path {
                 kube::config::Kubeconfig::read_from(path)?
@@ -79,6 +85,7 @@ impl KubeRsClient {
                 },
             )
             .await
+            .inspect(|_| tracing::debug!("Finished Kubernetes config load from custom kubeconfig"))
             .map_err(Into::into);
         }
 
@@ -88,10 +95,14 @@ impl KubeRsClient {
                 &kube::config::KubeConfigOptions::default(),
             )
             .await
+            .inspect(|_| tracing::debug!("Finished Kubernetes config load from kubeconfig path"))
             .map_err(Into::into);
         }
 
-        kube::Config::infer().await.map_err(Into::into)
+        kube::Config::infer()
+            .await
+            .inspect(|_| tracing::debug!("Finished Kubernetes config load via inferred kubeconfig"))
+            .map_err(Into::into)
     }
 
     /// Build kube config from a Nyl profile and optional context override.
@@ -117,9 +128,16 @@ impl KubeRsClient {
 
     /// Create a new Kubernetes client from a profile
     pub async fn from_profile(profile: &Profile, context_override: Option<&str>) -> Result<Self> {
+        tracing::debug!(
+            has_context_override = context_override.is_some(),
+            "Initializing Kubernetes client from profile"
+        );
         let config = Self::load_kube_config_from_profile(profile, context_override).await?;
+        tracing::debug!("Creating kube-rs client from loaded config");
         let client = Client::try_from(config)?;
+        tracing::debug!("Running Kubernetes API discovery");
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
+        tracing::debug!("Kubernetes client initialization complete");
 
         Ok(Self { client, discovery })
     }
