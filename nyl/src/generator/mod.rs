@@ -309,7 +309,7 @@ mod tests {
 
         let toml = format!(
             r#"[project]
-components_search_paths = ["{}"]
+components_search_paths = ['{}']
 "#,
             temp.path().join("lib").display(),
         );

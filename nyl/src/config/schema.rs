@@ -24,7 +24,6 @@ mod tests {
     #[test]
     fn test_schema_matches_published_docs_artifact() {
         let schema = generate_project_config_schema();
-        let schema_text = serde_json::to_string_pretty(&schema).unwrap();
 
         let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("book")
@@ -33,10 +32,12 @@ mod tests {
             .join("schemas")
             .join("nyl.schema.json");
         let published = fs::read_to_string(&schema_path).expect("published schema file must exist");
+        let published_json: serde_json::Value =
+            serde_json::from_str(&published).expect("published schema file must be valid JSON");
 
         assert_eq!(
-            schema_text.trim(),
-            published.trim(),
+            schema,
+            published_json,
             "Published schema is out of date. Regenerate with: cargo run -- generate schema config > book/src/reference/schemas/nyl.schema.json"
         );
     }

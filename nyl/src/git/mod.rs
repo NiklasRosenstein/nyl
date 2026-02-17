@@ -449,11 +449,19 @@ mod tests {
     use super::*;
     use git2::Repository;
     use repository::BareRepository;
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use tempfile::TempDir;
 
     static ARGOCD_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_argocd_env() -> MutexGuard<'static, ()> {
+        ARGOCD_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn canonicalize_for_assert(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
 
     struct EnvCwdGuard {
         repo_url: Option<String>,
@@ -557,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_try_resolve_ref_from_argocd_env_reuses_checkout_on_exact_match() {
-        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _guard = lock_argocd_env();
         let _env_guard = EnvCwdGuard::new();
 
         let repo_root = TempDir::new().unwrap();
@@ -568,12 +576,12 @@ mod tests {
         std::env::set_var("ARGOCD_APP_SOURCE_PATH", "clusters/default");
 
         let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo", "HEAD", None).unwrap();
-        assert_eq!(resolved, repo_root.path());
+        assert_eq!(canonicalize_for_assert(&resolved), canonicalize_for_assert(repo_root.path()));
     }
 
     #[test]
     fn test_try_resolve_ref_from_argocd_env_reuses_checkout_with_subpath() {
-        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _guard = lock_argocd_env();
         let _env_guard = EnvCwdGuard::new();
 
         let repo_root = TempDir::new().unwrap();
@@ -587,12 +595,15 @@ mod tests {
         let resolved =
             try_resolve_ref_from_argocd_env("ssh://git@github.com/example/repo", "main", Some("charts/service"))
                 .unwrap();
-        assert_eq!(resolved, repo_root.path().join("charts/service"));
+        assert_eq!(
+            canonicalize_for_assert(&resolved),
+            canonicalize_for_assert(&repo_root.path().join("charts/service"))
+        );
     }
 
     #[test]
     fn test_try_resolve_ref_from_argocd_env_skips_on_target_revision_mismatch() {
-        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _guard = lock_argocd_env();
         let _env_guard = EnvCwdGuard::new();
 
         std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/repo.git");
@@ -605,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_try_resolve_ref_from_argocd_env_skips_on_repo_mismatch() {
-        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _guard = lock_argocd_env();
         let _env_guard = EnvCwdGuard::new();
 
         std::env::set_var("ARGOCD_APP_SOURCE_REPO_URL", "https://github.com/example/other.git");
@@ -618,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_try_resolve_ref_from_argocd_env_skips_on_unresolvable_source_path() {
-        let _guard = ARGOCD_ENV_LOCK.lock().unwrap();
+        let _guard = lock_argocd_env();
         let _env_guard = EnvCwdGuard::new();
 
         let repo_root = TempDir::new().unwrap();
