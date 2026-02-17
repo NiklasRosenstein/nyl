@@ -3,7 +3,7 @@
 /// This is an optional resource that can be included in YAML files to specify
 /// release metadata. When present, it provides the release name and namespace.
 /// When absent, these values must be provided via CLI flags.
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::constants::API_VERSION;
 use crate::{NylError, Result};
@@ -34,7 +34,41 @@ pub struct NylReleaseMetadata {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NylReleaseSpec {
-    // Future: additional metadata like labels, annotations
+    /// ArgoCD-specific options.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argocd: Option<NylReleaseArgoCdSpec>,
+}
+
+/// ArgoCD-specific options for NylRelease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NylReleaseArgoCdSpec {
+    /// Optional partial ArgoCD Application override.
+    ///
+    /// Must be an object if provided.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "applicationOverride",
+        deserialize_with = "deserialize_optional_object"
+    )]
+    pub application_override: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+fn deserialize_optional_object<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Object(map)) => Ok(Some(map)),
+        Some(_) => Err(serde::de::Error::custom(
+            "applicationOverride must be a YAML/JSON object",
+        )),
+    }
 }
 
 impl NylRelease {
@@ -154,6 +188,39 @@ mod tests {
     }
 
     #[test]
+    fn test_from_value_with_application_override() {
+        let value = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "NylRelease",
+            "metadata": {
+                "name": "myapp",
+                "namespace": "production"
+            },
+            "spec": {
+                "argocd": {
+                    "applicationOverride": {
+                        "spec": {
+                            "syncPolicy": {
+                                "automated": {
+                                    "prune": true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let release = NylRelease::from_value(&value).unwrap();
+        let application_override = release
+            .spec
+            .argocd
+            .and_then(|a| a.application_override)
+            .expect("applicationOverride should be parsed");
+        assert!(application_override.contains_key("spec"));
+    }
+
+    #[test]
     fn test_from_value_invalid_missing_metadata() {
         let value = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
@@ -254,5 +321,23 @@ unknownField: should-fail
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn test_nyl_release_rejects_non_object_application_override() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: test
+  namespace: default
+spec:
+  argocd:
+    applicationOverride: hello
+";
+        let result: std::result::Result<NylRelease, _> = serde_norway::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("applicationOverride must be a YAML/JSON object"));
     }
 }

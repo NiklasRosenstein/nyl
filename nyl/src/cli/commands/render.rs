@@ -1,5 +1,6 @@
 use clap::Args;
 use glob::{glob, Pattern};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,8 +13,8 @@ use crate::{
     profiles::{deep_merge_value, Profile, ProfileConfig},
     resources::{
         component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
-        is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef, HelmChart, KyvernoScope,
-        NylComponent, NylRelease,
+        is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_field_path, join_field_path_segments,
+        parse_component_kind, path_matches_glob, ChartRef, HelmChart, KyvernoScope, NylComponent, NylRelease,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -1145,6 +1146,52 @@ fn matches_glob_patterns(relative_path: &Path, patterns: &[String]) -> Result<bo
     Ok(false)
 }
 
+const NYL_CUSTOMIZATION_WARNING_NAME: &str = "nyl-release-customization-warning";
+const IMMUTABLE_APPLICATION_PATH_PATTERNS: &[&str] = &[
+    "apiVersion",
+    "kind",
+    "metadata.name",
+    "metadata.namespace",
+    "spec.project",
+    "spec.source.repoURL",
+    "spec.source.path",
+    "spec.source.targetRevision",
+    "spec.source.plugin.name",
+    "spec.source.plugin.env.**",
+    "spec.destination.server",
+    "spec.destination.namespace",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IgnoredOverrideReason {
+    CustomizationDisabled,
+    Disallowed,
+    Unsupported,
+}
+
+impl IgnoredOverrideReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CustomizationDisabled => "customization-disabled",
+            Self::Disallowed => "disallowed",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IgnoredOverride {
+    path: String,
+    reason: IgnoredOverrideReason,
+}
+
+#[derive(Debug, Clone)]
+struct OverrideLeaf {
+    segments: Vec<String>,
+    path: String,
+    value: serde_json::Value,
+}
+
 /// Create ArgoCD Application from generator config
 fn create_argocd_application_from_generator(
     release: &NylRelease,
@@ -1218,7 +1265,225 @@ fn create_argocd_application_from_generator(
         app["spec"]["syncPolicy"] = serde_json::to_value(sync_policy)?;
     }
 
+    apply_release_customization_overrides(&mut app, release, generator)?;
+
     Ok(app)
+}
+
+fn apply_release_customization_overrides(
+    app: &mut serde_json::Value,
+    release: &NylRelease,
+    generator: &crate::resources::ApplicationGenerator,
+) -> Result<()> {
+    let Some(application_override) = release
+        .spec
+        .argocd
+        .as_ref()
+        .and_then(|argocd| argocd.application_override.clone())
+    else {
+        return Ok(());
+    };
+
+    let mut override_leaves = Vec::new();
+    let mut prefix = Vec::new();
+    flatten_override_leaves(
+        &serde_json::Value::Object(application_override),
+        &mut prefix,
+        &mut override_leaves,
+    );
+
+    if override_leaves.is_empty() {
+        return Ok(());
+    }
+
+    let mut applied = Vec::new();
+    let mut ignored = Vec::new();
+
+    if let Some(customization) = &generator.spec.release_customization {
+        let allowed_paths = customization.effective_allowed_paths();
+        let denied_paths = &customization.denied_paths;
+        for leaf in override_leaves {
+            if !is_supported_application_field_path(&leaf.path) {
+                ignored.push(IgnoredOverride {
+                    path: leaf.path,
+                    reason: IgnoredOverrideReason::Unsupported,
+                });
+                continue;
+            }
+
+            if path_matches_any(&leaf.path, IMMUTABLE_APPLICATION_PATH_PATTERNS)? {
+                ignored.push(IgnoredOverride {
+                    path: leaf.path,
+                    reason: IgnoredOverrideReason::Disallowed,
+                });
+                continue;
+            }
+
+            let denied = path_matches_any(&leaf.path, denied_paths)?;
+            let allowed = path_matches_any(&leaf.path, &allowed_paths)?;
+            if denied || !allowed {
+                ignored.push(IgnoredOverride {
+                    path: leaf.path,
+                    reason: IgnoredOverrideReason::Disallowed,
+                });
+            } else {
+                applied.push(leaf);
+            }
+        }
+    } else {
+        for leaf in override_leaves {
+            ignored.push(IgnoredOverride {
+                path: leaf.path,
+                reason: IgnoredOverrideReason::CustomizationDisabled,
+            });
+        }
+    }
+
+    if !applied.is_empty() {
+        let override_value = build_override_value(&applied);
+        *app = deep_merge_value(Some(app.clone()), override_value);
+    }
+
+    if !ignored.is_empty() {
+        append_customization_warning(app, &ignored)?;
+    }
+
+    Ok(())
+}
+
+fn flatten_override_leaves(value: &serde_json::Value, prefix: &mut Vec<String>, leaves: &mut Vec<OverrideLeaf>) {
+    if let serde_json::Value::Object(map) = value {
+        if map.is_empty() {
+            return;
+        }
+        for (key, child) in map {
+            prefix.push(key.clone());
+            flatten_override_leaves(child, prefix, leaves);
+            prefix.pop();
+        }
+        return;
+    }
+
+    leaves.push(OverrideLeaf {
+        segments: prefix.clone(),
+        path: join_field_path_segments(prefix),
+        value: value.clone(),
+    });
+}
+
+fn build_override_value(leaves: &[OverrideLeaf]) -> serde_json::Value {
+    let mut root = serde_json::Map::new();
+    for leaf in leaves {
+        insert_override_leaf(&mut root, &leaf.segments, leaf.value.clone());
+    }
+    serde_json::Value::Object(root)
+}
+
+fn insert_override_leaf(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    segments: &[String],
+    value: serde_json::Value,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    if segments.len() == 1 {
+        root.insert(segments[0].clone(), value);
+        return;
+    }
+
+    let entry = root
+        .entry(segments[0].clone())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(map) = entry.as_object_mut() {
+        insert_override_leaf(map, &segments[1..], value);
+    }
+}
+
+fn path_matches_any(path: &str, patterns: &[impl AsRef<str>]) -> Result<bool> {
+    let mut candidates = vec![path.to_string()];
+    if let Some(stripped) = path.strip_prefix("spec.") {
+        candidates.push(stripped.to_string());
+    }
+
+    for candidate in &candidates {
+        for pattern in patterns {
+            if path_matches_glob(candidate, pattern.as_ref())? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn append_customization_warning(app: &mut serde_json::Value, ignored: &[IgnoredOverride]) -> Result<()> {
+    let mut grouped: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for item in ignored {
+        grouped.entry(item.reason.as_str()).or_default().push(item.path.clone());
+    }
+    for values in grouped.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+
+    let summary = grouped
+        .iter()
+        .map(|(reason, paths)| format!("{}={} ({})", reason, paths.len(), summarize_paths(paths)))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let warning_value = format!("Ignored NylRelease applicationOverride fields: {}", summary);
+
+    let spec = app
+        .get_mut("spec")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| NylError::Config("Generated Application is missing spec".to_string()))?;
+    let info_value = spec
+        .entry("info".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !info_value.is_array() {
+        let previous = std::mem::take(info_value);
+        *info_value = serde_json::Value::Array(vec![previous]);
+    }
+
+    let info_items = info_value
+        .as_array_mut()
+        .ok_or_else(|| NylError::Config("Application spec.info is not an array".to_string()))?;
+
+    let mut existing_index = None;
+    for (idx, item) in info_items.iter().enumerate() {
+        if item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|name| name == NYL_CUSTOMIZATION_WARNING_NAME)
+        {
+            existing_index = Some(idx);
+            break;
+        }
+    }
+
+    let warning_item = serde_json::json!({
+        "name": NYL_CUSTOMIZATION_WARNING_NAME,
+        "value": warning_value,
+    });
+    if let Some(idx) = existing_index {
+        info_items[idx] = warning_item;
+    } else {
+        info_items.push(warning_item);
+    }
+
+    Ok(())
+}
+
+fn summarize_paths(paths: &[String]) -> String {
+    const LIMIT: usize = 5;
+    if paths.len() <= LIMIT {
+        return paths.join(", ");
+    }
+    let head = paths.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    format!("{}, +{} more", head.join(", "), paths.len() - LIMIT)
 }
 
 /// Normalize a relative path to POSIX-style separators.
@@ -1421,6 +1686,7 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
@@ -1438,6 +1704,158 @@ metadata:
             .and_then(|v| v["value"].as_str())
             .unwrap();
         assert_eq!(template_input, "nginx.yaml");
+    }
+
+    #[test]
+    fn test_release_customization_appends_warning_to_existing_info_entries() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
+        };
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        let override_map = serde_json::from_value(serde_json::json!({
+            "spec": {
+                "info": [
+                    {"name": "team-note", "value": "kept"}
+                ],
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let release = NylRelease {
+            api_version: API_VERSION.to_string(),
+            kind: "NylRelease".to_string(),
+            metadata: NylReleaseMetadata {
+                name: "nginx".to_string(),
+                namespace: "web".to_string(),
+            },
+            spec: NylReleaseSpec {
+                argocd: Some(NylReleaseArgoCdSpec {
+                    application_override: Some(override_map),
+                }),
+            },
+        };
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "HEAD".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                release_customization: Some(ReleaseCustomizationPolicy {
+                    allowed_paths: Some(vec!["spec.info.**".to_string(), "spec.syncPolicy.**".to_string()]),
+                    denied_paths: vec!["spec.syncPolicy.automated.prune".to_string()],
+                }),
+            },
+        };
+
+        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
+        let source_root = Path::new("/tmp/worktree");
+        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+
+        assert!(app["spec"]["syncPolicy"]["automated"]["prune"].is_null());
+        let info = app["spec"]["info"].as_array().unwrap();
+        assert!(info.iter().any(|entry| entry["name"] == "team-note"));
+        assert!(info.iter().any(|entry| entry["name"] == NYL_CUSTOMIZATION_WARNING_NAME));
+    }
+
+    #[test]
+    fn test_release_customization_uses_default_allowed_paths() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
+        };
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        let override_map = serde_json::from_value(serde_json::json!({
+            "spec": {
+                "syncPolicy": {
+                    "automated": {
+                        "selfHeal": true
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let release = NylRelease {
+            api_version: API_VERSION.to_string(),
+            kind: "NylRelease".to_string(),
+            metadata: NylReleaseMetadata {
+                name: "nginx".to_string(),
+                namespace: "web".to_string(),
+            },
+            spec: NylReleaseSpec {
+                argocd: Some(NylReleaseArgoCdSpec {
+                    application_override: Some(override_map),
+                }),
+            },
+        };
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "HEAD".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                release_customization: Some(ReleaseCustomizationPolicy {
+                    allowed_paths: None,
+                    denied_paths: Vec::new(),
+                }),
+            },
+        };
+
+        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
+        let source_root = Path::new("/tmp/worktree");
+        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+
+        assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
     }
 
     #[test]
@@ -1481,6 +1899,7 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
@@ -1526,6 +1945,7 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
@@ -1573,6 +1993,7 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
@@ -1648,6 +2069,7 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 

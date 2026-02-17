@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::constants::API_VERSION_ARGOCD;
+use crate::resources::validate_path_glob_pattern;
 use crate::{NylError, Result};
 
 /// ApplicationGenerator resource for ArgoCD bootstrapping
@@ -54,6 +55,21 @@ pub struct ApplicationGeneratorSpec {
     /// Annotations to add to generated Applications
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub annotations: HashMap<String, String>,
+    /// Project-level release customization policy for generated Applications
+    #[serde(skip_serializing_if = "Option::is_none", rename = "releaseCustomization")]
+    pub release_customization: Option<ReleaseCustomizationPolicy>,
+}
+
+/// Policy for project-controlled Application customization via NylRelease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseCustomizationPolicy {
+    /// Allowed path patterns. If omitted, defaults are used. If empty, nothing is allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "allowedPaths")]
+    pub allowed_paths: Option<Vec<String>>,
+    /// Denied path patterns that take precedence over allowed paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "deniedPaths")]
+    pub denied_paths: Vec<String>,
 }
 
 /// Destination configuration for ArgoCD Applications
@@ -184,7 +200,30 @@ impl ApplicationGenerator {
         if self.spec.destination.namespace.is_empty() {
             return Err(NylError::Config("spec.destination.namespace is required".to_string()));
         }
+        if let Some(customization) = &self.spec.release_customization {
+            let patterns = customization.effective_allowed_paths();
+            for pattern in &patterns {
+                validate_path_glob_pattern(pattern)?;
+            }
+            for pattern in &customization.denied_paths {
+                validate_path_glob_pattern(pattern)?;
+            }
+        }
         Ok(())
+    }
+}
+
+impl ReleaseCustomizationPolicy {
+    pub const DEFAULT_ALLOWED_PATHS: [&str; 3] = [
+        "metadata.annotations.\"pref.argocd.argoproj.io/*\"",
+        "spec.info.**",
+        "syncPolicy.**",
+    ];
+
+    pub fn effective_allowed_paths(&self) -> Vec<String> {
+        self.allowed_paths
+            .clone()
+            .unwrap_or_else(|| Self::DEFAULT_ALLOWED_PATHS.iter().map(|s| (*s).to_string()).collect())
     }
 }
 
@@ -396,6 +435,7 @@ mod tests {
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
@@ -464,6 +504,32 @@ mod tests {
         let result = gen.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn test_release_customization_default_allowed_paths() {
+        let policy = ReleaseCustomizationPolicy {
+            allowed_paths: None,
+            denied_paths: Vec::new(),
+        };
+        assert_eq!(
+            policy.effective_allowed_paths(),
+            vec![
+                "metadata.annotations.\"pref.argocd.argoproj.io/*\"".to_string(),
+                "spec.info.**".to_string(),
+                "syncPolicy.**".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_release_customization_patterns() {
+        let mut gen = create_test_generator();
+        gen.spec.release_customization = Some(ReleaseCustomizationPolicy {
+            allowed_paths: Some(vec!["spec.syncPolicy.**".to_string()]),
+            denied_paths: vec!["spec.syncPolicy.automated.*".to_string()],
+        });
+        assert!(gen.validate().is_ok());
     }
 
     #[test]
@@ -630,6 +696,7 @@ mod tests {
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
+                release_customization: None,
             },
         }
     }

@@ -11,6 +11,8 @@ metadata:
   name: string        # Release name
   namespace: string   # Target namespace
 spec: {}              # Reserved for future use
+  argocd:             # Optional ArgoCD customization
+    applicationOverride: {}   # Partial Application override (object)
 ```
 
 ## Field Reference
@@ -27,11 +29,14 @@ spec: {}              # Reserved for future use
 - **Description**: The target namespace for this release
 - **Usage**: Resources are deployed to this namespace
 
-### spec
+### spec.argocd.applicationOverride
 
 - **Type**: `object` (optional)
-- **Description**: Reserved for future metadata like labels, annotations
-- **Current**: Empty object (`{}`)
+- **Description**: Partial ArgoCD `Application` override for use with `ApplicationGenerator` release customization policy
+- **Behavior**:
+  - Override fields are applied only if allowed by `ApplicationGenerator.spec.releaseCustomization`
+  - Unsupported or disallowed fields are ignored
+  - Ignored fields are reported as a warning in generated `Application.spec.info`
 
 ## Behavior
 
