@@ -169,7 +169,10 @@ jobs:
             FULL_SHA="${{ github.event.pull_request.head.sha }}"
             SHORT_SHA="${FULL_SHA:0:7}"
             PR_NUMBER="${{ github.event.number }}"
-            CANONICAL_VERSION="0.0.0-pr.${PR_NUMBER}.sha.${SHORT_SHA}"
+            # Helm chart versions must be valid SemVer. Prefix the SHA segment
+            # with a letter so it is parsed as alphanumeric, not numeric with
+            # potential leading zeros.
+            CANONICAL_VERSION="0.0.0-pr.${PR_NUMBER}.sha.g${SHORT_SHA}"
             CAN_PUSH=$([ "${{ github.event.pull_request.head.repo.fork }}" = "true" ] && echo "false" || echo "true")
           elif [ "$EVENT_NAME" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
             TAG_VERSION="${REF_NAME#v}"
@@ -184,7 +187,7 @@ jobs:
             CANONICAL_VERSION="$TAG_VERSION"
             CAN_PUSH="true"
           else
-            CANONICAL_VERSION="0.0.0-dev.sha.${SHORT_SHA}"
+            CANONICAL_VERSION="0.0.0-dev.sha.g${SHORT_SHA}"
             CAN_PUSH="true"
           fi
 
