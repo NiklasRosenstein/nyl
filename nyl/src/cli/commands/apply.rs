@@ -37,6 +37,10 @@ pub struct ApplyArgs {
     /// Skips pruning to preserve resources from previous releases.
     #[arg(long)]
     pub append_release: bool,
+
+    /// Apply resources without creating release revisions or pruning.
+    #[arg(long, conflicts_with_all = ["append_release", "name", "namespace"])]
+    pub no_release: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -71,7 +75,28 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 2. Determine release name and namespace
+    // 2. Initialize Kubernetes client
+    let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
+
+    // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
+    let mut sorted_manifests = desired_manifests.clone();
+    ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
+
+    // 4. Apply manifests
+    let apply_result = apply_sorted_manifests(&kube_client, &sorted_manifests).await?;
+
+    if args.no_release {
+        print_apply_summary(&apply_result.outcomes, None, &duplicates, apply_result.failed_count);
+        if apply_result.failed_count > 0 {
+            return Err(NylError::Other(format!(
+                "Apply completed with {} error(s)",
+                apply_result.failed_count
+            )));
+        }
+        return Ok(());
+    }
+
+    // 5. Determine release name and namespace
     let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
         (release.metadata.name.clone(), release.metadata.namespace.clone())
     } else {
@@ -85,10 +110,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         (name, namespace)
     };
 
-    // 4. Initialize Kubernetes client
-    let kube_client = KubeRsClient::from_profile(&profile, args.context.as_deref()).await?;
-
-    // Get underlying client for state storage
+    // 6. Initialize release storage
     let config = if let Some(ctx) = &args.context {
         let kubeconfig = kube::config::Kubeconfig::read()?;
         kube::Config::from_custom_kubeconfig(
@@ -103,61 +125,26 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         kube::Config::infer().await?
     };
     let client = Client::try_from(config)?;
-
-    // 5. Initialize state storage
     let storage = KubernetesReleaseStorage::new(client);
 
-    // 6. Determine next revision number
+    // 7. Determine next revision number
     let revisions = storage.list_revisions(&release_name, &release_namespace).await?;
     let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
-
-    // 7. Convert manifests to YAML string for storage
-    let manifest_yaml = manifests_to_yaml(&desired_manifests)?;
 
     // 8. Create initial release state
     let mut release = ReleaseState {
         release_name: release_name.clone(),
         release_namespace: release_namespace.clone(),
         revision: next_revision,
-        resource_keys: Vec::new(), // Will be populated during apply
-        manifest: manifest_yaml,
+        resource_keys: apply_result.resource_keys.clone(),
+        manifest: manifests_to_yaml(&desired_manifests)?,
         status: ReleaseStatus::Rendered,
         rendered_at: Utc::now(),
         applied_at: None,
         error: None,
     };
 
-    // 9. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
-    let mut sorted_manifests = desired_manifests.clone();
-    ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
-
-    // 10. Apply each resource and track resource keys
-    let mut outcomes = Vec::new();
-    let mut failed_count = 0;
-    let mut resource_keys = Vec::new();
-
-    for manifest in &sorted_manifests {
-        // Extract resource key
-        let key = ResourceKey::from_json_value(manifest)?;
-
-        match apply_manifest(&kube_client, manifest).await {
-            Ok(outcome) => {
-                outcomes.push(outcome);
-                resource_keys.push(key);
-            }
-            Err(e) => {
-                // Print error immediately with resource info
-                let error_msg = format!("(failed to apply resource: {})", e);
-                println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
-                failed_count += 1;
-            }
-        }
-    }
-
-    // 10. Update release state with resource keys
-    release.resource_keys = resource_keys;
-
-    // 10.5. Append-release mode: merge with previous release
+    // 9. Append-release mode: merge with previous release
     if args.append_release && next_revision > 1 {
         // Fetch previous release
         if let Ok(Some(previous_release)) = storage
@@ -218,16 +205,16 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // 11. Update release status
-    if failed_count == 0 {
+    // 10. Update release status
+    if apply_result.failed_count == 0 {
         release.status = ReleaseStatus::Deployed;
         release.applied_at = Some(Utc::now());
     } else {
         release.status = ReleaseStatus::Failed;
-        release.error = Some(format!("{} resource(s) failed to apply", failed_count));
+        release.error = Some(format!("{} resource(s) failed to apply", apply_result.failed_count));
     }
 
-    // 12. Save release state
+    // 11. Save release state
     // Ensure the release namespace exists before saving the release state
     ensure_namespace_exists(&kube_client, &release_namespace).await?;
 
@@ -248,8 +235,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .ok(); // Ignore errors if previous revision doesn't exist
     }
 
-    // 13. Prune resources from previous release that are no longer desired
-    let mut pruned_keys = Vec::new();
+    // 12. Prune resources from previous release that are no longer desired
     if !args.append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
         // Get previous release's resource keys
         if let Ok(Some(previous_release)) = storage
@@ -273,7 +259,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
                     {
                         Ok(()) => {
                             println!("  ✓ Deleted {}", key);
-                            pruned_keys.push(key.clone());
                         }
                         Err(e) => {
                             println!("  ✗ Failed to delete {}: {}", key, e);
@@ -285,17 +270,58 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // 14. Print summary
-    print_apply_summary(&outcomes, &release, &duplicates, failed_count);
+    // 13. Print summary
+    print_apply_summary(
+        &apply_result.outcomes,
+        Some(&release),
+        &duplicates,
+        apply_result.failed_count,
+    );
 
-    if failed_count > 0 {
+    if apply_result.failed_count > 0 {
         return Err(NylError::Other(format!(
             "Apply completed with {} error(s)",
-            failed_count
+            apply_result.failed_count
         )));
     }
 
     Ok(())
+}
+
+struct ApplyExecutionResult {
+    outcomes: Vec<ApplyOutcome>,
+    failed_count: usize,
+    resource_keys: Vec<ResourceKey>,
+}
+
+async fn apply_sorted_manifests(
+    client: &KubeRsClient,
+    manifests: &[serde_json::Value],
+) -> Result<ApplyExecutionResult> {
+    let mut outcomes = Vec::new();
+    let mut failed_count = 0;
+    let mut resource_keys = Vec::new();
+
+    for manifest in manifests {
+        let key = ResourceKey::from_json_value(manifest)?;
+        match apply_manifest(client, manifest).await {
+            Ok(outcome) => {
+                outcomes.push(outcome);
+                resource_keys.push(key);
+            }
+            Err(e) => {
+                let error_msg = format!("(failed to apply resource: {})", e);
+                println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
+                failed_count += 1;
+            }
+        }
+    }
+
+    Ok(ApplyExecutionResult {
+        outcomes,
+        failed_count,
+        resource_keys,
+    })
 }
 
 /// Convert manifests to YAML string
@@ -323,7 +349,7 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value) -> 
 #[allow(clippy::too_many_lines)]
 fn print_apply_summary(
     outcomes: &[ApplyOutcome],
-    release: &ReleaseState,
+    release: Option<&ReleaseState>,
     duplicates: &HashMap<ResourceKey, usize>,
     failed_count: usize,
 ) {
@@ -418,15 +444,16 @@ fn print_apply_summary(
 
     println!("Summary: {}", parts.join(", "));
 
-    println!();
-
-    if release.status == ReleaseStatus::Deployed {
-        println!(
-            "Release: {} revision {} deployed successfully to namespace {}",
-            release.release_name, release.revision, release.release_namespace
-        );
-    } else {
-        println!("Release: {} revision {} failed", release.release_name, release.revision);
+    if let Some(release) = release {
+        println!();
+        if release.status == ReleaseStatus::Deployed {
+            println!(
+                "Release: {} revision {} deployed successfully to namespace {}",
+                release.release_name, release.revision, release.release_namespace
+            );
+        } else {
+            println!("Release: {} revision {} failed", release.release_name, release.revision);
+        }
     }
 }
 

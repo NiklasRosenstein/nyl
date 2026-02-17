@@ -130,6 +130,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 6. Fetch previous release for tracking resource deletions
     let previous_release = storage.get_latest_release(&release_name, &release_namespace).await?;
+    if previous_release.is_none() {
+        tracing::warn!("{}", missing_release_warning_message(&release_namespace, &release_name));
+    }
 
     // 6.5. Append-release mode: include previous release's resources in desired state
     let desired_manifests = if args.append_release {
@@ -470,6 +473,13 @@ fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<Reso
     String::new()
 }
 
+fn missing_release_warning_message(namespace: &str, release_name: &str) -> String {
+    format!(
+        "No previous release state found for {}/{}. Diff can only compare current desired resources; prune candidates cannot be determined.",
+        namespace, release_name
+    )
+}
+
 /// Merge current manifests with previous release's resources (for --append-release preview)
 async fn merge_with_previous_release(
     client: &dyn KubeClient,
@@ -527,7 +537,12 @@ async fn merge_with_previous_release(
 
 #[cfg(test)]
 mod tests {
-    // Note: Full diff testing with live cluster requires integration tests
-    // with MockKubeClient or a real cluster. Unit tests moved to the DiffEngine
-    // module in kubernetes/diff.rs.
+    use super::missing_release_warning_message;
+
+    #[test]
+    fn test_missing_release_warning_message_mentions_prune_limitation() {
+        let msg = missing_release_warning_message("default", "demo");
+        assert!(msg.contains("default/demo"));
+        assert!(msg.contains("prune candidates cannot be determined"));
+    }
 }

@@ -328,10 +328,52 @@ helm_chart_search_paths = ["."]
         .arg("--max-depth")
         .arg("5")
         .arg("--track-parent")
+        .arg("--no-release")
         .arg("test-resource.yaml");
 
     // Should succeed but with no manifests message
     cmd.assert().success();
+}
+
+#[test]
+fn test_apply_no_release_conflicts_with_append_release() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("apply")
+        .arg("--no-release")
+        .arg("--append-release")
+        .arg("test-resource.yaml");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-release"))
+        .stderr(predicate::str::contains("--append-release"));
+}
+
+#[test]
+fn test_apply_no_release_conflicts_with_name() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("apply")
+        .arg("--no-release")
+        .arg("--name")
+        .arg("demo")
+        .arg("test-resource.yaml");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-release"))
+        .stderr(predicate::str::contains("--name"));
+}
+
+#[test]
+fn test_apply_no_release_conflicts_with_namespace() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("apply")
+        .arg("--no-release")
+        .arg("--namespace")
+        .arg("default")
+        .arg("test-resource.yaml");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-release"))
+        .stderr(predicate::str::contains("--namespace"));
 }
 
 /// Test that diff command accepts new flags

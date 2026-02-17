@@ -576,7 +576,10 @@ mod tests {
         std::env::set_var("ARGOCD_APP_SOURCE_PATH", "clusters/default");
 
         let resolved = try_resolve_ref_from_argocd_env("https://github.com/example/repo", "HEAD", None).unwrap();
-        assert_eq!(canonicalize_for_assert(&resolved), canonicalize_for_assert(repo_root.path()));
+        assert_eq!(
+            canonicalize_for_assert(&resolved),
+            canonicalize_for_assert(repo_root.path())
+        );
     }
 
     #[test]
