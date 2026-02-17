@@ -1537,6 +1537,7 @@ fn add_parent_annotations(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use tempfile::TempDir;
 
     static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1545,6 +1546,15 @@ mod tests {
             file: None,
             config: crate::config::ProjectFile::default(),
         }
+    }
+
+    fn create_test_worktree_paths() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let source_root = temp.path().join("worktree");
+        let file_path = source_root.join("clusters/default/addons/nginx.yaml");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n").unwrap();
+        (temp, source_root, file_path)
     }
 
     #[test]
@@ -1641,7 +1651,6 @@ metadata:
             ApplicationSource, NylReleaseMetadata, NylReleaseSpec,
         };
         use std::collections::HashMap;
-        use std::path::Path;
 
         let release = NylRelease {
             api_version: API_VERSION.to_string(),
@@ -1682,9 +1691,8 @@ metadata:
             },
         };
 
-        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
-        let source_root = Path::new("/tmp/worktree");
-        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+        let (_temp, source_root, file_path) = create_test_worktree_paths();
+        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
         assert_eq!(app["spec"]["source"]["path"], "clusters/default/addons");
         assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
@@ -1705,7 +1713,6 @@ metadata:
             ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
         };
         use std::collections::HashMap;
-        use std::path::Path;
 
         let override_map = serde_json::from_value(serde_json::json!({
             "spec": {
@@ -1767,9 +1774,8 @@ metadata:
             },
         };
 
-        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
-        let source_root = Path::new("/tmp/worktree");
-        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+        let (_temp, source_root, file_path) = create_test_worktree_paths();
+        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
         assert!(app["spec"]["syncPolicy"]["automated"]["prune"].is_null());
         let info = app["spec"]["info"].as_array().unwrap();
@@ -1784,7 +1790,6 @@ metadata:
             ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
         };
         use std::collections::HashMap;
-        use std::path::Path;
 
         let override_map = serde_json::from_value(serde_json::json!({
             "spec": {
@@ -1843,9 +1848,8 @@ metadata:
             },
         };
 
-        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
-        let source_root = Path::new("/tmp/worktree");
-        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+        let (_temp, source_root, file_path) = create_test_worktree_paths();
+        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
         assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
     }
@@ -1857,7 +1861,6 @@ metadata:
             ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec,
         };
         use std::collections::HashMap;
-        use std::path::Path;
 
         let override_map = serde_json::from_value(serde_json::json!({
             "spec": {
@@ -1913,9 +1916,8 @@ metadata:
             },
         };
 
-        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
-        let source_root = Path::new("/tmp/worktree");
-        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+        let (_temp, source_root, file_path) = create_test_worktree_paths();
+        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
         assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
     }

@@ -54,7 +54,7 @@ impl SecretProvider for NullProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn test_null_provider_new() {
@@ -65,7 +65,8 @@ mod tests {
     #[test]
     fn test_null_provider_init() {
         let mut provider = NullProvider::new();
-        let result = provider.init(&PathBuf::from("/tmp/test.yaml"));
+        let temp = TempDir::new().unwrap();
+        let result = provider.init(&temp.path().join("test.yaml"));
         assert!(result.is_ok());
     }
 

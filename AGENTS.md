@@ -86,6 +86,7 @@ mise run docs-rustdoc     # Generate API docs
 - Tests MUST NOT modify global state (env::set_var, static mut)
 - Use dependency injection for external dependencies (cache dirs, config paths)
 - Each test should use isolated temporary directories via `tempfile::TempDir`
+- Tests MUST NOT hardcode fixed temp paths like `/tmp/...`; always create per-test paths from `TempDir`
 
 **Example - DON'T:**
 ```rust
