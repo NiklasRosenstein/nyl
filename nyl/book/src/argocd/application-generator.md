@@ -32,6 +32,9 @@ spec:
   applicationNameTemplate: string  # Naming template (default: "{{ .release.name }}")
   labels: {string: string}         # Labels for generated Applications
   annotations: {string: string}    # Annotations for generated Applications
+  releaseCustomization:            # Optional NylRelease override policy
+    allowedPaths: [string]
+    deniedPaths: [string]
 ```
 
 ## Field Reference
@@ -136,6 +139,24 @@ annotations:
   docs-url: https://wiki.example.com/apps
   team-slack: "#platform-team"
 ```
+
+### spec.releaseCustomization
+
+Controls project-level `NylRelease.spec.argocd.applicationOverride` customization of generated Applications.
+
+- `NylRelease` overrides are always evaluated against effective `allowedPaths`/`deniedPaths`.
+- If `releaseCustomization` is omitted, defaults are used.
+- `allowedPaths` and `deniedPaths` use dotted field globs:
+  - `*` matches one segment (does not cross dots)
+  - `**` matches multiple segments (crosses dots)
+- If both allow and deny match, deny takes precedence.
+- If `allowedPaths` is omitted or null, defaults are used:
+  - `metadata.annotations."pref.argocd.argoproj.io/*"`
+  - `spec.info.**`
+  - `spec.syncPolicy.**`
+- If `allowedPaths` is an empty list, no fields are allowed.
+
+Ignored fields (unsupported/disallowed) are not applied and are reported in generated `Application.spec.info`.
 
 ## File Filtering
 

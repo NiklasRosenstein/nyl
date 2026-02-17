@@ -2,15 +2,18 @@
 ///
 /// This module provides Kubernetes-style resource definitions for Nyl
 mod application_generator;
+mod argocd_application_field_catalog;
 mod component;
 mod helmchart;
 mod kyverno;
 mod nyl_release;
+mod path_glob;
 
 pub use application_generator::{
     extract_application_generators, ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata,
-    ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, SyncPolicy,
+    ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, ReleaseCustomizationPolicy, SyncPolicy,
 };
+pub use argocd_application_field_catalog::is_supported_application_field_path;
 pub use component::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind,
     ComponentKindParsed, NylComponent,
@@ -20,4 +23,5 @@ pub use kyverno::{
     extract_all_kyverno_policies, extract_policies_by_scope, has_kyverno_scope_annotation, is_kyverno_policy,
     AnnotatedKyvernoPolicy, KyvernoScope,
 };
-pub use nyl_release::{extract_nyl_release, NylRelease, NylReleaseMetadata, NylReleaseSpec};
+pub use nyl_release::{extract_nyl_release, NylRelease, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec};
+pub use path_glob::{join_segments as join_field_path_segments, path_matches_glob, validate_path_glob_pattern};

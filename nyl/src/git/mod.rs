@@ -540,7 +540,11 @@ mod tests {
     fn test_resolve_ref_errors_when_fetch_fails_and_no_cached_ref() {
         let cache_dir = TempDir::new().unwrap();
         let mut manager = GitManager::with_cache_dir(cache_dir.path());
-        let url = "/tmp/nyl-does-not-exist-cred-test".to_string();
+        let url = cache_dir
+            .path()
+            .join("nyl-does-not-exist-cred-test")
+            .to_string_lossy()
+            .to_string();
 
         let bare_repo_path = manager.cache.bare_repo_path(&url);
         let raw_repo = Repository::init_bare(&bare_repo_path).unwrap();
