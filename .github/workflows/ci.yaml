@@ -231,55 +231,25 @@ jobs:
 
       - name: Package Helm chart
         run: |
+          set -euo pipefail
           cp -r chart "$RUNNER_TEMP/chart"
-          python - <<'PY'
-import os
-import re
-from pathlib import Path
+          CHART_VERSION="${{ steps.vars.outputs.chart_version }}"
+          IMAGE_TAG="${{ steps.vars.outputs.image_tag }}"
 
-chart_dir = Path(os.environ["RUNNER_TEMP"]) / "chart"
-chart_yaml = chart_dir / "Chart.yaml"
-chart_text = chart_yaml.read_text()
-chart_text, version_replaced = re.subn(
-    r"(?m)^version: .*$",
-    f"version: {os.environ['CHART_VERSION']}",
-    chart_text,
-    count=1,
-)
-if version_replaced != 1:
-    raise SystemExit("failed to update Chart.yaml version line")
-chart_text, app_version_replaced = re.subn(
-    r'(?m)^appVersion: .*$',
-    f'appVersion: "{os.environ["CHART_VERSION"]}"',
-    chart_text,
-    count=1,
-)
-if app_version_replaced != 1:
-    raise SystemExit("failed to update Chart.yaml appVersion line")
-chart_yaml.write_text(chart_text)
+          sed -i -E "s|^version: .*|version: ${CHART_VERSION}|" "$RUNNER_TEMP/chart/Chart.yaml"
+          sed -i -E "s|^appVersion: .*|appVersion: \"${CHART_VERSION}\"|" "$RUNNER_TEMP/chart/Chart.yaml"
+          sed -i -E "s|^([[:space:]]*tag: ).*|\\1${IMAGE_TAG}|" "$RUNNER_TEMP/chart/values.yaml"
 
-values_yaml = chart_dir / "values.yaml"
-values_text = values_yaml.read_text()
-values_text, tag_replaced = re.subn(
-    r"(?m)^(\s*tag: ).*$",
-    f"\\1{os.environ['IMAGE_TAG']}",
-    values_text,
-    count=1,
-)
-if tag_replaced != 1:
-    raise SystemExit("failed to update values.yaml tag line")
-values_yaml.write_text(values_text)
-PY
-          helm package "$RUNNER_TEMP/chart" --version="${{ steps.vars.outputs.chart_version }}" -d "$RUNNER_TEMP"
-          if ! grep -Fxq "version: ${{ steps.vars.outputs.chart_version }}" "$RUNNER_TEMP/chart/Chart.yaml"; then
+          helm package "$RUNNER_TEMP/chart" --version="${CHART_VERSION}" -d "$RUNNER_TEMP"
+          if ! grep -Fxq "version: ${CHART_VERSION}" "$RUNNER_TEMP/chart/Chart.yaml"; then
             echo "error: Chart.yaml version mismatch" >&2
             exit 1
           fi
-          if ! grep -Fxq "appVersion: \"${{ steps.vars.outputs.chart_version }}\"" "$RUNNER_TEMP/chart/Chart.yaml"; then
+          if ! grep -Fxq "appVersion: \"${CHART_VERSION}\"" "$RUNNER_TEMP/chart/Chart.yaml"; then
             echo "error: Chart.yaml appVersion mismatch" >&2
             exit 1
           fi
-          if ! grep -Fxq "tag: ${{ steps.vars.outputs.image_tag }}" "$RUNNER_TEMP/chart/values.yaml"; then
+          if ! grep -Fxq "tag: ${IMAGE_TAG}" "$RUNNER_TEMP/chart/values.yaml"; then
             echo "error: values.yaml image tag mismatch" >&2
             exit 1
           fi
