@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "description": "Project settings in `[project]` section of `nyl.toml`.",
+      "properties": {
+        "components_search_paths": {
+          "default": [
+            "components"
+          ],
+          "description": "Search paths for local component charts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "helm_chart_search_paths": {
+          "default": [
+            "."
+          ],
+          "description": "Search paths for Helm chart names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "description": "Root structure of `nyl.toml`.",
+  "properties": {
+    "project": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      ],
+      "default": {
+        "components_search_paths": [
+          "components"
+        ],
+        "helm_chart_search_paths": [
+          "."
+        ]
+      }
+    }
+  },
+  "title": "ProjectFile",
+  "type": "object"
+}

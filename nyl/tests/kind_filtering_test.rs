@@ -6,16 +6,11 @@ use tempfile::TempDir;
 /// Helper to create a test project structure with multiple resource types
 fn create_test_project(temp: &TempDir) {
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath:
-    - components
-
-profiles:
-  default:
-    values:
-      environment: test
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();

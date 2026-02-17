@@ -39,6 +39,14 @@ nyl generate argocd clusters/default \
   -o applications.yaml
 ```
 
+### schema config
+
+Generate JSON Schema for `nyl.toml` to stdout.
+
+```bash
+nyl generate schema config
+```
+
 ## Relation to ApplicationGenerator
 
 The `nyl generate argocd` command is a **manual CLI tool** for one-time generation of ArgoCD Applications from a directory of Nyl releases. It's useful for:

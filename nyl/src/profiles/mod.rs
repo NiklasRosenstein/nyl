@@ -5,7 +5,6 @@
 /// - Precedence-based loading from multiple sources
 /// - Kubeconfig sources (local files, SSH remote)
 /// - Profile value merging
-use crate::config::ProjectConfig;
 use crate::{NylError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -117,8 +116,7 @@ pub struct SshTunnel {
 /// Profiles are loaded from multiple sources with this precedence:
 /// 1. Explicit file path (highest priority)
 /// 2. nyl-profiles.yaml in current/parent directories
-/// 3. Profiles from nyl-project.yaml
-/// 4. ~/.config/nyl/profiles.yaml (global)
+/// 3. ~/.config/nyl/profiles.yaml (global)
 #[derive(Debug)]
 pub struct ProfileConfig {
     /// Path to the profile configuration file (if any)
@@ -168,12 +166,7 @@ impl ProfileConfig {
             return Self::load_from_file(&path);
         }
 
-        // 3. Try to load from project config
-        if let Some(config) = Self::load_from_project_config_in_dir(dir)? {
-            return Ok(config);
-        }
-
-        // 4. Try global config directory
+        // 3. Try global config directory
         if let Some(config) = Self::load_from_global()? {
             return Ok(config);
         }
@@ -216,20 +209,6 @@ impl ProfileConfig {
             file: Some(path.to_path_buf()),
             profiles,
         })
-    }
-
-    /// Load profiles from project config in a specific directory
-    fn load_from_project_config_in_dir(dir: Option<&Path>) -> Result<Option<Self>> {
-        let project_config = ProjectConfig::load_from_dir(None, dir)?;
-
-        if project_config.config.profiles.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(Self {
-            file: project_config.file,
-            profiles: project_config.config.profiles,
-        }))
     }
 
     /// Load profiles from global config directory (~/.config/nyl/profiles.yaml)

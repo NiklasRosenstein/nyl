@@ -35,17 +35,19 @@ gitops-repo/
 │       ├── app1.yaml          # Application 1 with NylRelease
 │       ├── app2.yaml          # Application 2 with NylRelease
 │       └── app3.yaml          # Application 3 with NylRelease
-├── nyl-project.yaml           # Nyl project configuration
+├── nyl.toml           # Nyl project configuration
 ├── nyl-profiles.yaml          # Nyl profiles (environments)
 └── nyl-secrets.yaml           # Secrets configuration
 ```
 
 ## Step 1: Create Configuration Files
 
-### nyl-project.yaml
+### nyl.toml
 
-```yaml
-{}
+```toml
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 ```
 
 ### nyl-profiles.yaml

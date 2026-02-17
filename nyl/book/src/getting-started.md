@@ -31,7 +31,7 @@ cd my-app
 ```
 
 This creates:
-- `nyl-project.yaml` - Project configuration
+- `nyl.toml` - Project configuration
 - `components/` - Directory for components
 
 ### 2. Add a Component
@@ -54,9 +54,9 @@ nyl validate
 
 Output:
 ```
-✓ Found project config: /path/to/my-app/nyl-project.yaml
-✓ Components directory exists: /path/to/my-app/components
-✓ Search path exists: /path/to/my-app
+✓ Found project config: /path/to/my-app/nyl.toml
+✓ Components search path exists: /path/to/my-app/components
+✓ Helm chart search path exists: /path/to/my-app
 
 ✓ Validation passed
 ```
@@ -73,7 +73,7 @@ nyl validate --strict
 
 ```
 my-app/
-├── nyl-project.yaml          # Project configuration
+├── nyl.toml                  # Project configuration
 ├── components/               # Component definitions
 │   └── v1.example.io/
 │       └── MyApp/
@@ -82,7 +82,7 @@ my-app/
 │           ├── values.schema.json
 │           └── templates/
 │               └── deployment.yaml
-└── lib/                      # Optional: shared libraries (Phase 2+)
+└── charts/                   # Optional: additional Helm chart search path
 ```
 
 ## Next Steps

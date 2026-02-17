@@ -5,15 +5,13 @@ use tempfile::TempDir;
 
 fn bench_config_discovery(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
-    let config_path = temp.path().join("nyl-project.yaml");
+    let config_path = temp.path().join("nyl.toml");
     fs::write(
         &config_path,
         r#"
-settings:
-  components_path: ./components
-  search_path:
-    - ./charts
-    - ./manifests
+[project]
+components_search_paths = ["./components"]
+helm_chart_search_paths = ["./charts", "./manifests"]
 "#,
     )
     .unwrap();
@@ -26,48 +24,31 @@ settings:
 }
 
 fn bench_config_parsing(c: &mut Criterion) {
-    let yaml_content = r#"
-settings:
-  components_path: ./components
-  search_path:
-    - ./charts
-    - ./manifests
-  default_namespace: default
-
-profiles:
-  dev:
-    values:
-      environment: development
-      debug: true
-      replicas: 1
-  prod:
-    values:
-      environment: production
-      debug: false
-      replicas: 3
+    let toml_content = r#"
+[project]
+components_search_paths = ["./components"]
+helm_chart_search_paths = ["./charts", "./manifests"]
 "#;
 
     c.bench_function("config_parsing_simple", |b| {
         b.iter(|| {
-            let _result: Result<serde_json::Value, _> = serde_norway::from_str(black_box(yaml_content));
+            let _result: Result<nyl::config::ProjectFile, _> = toml::from_str(black_box(toml_content));
         });
     });
 }
 
 fn bench_config_load_full(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
-    let config_path = temp.path().join("nyl-project.yaml");
+    let config_path = temp.path().join("nyl.toml");
     let components_dir = temp.path().join("components");
     fs::create_dir(&components_dir).unwrap();
 
     fs::write(
         &config_path,
         r#"
-settings:
-  components_path: ./components
-  search_path:
-    - ./charts
-  default_namespace: default
+[project]
+components_search_paths = ["./components"]
+helm_chart_search_paths = ["./charts"]
 "#,
     )
     .unwrap();

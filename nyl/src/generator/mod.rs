@@ -39,26 +39,7 @@ impl Generator {
 
     /// Build search paths from configuration
     fn build_search_paths(config: &ProjectConfig) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        // Add parent of components path
-        // ComponentRegistry expects to append "components/<apiVersion>/<kind>"
-        // to the search path, so we need the parent directory
-        let components_path = config.get_components_path();
-        if let Some(parent) = components_path.parent() {
-            paths.push(parent.to_path_buf());
-        } else {
-            // If components_path has no parent, use it as-is
-            // This shouldn't happen in practice
-            paths.push(components_path);
-        }
-
-        // Add search paths from config
-        for path in &config.config.settings.search_path {
-            paths.push(path.clone());
-        }
-
-        paths
+        config.get_components_search_paths().to_vec()
     }
 
     /// Find a component by API version and kind
@@ -141,7 +122,7 @@ impl Default for Generator {
     fn default() -> Self {
         Self::new(ProjectConfig::load(None).unwrap_or_else(|_| ProjectConfig {
             file: None,
-            config: crate::config::Project::default(),
+            config: crate::config::ProjectFile::default(),
         }))
     }
 }
@@ -192,8 +173,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_config(base: &std::path::Path) -> ProjectConfig {
-        let config_path = base.join("nyl-project.yaml");
-        fs::write(&config_path, "settings:\n  search_path: []\n").unwrap();
+        let config_path = base.join("nyl.toml");
+        fs::write(&config_path, "[project]\ncomponents_search_paths = [\"components\"]\n").unwrap();
 
         ProjectConfig::load(Some(config_path)).unwrap()
     }
@@ -324,31 +305,21 @@ mod tests {
     #[test]
     fn test_build_search_paths() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
+        let config_path = temp.path().join("nyl.toml");
 
-        let yaml = format!(
-            r"
-settings:
-  components_path: custom-components
-  search_path:
-    - {}
-    - {}
-",
+        let toml = format!(
+            r#"[project]
+components_search_paths = ["{}"]
+"#,
             temp.path().join("lib").display(),
-            temp.path().join("vendor").display()
         );
 
-        fs::write(&config_path, yaml).unwrap();
+        fs::write(&config_path, toml).unwrap();
 
         let config = ProjectConfig::load(Some(config_path)).unwrap();
         let paths = Generator::build_search_paths(&config);
 
-        // Should have parent of components_path + 2 search paths = 3 total
-        assert_eq!(paths.len(), 3);
-        // First path should be parent of custom-components (i.e., temp.path())
-        assert_eq!(paths[0], temp.path());
-        // Other paths should be lib and vendor
-        assert!(paths[1].ends_with("lib") || paths[2].ends_with("lib"));
-        assert!(paths[1].ends_with("vendor") || paths[2].ends_with("vendor"));
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("lib"));
     }
 }

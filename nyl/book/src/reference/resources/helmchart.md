@@ -146,8 +146,8 @@ spec:
 
 Configure search paths in `nyl.toml`:
 ```toml
-[settings]
-search_path = ["./charts", "/opt/helm-charts"]
+[project]
+helm_chart_search_paths = ["./charts", "/opt/helm-charts"]
 ```
 
 ### Git Repository
@@ -414,5 +414,4 @@ nyl render -e production app.yaml
 
 - [Git Integration](../../git-integration.md) - Git repository management
 - [Configuration](../../configuration.md) - Search paths and settings
-- [Profiles](../../configuration.md#profiles) - Environment-specific values
 - [NylRelease](./nyl-release.md) - Release metadata

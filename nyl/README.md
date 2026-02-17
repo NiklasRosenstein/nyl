@@ -229,12 +229,10 @@ cargo test --test integration_test
 
 ## 🔄 Migration from Python
 
-The Rust version is a **drop-in replacement**:
+The Rust version keeps the same core workflow, with one important project-config change:
 
-✅ Existing `nyl-project.yaml` files work without modification
-✅ Same CLI command structure
-✅ Compatible YAML output
-✅ Same Helm chart handling
+- Project settings are loaded from `nyl.toml` (`[project]` section).
+- Legacy `nyl-project.*` files must be migrated.
 
 See the [Migration Guide](./book/src/migration.md) for details.
 

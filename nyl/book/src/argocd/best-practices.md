@@ -28,7 +28,7 @@ gitops-repo/
 ├── base/                       # Shared base configurations
 │   ├── postgres/
 │   └── redis/
-├── nyl-project.yaml
+├── nyl.toml
 ├── nyl-profiles.yaml
 └── nyl-secrets.yaml
 ```

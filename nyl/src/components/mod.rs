@@ -6,7 +6,7 @@
 /// - Component type definitions
 ///
 /// Components are discovered in the directory structure:
-/// components/<apiVersion>/<kind>/Chart.yaml
+/// <components_search_path>/<apiVersion>/<kind>/Chart.yaml
 use crate::{NylError, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ impl HelmComponent {
 /// Registry for discovering and caching components
 ///
 /// The registry searches configured paths for components following the
-/// structure: components/<apiVersion>/<kind>/Chart.yaml
+/// structure: <search_path>/<apiVersion>/<kind>/Chart.yaml
 pub struct ComponentRegistry {
     /// Directories to search for components
     search_paths: Vec<PathBuf>,
@@ -107,8 +107,8 @@ impl ComponentRegistry {
     /// Search for a component in all search paths
     fn search_component(&self, api_version: &str, kind: &str) -> Result<Option<Component>> {
         for search_path in &self.search_paths {
-            // Look for components/<apiVersion>/<kind>/Chart.yaml
-            let component_path = search_path.join("components").join(api_version).join(kind);
+            // Look for <search_path>/<apiVersion>/<kind>/Chart.yaml
+            let component_path = search_path.join(api_version).join(kind);
 
             let chart_path = component_path.join("Chart.yaml");
 
@@ -154,13 +154,13 @@ impl ComponentRegistry {
         let mut components = Vec::new();
 
         for search_path in &self.search_paths {
-            let components_dir = search_path.join("components");
+            let components_dir = search_path;
             if !components_dir.exists() {
                 continue;
             }
 
             // Walk the components directory structure
-            if let Ok(entries) = std::fs::read_dir(&components_dir) {
+            if let Ok(entries) = std::fs::read_dir(components_dir) {
                 for api_version_entry in entries.flatten() {
                     let api_version_path = api_version_entry.path();
                     if !api_version_path.is_dir() {
@@ -220,7 +220,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_component(base: &Path, api_version: &str, kind: &str) {
-        let component_dir = base.join("components").join(api_version).join(kind);
+        let component_dir = base.join(api_version).join(kind);
         fs::create_dir_all(&component_dir).unwrap();
 
         let chart_yaml = component_dir.join("Chart.yaml");

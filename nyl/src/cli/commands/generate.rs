@@ -39,6 +39,18 @@ pub enum GenerateSubcommand {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Generate JSON schemas
+    Schema {
+        #[command(subcommand)]
+        command: SchemaSubcommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SchemaSubcommand {
+    /// Generate JSON schema for nyl.toml project configuration
+    Config,
 }
 
 pub fn execute(args: GenerateArgs) -> Result<()> {
@@ -58,6 +70,15 @@ pub fn execute(args: GenerateArgs) -> Result<()> {
             &project,
             output.as_deref(),
         ),
+        GenerateSubcommand::Schema {
+            command: SchemaSubcommand::Config,
+        } => {
+            let schema = crate::config::schema::generate_project_config_schema();
+            let output = serde_json::to_string_pretty(&schema)
+                .map_err(|e| NylError::Config(format!("Failed to serialize schema JSON: {}", e)))?;
+            println!("{}", output);
+            Ok(())
+        }
     }
 }
 

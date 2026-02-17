@@ -6,7 +6,8 @@ This example demonstrates a basic web application deployment with Nyl.
 
 ```
 simple-app/
-├── nyl-project.yaml          # Project configuration with profiles
+├── nyl.toml                  # Project path configuration
+├── nyl-profiles.yaml         # Profile values (dev/staging/prod)
 ├── manifests/
 │   ├── deployment.yaml       # Application Deployment
 │   ├── service.yaml          # ClusterIP Service
@@ -73,7 +74,7 @@ nyl diff --environment dev
 
 To customize this example:
 
-1. Edit `nyl-project.yaml` to add more profiles or change values
+1. Edit `nyl-profiles.yaml` to add more profiles or change values
 2. Modify manifests in `manifests/` to add resources (Ingress, PVC, etc.)
 3. Add environment-specific overrides using profile values
 

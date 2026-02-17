@@ -9,10 +9,10 @@ pub enum NylError {
     #[error("Helm chart error: {0}\nHint: Verify the chart path exists and Helm is installed. Run 'helm version' to check Helm availability.")]
     HelmChart(String),
 
-    #[error("Configuration error: {0}\nHint: Check your nyl-project.yaml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
+    #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
 
-    #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl-project.yaml file.")]
+    #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl.toml file.")]
     ConfigNotFound(String),
 
     #[error("IO error: {0}")]

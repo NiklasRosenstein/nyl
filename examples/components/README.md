@@ -8,7 +8,7 @@ write a minimal manifest whose `kind` is the path to a Helm chart under
 ## Layout
 
 ```
-nyl-project.toml                    # sets components_path = "components"
+nyl.toml                    # sets components_search_paths = ["components"]
 components/
   example/v1/Nginx/                 # a Helm chart; referenced by kind: example/v1/Nginx
     Chart.yaml

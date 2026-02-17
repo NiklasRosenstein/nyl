@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 /// Helper to create a test component
 fn create_test_component(base: &std::path::Path, api_version: &str, kind: &str) {
-    let component_dir = base.join("components").join(api_version).join(kind);
+    let component_dir = base.join(api_version).join(kind);
     fs::create_dir_all(&component_dir).unwrap();
 
     fs::write(
@@ -112,22 +112,19 @@ fn test_helm_chart_resolution_integration() {
 fn test_profile_loading_precedence() {
     let temp = TempDir::new().unwrap();
 
-    // 1. Create project config with profiles
-    let project_config = temp.path().join("nyl-project.yaml");
+    // 1. Create project config
+    let project_config = temp.path().join("nyl.toml");
     fs::write(
         &project_config,
         r#"
-settings: {}
-profiles:
-  dev:
-    values:
-      source: "project-config"
-      fromProject: true
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
 
-    // 2. Create nyl-profiles.yaml (should override project config)
+    // 2. Create nyl-profiles.yaml
     let profiles_file = temp.path().join("nyl-profiles.yaml");
     fs::write(
         &profiles_file,
@@ -148,7 +145,7 @@ prod:
     let original_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(temp.path()).unwrap();
 
-    // Load profiles - should prefer nyl-profiles.yaml
+    // Load profiles from nyl-profiles.yaml
     let config = ProfileConfig::load(None).unwrap();
 
     // Restore original directory
@@ -294,22 +291,21 @@ fn test_component_to_helmchart_flow() {
 fn test_generator_end_to_end() {
     let temp = TempDir::new().unwrap();
 
-    // Create project config - use relative paths that will be resolved relative to config location
-    let config_path = temp.path().join("nyl-project.yaml");
+    // Create project config
+    let config_path = temp.path().join("nyl.toml");
     fs::write(
         &config_path,
         r#"
-settings:
-  components_path: components
-  search_path: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = []
 "#,
     )
     .unwrap();
 
-    // Create components - the registry will look for components/<apiVersion>/<kind>
-    // So we create them relative to temp.path() which is the config directory
-    create_test_component(temp.path(), "v1.example.io", "WebApp");
-    create_test_component(temp.path(), "v1.example.io", "Database");
+    // Create components under configured component root.
+    create_test_component(&temp.path().join("components"), "v1.example.io", "WebApp");
+    create_test_component(&temp.path().join("components"), "v1.example.io", "Database");
 
     // Create charts
     let charts_dir = temp.path().join("charts");
@@ -369,40 +365,38 @@ fn test_profile_merge() {
 }
 
 #[test]
-fn test_typed_profiles_in_project_config() {
+fn test_typed_profiles_in_profiles_file() {
     let temp = TempDir::new().unwrap();
-    let config_path = temp.path().join("nyl-project.yaml");
+    let config_path = temp.path().join("nyl-profiles.yaml");
 
     let yaml = r#"
-settings: {}
-profiles:
-  dev:
-    values:
-      environment: development
-      debug: true
-    kubeconfig:
-      type: local
-      context: minikube
-  prod:
-    values:
-      environment: production
-      debug: false
-    kubeconfig:
-      type: local
-      context: prod-cluster
+dev:
+  values:
+    environment: development
+    debug: true
+  kubeconfig:
+    type: local
+    context: minikube
+prod:
+  values:
+    environment: production
+    debug: false
+  kubeconfig:
+    type: local
+    context: prod-cluster
 "#;
 
     fs::write(&config_path, yaml).unwrap();
 
-    let config = ProjectConfig::load(Some(config_path)).unwrap();
+    let config = ProfileConfig::load_from_dir(None, Some(temp.path())).unwrap();
 
-    assert_eq!(config.config.profiles.len(), 2);
+    assert_eq!(config.profiles.len(), 2);
 
-    let dev = config.config.profiles.get("dev").unwrap();
+    let dev = config.profiles.get("dev").unwrap();
     assert_eq!(dev.values["environment"], "development");
     assert_eq!(dev.values["debug"], true);
 
-    let prod = config.config.profiles.get("prod").unwrap();
+    let prod = config.profiles.get("prod").unwrap();
     assert_eq!(prod.values["environment"], "production");
     assert_eq!(prod.values["debug"], false);
 }

@@ -1,6 +1,0 @@
-settings:
-  default_namespace: argocd
-
-profiles:
-  default:
-    values: {}

@@ -20,21 +20,27 @@ fn test_cli_version() {
 }
 
 #[test]
+fn test_generate_schema_config_command() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("generate").arg("schema").arg("config");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"project\""))
+        .stdout(predicate::str::contains("\"components_search_paths\""))
+        .stdout(predicate::str::contains("\"helm_chart_search_paths\""));
+}
+
+#[test]
 fn test_render_command_basic() {
     let temp = TempDir::new().unwrap();
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath:
-    - components
-
-profiles:
-  default:
-    values:
-      environment: test
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -77,15 +83,15 @@ fn test_diff_command_requires_default_profile_when_profiles_exist() {
 
     // Create config with a profile that is NOT named "default"
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl-profiles.yaml"),
         r#"
-profiles:
-  staging:
-    values:
-      environment: staging
+staging:
+  values:
+    environment: staging
 "#,
     )
     .unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -114,15 +120,15 @@ fn test_apply_command_requires_default_profile_when_profiles_exist() {
 
     // Create config with a profile that is NOT named "default"
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl-profiles.yaml"),
         r#"
-profiles:
-  production:
-    values:
-      environment: production
+production:
+  values:
+    environment: production
 "#,
     )
     .unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -159,7 +165,7 @@ fn test_new_project_command() {
     // Verify project structure (defaults to TOML format with hidden file)
     let project_dir = temp.path().join("test-project");
     assert!(project_dir.exists());
-    assert!(project_dir.join(".nyl-project.toml").exists());
+    assert!(project_dir.join("nyl.toml").exists());
     assert!(project_dir.join("components").exists());
 }
 
@@ -180,8 +186,8 @@ fn test_new_component_command() {
     let temp = TempDir::new().unwrap();
 
     // Create a project first
-    let config_path = temp.path().join("nyl-project.yaml");
-    fs::write(&config_path, "settings: {}").unwrap();
+    let config_path = temp.path().join("nyl.toml");
+    fs::write(&config_path, "[project]\n").unwrap();
 
     let components_dir = temp.path().join("components");
     fs::create_dir(&components_dir).unwrap();
@@ -207,8 +213,8 @@ fn test_validate_command_with_config() {
     let temp = TempDir::new().unwrap();
 
     // Create a valid project
-    let config_path = temp.path().join("nyl-project.yaml");
-    fs::write(&config_path, "settings: {}").unwrap();
+    let config_path = temp.path().join("nyl.toml");
+    fs::write(&config_path, "[project]\n").unwrap();
 
     let components_dir = temp.path().join("components");
     fs::create_dir(&components_dir).unwrap();
@@ -238,9 +244,13 @@ fn test_validate_command_no_config() {
 fn test_validate_command_strict_mode() {
     let temp = TempDir::new().unwrap();
 
-    // Create config with invalid on_lookup_failure
-    let config_path = temp.path().join("nyl-project.yaml");
-    fs::write(&config_path, "settings:\n  on_lookup_failure: InvalidValue").unwrap();
+    // Create config with a missing component path (warning in strict mode)
+    let config_path = temp.path().join("nyl.toml");
+    fs::write(
+        &config_path,
+        "[project]\ncomponents_search_paths = [\"does-not-exist\"]\n",
+    )
+    .unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
@@ -262,7 +272,7 @@ fn test_verbose_flag() {
 fn test_render_missing_file_in_argocd_prints_diagnostics() {
     let temp = TempDir::new().unwrap();
 
-    fs::write(temp.path().join("nyl-project.yaml"), "settings: {}\n").unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
@@ -291,7 +301,7 @@ fn test_render_missing_file_in_argocd_prints_diagnostics() {
 fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
     let temp = TempDir::new().unwrap();
 
-    fs::write(temp.path().join("nyl-project.yaml"), "settings: {}\n").unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
@@ -307,7 +317,8 @@ fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
 fn test_render_non_file_not_found_error_in_argocd_does_not_print_diagnostics() {
     let temp = TempDir::new().unwrap();
 
-    fs::write(temp.path().join("nyl-project.yaml"), "profiles:\n  default: {}\n").unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(temp.path().join("nyl-profiles.yaml"), "default: {}\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
         temp.path().join("test-resource.yaml"),

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// use nyl::util::fs::find_config_file;
 ///
 /// let config = find_config_file(
-///     &["nyl-project.yaml", "nyl-project.json"],
+///     &["nyl.toml"],
 ///     None,
 ///     false
 /// );
@@ -101,10 +101,10 @@ mod tests {
     #[test]
     fn test_find_config_in_current_dir() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
+        let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "test: value").unwrap();
 
-        let result = find_config_file(&["nyl-project.yaml"], Some(temp.path()), false).unwrap();
+        let result = find_config_file(&["nyl.toml"], Some(temp.path()), false).unwrap();
 
         assert!(result.is_some());
         assert_eq!(result.unwrap(), config_path);
@@ -113,14 +113,14 @@ mod tests {
     #[test]
     fn test_find_config_in_parent_dir() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
+        let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "test: value").unwrap();
 
         // Create subdirectory
         let subdir = temp.path().join("subdir");
         fs::create_dir(&subdir).unwrap();
 
-        let result = find_config_file(&["nyl-project.yaml"], Some(&subdir), false).unwrap();
+        let result = find_config_file(&["nyl.toml"], Some(&subdir), false).unwrap();
 
         assert!(result.is_some());
         assert_eq!(result.unwrap(), config_path);
@@ -129,24 +129,23 @@ mod tests {
     #[test]
     fn test_priority_order() {
         let temp = TempDir::new().unwrap();
-        let yaml_path = temp.path().join("nyl-project.yaml");
-        let json_path = temp.path().join("nyl-project.json");
+        let primary_path = temp.path().join("nyl.toml");
+        let secondary_path = temp.path().join("fallback.toml");
 
-        fs::write(&yaml_path, "test: value").unwrap();
-        fs::write(&json_path, r#"{"test": "value"}"#).unwrap();
+        fs::write(&primary_path, "test = \"value\"").unwrap();
+        fs::write(&secondary_path, "test = \"value\"").unwrap();
 
-        // YAML should be found first due to priority
-        let result = find_config_file(&["nyl-project.yaml", "nyl-project.json"], Some(temp.path()), false).unwrap();
+        let result = find_config_file(&["nyl.toml", "fallback.toml"], Some(temp.path()), false).unwrap();
 
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), yaml_path);
+        assert_eq!(result.unwrap(), primary_path);
     }
 
     #[test]
     fn test_no_config_found_optional() {
         let temp = TempDir::new().unwrap();
 
-        let result = find_config_file(&["nyl-project.yaml"], Some(temp.path()), false).unwrap();
+        let result = find_config_file(&["nyl.toml"], Some(temp.path()), false).unwrap();
 
         assert!(result.is_none());
     }
@@ -155,10 +154,10 @@ mod tests {
     fn test_no_config_found_required() {
         let temp = TempDir::new().unwrap();
 
-        let result = find_config_file(&["nyl-project.yaml"], Some(temp.path()), true);
+        let result = find_config_file(&["nyl.toml"], Some(temp.path()), true);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nyl-project.yaml"));
+        assert!(result.unwrap_err().to_string().contains("nyl.toml"));
     }
 
     #[test]

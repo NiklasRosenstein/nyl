@@ -374,7 +374,7 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
 
         // Skip nyl project configuration files — they are not manifests
         let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(stem, "nyl-project" | "nyl-profiles" | "nyl-secrets") {
+        if matches!(stem, "nyl" | "nyl-project" | "nyl-profiles" | "nyl-secrets") {
             continue;
         }
 
@@ -674,16 +674,7 @@ fn generate_resource(
             }
         } else {
             // Local component path - use existing component resolution mechanism
-            let chart_dir = config.get_components_path().join(&component.kind);
-            let chart_yaml = chart_dir.join("Chart.yaml");
-            if !chart_yaml.exists() {
-                return Err(NylError::Config(format!(
-                    "Component '{}' references chart path '{}', but {} does not exist",
-                    component.kind,
-                    chart_dir.display(),
-                    chart_yaml.display()
-                )));
-            }
+            let chart_dir = config.resolve_component_chart_dir(&component.kind)?;
 
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
@@ -775,7 +766,7 @@ fn render_helm_chart(
         std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
 
     let resolver = HelmChartResolver::with_cache_dir_and_provider(
-        config.config.settings.search_path.clone(),
+        config.get_helm_chart_search_paths().to_vec(),
         working_dir,
         None,
         credential_provider,

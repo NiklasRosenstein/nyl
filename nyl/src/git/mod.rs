@@ -584,12 +584,9 @@ mod tests {
         std::env::set_var("ARGOCD_APP_SOURCE_TARGET_REVISION", "main");
         std::env::set_var("ARGOCD_APP_SOURCE_PATH", "apps");
 
-        let resolved = try_resolve_ref_from_argocd_env(
-            "ssh://git@github.com/example/repo",
-            "main",
-            Some("charts/service"),
-        )
-        .unwrap();
+        let resolved =
+            try_resolve_ref_from_argocd_env("ssh://git@github.com/example/repo", "main", Some("charts/service"))
+                .unwrap();
         assert_eq!(resolved, repo_root.path().join("charts/service"));
     }
 

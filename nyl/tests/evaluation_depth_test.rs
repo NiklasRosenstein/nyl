@@ -10,10 +10,11 @@ fn test_max_depth_flag_accepted() {
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -49,10 +50,11 @@ fn test_max_depth_limits_evaluation() {
 
     // Create project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -129,10 +131,11 @@ fn test_track_parent_flag_accepted() {
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -168,10 +171,11 @@ fn test_track_parent_adds_annotations() {
 
     // Create project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -255,10 +259,11 @@ fn test_max_depth_and_track_parent_together() {
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -298,10 +303,11 @@ fn test_apply_with_new_flags() {
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();
@@ -335,10 +341,11 @@ fn test_diff_with_new_flags() {
 
     // Create minimal project structure
     fs::write(
-        temp.path().join("nyl-project.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-settings:
-  searchPath: []
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 "#,
     )
     .unwrap();

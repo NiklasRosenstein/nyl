@@ -20,10 +20,6 @@ enum NewSubcommand {
         /// Directory where to create the project
         #[arg(value_name = "DIR")]
         dir: PathBuf,
-
-        /// Configuration format (toml or yaml)
-        #[arg(short, long, default_value = "toml")]
-        format: ConfigFormat,
     },
     /// Create a new component
     Component {
@@ -35,29 +31,22 @@ enum NewSubcommand {
     },
 }
 
-#[derive(Debug, Clone, clap::ValueEnum)]
-enum ConfigFormat {
-    Toml,
-    Yaml,
-}
-
 pub fn execute(args: NewArgs) -> Result<()> {
     match args.command {
-        NewSubcommand::Project { dir, format } => create_project(&dir, format),
+        NewSubcommand::Project { dir } => create_project(&dir),
         NewSubcommand::Component { api_version, kind } => create_component(&api_version, &kind),
     }
 }
 
 /// Create a new nyl project
-fn create_project(project_path: &Path, format: ConfigFormat) -> Result<()> {
+fn create_project(project_path: &Path) -> Result<()> {
     info!("Creating new project at: {}", project_path.display());
 
     // Create project directory if it doesn't exist
     if project_path.exists() {
         // Check if a nyl project already exists in this directory
-        let toml_config = project_path.join(".nyl-project.toml");
-        let yaml_config = project_path.join(".nyl-project.yaml");
-        if toml_config.exists() || yaml_config.exists() {
+        let toml_config = project_path.join("nyl.toml");
+        if toml_config.exists() {
             return Err(NylError::Config(format!(
                 "Project already exists at: {}",
                 project_path.display()
@@ -74,26 +63,13 @@ fn create_project(project_path: &Path, format: ConfigFormat) -> Result<()> {
     fs::create_dir(&components_dir)?;
     println!("✓ Created components directory: {}", components_dir.display());
 
-    // Create config file based on format (hidden files with . prefix)
-    let (config_filename, config_content) = match format {
-        ConfigFormat::Toml => (
-            ".nyl-project.toml",
-            r#"[settings]
-components_path = "components"
-search_path = ["."]
-"#,
-        ),
-        ConfigFormat::Yaml => (
-            ".nyl-project.yaml",
-            r"settings:
-  components_path: components
-  search_path:
-    - .
-",
-        ),
-    };
+    let config_content = r#"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
 
-    let config_path = project_path.join(config_filename);
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
+"#;
+    let config_path = project_path.join("nyl.toml");
     fs::write(&config_path, config_content)?;
     println!("✓ Created configuration file: {}", config_path.display());
 
@@ -129,7 +105,7 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
 
     // Load project config to find components directory
     let config = ProjectConfig::load_from_dir(None, project_dir)?;
-    let components_base = config.get_components_path();
+    let components_base = config.get_components_search_paths()[0].clone();
 
     debug!("Components base path: {}", components_base.display());
 
@@ -328,35 +304,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("test-project");
 
-        let result = create_project(&project_dir, ConfigFormat::Toml);
+        let result = create_project(&project_dir);
         assert!(result.is_ok());
 
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
-        assert!(project_dir.join(".nyl-project.toml").exists());
+        assert!(project_dir.join("nyl.toml").exists());
 
-        // Verify config file content (TOML format)
-        let config_content = fs::read_to_string(project_dir.join(".nyl-project.toml")).unwrap();
-        assert!(config_content.contains(r#"components_path = "components""#));
-        assert!(config_content.contains(r#"search_path = ["."]"#));
-    }
-
-    #[test]
-    fn test_create_project_yaml() {
-        let temp = TempDir::new().unwrap();
-        let project_dir = temp.path().join("test-project-yaml");
-
-        let result = create_project(&project_dir, ConfigFormat::Yaml);
-        assert!(result.is_ok());
-
-        assert!(project_dir.exists());
-        assert!(project_dir.join("components").exists());
-        assert!(project_dir.join(".nyl-project.yaml").exists());
-
-        // Verify config file content (YAML format)
-        let config_content = fs::read_to_string(project_dir.join(".nyl-project.yaml")).unwrap();
-        assert!(config_content.contains("components_path: components"));
-        assert!(config_content.contains("search_path:"));
+        let config_content = fs::read_to_string(project_dir.join("nyl.toml")).unwrap();
+        assert!(config_content.contains(
+            "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json"
+        ));
+        assert!(config_content.contains(r#"components_search_paths = ["components"]"#));
+        assert!(config_content.contains(r#"helm_chart_search_paths = ["."]"#));
     }
 
     #[test]
@@ -364,10 +324,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("test-project");
         fs::create_dir(&project_dir).unwrap();
-        // Create a config file to simulate an existing project
-        fs::write(project_dir.join(".nyl-project.toml"), "").unwrap();
+        fs::write(project_dir.join("nyl.toml"), "").unwrap();
 
-        let result = create_project(&project_dir, ConfigFormat::Toml);
+        let result = create_project(&project_dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -377,8 +336,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Create a project first
-        let config_path = temp.path().join(".nyl-project.yaml");
-        fs::write(&config_path, "settings: {}").unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[project]\ncomponents_search_paths = [\"components\"]\n").unwrap();
 
         let components_dir = temp.path().join("components");
         fs::create_dir(&components_dir).unwrap();
@@ -400,8 +359,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Create a project first
-        let config_path = temp.path().join(".nyl-project.yaml");
-        fs::write(&config_path, "settings: {}").unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[project]\ncomponents_search_paths = [\"components\"]\n").unwrap();
 
         let component_dir = temp.path().join("components").join("v1.example.io").join("MyApp");
         fs::create_dir_all(&component_dir).unwrap();

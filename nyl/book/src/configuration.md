@@ -1,129 +1,82 @@
 # Configuration
 
-nyl uses a project configuration file to define project settings. The configuration file can be in YAML or JSON format.
+nyl project settings are loaded from a single file: `nyl.toml`.
 
-## Configuration File
+## Configuration File Discovery
 
-nyl searches for configuration files in the following order:
-
-1. `nyl-project.yaml`
-2. `nyl-project.json`
-
-The search starts in the current directory and moves upward through parent directories until a configuration file is found.
+nyl searches for `nyl.toml` starting in the current directory and walking up parent directories.
 
 ## Configuration Structure
 
-### YAML Format
+`nyl.toml` supports one section: `[project]`.
 
-```yaml
-settings:
-  generate_applysets: false
-  on_lookup_failure: Error
-  components_path: components
-  search_path:
-    - .
-    - lib
-```
-
-### JSON Format
-
-```json
-{
-  "settings": {
-    "generate_applysets": false,
-    "on_lookup_failure": "Error",
-    "components_path": "components",
-    "search_path": [
-      ".",
-      "lib"
-    ]
-  }
-}
+```toml
+[project]
+components_search_paths = ["components"]
+helm_chart_search_paths = ["."]
 ```
 
 ## Settings
 
-### `generate_applysets`
+### `project.components_search_paths`
 
-- **Type**: `boolean`
-- **Default**: `false`
-- **Description**: If enabled, automatically generate an ApplySet for every template file. (Phase 3+)
+- Type: array of path strings
+- Default: `["components"]`
+- Meaning: Direct roots for component charts. Each root is scanned as:
+  - `<root>/<apiVersion>/<kind>/Chart.yaml`
 
-### `on_lookup_failure`
+### `project.helm_chart_search_paths`
 
-- **Type**: `string`
-- **Default**: `"Error"`
-- **Valid Values**: `"Error"`, `"CreatePlaceholder"`, `"SkipResource"`
-- **Description**: Behavior when a lookup() call fails during template rendering. (Phase 3+)
-  - `Error`: Fail with an error
-  - `CreatePlaceholder`: Create a placeholder resource
-  - `SkipResource`: Skip the resource that depends on the lookup
-
-### `components_path`
-
-- **Type**: `string` (path)
-- **Default**: `"components"`
-- **Description**: Path to the directory that contains nyl components. Relative paths are resolved relative to the configuration file location.
-
-### `search_path`
-
-- **Type**: `array` of `string` (paths)
-- **Default**: `["."]`
-- **Description**: Search paths for additional resources used by the project. Used for example when using the `chart.path` option on a HelmChart resource. (Phase 2+) Relative paths are resolved relative to the configuration file location.
+- Type: array of path strings
+- Default: `["."]`
+- Meaning: Search paths used for Helm chart name resolution.
 
 ## Path Resolution
 
-All relative paths in the configuration are resolved relative to the configuration file's parent directory.
+Relative paths are resolved against the directory that contains `nyl.toml`.
 
-For example, if your configuration is at `/home/user/my-app/nyl-project.yaml`:
+Example (`/home/user/my-app/nyl.toml`):
 
-```yaml
-settings:
-  components_path: components        # Resolves to /home/user/my-app/components
-  search_path:
-    - .                              # Resolves to /home/user/my-app
-    - lib                            # Resolves to /home/user/my-app/lib
-    - /absolute/path                 # Remains /absolute/path
+```toml
+[project]
+components_search_paths = ["components", "/opt/shared-components"]
+helm_chart_search_paths = [".", "charts"]
 ```
 
-## Default Configuration
-
-If no configuration file is found, nyl uses the following defaults:
-
-```yaml
-settings:
-  generate_applysets: false
-  on_lookup_failure: Error
-  components_path: null              # Defaults to ./components
-  search_path:
-    - .
-```
+Resolves to:
+- `components_search_paths`:
+  - `/home/user/my-app/components`
+  - `/opt/shared-components`
+- `helm_chart_search_paths`:
+  - `/home/user/my-app`
+  - `/home/user/my-app/charts`
 
 ## Validation
 
-Use `nyl validate` to check your configuration:
+Use:
 
 ```bash
 nyl validate
 ```
 
-This checks:
-- Configuration file syntax (YAML/JSON)
-- `on_lookup_failure` has a valid value
-- Components directory exists
-- Search paths are accessible
+Checks:
+- `nyl.toml` discovery and parse validity
+- existence of configured `components_search_paths`
+- existence of configured `helm_chart_search_paths`
 
-Use `--strict` mode in CI/CD to treat warnings as errors:
+Use strict mode in CI:
 
 ```bash
 nyl validate --strict
 ```
 
-## Future Settings (Phase 2+)
+## JSON Schema
 
-The configuration file may also contain:
+Generate schema from the current binary:
 
-- `profiles`: Profile configurations for different environments
-- `secrets`: Secret provider configurations
+```bash
+nyl generate schema config
+```
 
-These sections are ignored in Phase 1 but will be supported in future phases.
+Published schema artifact:
+- [`reference/schemas/nyl.schema.json`](./reference/schemas/nyl.schema.json)

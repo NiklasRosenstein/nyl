@@ -1,89 +1,65 @@
 /// Configuration module for project settings
 ///
 /// This module handles:
-/// - ProjectConfig structure
-/// - YAML/JSON loading
+/// - `nyl.toml` loading
 /// - Path resolution
-use crate::profiles::Profile;
-use crate::secrets::SecretProviderConfig;
+/// - JSON schema generation for `nyl.toml`
+pub mod schema;
+
 use crate::util::fs::{find_config_file, resolve_paths};
 use crate::{NylError, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Core project settings stored in nyl-project.yaml
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProjectSettings {
-    /// Path to the directory that contains Nyl components
-    pub components_path: Option<PathBuf>,
-
-    /// Search path for additional resources used by the project
-    #[serde(default = "default_search_path")]
-    pub search_path: Vec<PathBuf>,
+fn default_components_search_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from("components")]
 }
 
-fn default_search_path() -> Vec<PathBuf> {
+fn default_helm_chart_search_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(".")]
+}
+
+/// Project settings in `[project]` section of `nyl.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectSettings {
+    /// Search paths for local component charts.
+    pub components_search_paths: Vec<PathBuf>,
+
+    /// Search paths for Helm chart names.
+    pub helm_chart_search_paths: Vec<PathBuf>,
 }
 
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
-            components_path: None,
-            search_path: default_search_path(),
+            components_search_paths: default_components_search_paths(),
+            helm_chart_search_paths: default_helm_chart_search_paths(),
         }
     }
 }
 
-/// Project configuration with settings, profiles, and secrets
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Project {
-    /// Project settings
-    pub settings: ProjectSettings,
-
-    /// Profiles configuration (typed in Phase 2)
-    #[serde(default)]
-    pub profiles: HashMap<String, Profile>,
-
-    /// Secrets provider configuration
-    #[serde(default)]
-    pub secrets: Option<SecretProviderConfig>,
+/// Root structure of `nyl.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectFile {
+    pub project: ProjectSettings,
 }
 
-impl Default for Project {
-    fn default() -> Self {
-        Self {
-            settings: ProjectSettings::default(),
-            profiles: HashMap::new(),
-            secrets: None,
-        }
-    }
-}
-
-/// Wrapper for project configuration file
+/// Wrapper for project configuration file.
 #[derive(Debug, Clone)]
 pub struct ProjectConfig {
-    /// Path to the configuration file (None if using defaults)
+    /// Path to the configuration file (None if using defaults).
     pub file: Option<PathBuf>,
 
-    /// The loaded project configuration
-    pub config: Project,
+    /// The loaded project configuration.
+    pub config: ProjectFile,
 }
 
 impl ProjectConfig {
-    /// Config file names searched in priority order
-    /// Hidden files (starting with .) are checked first to avoid conflicts with ArgoCD
-    pub const FILENAMES: &'static [&'static str] = &[
-        ".nyl-project.toml",
-        ".nyl-project.yaml",
-        ".nyl-project.json",
-        "nyl-project.toml",
-        "nyl-project.yaml",
-        "nyl-project.json",
-    ];
+    /// Config file names searched in priority order.
+    pub const FILENAMES: &'static [&'static str] = &["nyl.toml"];
 
     /// Find the project configuration file
     ///
@@ -99,10 +75,7 @@ impl ProjectConfig {
         find_config_file(Self::FILENAMES, cwd, false)
     }
 
-    /// Load project configuration from file
-    ///
-    /// If no file is specified, attempts to find one in the current directory.
-    /// If no file is found, returns a default configuration.
+    /// Load project configuration from file.
     ///
     /// # Arguments
     /// * `file` - Optional path to config file
@@ -113,10 +86,7 @@ impl ProjectConfig {
         Self::load_from_dir(file, None)
     }
 
-    /// Load project configuration from file in a specific directory context
-    ///
-    /// If no file is specified, attempts to find one starting from the given directory.
-    /// If no file is found, returns a default configuration.
+    /// Load project configuration from file in a specific directory context.
     ///
     /// # Arguments
     /// * `file` - Optional path to config file
@@ -135,15 +105,12 @@ impl ProjectConfig {
         } else {
             Ok(Self {
                 file: None,
-                config: Project::default(),
+                config: ProjectFile::default(),
             })
         }
     }
 
-    /// Load project configuration with warning if no config file found
-    ///
-    /// This is the recommended method for commands that operate on Kubernetes
-    /// resources, as it warns users when no project configuration is present.
+    /// Load project configuration with warning if no config file found.
     ///
     /// # Arguments
     /// * `file` - Optional path to config file
@@ -175,12 +142,12 @@ impl ProjectConfig {
             tracing::info!("Using default settings. Initialize with 'nyl new project' to create one.");
             Ok(Self {
                 file: None,
-                config: Project::default(),
+                config: ProjectFile::default(),
             })
         }
     }
 
-    /// Load configuration from a specific file
+    /// Load configuration from a specific file.
     fn load_from_file(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(NylError::Config(format!(
@@ -189,32 +156,30 @@ impl ProjectConfig {
             )));
         }
 
+        if path.file_name().and_then(|s| s.to_str()) != Some("nyl.toml") {
+            return Err(NylError::Config(format!(
+                "Unsupported project configuration file '{}'. Use 'nyl.toml'.",
+                path.display()
+            )));
+        }
+
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            return Err(NylError::Config(format!(
+                "Unsupported project configuration format for '{}'. Only TOML is supported.",
+                path.display()
+            )));
+        }
+
         tracing::debug!("Reading configuration file: {}", path.display());
 
         let contents = std::fs::read_to_string(path)?;
+        let mut project: ProjectFile =
+            toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
 
-        let mut project: Project = match path.extension().and_then(|s| s.to_str()) {
-            Some("json") => serde_json::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse JSON config: {}", e)))?,
-            Some("toml") => toml::from_str(&contents)
-                .map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?,
-            _ => {
-                // Use SourceContext for better YAML error messages
-                let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
-                source_ctx.parse_yaml(&contents)?
-            }
-        };
-
-        // Resolve search paths relative to config file parent directory
+        // Resolve paths relative to config file parent directory.
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        project.settings.search_path = resolve_paths(&project.settings.search_path, base_dir);
-
-        // Resolve components_path if it's relative
-        if let Some(comp_path) = &project.settings.components_path {
-            if !comp_path.is_absolute() {
-                project.settings.components_path = Some(base_dir.join(comp_path));
-            }
-        }
+        project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
+        project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
 
         Ok(Self {
             file: Some(path.to_path_buf()),
@@ -222,21 +187,29 @@ impl ProjectConfig {
         })
     }
 
-    /// Get the components directory path
-    ///
-    /// Returns the configured components_path, or defaults to "components"
-    /// relative to the config file (or current directory if no config file).
-    pub fn get_components_path(&self) -> PathBuf {
-        let base = self
-            .file
-            .as_ref()
-            .and_then(|f| f.parent())
-            .unwrap_or_else(|| Path::new("."));
+    /// Component roots from configuration.
+    pub fn get_components_search_paths(&self) -> &[PathBuf] {
+        &self.config.project.components_search_paths
+    }
 
-        match &self.config.settings.components_path {
-            Some(path) => path.clone(),
-            None => base.join("components"),
+    /// Helm chart search paths from configuration.
+    pub fn get_helm_chart_search_paths(&self) -> &[PathBuf] {
+        &self.config.project.helm_chart_search_paths
+    }
+
+    /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
+    pub fn resolve_component_chart_dir(&self, kind: &str) -> Result<PathBuf> {
+        for root in self.get_components_search_paths() {
+            let chart_dir = root.join(kind);
+            if chart_dir.join("Chart.yaml").exists() {
+                return Ok(chart_dir);
+            }
         }
+
+        Err(NylError::Config(format!(
+            "Component '{}' was not found in configured components_search_paths",
+            kind
+        )))
     }
 
     /// Validate the configuration
@@ -245,19 +218,15 @@ impl ProjectConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        // Check if components directory exists
-        let components_path = self.get_components_path();
-        if !components_path.exists() {
-            warnings.push(format!(
-                "Components directory does not exist: {}",
-                components_path.display()
-            ));
+        for path in self.get_components_search_paths() {
+            if !path.exists() {
+                warnings.push(format!("Components search path does not exist: {}", path.display()));
+            }
         }
 
-        // Check if search paths exist
-        for path in &self.config.settings.search_path {
+        for path in self.get_helm_chart_search_paths() {
             if !path.exists() {
-                warnings.push(format!("Search path does not exist: {}", path.display()));
+                warnings.push(format!("Helm chart search path does not exist: {}", path.display()));
             }
         }
 
@@ -275,74 +244,30 @@ mod tests {
     #[test]
     fn test_default_project_settings() {
         let settings = ProjectSettings::default();
-        assert!(settings.components_path.is_none());
-        assert_eq!(settings.search_path, vec![PathBuf::from(".")]);
-    }
-
-    #[test]
-    fn test_load_yaml_config() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
-
-        let yaml_content = r#"
-settings:
-  components_path: my-components
-  search_path:
-    - lib
-    - vendor
-"#;
-        fs::write(&config_path, yaml_content).unwrap();
-
-        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
-        assert_eq!(config.file, Some(config_path.clone()));
-
-        // Check that paths were resolved to absolute
-        let expected_components = temp.path().join("my-components");
-        assert_eq!(config.config.settings.components_path, Some(expected_components));
-
-        assert_eq!(config.config.settings.search_path.len(), 2);
-        assert!(config.config.settings.search_path[0].is_absolute());
-        assert!(config.config.settings.search_path[1].is_absolute());
-    }
-
-    #[test]
-    fn test_load_json_config() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.json");
-
-        let json_content = r#"{
-  "settings": {
-    "search_path": ["."]
-  }
-}"#;
-        fs::write(&config_path, json_content).unwrap();
-
-        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
-        assert_eq!(config.file, Some(config_path));
+        assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
+        assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
     }
 
     #[test]
     fn test_load_toml_config() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join(".nyl-project.toml");
+        let config_path = temp.path().join("nyl.toml");
 
         let toml_content = r#"
-[settings]
-components_path = "my-components"
-search_path = ["lib", "vendor"]
+[project]
+components_search_paths = ["my-components"]
+helm_chart_search_paths = ["lib", "vendor"]
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
         let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
         assert_eq!(config.file, Some(config_path.clone()));
 
-        // Check that paths were resolved to absolute
-        let expected_components = temp.path().join("my-components");
-        assert_eq!(config.config.settings.components_path, Some(expected_components));
-
-        assert_eq!(config.config.settings.search_path.len(), 2);
-        assert!(config.config.settings.search_path[0].is_absolute());
-        assert!(config.config.settings.search_path[1].is_absolute());
+        assert_eq!(config.get_components_search_paths().len(), 1);
+        assert_eq!(config.get_helm_chart_search_paths().len(), 2);
+        assert!(config.get_components_search_paths()[0].is_absolute());
+        assert!(config.get_helm_chart_search_paths()[0].is_absolute());
+        assert!(config.get_helm_chart_search_paths()[1].is_absolute());
     }
 
     #[test]
@@ -351,115 +276,79 @@ search_path = ["lib", "vendor"]
 
         let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
         assert!(config.file.is_none());
-        assert!(config.config.settings.components_path.is_none());
+        assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
+        assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
     }
 
     #[test]
-    fn test_get_components_path_with_config() {
+    fn test_resolve_component_chart_dir() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
+        let root1 = temp.path().join("comps1");
+        let root2 = temp.path().join("comps2");
+        fs::create_dir_all(root1.join("v1.example.io/WebApp")).unwrap();
+        fs::create_dir_all(root2.join("v1.example.io/WebApp")).unwrap();
+        fs::write(root2.join("v1.example.io/WebApp/Chart.yaml"), "apiVersion = \"v2\"").unwrap();
 
-        fs::write(&config_path, "settings:\n  components_path: my-comps").unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(
+            &config_path,
+            r#"[project]
+components_search_paths = ["comps1", "comps2"]
+"#,
+        )
+        .unwrap();
 
         let config = ProjectConfig::load(Some(config_path)).unwrap();
-        let components = config.get_components_path();
-
-        assert_eq!(components, temp.path().join("my-comps"));
+        let resolved = config.resolve_component_chart_dir("v1.example.io/WebApp").unwrap();
+        assert_eq!(resolved, root2.join("v1.example.io/WebApp"));
     }
 
     #[test]
-    fn test_get_components_path_default() {
+    fn test_find_uses_nyl_toml_only() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
+        fs::write(temp.path().join("nyl-project.yaml"), "settings: {}").unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]").unwrap();
 
-        fs::write(&config_path, "settings: {}").unwrap();
-
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-        let components = config.get_components_path();
-
-        assert_eq!(components, temp.path().join("components"));
+        let found = ProjectConfig::find(Some(temp.path())).unwrap();
+        assert_eq!(found, Some(temp.path().join("nyl.toml")));
     }
 
     #[test]
-    fn test_validate_missing_components_dir() {
+    fn test_validate_missing_paths() {
         let config = ProjectConfig {
             file: None,
-            config: Project::default(),
+            config: ProjectFile::default(),
         };
 
         let warnings = config.validate();
         assert!(warnings
             .iter()
-            .any(|w| w.contains("Components directory does not exist")));
-    }
-
-    #[test]
-    fn test_path_resolution() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
-
-        // Use platform-appropriate absolute path
-        #[cfg(windows)]
-        let absolute_path = "C:/absolute/path";
-        #[cfg(not(windows))]
-        let absolute_path = "/absolute/path";
-
-        let yaml_content = format!(
-            r#"
-settings:
-  search_path:
-    - relative/path
-    - {}
-"#,
-            absolute_path
-        );
-        fs::write(&config_path, yaml_content).unwrap();
-
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-
-        // First path should be resolved relative to config file parent
-        assert!(config.config.settings.search_path[0].is_absolute());
-        assert!(config.config.settings.search_path[0].starts_with(temp.path()));
-
-        // Second path should remain absolute as-is
-        assert_eq!(config.config.settings.search_path[1], PathBuf::from(absolute_path));
-    }
-
-    #[test]
-    fn test_malformed_yaml() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.yaml");
-
-        fs::write(&config_path, "this is: not: valid: yaml:").unwrap();
-
-        let result = ProjectConfig::load(Some(config_path));
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        // Error message now includes file path and detailed context
-        assert!(err_msg.contains("Resource validation error") || err_msg.contains("resource parsing"));
-    }
-
-    #[test]
-    fn test_malformed_json() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.json");
-
-        fs::write(&config_path, r#"{"invalid": json"#).unwrap();
-
-        let result = ProjectConfig::load(Some(config_path));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse JSON"));
+            .any(|w| w.contains("Components search path does not exist")));
     }
 
     #[test]
     fn test_malformed_toml() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl-project.toml");
+        let config_path = temp.path().join("nyl.toml");
 
-        fs::write(&config_path, "[settings\ninvalid toml").unwrap();
+        fs::write(&config_path, "[project\ninvalid toml").unwrap();
 
         let result = ProjectConfig::load(Some(config_path));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to parse TOML"));
+    }
+
+    #[test]
+    fn test_reject_legacy_filename() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl-project.toml");
+        fs::write(&config_path, "[project]").unwrap();
+
+        let result = ProjectConfig::load(Some(config_path));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported project configuration file"));
     }
 }
