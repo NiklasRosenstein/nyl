@@ -30,7 +30,7 @@ spec:
     allowedPaths:
       - metadata.annotations."pref.argocd.argoproj.io/*"
       - spec.info.**
-      - syncPolicy.**
+      - spec.syncPolicy.**
     deniedPaths:
       - spec.syncPolicy.automated.prune
 ```
