@@ -1404,20 +1404,9 @@ fn insert_override_leaf(
 }
 
 fn path_matches_any(path: &str, patterns: &[impl AsRef<str>]) -> Result<bool> {
-    // Backward-compatibility alias:
-    // Historically, some patterns were written without the "spec." prefix
-    // (e.g. "syncPolicy.**"). We evaluate both forms so existing configs
-    // continue to match while docs/defaults now use full paths.
-    let mut candidates = vec![path.to_string()];
-    if let Some(stripped) = path.strip_prefix("spec.") {
-        candidates.push(stripped.to_string());
-    }
-
-    for candidate in &candidates {
-        for pattern in patterns {
-            if path_matches_glob(candidate, pattern.as_ref())? {
-                return Ok(true);
-            }
+    for pattern in patterns {
+        if path_matches_glob(path, pattern.as_ref())? {
+            return Ok(true);
         }
     }
     Ok(false)
