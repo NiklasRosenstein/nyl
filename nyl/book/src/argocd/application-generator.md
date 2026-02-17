@@ -144,7 +144,8 @@ annotations:
 
 Controls project-level `NylRelease.spec.argocd.applicationOverride` customization of generated Applications.
 
-- If `releaseCustomization` is omitted, release overrides are ignored.
+- `NylRelease` overrides are always evaluated against effective `allowedPaths`/`deniedPaths`.
+- If `releaseCustomization` is omitted, defaults are used.
 - `allowedPaths` and `deniedPaths` use dotted field globs:
   - `*` matches one segment (does not cross dots)
   - `**` matches multiple segments (crosses dots)

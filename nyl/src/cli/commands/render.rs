@@ -1164,7 +1164,6 @@ const IMMUTABLE_APPLICATION_PATH_PATTERNS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IgnoredOverrideReason {
-    CustomizationDisabled,
     Disallowed,
     Unsupported,
 }
@@ -1172,7 +1171,6 @@ enum IgnoredOverrideReason {
 impl IgnoredOverrideReason {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::CustomizationDisabled => "customization-disabled",
             Self::Disallowed => "disallowed",
             Self::Unsupported => "unsupported",
         }
@@ -1299,43 +1297,44 @@ fn apply_release_customization_overrides(
     let mut applied = Vec::new();
     let mut ignored = Vec::new();
 
-    if let Some(customization) = &generator.spec.release_customization {
-        let allowed_paths = customization.effective_allowed_paths();
-        let denied_paths = &customization.denied_paths;
-        for leaf in override_leaves {
-            if !is_supported_application_field_path(&leaf.path) {
-                ignored.push(IgnoredOverride {
-                    path: leaf.path,
-                    reason: IgnoredOverrideReason::Unsupported,
-                });
-                continue;
-            }
+    let customization =
+        generator
+            .spec
+            .release_customization
+            .clone()
+            .unwrap_or(crate::resources::ReleaseCustomizationPolicy {
+                allowed_paths: None,
+                denied_paths: Vec::new(),
+            });
+    let allowed_paths = customization.effective_allowed_paths();
+    let denied_paths = &customization.denied_paths;
 
-            if path_matches_any(&leaf.path, IMMUTABLE_APPLICATION_PATH_PATTERNS)? {
-                ignored.push(IgnoredOverride {
-                    path: leaf.path,
-                    reason: IgnoredOverrideReason::Disallowed,
-                });
-                continue;
-            }
-
-            let denied = path_matches_any(&leaf.path, denied_paths)?;
-            let allowed = path_matches_any(&leaf.path, &allowed_paths)?;
-            if denied || !allowed {
-                ignored.push(IgnoredOverride {
-                    path: leaf.path,
-                    reason: IgnoredOverrideReason::Disallowed,
-                });
-            } else {
-                applied.push(leaf);
-            }
-        }
-    } else {
-        for leaf in override_leaves {
+    for leaf in override_leaves {
+        if !is_supported_application_field_path(&leaf.path) {
             ignored.push(IgnoredOverride {
                 path: leaf.path,
-                reason: IgnoredOverrideReason::CustomizationDisabled,
+                reason: IgnoredOverrideReason::Unsupported,
             });
+            continue;
+        }
+
+        if path_matches_any(&leaf.path, IMMUTABLE_APPLICATION_PATH_PATTERNS)? {
+            ignored.push(IgnoredOverride {
+                path: leaf.path,
+                reason: IgnoredOverrideReason::Disallowed,
+            });
+            continue;
+        }
+
+        let denied = path_matches_any(&leaf.path, denied_paths)?;
+        let allowed = path_matches_any(&leaf.path, &allowed_paths)?;
+        if denied || !allowed {
+            ignored.push(IgnoredOverride {
+                path: leaf.path,
+                reason: IgnoredOverrideReason::Disallowed,
+            });
+        } else {
+            applied.push(leaf);
         }
     }
 
@@ -1841,6 +1840,76 @@ metadata:
                     allowed_paths: None,
                     denied_paths: Vec::new(),
                 }),
+            },
+        };
+
+        let file_path = Path::new("/tmp/worktree/clusters/default/addons/nginx.yaml");
+        let source_root = Path::new("/tmp/worktree");
+        let app = create_argocd_application_from_generator(&release, file_path, source_root, &generator).unwrap();
+
+        assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
+    }
+
+    #[test]
+    fn test_release_customization_defaults_apply_when_policy_omitted() {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec,
+        };
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        let override_map = serde_json::from_value(serde_json::json!({
+            "spec": {
+                "syncPolicy": {
+                    "automated": {
+                        "selfHeal": true
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let release = NylRelease {
+            api_version: API_VERSION.to_string(),
+            kind: "NylRelease".to_string(),
+            metadata: NylReleaseMetadata {
+                name: "nginx".to_string(),
+                namespace: "web".to_string(),
+            },
+            spec: NylReleaseSpec {
+                argocd: Some(NylReleaseArgoCdSpec {
+                    application_override: Some(override_map),
+                }),
+            },
+        };
+
+        let generator = ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "HEAD".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                release_customization: None,
             },
         };
 
