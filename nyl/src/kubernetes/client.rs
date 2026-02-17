@@ -5,6 +5,7 @@ use kube::{
     Client, ResourceExt,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -57,50 +58,66 @@ pub struct KubeRsClient {
 }
 
 impl KubeRsClient {
-    /// Create a new Kubernetes client from a profile
-    pub async fn from_profile(profile: &Profile, context_override: Option<&str>) -> Result<Self> {
-        let kubeconfig = &profile.kubeconfig;
-
-        // Check for SSH kubeconfig (not supported yet)
-        if matches!(kubeconfig, KubeconfigSource::Ssh { .. }) {
-            return Err(NylError::Config(
-                "SSH kubeconfig is not yet supported. This feature is planned for Phase 5.".to_string(),
-            ));
-        }
-
-        // Use Local kubeconfig
-        let KubeconfigSource::Local { path, context } = kubeconfig else {
-            unreachable!()
-        };
-
-        let mut config = if let Some(path) = path {
-            kube::Config::from_custom_kubeconfig(
-                kube::config::Kubeconfig::read_from(path)?,
-                &kube::config::KubeConfigOptions::default(),
-            )
-            .await?
-        } else {
-            kube::Config::infer().await?
-        };
-
-        // Apply context override if provided
-        if let Some(ctx) = context_override.or(context.as_deref()) {
+    /// Build kube config from explicit path/context options.
+    ///
+    /// Notes for exec-based auth plugins:
+    /// - kube-client is responsible for spawning the exec plugin
+    /// - when supported by kube-client, plugin stderr should be visible in CLI stderr
+    pub async fn load_kube_config(path: Option<&Path>, context: Option<&str>) -> Result<kube::Config> {
+        if let Some(ctx) = context {
             let kubeconfig = if let Some(path) = path {
                 kube::config::Kubeconfig::read_from(path)?
             } else {
                 kube::config::Kubeconfig::read()?
             };
 
-            config = kube::Config::from_custom_kubeconfig(
+            return kube::Config::from_custom_kubeconfig(
                 kubeconfig,
                 &kube::config::KubeConfigOptions {
                     context: Some(ctx.to_string()),
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            .map_err(Into::into);
         }
 
+        if let Some(path) = path {
+            return kube::Config::from_custom_kubeconfig(
+                kube::config::Kubeconfig::read_from(path)?,
+                &kube::config::KubeConfigOptions::default(),
+            )
+            .await
+            .map_err(Into::into);
+        }
+
+        kube::Config::infer().await.map_err(Into::into)
+    }
+
+    /// Build kube config from a Nyl profile and optional context override.
+    pub async fn load_kube_config_from_profile(
+        profile: &Profile,
+        context_override: Option<&str>,
+    ) -> Result<kube::Config> {
+        let kubeconfig = &profile.kubeconfig;
+
+        if matches!(kubeconfig, KubeconfigSource::Ssh { .. }) {
+            return Err(NylError::Config(
+                "SSH kubeconfig is not yet supported. This feature is planned for Phase 5.".to_string(),
+            ));
+        }
+
+        let KubeconfigSource::Local { path, context } = kubeconfig else {
+            unreachable!()
+        };
+
+        let resolved_context = context_override.or(context.as_deref());
+        Self::load_kube_config(path.as_deref(), resolved_context).await
+    }
+
+    /// Create a new Kubernetes client from a profile
+    pub async fn from_profile(profile: &Profile, context_override: Option<&str>) -> Result<Self> {
+        let config = Self::load_kube_config_from_profile(profile, context_override).await?;
         let client = Client::try_from(config)?;
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
 

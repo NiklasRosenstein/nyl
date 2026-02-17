@@ -2,7 +2,7 @@ use clap::Args;
 
 use crate::{
     cli::commands::release::{format, OutputFormat},
-    kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
+    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
 
@@ -36,19 +36,7 @@ pub struct ShowArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ShowArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = if let Some(ctx) = &args.context {
-        let kubeconfig = kube::config::Kubeconfig::read()?;
-        kube::Config::from_custom_kubeconfig(
-            kubeconfig,
-            &kube::config::KubeConfigOptions {
-                context: Some(ctx.clone()),
-                ..Default::default()
-            },
-        )
-        .await?
-    } else {
-        kube::Config::infer().await?
-    };
+    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);

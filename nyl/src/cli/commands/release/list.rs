@@ -3,7 +3,7 @@ use comfy_table::Cell;
 
 use crate::{
     cli::commands::release::{format, OutputFormat, SortBy},
-    kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
+    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     Result,
 };
 
@@ -37,19 +37,7 @@ pub struct ListArgs {
 
 pub async fn execute(args: ListArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = if let Some(ctx) = &args.context {
-        let kubeconfig = kube::config::Kubeconfig::read()?;
-        kube::Config::from_custom_kubeconfig(
-            kubeconfig,
-            &kube::config::KubeConfigOptions {
-                context: Some(ctx.clone()),
-                ..Default::default()
-            },
-        )
-        .await?
-    } else {
-        kube::Config::infer().await?
-    };
+    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);
