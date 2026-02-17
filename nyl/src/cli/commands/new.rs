@@ -312,9 +312,8 @@ mod tests {
         assert!(project_dir.join("nyl.toml").exists());
 
         let config_content = fs::read_to_string(project_dir.join("nyl.toml")).unwrap();
-        assert!(config_content.contains(
-            "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json"
-        ));
+        assert!(config_content
+            .contains("#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json"));
         assert!(config_content.contains(r#"components_search_paths = ["components"]"#));
         assert!(config_content.contains(r#"helm_chart_search_paths = ["."]"#));
     }

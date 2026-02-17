@@ -242,7 +242,12 @@ pub async fn render_manifests(
     let needs_helm_rendering = filtered.iter().any(|r| {
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || api_version == Some(API_VERSION_COMPONENTS)
+        (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+            || api_version == Some(API_VERSION_COMPONENTS)
+            || api_version
+                .zip(kind)
+                .and_then(|(av, k)| project_config.get_alias_target_for_kind(av, k))
+                .is_some()
     });
 
     // 8. Determine kube_version and api_versions (only if needed)
@@ -287,7 +292,7 @@ pub async fn render_manifests(
                 track_parent,
             )?;
             for manifest in manifests {
-                if is_renderable_resource(&manifest) {
+                if is_renderable_resource(&manifest, &project_config) {
                     next_pending.push(manifest);
                 } else {
                     all_manifests.push(manifest);
@@ -457,10 +462,15 @@ fn deduplicate_manifests(
 
 /// Check whether a resource will be expanded by generate_resource
 /// (i.e. it is a HelmChart or Component, not a plain k8s manifest)
-fn is_renderable_resource(resource: &serde_json::Value) -> bool {
+fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
-    (kind == Some("HelmChart") && api_version == Some(API_VERSION)) || is_nyl_component(resource)
+    (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+        || is_nyl_component(resource)
+        || api_version
+            .zip(kind)
+            .and_then(|(av, k)| config.get_alias_target_for_kind(av, k))
+            .is_some()
 }
 
 /// Maximum Levenshtein distance for considering an API version as "similar" to a known Nyl domain.
@@ -609,10 +619,18 @@ fn generate_resource(
         } else {
             Ok(manifests)
         }
-    } else if is_nyl_component(resource) {
+    } else if is_nyl_component(resource)
+        || api_version
+            .zip(kind)
+            .and_then(|(av, k)| config.get_alias_target_for_kind(av, k))
+            .is_some()
+    {
         // Parse as Component and render via the existing Helm path
-        let component: NylComponent = serde_json::from_value(resource.clone())
+        let mut component: NylComponent = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
+        if let Some(target) = config.get_alias_target_for_kind(&component.api_version, &component.kind) {
+            component.kind = target.to_string();
+        }
 
         // Check if the kind uses the shortcut format for remote Helm charts
         if is_remote_helm_chart_shortcut(&component.kind) {
@@ -1264,6 +1282,13 @@ mod tests {
     use std::sync::Mutex;
 
     static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_project_config() -> ProjectConfig {
+        ProjectConfig {
+            file: None,
+            config: crate::config::ProjectFile::default(),
+        }
+    }
 
     #[test]
     fn test_parse_yaml_documents_single() {
@@ -1990,41 +2015,60 @@ metadata:
 
     #[test]
     fn test_is_renderable_resource_helm_chart() {
+        let config = test_project_config();
         let resource = serde_json::json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "HelmChart",
             "metadata": {"name": "test"}
         });
-        assert!(is_renderable_resource(&resource));
+        assert!(is_renderable_resource(&resource, &config));
     }
 
     #[test]
     fn test_is_renderable_resource_component() {
+        let config = test_project_config();
         let resource = serde_json::json!({
             "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
             "kind": "example/v1/Nginx",
             "metadata": {"name": "test"}
         });
-        assert!(is_renderable_resource(&resource));
+        assert!(is_renderable_resource(&resource, &config));
     }
 
     #[test]
     fn test_is_renderable_resource_component_shortcut() {
+        let config = test_project_config();
         let resource = serde_json::json!({
             "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
             "kind": "https://charts.example.com/repo#nginx@1.0.0",
             "metadata": {"name": "test"}
         });
-        assert!(is_renderable_resource(&resource));
+        assert!(is_renderable_resource(&resource, &config));
+    }
+
+    #[test]
+    fn test_is_renderable_resource_alias() {
+        let mut config = test_project_config();
+        config.config.project.aliases.insert(
+            "myapi.io/v1/MyKind".to_string(),
+            "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4".to_string(),
+        );
+        let resource = serde_json::json!({
+            "apiVersion": "myapi.io/v1",
+            "kind": "MyKind",
+            "metadata": {"name": "test"}
+        });
+        assert!(is_renderable_resource(&resource, &config));
     }
 
     #[test]
     fn test_is_renderable_resource_plain_k8s() {
+        let config = test_project_config();
         let resource = serde_json::json!({
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {"name": "test"}
         });
-        assert!(!is_renderable_resource(&resource));
+        assert!(!is_renderable_resource(&resource, &config));
     }
 }

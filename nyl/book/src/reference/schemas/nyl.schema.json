@@ -6,6 +6,14 @@
       "additionalProperties": false,
       "description": "Project settings in `[project]` section of `nyl.toml`.",
       "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`. Values are component kind targets (local component path or remote shortcut URL).",
+          "type": "object"
+        },
         "components_search_paths": {
           "default": [
             "components"
@@ -39,6 +47,7 @@
         }
       ],
       "default": {
+        "aliases": {},
         "components_search_paths": [
           "components"
         ],

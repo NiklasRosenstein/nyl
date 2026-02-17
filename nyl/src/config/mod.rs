@@ -10,6 +10,7 @@ use crate::util::fs::{find_config_file, resolve_paths};
 use crate::{NylError, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn default_components_search_paths() -> Vec<PathBuf> {
@@ -18,6 +19,10 @@ fn default_components_search_paths() -> Vec<PathBuf> {
 
 fn default_helm_chart_search_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(".")]
+}
+
+fn default_aliases() -> BTreeMap<String, String> {
+    BTreeMap::new()
 }
 
 /// Project settings in `[project]` section of `nyl.toml`.
@@ -29,6 +34,10 @@ pub struct ProjectSettings {
 
     /// Search paths for Helm chart names.
     pub helm_chart_search_paths: Vec<PathBuf>,
+
+    /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
+    /// Values are component kind targets (local component path or remote shortcut URL).
+    pub aliases: BTreeMap<String, String>,
 }
 
 impl Default for ProjectSettings {
@@ -36,6 +45,7 @@ impl Default for ProjectSettings {
         Self {
             components_search_paths: default_components_search_paths(),
             helm_chart_search_paths: default_helm_chart_search_paths(),
+            aliases: default_aliases(),
         }
     }
 }
@@ -197,6 +207,17 @@ impl ProjectConfig {
         &self.config.project.helm_chart_search_paths
     }
 
+    /// Return alias target for a fully qualified key (`<apiVersion>/<kind>`).
+    pub fn get_alias_target(&self, key: &str) -> Option<&str> {
+        self.config.project.aliases.get(key).map(String::as_str)
+    }
+
+    /// Return alias target for an apiVersion/kind pair.
+    pub fn get_alias_target_for_kind(&self, api_version: &str, kind: &str) -> Option<&str> {
+        let key = format!("{}/{}", api_version, kind);
+        self.get_alias_target(&key)
+    }
+
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
     pub fn resolve_component_chart_dir(&self, kind: &str) -> Result<PathBuf> {
         for root in self.get_components_search_paths() {
@@ -230,6 +251,18 @@ impl ProjectConfig {
             }
         }
 
+        for (key, target) in &self.config.project.aliases {
+            if !key.contains('/') {
+                warnings.push(format!(
+                    "Alias key '{}' is invalid; expected '<apiVersion>/<kind>'",
+                    key
+                ));
+            }
+            if target.trim().is_empty() {
+                warnings.push(format!("Alias '{}' has an empty target", key));
+            }
+        }
+
         warnings
     }
 }
@@ -246,6 +279,7 @@ mod tests {
         let settings = ProjectSettings::default();
         assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
         assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
+        assert!(settings.aliases.is_empty());
     }
 
     #[test]
@@ -257,6 +291,8 @@ mod tests {
 [project]
 components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
+[project.aliases]
+"myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
@@ -265,6 +301,10 @@ helm_chart_search_paths = ["lib", "vendor"]
 
         assert_eq!(config.get_components_search_paths().len(), 1);
         assert_eq!(config.get_helm_chart_search_paths().len(), 2);
+        assert_eq!(
+            config.get_alias_target_for_kind("myapi.io/v1", "MyKind"),
+            Some("oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4")
+        );
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[1].is_absolute());
@@ -278,6 +318,27 @@ helm_chart_search_paths = ["lib", "vendor"]
         assert!(config.file.is_none());
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
+        assert!(config.config.project.aliases.is_empty());
+    }
+
+    #[test]
+    fn test_validate_aliases() {
+        let config = ProjectConfig {
+            file: None,
+            config: ProjectFile {
+                project: ProjectSettings {
+                    aliases: BTreeMap::from([
+                        ("bad-key".to_string(), "oci://example.com/app@1.0.0".to_string()),
+                        ("good.io/v1/Empty".to_string(), "   ".to_string()),
+                    ]),
+                    ..ProjectSettings::default()
+                },
+            },
+        };
+
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| w.contains("Alias key 'bad-key' is invalid")));
+        assert!(warnings.iter().any(|w| w.contains("has an empty target")));
     }
 
     #[test]

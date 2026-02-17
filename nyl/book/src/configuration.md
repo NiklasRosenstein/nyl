@@ -14,6 +14,9 @@ nyl searches for `nyl.toml` starting in the current directory and walking up par
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
+
+[project.aliases]
+"myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
 ```
 
 ## Settings
@@ -30,6 +33,36 @@ helm_chart_search_paths = ["."]
 - Type: array of path strings
 - Default: `["."]`
 - Meaning: Search paths used for Helm chart name resolution.
+
+### `project.aliases`
+
+- Type: table/map of string to string
+- Default: empty table
+- Key format: `<apiVersion>/<kind>`
+- Value format: same component shortcut format accepted in `kind` (`<repository>[#<name>][@<version>]`) or a local component path
+- Meaning: Treat matching resources as component-style resources and resolve them directly to the configured target instead of `components_search_paths`.
+
+Example:
+
+```toml
+[project]
+components_search_paths = ["components"]
+
+[project.aliases]
+"myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
+"platform.example.io/v1/IngressStack" = "https://charts.bitnami.com/bitnami#nginx@18.2.4"
+```
+
+Then this manifest is resolved through the alias target:
+
+```yaml
+apiVersion: myapi.io/v1
+kind: MyKind
+metadata:
+  name: my-nginx
+spec:
+  replicaCount: 2
+```
 
 ## Path Resolution
 

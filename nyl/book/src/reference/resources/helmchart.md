@@ -85,6 +85,40 @@ spec:
 
 See the [examples directory](../../../../examples/helm-chart-shortcuts/) for more examples.
 
+## Alias-Based Components (`nyl.toml`)
+
+You can define named component aliases in `nyl.toml` and then use regular `apiVersion` + `kind` in manifests.
+
+```toml
+[project.aliases]
+"myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
+```
+
+```yaml
+apiVersion: myapi.io/v1
+kind: MyKind
+metadata:
+  name: my-kind-release
+  namespace: default
+spec:
+  # forwarded as Helm values
+  replicaCount: 2
+```
+
+The alias value uses the same target syntax as the component shortcut:
+- remote shortcut (`https://...#chart@version`, `oci://...@version`, `git+...#path@ref`)
+- local component path (`example/v1/MyComponent`)
+
+## Choosing A Paradigm
+
+Nyl supports three ways to reference charts/components:
+
+| Paradigm | How you write it | Best for | Main benefit |
+|---|---|---|---|
+| Full `HelmChart` resource | `kind: HelmChart` + `spec.chart.*` | Explicit platform manifests | Maximum clarity and full chart fields |
+| Component shortcut | `apiVersion: components...` + `kind: <shortcut>` | Fast authoring close to chart source | Minimal boilerplate |
+| `project.aliases` named kinds | `apiVersion/kind` mapped in `nyl.toml` | Domain-specific APIs and teams | Stable semantic kinds decoupled from chart location |
+
 ## Resource Definition
 
 ```yaml
