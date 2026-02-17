@@ -217,7 +217,7 @@ impl ReleaseCustomizationPolicy {
     pub const DEFAULT_ALLOWED_PATHS: [&str; 3] = [
         "metadata.annotations.\"pref.argocd.argoproj.io/*\"",
         "spec.info.**",
-        "syncPolicy.**",
+        "spec.syncPolicy.**",
     ];
 
     pub fn effective_allowed_paths(&self) -> Vec<String> {
@@ -517,7 +517,7 @@ mod tests {
             vec![
                 "metadata.annotations.\"pref.argocd.argoproj.io/*\"".to_string(),
                 "spec.info.**".to_string(),
-                "syncPolicy.**".to_string(),
+                "spec.syncPolicy.**".to_string(),
             ]
         );
     }
