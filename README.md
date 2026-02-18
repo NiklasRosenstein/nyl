@@ -5,12 +5,10 @@ This repository contains the Nyl project and related components for Kubernetes m
 ## 📦 Repository Contents
 
 ### [`nyl/`](nyl/) - The Nyl Tool
-Fast, efficient Kubernetes manifest generator written in Rust. Complete rewrite with 10x performance improvements.
+Fast, efficient Kubernetes manifest generator.
 
 **Key features:**
 - 🚀 Blazing fast manifest generation
-- 💾 Memory efficient (<50MB RAM)
-- 📦 Single static binary (8.5MB)
 - 🔧 Helm integration
 - 🎨 Jinja2-compatible templating
 
@@ -69,21 +67,8 @@ mise run docs-serve  # Serve mdbook documentation
 ## 📚 Documentation
 
 - **[Nyl Tool Documentation](nyl/README.md)** - Installation, commands, examples
-- **[Migration Guide](MOVE_TO_RUST.md)** - Python to Rust migration details
+- **[Component System Guide](nyl/book/src/components/overview.md)** - Component authoring, resolution, shortcuts, aliases
 - **[Online Docs](https://helsing-ai.github.io/nyl/)** - Complete documentation (mdbook)
-
-## 🦀 Rust Rewrite
-
-Nyl has been completely rewritten in Rust with significant improvements:
-
-| Metric | Improvement |
-|--------|-------------|
-| Performance | 10x faster |
-| Memory | 75% reduction |
-| Binary size | 8.5MB (vs ~200MB+ image) |
-| Cold start | <50ms |
-
-See [MOVE_TO_RUST.md](MOVE_TO_RUST.md) for complete migration details.
 
 ## 📄 License
 

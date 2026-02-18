@@ -1,19 +1,17 @@
 # Nyl
 
-> **Kubernetes manifest generator with Helm integration** - Rust edition
+> **Kubernetes manifest generator with Helm integration**
 
 [![Release](https://img.shields.io/github/v/release/NiklasRosenstein/nyl)](https://github.com/NiklasRosenstein/nyl/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Fast, efficient Kubernetes manifest generation written in Rust. A complete rewrite of the Python version with 10x performance improvements and 70-90% memory reduction.
+Fast, efficient Kubernetes manifest generation with a small operational footprint.
 
 ## ✨ Features
 
-- 🚀 **Blazing Fast**: 10x faster than Python version
-- 💾 **Memory Efficient**: Uses <50MB RAM (vs ~200MB in Python)
-- 📦 **Single Binary**: 8.5MB static binary with no dependencies
-- ⚡ **Quick Start**: <50ms cold start time
-- 🎯 **Drop-in Replacement**: Compatible with existing Python configurations
+- 🚀 **Blazing Fast**: Optimized manifest generation
+- 📦 **Simple Distribution**: Single-binary CLI install flow
+- 🧩 **Component-Oriented**: Local component charts, aliases, and remote chart shortcuts
 - 🔧 **Helm Integration**: First-class Helm chart support with value customization
 - 🌍 **Multi-Environment**: Profile-based configurations (dev, staging, prod)
 - 🔐 **Git Support**: Private repository access with SSH/HTTPS authentication
@@ -110,11 +108,15 @@ mdbook serve book --open
 
 **Documentation includes:**
 - Getting started guide
+- Component system guide
 - Configuration reference
 - Command documentation
-- Migration guide from Python
 - API reference (rustdoc)
 - Example projects
+
+Key entry points:
+- [Component System](./book/src/components/overview.md)
+- [Component Reference](./book/src/reference/resources/component.md)
 
 ## 🎯 Examples
 
@@ -163,9 +165,6 @@ cargo build --release
 # Run tests
 cargo test
 
-# Run benchmarks
-cargo bench
-
 # Format and lint
 cargo fmt
 cargo clippy -- -D warnings
@@ -183,28 +182,8 @@ mise install
 mise run fmt          # Format code
 mise run lint         # Run clippy
 mise run test         # Run tests
-mise run bench        # Run benchmarks
 mise run docs-serve   # Serve documentation
 ```
-
-## 📊 Performance
-
-### Benchmarks
-
-| Metric | Rust | Python | Improvement |
-|--------|------|--------|-------------|
-| **Startup Time** | <50ms | ~500ms | **10x faster** |
-| **Memory Usage** | <50MB | ~200MB | **75% reduction** |
-| **100 Helm Charts** | <1s | ~10s | **10x faster** |
-| **Binary Size** | 8.5MB | ~100MB+ | **92% smaller** |
-
-Run benchmarks yourself:
-```bash
-cargo bench
-# Results saved to target/criterion/
-```
-
-See [BENCHMARKS.md](./BENCHMARKS.md) for detailed performance analysis.
 
 ## 🧪 Testing
 
@@ -226,15 +205,6 @@ cargo test --test integration_test
 - 221 unit tests
 - 34 integration tests
 - 90%+ code coverage
-
-## 🔄 Migration from Python
-
-The Rust version keeps the same core workflow, with one important project-config change:
-
-- Project settings are loaded from `nyl.toml` (`[project]` section).
-- Legacy `nyl-project.*` files must be migrated.
-
-See the [Migration Guide](./book/src/migration.md) for details.
 
 ## 🗺️ Roadmap
 

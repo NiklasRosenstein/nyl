@@ -7,6 +7,7 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 ### Core Resources
 
 - **[NylRelease](./resources/nyl-release.md)**: Defines release metadata (name, namespace) for deployments
+- **[Component](./resources/component.md)**: Compact chart-backed resource using dynamic `kind` lookup
 - **[HelmChart](./resources/helmchart.md)**: Declarative Helm chart deployment with templating support
 
 ### ArgoCD Resources
@@ -35,6 +36,7 @@ spec:
 
 - `nyl.niklasrosenstein.github.com/v1`: Core Nyl resources (NylRelease, HelmChart)
 - `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
+- `components.nyl.niklasrosenstein.github.com/v1`: Component resources (dynamic `kind` path/shortcut)
 
 ## Processing Behavior
 
@@ -47,6 +49,7 @@ Regular Kubernetes resources (ConfigMap, Deployment, etc.) are passed through un
 Nyl resources are processed based on their kind:
 
 - **NylRelease**: Extracted and removed from output (provides metadata only)
+- **Component**: Resolved to a chart reference and rendered via Helm, replaced with rendered manifests
 - **HelmChart**: Rendered using Helm templating, replaced with rendered manifests
 - **ApplicationGenerator**: Processed to generate ArgoCD Applications, removed from output
 

@@ -88,6 +88,6 @@ my-app/
 ## Next Steps
 
 - Read about [Configuration](./configuration.md)
+- Read the [Component System](./components/overview.md)
 - Learn about the [`new` command](./commands/new.md)
 - Learn about the [`validate` command](./commands/validate.md)
-- Check the [Migration Guide](./migration.md) if you're coming from Python nyl

@@ -1,15 +1,13 @@
 # ArgoCD with Nyl Helm Chart
 
-This is a Helm chart to install ArgoCD with Nyl (Rust version) as a Config Management Plugin. The chart uses Nyl's `HelmChart` resource to deploy ArgoCD with the Nyl CMP (Config Management Plugin) as a sidecar container.
-
-**⚠️ Migration Notice**: This chart uses the Rust version of Nyl. See the [Migration Guide](#migration-from-python-to-rust) below if you're upgrading from the Python version.
+This is a Helm chart to install ArgoCD with Nyl as a Config Management Plugin. The chart uses Nyl's `HelmChart` resource to deploy ArgoCD with the Nyl CMP (Config Management Plugin) as a sidecar container.
 
 ## Goals
 
 * Bootstrap an ArgoCD instance with Nyl as a Config Management Plugin from zero to fully functional in a single command.
 * Have ArgoCD immediately own its own installation after bootstrapping.
 * If anything goes wrong, be able to easily re-run the command to get back to a fully functional state.
-* Demonstrate using SOPS to inject secrets into manifests and Helm chart values (Note: SOPS not yet implemented in Rust version).
+* Demonstrate using SOPS to inject secrets into manifests and Helm chart values.
 
 ## Installation
 
@@ -111,71 +109,3 @@ This Helm chart uses Nyl's `HelmChart` custom resource (`nyl.niklasrosenstein.gi
 3. Configure the necessary volumes and environment variables
 
 When Nyl processes the `HelmChart` resource, it will render the ArgoCD Helm chart with the specified values and apply the resulting Kubernetes manifests.
-
-## Migration from Python to Rust
-
-If you're upgrading from the Python version of Nyl, here's what you need to know:
-
-### Breaking Changes
-
-1. **Command renamed**: `nyl template` → `nyl render`
-   - Update your plugin.yaml, scripts, and documentation
-   - The ArgoCD plugin.yaml in this repository has been updated
-
-2. **Image version**: New major version (1.0.0)
-   - Update your Helm values to use the new image tag
-   - Example: `ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0`
-
-3. **SOPS support**: Not yet implemented in Rust version
-   - **Workaround**: Use Kubernetes secrets provider or Null provider temporarily
-   - SOPS support is planned for a future release
-   - The SOPS binary is included in the image for future use
-
-### Migration Steps
-
-1. **Update image reference** in your ArgoCD application:
-   ```yaml
-   image: ghcr.io/helsing-ai/nyl/argocd-cmp:1.0.0
-   ```
-
-2. **Update any local scripts** that use `nyl template`:
-   ```bash
-   # Old
-   nyl template --apply
-
-   # New
-   nyl render --apply
-   ```
-
-3. **Handle SOPS secrets** (if applicable):
-   - Option A: Wait for SOPS support in Rust version
-   - Option B: Use Kubernetes secrets provider temporarily
-   - Option C: Use Null provider for non-production environments
-
-4. **Test your manifests** with the Rust version:
-   ```bash
-   nyl render manifest.yaml > /tmp/output.yaml
-   kubectl diff -f /tmp/output.yaml
-   ```
-
-### Benefits of Rust Version
-
-- **10x faster** rendering performance
-- **75% less memory** usage
-- **<100MB image** (down from 200MB+)
-- **No Python runtime** required
-- **Static binary** with zero dependencies
-
-### What Still Works
-
-- Existing `nyl-project.yaml` files (no changes needed)
-- `HelmChart`, `Component`, `NylRelease`, `ApplicationGenerator` resources
-- Template syntax (MiniJinja is Jinja2-compatible)
-- Git repository handling
-- Kubernetes API access
-
-### Additional Resources
-
-- [Complete migration guide](../MOVE_TO_RUST.md)
-- [Rust implementation details](../nyl/IMPLEMENTATION.md)
-- [Feature comparison table](../MOVE_TO_RUST.md#feature-comparison)

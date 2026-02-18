@@ -6,6 +6,11 @@
 # User Guide
 
 - [Configuration](./configuration.md)
+- [Component System](./components/overview.md)
+  - [Authoring Local Components](./components/authoring-local-components.md)
+  - [Resolution & Lookup Rules](./components/resolution-and-lookup.md)
+  - [Remote Shortcuts & Aliases](./components/remote-shortcuts-and-aliases.md)
+  - [Troubleshooting Components](./components/troubleshooting.md)
 - [Git Integration](./git-integration.md)
 - [Commands](./commands/README.md)
   - [new](./commands/new.md)
@@ -26,8 +31,9 @@
 
 # Reference
 
-- [Migration from Python](./migration.md)
 - [Resources](./reference/resources.md)
+  - [Component](./reference/resources/component.md)
+  - [HelmChart](./reference/resources/helmchart.md)
   - [NylRelease](./reference/resources/nyl-release.md)
   - [ApplicationGenerator](./reference/resources/application-generator.md)
 - [Kyverno Policies](./reference/kyverno-policies.md)

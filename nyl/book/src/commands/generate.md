@@ -51,7 +51,7 @@ nyl generate schema config
 
 The `nyl generate argocd` command is a **manual CLI tool** for one-time generation of ArgoCD Applications from a directory of Nyl releases. It's useful for:
 
-- Initial migration to ArgoCD
+- Initial ArgoCD bootstrap
 - One-off Application generation
 - CI/CD pipelines that don't use ApplicationGenerator
 
@@ -68,7 +68,7 @@ The **ApplicationGenerator resource** is the **recommended approach** for ongoin
 |----------|------|-----|
 | Bootstrap ArgoCD | ApplicationGenerator | Declarative, self-hosting |
 | Ongoing management | ApplicationGenerator | Automatic, GitOps-native |
-| One-time migration | `nyl generate argocd` | Manual control |
+| One-time bootstrap | `nyl generate argocd` | Manual control |
 | CI/CD generation | `nyl generate argocd` | Explicit generation step |
 
 **Recommendation**: Use ApplicationGenerator for most use cases. It's processed during `nyl render` and integrates seamlessly with ArgoCD.

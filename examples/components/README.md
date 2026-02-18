@@ -19,8 +19,7 @@ manifests/
   nginx.yaml                        # the Component manifest
 ```
 
-`nyl render` is pointed at `manifests/` so it does not walk into the chart
-templates inside `components/`.
+`nyl render` should target the manifest file directly.
 
 ## How it works
 
@@ -38,5 +37,5 @@ Nyl resolves the chart, runs `helm template`, and emits the rendered manifests.
 ## Run
 
 ```sh
-nyl render manifests --offline --kube-version 1.30.0 --kube-api-versions v1
+nyl render manifests/nginx.yaml --offline --kube-version 1.30.0 --kube-api-versions v1
 ```
