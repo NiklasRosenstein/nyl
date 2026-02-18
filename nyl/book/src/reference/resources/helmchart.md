@@ -7,120 +7,14 @@ Use `Component` when you want compact chart-backed resources with dynamic `kind`
 
 > **Note**: Git chart references are fully supported. Repositories are cloned automatically to a local cache. See the [Git Integration](../../git-integration.md) guide for details.
 
-## Component Shortcut Syntax
+## Related: Components
 
-For convenience, Nyl provides a shortcut syntax that allows you to reference Helm charts using the Component resource with a compact `kind` format:
+Component resources provide a compact chart-backed format and support local component paths, remote shortcut syntax, and alias-based indirection.
 
-```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: <repository>[#<name>][@<version>]
-metadata:
-  name: release-name
-  namespace: release-namespace
-spec:
-  # Helm values go here
-```
+For component syntax, examples, and pattern selection, see:
 
-This is equivalent to the full HelmChart resource but with less boilerplate.
-
-### Shortcut Format
-
-The `kind` field uses the format: `<repository>[#<name>][@<version>]`
-
-- `<repository>`: Repository URL (for remote charts) or local path
-- `#<name>`: Chart name (required for HTTP/HTTPS repositories, optional for others)
-- `@<version>`: Version or Git ref (required for HTTP/HTTPS and OCI repositories)
-
-**Remote repositories** are identified by URL prefixes:
-- `http://` or `https://` - Traditional Helm repositories (requires `#<name>` and `@<version>`)
-- `git+` - Git repositories (optional `#<subpath>` and `@<ref>`, defaults to HEAD if version omitted)
-- `oci://` - OCI registries (requires `@<version>`)
-
-**Local paths** (without URL prefix) use the existing component resolution mechanism.
-
-### Shortcut Examples
-
-```yaml
-# HTTP Helm repository with full specification
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: https://charts.bitnami.com/bitnami#nginx@18.2.4
-metadata:
-  name: my-nginx
-  namespace: default
-spec:
-  replicaCount: 2
-  service:
-    type: ClusterIP
-```
-
-```yaml
-# OCI registry
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4
-metadata:
-  name: nginx-oci
-spec:
-  replicaCount: 1
-```
-
-```yaml
-# Git repository
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
-metadata:
-  name: prometheus
-  namespace: monitoring
-spec:
-  server:
-    persistentVolume:
-      enabled: false
-```
-
-```yaml
-# Local component (existing behavior)
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: example/v1/MyComponent
-metadata:
-  name: local-app
-spec:
-  replicas: 3
-```
-
-See the [examples directory](../../../../examples/helm-chart-shortcuts/) for more examples.
-
-## Alias-Based Components (`nyl.toml`)
-
-You can define named component aliases in `nyl.toml` and then use regular `apiVersion` + `kind` in manifests.
-
-```toml
-[project.aliases]
-"myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
-```
-
-```yaml
-apiVersion: myapi.io/v1
-kind: MyKind
-metadata:
-  name: my-kind-release
-  namespace: default
-spec:
-  # forwarded as Helm values
-  replicaCount: 2
-```
-
-The alias value uses the same target syntax as the component shortcut:
-- remote shortcut (`https://...#chart@version`, `oci://...@version`, `git+...#path@ref`)
-- local component path (`example/v1/MyComponent`)
-
-## Choosing A Paradigm
-
-Nyl supports three ways to reference charts/components:
-
-| Paradigm | How you write it | Best for | Main benefit |
-|---|---|---|---|
-| Full `HelmChart` resource | `kind: HelmChart` + `spec.chart.*` | Explicit platform manifests | Maximum clarity and full chart fields |
-| Component shortcut | `apiVersion: components...` + `kind: <shortcut>` | Fast authoring close to chart source | Minimal boilerplate |
-| `project.aliases` named kinds | `apiVersion/kind` mapped in `nyl.toml` | Domain-specific APIs and teams | Stable semantic kinds decoupled from chart location |
+- [Component resource reference](./component.md)
+- [Remote Shortcuts & Aliases](../../components/remote-shortcuts-and-aliases.md)
 
 ## Resource Definition
 
@@ -144,9 +38,6 @@ spec:
     # - Local: no repository, name is filesystem path
 
   values: object            # Chart values (merged with profile values)
-
-  kube_version: string      # Kubernetes version for template rendering
-  api_versions: [string]    # Available API versions for rendering
 ```
 
 ## Chart Reference Methods
@@ -339,30 +230,6 @@ spec:
     environment: "{{ profile.name }}"
 ```
 
-## Kubernetes Version
-
-Override the Kubernetes version used for template rendering:
-
-```yaml
-spec:
-  kube_version: "1.28.0"
-```
-
-This affects chart templates that use `.Capabilities.KubeVersion`.
-
-## API Versions
-
-Specify available Kubernetes API versions for rendering:
-
-```yaml
-spec:
-  api_versions:
-    - "networking.k8s.io/v1"
-    - "autoscaling/v2"
-```
-
-This affects chart templates that use `.Capabilities.APIVersions`.
-
 ## Complete Example
 
 ```yaml
@@ -397,9 +264,6 @@ spec:
       limits:
         cpu: 1000m
         memory: 1Gi
-  kube_version: "1.28.0"
-  api_versions:
-    - "networking.k8s.io/v1"
 ```
 
 ## Multi-Environment Deployments

@@ -90,6 +90,14 @@ spec:
 
 ## When to Use What
 
+Nyl supports three common patterns:
+
+| Pattern | How you write it | Best for | Main benefit |
+|---|---|---|---|
+| Full `HelmChart` resource | `kind: HelmChart` + `spec.chart.*` | Explicit platform manifests | Maximum clarity and explicit chart fields |
+| Component shortcut | `apiVersion: components...` + `kind: <shortcut>` | Fast authoring near chart source | Minimal boilerplate |
+| `project.aliases` named kinds | `apiVersion/kind` mapped in `nyl.toml` | Domain APIs across teams | Stable semantic kinds decoupled from chart location |
+
 - Local component path: internal platform APIs and reviewable chart source.
 - Remote shortcut: quick direct dependency on an external chart source.
 - Alias: stable contract for app teams while platform controls chart target centrally.

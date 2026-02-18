@@ -13,6 +13,7 @@ kyverno = "1.17.0"
 sops = "3.11.0"
 helm = "3.19.5"
 kubectl = "1.35.0"
+mdbook = "latest"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
