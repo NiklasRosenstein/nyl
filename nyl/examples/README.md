@@ -8,28 +8,9 @@ This directory contains practical examples demonstrating how to use Nyl for vari
 Basic example showing:
 - Simple Kubernetes manifests (Deployment, Service, ConfigMap)
 - Template variables with profiles
-- Multi-environment configuration
+- Multi-environment rendering with `--profile`
 
-### 2. [helm-charts](./helm-charts/)
-Demonstrates Helm chart usage:
-- Using HelmChart resources
-- Customizing chart values
-- Local chart references
-- Chart composition
-
-### 3. [components](./components/)
-Shows component-based architecture:
-- Creating reusable components
-- Component instantiation
-- Component discovery
-- Building component libraries
-
-### 4. [multi-env](./multi-env/)
-Production-grade multi-environment setup:
-- Development, staging, production profiles
-- Environment-specific values
-- Secret management patterns
-- Resource customization per environment
+More examples are planned and will be added here as they are published.
 
 ## Running Examples
 
@@ -43,16 +24,16 @@ cd examples/simple-app
 nyl validate
 
 # Render manifests for development
-nyl render --environment dev
+nyl render --profile dev
 
 # Render for production
-nyl render --environment prod
+nyl render --profile prod
 
 # See diff against cluster
-nyl diff --environment dev
+nyl diff --profile dev
 
 # Apply to cluster
-nyl apply --environment dev
+nyl apply --profile dev
 ```
 
 ## Prerequisites
@@ -64,9 +45,9 @@ nyl apply --environment dev
 ## Learning Path
 
 1. Start with **simple-app** to understand basic concepts
-2. Move to **helm-charts** to learn chart integration
-3. Explore **components** for reusable patterns
-4. Study **multi-env** for production setups
+2. Extend it by adding a HelmChart resource
+3. Refactor repeated manifests into reusable components
+4. Add more profiles and profile values in `nyl.toml`
 
 ## Contributing
 

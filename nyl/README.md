@@ -72,13 +72,13 @@ cd my-app
 nyl validate
 
 # Render manifests for development
-nyl render --environment dev
+nyl render --profile dev
 
 # See diff against cluster
-nyl diff --environment dev
+nyl diff --profile dev
 
 # Apply to cluster
-nyl apply --environment dev
+nyl apply --profile dev
 ```
 
 ## 📚 Commands
@@ -88,9 +88,9 @@ nyl apply --environment dev
 | `nyl new project <name>` | Create new project with scaffolding |
 | `nyl new component <api-version> <kind>` | Create component definition |
 | `nyl validate [--strict]` | Validate project configuration |
-| `nyl render [--environment ENV]` | Render manifests to stdout |
-| `nyl diff [--environment ENV]` | Show kubectl diff against cluster |
-| `nyl apply [--environment ENV]` | Apply manifests to cluster |
+| `nyl render [--profile NAME]` | Render manifests to stdout |
+| `nyl diff [--profile NAME]` | Show kubectl diff against cluster |
+| `nyl apply [--profile NAME]` | Apply manifests to cluster |
 | `nyl generate argocd` | Generate ArgoCD Applications |
 | `nyl cluster-info` | Display cluster version information |
 

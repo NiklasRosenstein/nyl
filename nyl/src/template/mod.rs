@@ -48,12 +48,12 @@ impl Default for TemplateEngine {
 pub struct TemplateContext {
     pub values: serde_json::Value,
     pub secrets: serde_json::Value,
-    pub environment: String,
+    pub profile: String,
 }
 
 impl TemplateContext {
-    /// Build a template context from profile, secrets, and environment name
-    pub fn build(profile: &Profile, secrets: &SecretsConfig, env_name: &str) -> Result<Self> {
+    /// Build a template context from profile values, secrets, and selected profile name
+    pub fn build(profile: &Profile, secrets: &SecretsConfig, profile_name: &str) -> Result<Self> {
         let values = serde_json::to_value(&profile.values)?;
 
         let secret_keys = secrets.keys()?;
@@ -66,7 +66,7 @@ impl TemplateContext {
         Ok(Self {
             values,
             secrets: serde_json::Value::Object(secrets_map),
-            environment: env_name.to_string(),
+            profile: profile_name.to_string(),
         })
     }
 
@@ -77,7 +77,7 @@ impl TemplateContext {
         serde_json::json!({
             "values": self.values,
             "secrets": self.secrets,
-            "environment": self.environment,
+            "profile": self.profile,
             "env": env,
         })
     }

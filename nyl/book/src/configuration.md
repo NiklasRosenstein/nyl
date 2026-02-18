@@ -8,12 +8,22 @@ nyl searches for `nyl.toml` starting in the current directory and walking up par
 
 ## Configuration Structure
 
-`nyl.toml` supports one section: `[project]`.
+`nyl.toml` supports:
+- `[project]` for project settings
+- `[profile.values.<name>]` for profile values used in templates
 
 ```toml
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
+
+[profile.values.default]
+namespace = "default"
+replicas = 1
+
+[profile.values.dev]
+namespace = "dev"
+replicas = 2
 
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
@@ -41,6 +51,34 @@ helm_chart_search_paths = ["."]
 - Key format: `<apiVersion>/<kind>`
 - Value format: same component shortcut format accepted in `kind` (`<repository>[#<name>][@<version>]`) or a local component path
 - Meaning: Treat matching resources as component-style resources and resolve them directly to the configured target instead of `components_search_paths`.
+
+### `profile.values.<name>`
+
+- Type: object/map
+- Default: none
+- Meaning: Template values for profile `<name>` exposed as `values.*` during rendering.
+- Selection: `--profile <name>` selects a profile. If omitted, Nyl uses `default` when available.
+
+Example:
+
+```toml
+[profile.values.dev]
+my_value = "Hello!"
+replicas = 1
+
+[profile.values.prod]
+my_value = "World!"
+replicas = 3
+```
+
+Template usage:
+
+```jinja
+{{ values.my_value }}
+{% if profile == "dev" %}
+# dev-specific logic
+{% endif %}
+```
 
 Example:
 

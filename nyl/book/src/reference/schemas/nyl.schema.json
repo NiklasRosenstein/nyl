@@ -2,6 +2,22 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ProfileSettings": {
+      "additionalProperties": false,
+      "description": "Profile configuration in `[profile]` section of `nyl.toml`.",
+      "properties": {
+        "values": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "default": {},
+          "description": "Per-profile template values, keyed by profile name.\n\nExample: `[profile.values.dev]` `replicas = 2`",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "ProjectSettings": {
       "additionalProperties": false,
       "description": "Project settings in `[project]` section of `nyl.toml`.",
@@ -40,6 +56,16 @@
   },
   "description": "Root structure of `nyl.toml`.",
   "properties": {
+    "profile": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProfileSettings"
+        }
+      ],
+      "default": {
+        "values": {}
+      }
+    },
     "project": {
       "allOf": [
         {

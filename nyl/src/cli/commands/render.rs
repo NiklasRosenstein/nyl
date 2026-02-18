@@ -1,6 +1,7 @@
 use clap::Args;
 use glob::{glob, Pattern};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use crate::{
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient, ResourceKey},
     postprocess::apply_kyverno_policies,
-    profiles::{deep_merge_value, Profile, ProfileConfig},
+    profiles::{deep_merge_value, Profile},
     resources::{
         component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
         is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_field_path, join_field_path_segments,
@@ -64,8 +65,8 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Offline mode: skip profile loading, use default profile
-    #[arg(long, conflicts_with = "profile")]
+    /// Offline mode: skip Kubernetes discovery and use CLI-provided API information
+    #[arg(long)]
     pub offline: bool,
 
     /// Kubernetes version for Helm templating (required with --offline)
@@ -190,41 +191,14 @@ pub async fn render_manifests(
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
-    // 2. Select environment/profile
-    let (profile, env_name): (Profile, String) = if offline {
-        // Offline mode: skip profile loading, use default profile
-        (Profile::default(), "offline".to_string())
-    } else {
-        // Load profile configuration
-        let profile_config = ProfileConfig::load(None)?;
-
-        // If user explicitly specified a profile, require it to exist.
-        // If no profile specified and no profiles configured, use default Profile (current kubecontext).
-        let env_name = environment.unwrap_or("default");
-        let profile: Profile = if let Some(p) = profile_config.get(env_name) {
-            p.clone()
-        } else if environment.is_some() {
-            // User explicitly requested a profile that doesn't exist
-            return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
-        } else if profile_config.profiles.is_empty() {
-            // No profiles configured at all - use default (current kubecontext)
-            Profile::default()
-        } else {
-            // Profiles exist but "default" doesn't - user must specify which one
-            return Err(NylError::Config(format!(
-                "Profile '{}' not found. Available profiles: {}",
-                env_name,
-                profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
-            )));
-        };
-        (profile, env_name.to_string())
-    };
+    // 2. Select profile from nyl.toml
+    let (profile, profile_name) = select_profile_from_project(&project_config, environment)?;
 
     // 3. Load secrets
     let secrets_config = SecretsConfig::load(None)?;
 
     // 4. Build template context
-    let context = TemplateContext::build(&profile, &secrets_config, &env_name)?;
+    let context = TemplateContext::build(&profile, &secrets_config, &profile_name)?;
 
     let credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
 
@@ -305,7 +279,32 @@ pub async fn render_manifests(
     // This happens when max_depth is reached before all resources are expanded
     all_manifests.extend(pending);
 
-    Ok((all_manifests, profile, env_name, credential_provider))
+    Ok((all_manifests, profile, profile_name, credential_provider))
+}
+
+fn select_profile_from_project(project_config: &ProjectConfig, requested: Option<&str>) -> Result<(Profile, String)> {
+    let profile_name = requested.unwrap_or("default");
+
+    let selected = if let Some(values) = project_config.get_profile_values(profile_name) {
+        let mut profile = Profile::default();
+        profile.values = values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<HashMap<_, _>>();
+        profile
+    } else if requested.is_some() {
+        return Err(NylError::Config(format!("Profile '{}' not found", profile_name)));
+    } else if !project_config.has_profiles() {
+        Profile::default()
+    } else {
+        return Err(NylError::Config(format!(
+            "Profile '{}' not found. Available profiles: {}",
+            profile_name,
+            project_config.profile_names().join(", ")
+        )));
+    };
+
+    Ok((selected, profile_name.to_string()))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
@@ -885,10 +884,9 @@ fn process_application_generator(
         } else {
             tracing::trace!("No NylRelease found in {}, skipping", file_path.display());
             missing_release_count += 1;
-            let display_path = file_path.strip_prefix(&source_root).map_or_else(
-                |_| file_path.display().to_string(),
-                normalize_relative_path_to_posix,
-            );
+            let display_path = file_path
+                .strip_prefix(&source_root)
+                .map_or_else(|_| file_path.display().to_string(), normalize_relative_path_to_posix);
             missing_release_files.push(display_path);
         }
     }

@@ -35,8 +35,7 @@ gitops-repo/
 │       ├── app1.yaml          # Application 1 with NylRelease
 │       ├── app2.yaml          # Application 2 with NylRelease
 │       └── app3.yaml          # Application 3 with NylRelease
-├── nyl.toml           # Nyl project configuration
-├── nyl-profiles.yaml          # Nyl profiles (environments)
+├── nyl.toml                   # Nyl project + profile configuration
 └── nyl-secrets.yaml           # Secrets configuration
 ```
 
@@ -48,13 +47,9 @@ gitops-repo/
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
-```
 
-### nyl-profiles.yaml
-
-```yaml
-default:
-  values: {}
+[profile.values.default]
+# default profile values
 ```
 
 ### nyl-secrets.yaml

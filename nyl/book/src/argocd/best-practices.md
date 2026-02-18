@@ -29,7 +29,6 @@ gitops-repo/
 │   ├── postgres/
 │   └── redis/
 ├── nyl.toml
-├── nyl-profiles.yaml
 └── nyl-secrets.yaml
 ```
 

@@ -1,9 +1,11 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
+use std::collections::HashMap;
 
 use crate::{
+    config::ProjectConfig,
     kubernetes::{KubeClient, KubeRsClient},
-    profiles::{Profile, ProfileConfig},
+    profiles::Profile,
     NylError, Result,
 };
 
@@ -42,16 +44,21 @@ struct ClusterInfo {
 
 pub async fn execute(args: ClusterInfoArgs) -> Result<()> {
     // 1. Load profile configuration
-    let profile_config = ProfileConfig::load(None)?;
+    let project_config = ProjectConfig::load_with_warning(None)?;
 
     // 2. Get profile
     let env_name = args.profile.as_deref().unwrap_or("default");
-    let profile: Profile = if let Some(p) = profile_config.get(env_name) {
-        p.clone()
+    let profile: Profile = if let Some(values) = project_config.get_profile_values(env_name) {
+        let mut p = Profile::default();
+        p.values = values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<HashMap<_, _>>();
+        p
     } else if args.profile.is_some() {
         // User explicitly requested a profile that doesn't exist
         return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
-    } else if profile_config.profiles.is_empty() {
+    } else if !project_config.has_profiles() {
         // No profiles configured at all - use default (current kubecontext)
         Profile::default()
     } else {
@@ -59,7 +66,7 @@ pub async fn execute(args: ClusterInfoArgs) -> Result<()> {
         return Err(NylError::Config(format!(
             "Profile '{}' not found. Available profiles: {}",
             env_name,
-            profile_config.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+            project_config.profile_names().join(", ")
         )));
     };
 

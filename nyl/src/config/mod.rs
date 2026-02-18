@@ -25,6 +25,10 @@ fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
+fn default_profile_values() -> BTreeMap<String, BTreeMap<String, serde_json::Value>> {
+    BTreeMap::new()
+}
+
 /// Project settings in `[project]` section of `nyl.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -50,11 +54,32 @@ impl Default for ProjectSettings {
     }
 }
 
+/// Profile configuration in `[profile]` section of `nyl.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProfileSettings {
+    /// Per-profile template values, keyed by profile name.
+    ///
+    /// Example:
+    /// `[profile.values.dev]`
+    /// `replicas = 2`
+    pub values: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            values: default_profile_values(),
+        }
+    }
+}
+
 /// Root structure of `nyl.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
+    pub profile: ProfileSettings,
 }
 
 /// Wrapper for project configuration file.
@@ -218,6 +243,21 @@ impl ProjectConfig {
         self.get_alias_target(&key)
     }
 
+    /// Return whether any profile values are configured.
+    pub fn has_profiles(&self) -> bool {
+        !self.config.profile.values.is_empty()
+    }
+
+    /// Return configured profile names.
+    pub fn profile_names(&self) -> Vec<&str> {
+        self.config.profile.values.keys().map(String::as_str).collect()
+    }
+
+    /// Return template values for a profile name.
+    pub fn get_profile_values(&self, name: &str) -> Option<&BTreeMap<String, serde_json::Value>> {
+        self.config.profile.values.get(name)
+    }
+
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
     pub fn resolve_component_chart_dir(&self, kind: &str) -> Result<PathBuf> {
         for root in self.get_components_search_paths() {
@@ -283,6 +323,12 @@ mod tests {
     }
 
     #[test]
+    fn test_default_profile_settings() {
+        let settings = ProfileSettings::default();
+        assert!(settings.values.is_empty());
+    }
+
+    #[test]
     fn test_load_toml_config() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
@@ -319,6 +365,7 @@ helm_chart_search_paths = ["lib", "vendor"]
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
         assert!(config.config.project.aliases.is_empty());
+        assert!(!config.has_profiles());
     }
 
     #[test]
@@ -333,6 +380,7 @@ helm_chart_search_paths = ["lib", "vendor"]
                     ]),
                     ..ProjectSettings::default()
                 },
+                profile: ProfileSettings::default(),
             },
         };
 
@@ -411,5 +459,49 @@ components_search_paths = ["comps1", "comps2"]
             .unwrap_err()
             .to_string()
             .contains("Unsupported project configuration file"));
+    }
+
+    #[test]
+    fn test_load_profile_values_from_toml() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+
+[profile.values.dev]
+replicas = 1
+image_tag = "dev-latest"
+
+[profile.values.prod]
+replicas = 3
+image_tag = "v1.0.0"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        assert!(config.has_profiles());
+        assert_eq!(config.profile_names().len(), 2);
+        assert_eq!(
+            config.get_profile_values("dev").and_then(|v| v.get("replicas")),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    #[test]
+    fn test_profile_invalid_shape_rejected() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+
+[profile.dev]
+replicas = 1
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("Failed to parse TOML config"));
     }
 }

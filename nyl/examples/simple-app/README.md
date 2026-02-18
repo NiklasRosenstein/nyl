@@ -6,8 +6,7 @@ This example demonstrates a basic web application deployment with Nyl.
 
 ```
 simple-app/
-├── nyl.toml                  # Project path configuration
-├── nyl-profiles.yaml         # Profile values (dev/staging/prod)
+├── nyl.toml                  # Project + profile values configuration
 ├── manifests/
 │   ├── deployment.yaml       # Application Deployment
 │   ├── service.yaml          # ClusterIP Service
@@ -18,9 +17,9 @@ simple-app/
 ## Features Demonstrated
 
 - **Template Variables**: Using `{{ }}` syntax for dynamic values
-- **Profiles**: Different configurations for dev, staging, and prod
-- **Resource Management**: CPU and memory settings per environment
-- **Environment-Specific Values**: Replica counts, image tags, debug flags
+- **Profile Selection**: `--profile` drives environment behavior
+- **Conditional Rendering**: Most environment differences come from `{% if profile == ... %}` blocks
+- **Minimal Profile Values**: `nyl.toml` only stores profile-specific image tags
 
 ## Usage
 
@@ -34,30 +33,30 @@ nyl validate
 
 ```bash
 # Development environment (1 replica, debug mode)
-nyl render --environment dev
+nyl render --profile dev
 
 # Staging environment (2 replicas)
-nyl render --environment staging
+nyl render --profile staging
 
 # Production environment (3 replicas, optimized resources)
-nyl render --environment prod
+nyl render --profile prod
 ```
 
 ### Apply to Cluster
 
 ```bash
 # Deploy to development
-nyl apply --environment dev
+nyl apply --profile dev
 
 # Deploy to production
-nyl apply --environment prod
+nyl apply --profile prod
 ```
 
 ### View Differences
 
 ```bash
 # See what would change
-nyl diff --environment dev
+nyl diff --profile dev
 ```
 
 ## Profile Differences
@@ -67,20 +66,19 @@ nyl diff --environment dev
 | Replicas | 1 | 2 | 3 |
 | Image Tag | dev-latest | staging-v1.0.0 | v1.0.0 |
 | Debug Mode | true | false | false |
-| CPU Request | 100m | 200m | 500m |
-| Memory Request | 128Mi | 256Mi | 512Mi |
+| Resource Requests | 100m/128Mi | 200m/256Mi | 500m/512Mi |
 
 ## Customization
 
 To customize this example:
 
-1. Edit `nyl-profiles.yaml` to add more profiles or change values
+1. Edit `nyl.toml` under `[profile.values.<name>]` to add or change profiles
 2. Modify manifests in `manifests/` to add resources (Ingress, PVC, etc.)
-3. Add environment-specific overrides using profile values
+3. Adjust profile-specific conditionals (`{% if profile == ... %}`) in manifests
 
 ## Next Steps
 
 After mastering this example:
-- Try the [helm-charts](../helm-charts/) example for Helm integration
-- Explore [components](../components/) for reusable patterns
-- Study [multi-env](../multi-env/) for advanced configurations
+1. Add a `HelmChart` resource to this project and render it with different profiles.
+2. Extract repeated manifest fragments into local components.
+3. Add `profile.values` entries in `nyl.toml` beyond `image_tag` and consume them via `values.*`.

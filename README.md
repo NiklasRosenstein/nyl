@@ -33,7 +33,7 @@ Helm chart to deploy ArgoCD with Nyl as a Config Management Plugin.
 
 ```bash
 # Install Nyl from releases
-curl -LO https://github.com/helsing-ai/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/NiklasRosenstein/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
 tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
 sudo mv nyl /usr/local/bin/
 
@@ -42,7 +42,7 @@ nyl new project my-app
 cd my-app
 
 # Render manifests
-nyl render --environment dev
+nyl render --profile dev
 ```
 
 ## 🔧 Development
@@ -68,7 +68,7 @@ mise run docs-serve  # Serve mdbook documentation
 
 - **[Nyl Tool Documentation](nyl/README.md)** - Installation, commands, examples
 - **[Component System Guide](nyl/book/src/components/overview.md)** - Component authoring, resolution, shortcuts, aliases
-- **[Online Docs](https://helsing-ai.github.io/nyl/)** - Complete documentation (mdbook)
+- **[Online Docs](https://niklasrosenstein.github.io/nyl/)** - Complete documentation (mdbook)
 
 ## 📄 License
 

@@ -83,15 +83,15 @@ fn test_diff_command_requires_default_profile_when_profiles_exist() {
 
     // Create config with a profile that is NOT named "default"
     fs::write(
-        temp.path().join("nyl-profiles.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-staging:
-  values:
-    environment: staging
+[project]
+
+[profile.values.staging]
+environment = "staging"
 "#,
     )
     .unwrap();
-    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -120,15 +120,15 @@ fn test_apply_command_requires_default_profile_when_profiles_exist() {
 
     // Create config with a profile that is NOT named "default"
     fs::write(
-        temp.path().join("nyl-profiles.yaml"),
+        temp.path().join("nyl.toml"),
         r#"
-production:
-  values:
-    environment: production
+[project]
+
+[profile.values.production]
+environment = "production"
 "#,
     )
     .unwrap();
-    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -317,8 +317,7 @@ fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
 fn test_render_non_file_not_found_error_in_argocd_does_not_print_diagnostics() {
     let temp = TempDir::new().unwrap();
 
-    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-    fs::write(temp.path().join("nyl-profiles.yaml"), "default: {}\n").unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n[profile.values.default]\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
         temp.path().join("test-resource.yaml"),

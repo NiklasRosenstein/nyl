@@ -2,10 +2,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: myapp
-  namespace: {{ profile.namespace | default('default') }}
+  namespace: {% if profile == 'prod' %}production{% elif profile == 'staging' %}staging{% else %}development{% endif %}
   labels:
     app: myapp
-    environment: {{ profile.environment }}
+    environment: {{ profile }}
 spec:
   type: ClusterIP
   ports:

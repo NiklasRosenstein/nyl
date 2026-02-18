@@ -2,12 +2,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: myapp
-  namespace: {{ profile.namespace | default('default') }}
+  namespace: {% if profile == 'prod' %}production{% elif profile == 'staging' %}staging{% else %}development{% endif %}
   labels:
     app: myapp
-    environment: {{ profile.environment }}
+    environment: {{ profile }}
 spec:
-  replicas: {{ profile.replicas }}
+  replicas: {% if profile == 'prod' %}3{% elif profile == 'staging' %}2{% else %}1{% endif %}
   selector:
     matchLabels:
       app: myapp
@@ -15,19 +15,19 @@ spec:
     metadata:
       labels:
         app: myapp
-        environment: {{ profile.environment }}
+        environment: {{ profile }}
     spec:
       containers:
       - name: myapp
-        image: myorg/myapp:{{ profile.image_tag }}
+        image: myorg/myapp:{{ values.image_tag }}
         ports:
         - containerPort: 8080
           name: http
         env:
         - name: ENVIRONMENT
-          value: "{{ profile.environment }}"
+          value: "{{ profile }}"
         - name: DEBUG
-          value: "{{ profile.debug }}"
+          value: "{% if profile == 'dev' %}true{% else %}false{% endif %}"
         - name: APP_CONFIG
           valueFrom:
             configMapKeyRef:
@@ -35,11 +35,11 @@ spec:
               key: config.yaml
         resources:
           requests:
-            cpu: {{ profile.resources.requests.cpu }}
-            memory: {{ profile.resources.requests.memory }}
+            cpu: {% if profile == 'prod' %}500m{% elif profile == 'staging' %}200m{% else %}100m{% endif %}
+            memory: {% if profile == 'prod' %}512Mi{% elif profile == 'staging' %}256Mi{% else %}128Mi{% endif %}
           limits:
-            cpu: {{ profile.resources.limits.cpu }}
-            memory: {{ profile.resources.limits.memory }}
+            cpu: {% if profile == 'prod' %}2000m{% elif profile == 'staging' %}1000m{% else %}500m{% endif %}
+            memory: {% if profile == 'prod' %}1Gi{% elif profile == 'staging' %}512Mi{% else %}256Mi{% endif %}
         livenessProbe:
           httpGet:
             path: /healthz

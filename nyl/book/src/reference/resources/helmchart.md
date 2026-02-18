@@ -206,14 +206,13 @@ spec:
 
 Values from the active profile are automatically merged:
 
-```yaml
-# profiles/production.yaml
-values:
-  replicas: 5
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
+```toml
+[profile.values.production]
+replicas = 5
+
+[profile.values.production.resources.requests]
+cpu = "500m"
+memory = "512Mi"
 ```
 
 Inline values take precedence over profile values.
@@ -227,7 +226,7 @@ spec:
   values:
     image:
       tag: "{{ env.NYL_IMAGE_TAG }}"
-    environment: "{{ profile.name }}"
+    environment: "{{ profile }}"
 ```
 
 ## Complete Example
@@ -285,30 +284,28 @@ spec:
     # Base values here
 ```
 
-```yaml
-# profiles/development.yaml
-values:
-  replicas: 1
-  image:
-    tag: latest
-  environment: development
-```
+```toml
+[profile.values.development]
+replicas = 1
+environment = "development"
 
-```yaml
-# profiles/production.yaml
-values:
-  replicas: 5
-  image:
-    tag: v2.1.0
-  environment: production
-  resources:
-    requests:
-      cpu: 1000m
+[profile.values.development.image]
+tag = "latest"
+
+[profile.values.production]
+replicas = 5
+environment = "production"
+
+[profile.values.production.image]
+tag = "v2.1.0"
+
+[profile.values.production.resources.requests]
+cpu = "1000m"
 ```
 
 Render for specific environment:
 ```bash
-nyl render -e production app.yaml
+nyl render --profile production app.yaml
 ```
 
 ## See Also
