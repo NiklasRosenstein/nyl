@@ -133,11 +133,6 @@ pub async fn render_manifests_complete(
     }
     for generator in generators {
         let applications = process_application_generator(&generator, path, credential_provider.clone())?;
-        tracing::debug!(
-            "ApplicationGenerator {} produced {} ArgoCD Application(s)",
-            generator.metadata.name,
-            applications.len()
-        );
         final_manifests.extend(applications);
     }
 
@@ -860,8 +855,11 @@ fn process_application_generator(
         generator.metadata.name,
         yaml_files.len()
     );
+    let scanned_file_count = yaml_files.len();
 
     let mut applications = Vec::new();
+    let mut missing_release_files = Vec::new();
+    let mut missing_release_count = 0usize;
 
     for file_path in yaml_files {
         tracing::debug!("Reading YAML file: {}", file_path.display());
@@ -886,7 +884,25 @@ fn process_application_generator(
             applications.push(app);
         } else {
             tracing::trace!("No NylRelease found in {}, skipping", file_path.display());
+            missing_release_count += 1;
+            let display_path = file_path.strip_prefix(&source_root).map_or_else(
+                |_| file_path.display().to_string(),
+                normalize_relative_path_to_posix,
+            );
+            missing_release_files.push(display_path);
         }
+    }
+
+    if missing_release_count > 0 {
+        tracing::warn!(
+            "{}",
+            missing_nyl_release_warning_message(
+                generator,
+                missing_release_count,
+                scanned_file_count,
+                &missing_release_files
+            )
+        );
     }
 
     tracing::debug!(
@@ -895,6 +911,34 @@ fn process_application_generator(
         applications.len()
     );
     Ok(applications)
+}
+
+fn missing_nyl_release_warning_message(
+    generator: &crate::resources::ApplicationGenerator,
+    missing_release_count: usize,
+    scanned_file_count: usize,
+    skipped_files: &[String],
+) -> String {
+    let selectors = application_generator_source_selectors(generator);
+    let selectors_text = if selectors.is_empty() {
+        "<none>".to_string()
+    } else {
+        selectors.join(", ")
+    };
+    let base = format!(
+        "ApplicationGenerator {} (repoURL={}, targetRevision={}, source paths={}): skipped {}/{} file(s) because no NylRelease was found.",
+        generator.metadata.name,
+        generator.spec.source.repo_url,
+        generator.spec.source.target_revision,
+        selectors_text,
+        missing_release_count,
+        scanned_file_count
+    );
+    if skipped_files.is_empty() {
+        base
+    } else {
+        format!("{} Skipped files: {}", base, skipped_files.join(", "))
+    }
 }
 
 fn application_generator_source_selectors(generator: &crate::resources::ApplicationGenerator) -> Vec<String> {
@@ -1589,6 +1633,96 @@ mod tests {
         std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
         std::fs::write(&file_path, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n").unwrap();
         (temp, source_root, file_path)
+    }
+
+    fn test_application_generator_for_warning() -> crate::resources::ApplicationGenerator {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use std::collections::HashMap;
+
+        ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: "https://github.com/example/repo.git".to_string(),
+                    target_revision: "main".to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                release_customization: None,
+            },
+        }
+    }
+
+    #[test]
+    fn test_missing_nyl_release_warning_message_includes_counts_and_generator_name() {
+        let generator = test_application_generator_for_warning();
+        let msg = missing_nyl_release_warning_message(
+            &generator,
+            2,
+            5,
+            &[
+                "clusters/default/a.yaml".to_string(),
+                "clusters/default/b.yaml".to_string(),
+            ],
+        );
+        assert!(msg.contains("ApplicationGenerator apps"));
+        assert!(msg.contains("repoURL=https://github.com/example/repo.git"));
+        assert!(msg.contains("targetRevision=main"));
+        assert!(msg.contains("source paths=clusters/default"));
+        assert!(msg.contains("skipped 2/5 file(s)"));
+        assert!(msg.contains("no NylRelease was found"));
+        assert!(msg.contains("clusters/default/a.yaml"));
+        assert!(msg.contains("clusters/default/b.yaml"));
+        assert!(msg.contains("Skipped files:"));
+    }
+
+    #[test]
+    fn test_missing_nyl_release_warning_message_lists_all_skipped_files() {
+        let generator = test_application_generator_for_warning();
+        let msg = missing_nyl_release_warning_message(
+            &generator,
+            4,
+            4,
+            &[
+                "a.yaml".to_string(),
+                "b.yaml".to_string(),
+                "c.yaml".to_string(),
+                "d.yaml".to_string(),
+            ],
+        );
+        assert!(msg.contains("a.yaml"));
+        assert!(msg.contains("b.yaml"));
+        assert!(msg.contains("c.yaml"));
+        assert!(msg.contains("d.yaml"));
+        assert!(!msg.contains("Examples:"));
+    }
+
+    #[test]
+    fn test_missing_nyl_release_warning_message_without_examples() {
+        let generator = test_application_generator_for_warning();
+        let msg = missing_nyl_release_warning_message(&generator, 1, 1, &[]);
+        assert!(msg.contains("ApplicationGenerator apps"));
+        assert!(msg.contains("skipped 1/1 file(s)"));
+        assert!(!msg.contains("Skipped files:"));
     }
 
     #[test]
