@@ -1,7 +1,6 @@
 use clap::Args;
 use glob::{glob, Pattern};
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -286,12 +285,10 @@ fn select_profile_from_project(project_config: &ProjectConfig, requested: Option
     let profile_name = requested.unwrap_or("default");
 
     let selected = if let Some(values) = project_config.get_profile_values(profile_name) {
-        let mut profile = Profile::default();
-        profile.values = values
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<_, _>>();
-        profile
+        Profile {
+            values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            ..Default::default()
+        }
     } else if requested.is_some() {
         return Err(NylError::Config(format!("Profile '{}' not found", profile_name)));
     } else if !project_config.has_profiles() {

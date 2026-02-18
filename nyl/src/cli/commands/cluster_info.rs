@@ -1,6 +1,5 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
-use std::collections::HashMap;
 
 use crate::{
     config::ProjectConfig,
@@ -49,12 +48,10 @@ pub async fn execute(args: ClusterInfoArgs) -> Result<()> {
     // 2. Get profile
     let env_name = args.profile.as_deref().unwrap_or("default");
     let profile: Profile = if let Some(values) = project_config.get_profile_values(env_name) {
-        let mut p = Profile::default();
-        p.values = values
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<_, _>>();
-        p
+        Profile {
+            values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            ..Default::default()
+        }
     } else if args.profile.is_some() {
         // User explicitly requested a profile that doesn't exist
         return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
