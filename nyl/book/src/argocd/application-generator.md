@@ -445,9 +445,17 @@ For local testing, set:
 export NYL_APPGEN_REPO_PATH_OVERRIDE=/path/to/local/repo
 ```
 
+Or use:
+
+```bash
+export NYL_APPGEN_REPO_PATH_OVERRIDE=@git
+```
+
+to resolve the repository root from the current `PWD`.
+
 When this env var is set, selectors from `source.path`/`source.paths` are resolved under that local directory and no clone/worktree checkout is performed for ApplicationGenerator processing.
 
-If the override path is missing/invalid, or the resulting source path does not exist, `nyl render` fails with a configuration error.
+If the override path is missing/invalid, `@git` is used outside a Git repository, or the resulting source path does not exist, `nyl render` fails with a configuration error.
 
 For generated Applications:
 - The `path` field points to the directory containing the NylRelease file

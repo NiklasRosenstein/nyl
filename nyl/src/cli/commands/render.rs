@@ -918,7 +918,7 @@ fn resolve_application_generator_source_path(
     if let Ok(override_root_raw) = std::env::var(APPGEN_REPO_PATH_OVERRIDE) {
         let override_root_raw = override_root_raw.trim();
         if !override_root_raw.is_empty() {
-            let override_root = resolve_override_root_path(override_root_raw)?;
+            let override_root = resolve_override_root_path(APPGEN_REPO_PATH_OVERRIDE, override_root_raw)?;
             if !override_root.exists() {
                 return Err(NylError::Config(format!(
                     "Environment variable {} points to a path that does not exist: {}",
@@ -957,22 +957,56 @@ fn resolve_application_generator_source_path(
 ///
 /// Relative values are resolved against shell `PWD` if present, otherwise
 /// against the process current directory.
-fn resolve_override_root_path(raw: &str) -> Result<PathBuf> {
+fn resolve_override_root_path(env_var_name: &str, raw: &str) -> Result<PathBuf> {
+    if raw == "@git" {
+        return resolve_git_repo_root_from_current_pwd(env_var_name);
+    }
+
     let candidate = PathBuf::from(raw);
     if candidate.is_absolute() {
         return Ok(candidate);
     }
 
+    Ok(resolve_current_pwd()?.join(candidate))
+}
+
+fn resolve_git_repo_root_from_current_pwd(env_var_name: &str) -> Result<PathBuf> {
+    let cwd = resolve_current_pwd()?;
+    let repo = git2::Repository::discover(&cwd).map_err(|e| {
+        NylError::Config(format!(
+            "Environment variable {} is set to @git, but no Git repository root could be discovered from {}: {}",
+            env_var_name,
+            cwd.display(),
+            e
+        ))
+    })?;
+
+    if let Some(workdir) = repo.workdir() {
+        return Ok(workdir.to_path_buf());
+    }
+
+    let repo_path = repo.path();
+    if let Some(parent) = repo_path.parent() {
+        return Ok(parent.to_path_buf());
+    }
+
+    Err(NylError::Config(format!(
+        "Environment variable {} is set to @git, but the discovered Git repository has no parent directory: {}",
+        env_var_name,
+        repo_path.display()
+    )))
+}
+
+fn resolve_current_pwd() -> Result<PathBuf> {
     if let Ok(pwd) = std::env::var("PWD") {
         let pwd_path = PathBuf::from(pwd);
         if pwd_path.is_absolute() {
-            return Ok(pwd_path.join(candidate));
+            return Ok(pwd_path);
         }
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| NylError::Config(format!("Failed to get current directory for path resolution: {}", e)))?;
-    Ok(cwd.join(candidate))
+    std::env::current_dir()
+        .map_err(|e| NylError::Config(format!("Failed to get current directory for path resolution: {}", e)))
 }
 
 /// Find YAML files matching path/paths selectors and include/exclude patterns.
@@ -2152,8 +2186,42 @@ metadata:
         std::fs::create_dir_all(&repo).unwrap();
         std::env::set_var("PWD", temp.path());
 
-        let resolved = resolve_override_root_path("repo").unwrap();
+        let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "repo").unwrap();
         assert_eq!(resolved, repo);
+        std::env::remove_var("PWD");
+    }
+
+    #[test]
+    fn test_resolve_override_root_path_at_git_resolves_repo_root_from_pwd() {
+        use git2::Repository;
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        let nested = repo_root.join("nested/path");
+        std::fs::create_dir_all(&nested).unwrap();
+        Repository::init(&repo_root).unwrap();
+        std::env::set_var("PWD", &nested);
+
+        let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "@git").unwrap();
+        assert_eq!(resolved, repo_root);
+        std::env::remove_var("PWD");
+    }
+
+    #[test]
+    fn test_resolve_override_root_path_at_git_errors_when_pwd_not_in_repo() {
+        use tempfile::TempDir;
+
+        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        std::env::set_var("PWD", temp.path());
+
+        let err = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "@git").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("NYL_APPGEN_REPO_PATH_OVERRIDE"));
+        assert!(msg.contains("@git"));
+        std::env::remove_var("PWD");
     }
 
     #[cfg(unix)]

@@ -207,10 +207,16 @@ export NYL_APPGEN_REPO_PATH_OVERRIDE=/path/to/local/repo
 nyl render apps.yaml
 ```
 
+```bash
+export NYL_APPGEN_REPO_PATH_OVERRIDE=@git
+nyl render apps.yaml
+```
+
 Behavior:
-- If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set, Nyl resolves `spec.source.path`/`spec.source.paths` selectors under that local path.
+- If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set to a local path, Nyl resolves `spec.source.path`/`spec.source.paths` selectors under that path.
+- If `NYL_APPGEN_REPO_PATH_OVERRIDE=@git`, Nyl discovers the Git repository root from the current `PWD` and resolves selectors under that root.
 - If unset, Nyl uses normal Git clone/cache/worktree resolution from `spec.source.repoURL` and `spec.source.targetRevision`.
-- If the override path is invalid, rendering fails immediately.
+- If the override path is invalid, or `@git` is used outside a Git repository, rendering fails immediately.
 
 Selector behavior:
 - `source.path` scans the selected directory non-recursively by default.
