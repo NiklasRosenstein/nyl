@@ -1,0 +1,8 @@
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: missing-version
+spec:
+  chart:
+    repository: https://charts.bitnami.com/bitnami
+    name: nginx

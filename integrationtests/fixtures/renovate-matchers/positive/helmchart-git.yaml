@@ -1,0 +1,9 @@
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: git-chart
+spec:
+  chart:
+    repository: git+https://github.com/prometheus-community/helm-charts
+    name: charts/prometheus
+    version: prometheus-25.28.0

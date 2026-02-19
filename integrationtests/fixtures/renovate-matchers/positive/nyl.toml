@@ -1,0 +1,4 @@
+[project.aliases]
+"example.io/v1/HttpKind" = "https://charts.bitnami.com/bitnami#nginx@18.2.4"
+"example.io/v1/OciKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
+"example.io/v1/GitKind" = "git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0"

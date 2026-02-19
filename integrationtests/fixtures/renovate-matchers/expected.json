@@ -1,0 +1,100 @@
+{
+  "cases": [
+    {
+      "file": "positive/component-http.yaml",
+      "deps": [
+        {
+          "datasource": "helm",
+          "depName": "nginx",
+          "currentValue": "18.2.4"
+        }
+      ]
+    },
+    {
+      "file": "positive/component-oci.yaml",
+      "deps": [
+        {
+          "datasource": "docker",
+          "depName": "registry-1.docker.io/bitnamicharts/nginx",
+          "currentValue": "18.2.4"
+        }
+      ]
+    },
+    {
+      "file": "positive/component-git.yaml",
+      "deps": [
+        {
+          "datasource": "git-tags",
+          "depName": "https://github.com/prometheus-community/helm-charts",
+          "currentValue": "prometheus-25.28.0"
+        }
+      ]
+    },
+    {
+      "file": "positive/helmchart-http.yaml",
+      "deps": [
+        {
+          "datasource": "helm",
+          "depName": "nginx",
+          "currentValue": "18.2.4"
+        }
+      ]
+    },
+    {
+      "file": "positive/helmchart-oci.yaml",
+      "deps": [
+        {
+          "datasource": "docker",
+          "depName": "registry-1.docker.io/bitnamicharts/nginx",
+          "currentValue": "18.2.4"
+        }
+      ]
+    },
+    {
+      "file": "positive/helmchart-git.yaml",
+      "deps": [
+        {
+          "datasource": "git-tags",
+          "depName": "https://github.com/prometheus-community/helm-charts",
+          "currentValue": "prometheus-25.28.0"
+        }
+      ]
+    },
+    {
+      "file": "positive/nyl.toml",
+      "deps": [
+        {
+          "datasource": "helm",
+          "depName": "nginx",
+          "currentValue": "18.2.4"
+        },
+        {
+          "datasource": "docker",
+          "depName": "registry-1.docker.io/bitnamicharts/nginx",
+          "currentValue": "18.2.4"
+        },
+        {
+          "datasource": "git-tags",
+          "depName": "https://github.com/prometheus-community/helm-charts",
+          "currentValue": "prometheus-25.28.0"
+        }
+      ]
+    },
+    {
+      "file": "negative/component-local.yaml",
+      "deps": []
+    },
+    {
+      "file": "negative/component-no-version.yaml",
+      "deps": []
+    },
+    {
+      "file": "negative/helmchart-missing-version.yaml",
+      "deps": []
+    },
+    {
+      "file": "negative/non-nyl.yaml",
+      "deps": []
+    }
+  ]
+}

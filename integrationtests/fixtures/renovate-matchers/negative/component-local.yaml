@@ -1,0 +1,4 @@
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: example/v1/MyComponent
+metadata:
+  name: local-component

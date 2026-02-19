@@ -1,0 +1,93 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Reusable preset for Nyl HelmChart/Component version updates.",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "HelmChart resource with HTTP(S) Helm repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*(?<repoUrl>https?://[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<depName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "{{{repoUrl}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "HelmChart resource with OCI repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*oci://(?<repoPath>[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<chartName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "{{{repoPath}}}/{{{chartName}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "HelmChart resource with Git repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*git\\+(?<depName>[^\\s\"']+)\\s*\\n(?:\\s*name:\\s*[\"']?(?<chartPath>[^\\s\"']+)[\"']?\\s*\\n)?\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "git-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "Component shortcut kind with HTTP(S) Helm repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?(?<repoUrl>https?://[^\\s\"'#]+)#(?<depName>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "{{{repoUrl}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Component shortcut kind with OCI repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?oci://(?<repoPath>[^\\s\"'@]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "{{{repoPath}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Component shortcut kind with Git repository",
+      "fileMatch": ["(^|/).*\\.ya?ml$"],
+      "matchStrings": [
+        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?git\\+(?<depName>[^\\s\"'#]+)#(?<chartPath>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+      ],
+      "datasourceTemplate": "git-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "project.aliases shortcut with HTTP(S) Helm repository in nyl.toml",
+      "fileMatch": ["(^|/)nyl\\.toml$"],
+      "matchStrings": [
+        "(?m)^\\s*\"[^\"]+\"\\s*=\\s*\"(?<repoUrl>https?://[^\"#]+)#(?<depName>[^\"@#]+)@(?<currentValue>[^\"\\s]+)\"\\s*$"
+      ],
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "{{{repoUrl}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "project.aliases shortcut with OCI repository in nyl.toml",
+      "fileMatch": ["(^|/)nyl\\.toml$"],
+      "matchStrings": [
+        "(?m)^\\s*\"[^\"]+\"\\s*=\\s*\"oci://(?<repoPath>[^\"@]+)@(?<currentValue>[^\"\\s]+)\"\\s*$"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "{{{repoPath}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "project.aliases shortcut with Git repository in nyl.toml",
+      "fileMatch": ["(^|/)nyl\\.toml$"],
+      "matchStrings": [
+        "(?m)^\\s*\"[^\"]+\"\\s*=\\s*\"git\\+(?<depName>[^\"#]+)#(?<chartPath>[^\"@#]+)@(?<currentValue>[^\"\\s]+)\"\\s*$"
+      ],
+      "datasourceTemplate": "git-tags"
+    }
+  ]
+}

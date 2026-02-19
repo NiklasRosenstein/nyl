@@ -1,0 +1,9 @@
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: oci-chart
+spec:
+  chart:
+    repository: oci://registry-1.docker.io/bitnamicharts
+    name: nginx
+    version: 18.2.4

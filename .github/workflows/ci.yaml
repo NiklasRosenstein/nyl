@@ -76,6 +76,21 @@ jobs:
       - name: Security audit
         run: cargo audit
 
+  test-renovate-matchers:
+    name: Test Renovate Matchers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Renovate matcher tests
+        run: bash scripts/test-renovate-matchers.sh
+
   test-matrix:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

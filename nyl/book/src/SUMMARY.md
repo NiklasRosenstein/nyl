@@ -38,3 +38,7 @@
   - [ApplicationGenerator](./reference/resources/application-generator.md)
 - [Kyverno Policies](./reference/kyverno-policies.md)
 - [Schemas](./reference/schemas.md)
+
+# Extras
+
+- [Renovate Integration](./extras/renovate.md)

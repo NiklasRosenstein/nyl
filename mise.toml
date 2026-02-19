@@ -118,3 +118,7 @@ run = "ls -lh target/release/nyl && du -h target/release/nyl"
 description = "Clean build artifacts"
 dir = "nyl"
 run = "cargo clean"
+
+[tasks.test-renovate-matchers]
+description = "Validate Renovate custom regex matchers against fixtures"
+run = "bash scripts/test-renovate-matchers.sh"
