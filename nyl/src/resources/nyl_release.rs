@@ -6,6 +6,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::constants::API_VERSION;
+use crate::util::map_resource_parse_error;
 use crate::{NylError, Result};
 
 /// NylRelease resource for specifying release metadata
@@ -80,8 +81,7 @@ impl NylRelease {
 
     /// Parse NylRelease from JSON value
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| NylError::Config(format!("Invalid NylRelease resource: {}", e)))
+        serde_json::from_value(value.clone()).map_err(|e| map_resource_parse_error("NylRelease", &e))
     }
 }
 
@@ -339,5 +339,27 @@ spec:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("applicationOverride must be a YAML/JSON object"));
+    }
+
+    #[test]
+    fn test_from_value_unknown_field_message_is_human_friendly() {
+        let value = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "NylRelease",
+            "metadata": {
+                "name": "test",
+                "namespace": "default"
+            },
+            "spec": {
+                "argocd": {
+                    "unexpectedField": true
+                }
+            }
+        });
+
+        let err = NylRelease::from_value(&value).unwrap_err().to_string();
+        assert!(err.contains("Unknown field 'unexpectedField' in NylRelease."));
+        assert!(!err.contains("there are no fields"));
+        assert!(err.contains("Check for typos"));
     }
 }

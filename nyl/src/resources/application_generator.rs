@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::constants::API_VERSION_ARGOCD;
 use crate::resources::validate_path_glob_pattern;
+use crate::util::map_resource_parse_error;
 use crate::{NylError, Result};
 
 /// ApplicationGenerator resource for ArgoCD bootstrapping
@@ -160,8 +161,7 @@ impl ApplicationGenerator {
 
     /// Parse ApplicationGenerator from JSON value
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| NylError::Config(format!("Invalid ApplicationGenerator resource: {}", e)))
+        serde_json::from_value(value.clone()).map_err(|e| map_resource_parse_error("ApplicationGenerator", &e))
     }
 
     /// Validate the ApplicationGenerator configuration
@@ -721,5 +721,33 @@ spec:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn test_from_value_unknown_field_message_is_human_friendly() {
+        let value = json!({
+            "apiVersion": "argocd.nyl.niklasrosenstein.github.com/v1",
+            "kind": "ApplicationGenerator",
+            "metadata": {
+                "name": "test",
+                "namespace": "argocd"
+            },
+            "spec": {
+                "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": "argocd"
+                },
+                "source": {
+                    "repoURL": "https://github.com/example/repo",
+                    "path": "clusters/default"
+                },
+                "unexpectedField": true
+            }
+        });
+
+        let err = ApplicationGenerator::from_value(&value).unwrap_err().to_string();
+        assert!(err.contains("Unknown field 'unexpectedField' in ApplicationGenerator."));
+        assert!(!err.contains("there are no fields"));
+        assert!(err.contains("Check for typos"));
     }
 }
