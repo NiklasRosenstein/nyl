@@ -61,6 +61,7 @@ pub trait KubeClient: Send + Sync {
 pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
+    api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
 }
 
 impl KubeRsClient {
@@ -143,31 +144,48 @@ impl KubeRsClient {
         let client = Client::try_from(config)?;
         tracing::debug!("Running Kubernetes API discovery");
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
+        let api_resources = Self::build_api_resource_index(&discovery);
         tracing::debug!("Kubernetes client initialization complete");
 
-        Ok(Self { client, discovery })
+        Ok(Self {
+            client,
+            discovery,
+            api_resources,
+        })
     }
 
     /// Create a new Kubernetes client from an existing kube::Client
     pub async fn from_client(client: Client) -> Result<Self> {
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
-        Ok(Self { client, discovery })
+        let api_resources = Self::build_api_resource_index(&discovery);
+        Ok(Self {
+            client,
+            discovery,
+            api_resources,
+        })
+    }
+
+    fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
+        let mut index = HashMap::new();
+
+        for group in discovery.groups() {
+            for (ar, caps) in group.recommended_resources() {
+                let gvk = GroupVersionKind {
+                    group: ar.group.clone(),
+                    version: ar.version.clone(),
+                    kind: ar.kind.clone(),
+                };
+                index.entry(gvk).or_insert_with(|| (ar.clone(), caps.clone()));
+            }
+        }
+
+        index
     }
 
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        // Search through all groups for matching resource
-        for group in self.discovery.groups() {
-            for (ar, caps) in group.recommended_resources() {
-                // Match by kind and version
-                if ar.kind == gvk.kind && ar.version == gvk.version {
-                    // For core resources (empty group), ar.group is also empty
-                    // For other resources, check group matches
-                    if (gvk.group.is_empty() && ar.group.is_empty()) || ar.group == gvk.group {
-                        return Ok((ar, caps));
-                    }
-                }
-            }
+        if let Some((ar, caps)) = self.api_resources.get(gvk) {
+            return Ok((ar.clone(), caps.clone()));
         }
 
         let group_version = if gvk.group.is_empty() {
