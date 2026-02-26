@@ -4,7 +4,10 @@ use kube::Client;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    cli::commands::render::{render_manifests_complete, RenderOptions},
+    cli::{
+        commands::render::{render_manifests_complete, RenderOptions},
+        namespace_resolution::resolve_manifest_namespaces,
+    },
     kubernetes::{
         extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
         ResourceKey,
@@ -82,11 +85,6 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
-    // Display duplicate resources warning if any
-    if !duplicates.is_empty() {
-        print_duplicate_warning(&duplicates);
-    }
-
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to diff");
         return Ok(());
@@ -110,6 +108,14 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     let config = KubeRsClient::load_kube_config_from_profile(&profile, args.context.as_deref()).await?;
     let client = Client::try_from(config)?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
+
+    // Resolve missing namespaces for namespaced resources.
+    resolve_manifest_namespaces(&kube_client, &mut desired_manifests, Some(&release_namespace)).await?;
+
+    // Display duplicate resources warning if any
+    if !duplicates.is_empty() {
+        print_duplicate_warning(&duplicates);
+    }
 
     // 5. Initialize state storage
     let storage = KubernetesReleaseStorage::new(client);

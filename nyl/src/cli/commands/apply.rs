@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use colored::Colorize;
 
 use crate::{
-    cli::commands::render::{render_manifests_complete, RenderOptions},
+    cli::{
+        commands::render::{render_manifests_complete, RenderOptions},
+        namespace_resolution::resolve_manifest_namespaces,
+    },
     kubernetes::{
         ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
         ResourceKey, ResourceOrdering,
@@ -65,11 +68,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
-    // Display duplicate resources warning if any
-    if !duplicates.is_empty() {
-        print_duplicate_warning(&duplicates);
-    }
-
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
         return Ok(());
@@ -79,6 +77,19 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let config = KubeRsClient::load_kube_config_from_profile(&profile, args.context.as_deref()).await?;
     let client = Client::try_from(config)?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
+
+    let release_namespace_hint = nyl_release
+        .as_ref()
+        .map(|release| release.metadata.namespace.as_str())
+        .or(args.namespace.as_deref());
+
+    // Resolve missing namespaces for namespaced resources.
+    resolve_manifest_namespaces(&kube_client, &mut desired_manifests, release_namespace_hint).await?;
+
+    // Display duplicate resources warning if any
+    if !duplicates.is_empty() {
+        print_duplicate_warning(&duplicates);
+    }
 
     // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
     let mut sorted_manifests = desired_manifests.clone();

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
+    cli::namespace_resolution::resolve_manifest_namespaces,
     config::ProjectConfig,
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
     helm::{HelmChartResolver, HelmTemplateExecutor},
@@ -305,7 +306,7 @@ fn select_profile_from_project(project_config: &ProjectConfig, requested: Option
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let (mut final_manifests, _, _, _, duplicates) = render_manifests_complete(
+    let (mut final_manifests, nyl_release, profile, _, duplicates) = render_manifests_complete(
         &args.common.path,
         args.common.only_source_kind.as_deref(),
         args.common.profile.as_deref(),
@@ -324,6 +325,14 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
+    // In online mode, resolve missing namespaces for namespaced resources.
+    // Skip cluster access when no resource is missing metadata.namespace.
+    if should_resolve_namespaces(&final_manifests, args.offline) {
+        let client = KubeRsClient::from_profile(&profile, None).await?;
+        let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
+        resolve_manifest_namespaces(&client, &mut final_manifests, release_namespace_hint).await?;
+    }
+
     // Print duplicate warning summary if any
     if !duplicates.is_empty() {
         let total_unique = duplicates.len();
@@ -337,6 +346,13 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
 
     output_manifests(&final_manifests, OutputFormat::Yaml)?;
     Ok(())
+}
+
+fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> bool {
+    !offline
+        && manifests
+            .iter()
+            .any(|manifest| crate::kubernetes::extract_namespace(manifest).is_none())
 }
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
@@ -2753,5 +2769,35 @@ metadata:
             "metadata": {"name": "test"}
         });
         assert!(!is_renderable_resource(&resource, &config));
+    }
+
+    #[test]
+    fn test_should_resolve_namespaces_online_with_missing_namespace() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa"}
+        })];
+        assert!(should_resolve_namespaces(&manifests, false));
+    }
+
+    #[test]
+    fn test_should_not_resolve_namespaces_offline() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa"}
+        })];
+        assert!(!should_resolve_namespaces(&manifests, true));
+    }
+
+    #[test]
+    fn test_should_not_resolve_namespaces_when_all_namespaces_present() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa", "namespace": "default"}
+        })];
+        assert!(!should_resolve_namespaces(&manifests, false));
     }
 }

@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod filter;
+pub(crate) mod namespace_resolution;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
