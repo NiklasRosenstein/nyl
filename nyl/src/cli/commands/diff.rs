@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     cli::{
         commands::render::{render_manifests_complete, RenderOptions},
-        namespace_resolution::resolve_manifest_namespaces,
+        namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
         extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
@@ -111,6 +111,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Resolve missing namespaces for namespaced resources.
     resolve_manifest_namespaces(&kube_client, &mut desired_manifests, Some(&release_namespace)).await?;
+    let duplicates =
+        adjust_duplicate_keys_for_namespace_resolution(&kube_client, &duplicates, Some(&release_namespace)).await?;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {

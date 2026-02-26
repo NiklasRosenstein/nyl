@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use serde_json::{Map, Value};
 
 use crate::{
-    kubernetes::{KubeClient, ResourceKey},
+    kubernetes::{GroupVersionKind, KubeClient, ResourceKey},
     NylError, Result,
 };
 
@@ -18,14 +20,28 @@ pub async fn resolve_manifest_namespaces(
 ) -> Result<usize> {
     let mut resolved_count = 0;
     let default_namespace = client.default_namespace();
+    let mut scope_cache: HashMap<GroupVersionKind, bool> = HashMap::new();
 
     for manifest in manifests {
         let key = ResourceKey::from_json_value(manifest)?;
-        if key.namespace.is_some() {
+        if key
+            .namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|ns| !ns.is_empty())
+            .is_some()
+        {
             continue;
         }
 
-        if !client.is_namespaced(&key.gvk).await? {
+        let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
+            *cached
+        } else {
+            let discovered = client.is_namespaced(&key.gvk).await?;
+            scope_cache.insert(key.gvk.clone(), discovered);
+            discovered
+        };
+        if !is_namespaced {
             continue;
         }
 
@@ -58,6 +74,62 @@ pub async fn resolve_manifest_namespaces(
     }
 
     Ok(resolved_count)
+}
+
+/// Re-key duplicate map after namespace resolution mutates manifest keys.
+pub async fn adjust_duplicate_keys_for_namespace_resolution(
+    client: &dyn KubeClient,
+    duplicates: &HashMap<ResourceKey, usize>,
+    release_namespace: Option<&str>,
+) -> Result<HashMap<ResourceKey, usize>> {
+    let mut adjusted = HashMap::with_capacity(duplicates.len());
+    let mut scope_cache: HashMap<GroupVersionKind, bool> = HashMap::new();
+    let default_namespace = client.default_namespace();
+
+    for (key, count) in duplicates {
+        if key
+            .namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|ns| !ns.is_empty())
+            .is_some()
+        {
+            adjusted.insert(key.clone(), *count);
+            continue;
+        }
+
+        let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
+            *cached
+        } else {
+            let discovered = client.is_namespaced(&key.gvk).await?;
+            scope_cache.insert(key.gvk.clone(), discovered);
+            discovered
+        };
+
+        if !is_namespaced {
+            adjusted.insert(key.clone(), *count);
+            continue;
+        }
+
+        let namespace = release_namespace
+            .filter(|ns| !ns.trim().is_empty())
+            .or_else(|| {
+                let trimmed = default_namespace.trim();
+                (!trimmed.is_empty()).then_some(trimmed)
+            })
+            .ok_or_else(|| {
+                NylError::Config(format!(
+                    "Namespace required for namespaced resource {} {}",
+                    key.gvk.kind, key.name
+                ))
+            })?;
+
+        let mut resolved_key = key.clone();
+        resolved_key.namespace = Some(namespace.to_string());
+        adjusted.insert(resolved_key, *count);
+    }
+
+    Ok(adjusted)
 }
 
 fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
@@ -165,5 +237,53 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Namespace required for namespaced resource ServiceAccount sa"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_manifest_namespaces_treats_empty_namespace_as_missing() {
+        let client = MockKubeClient::with_default_namespace("ctx-default");
+        let mut manifests = vec![json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa", "namespace": "   "}
+        })];
+
+        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release-ns"))
+            .await
+            .unwrap();
+        assert_eq!(resolved, 1);
+        assert_eq!(manifests[0]["metadata"]["namespace"].as_str(), Some("release-ns"));
+    }
+
+    #[tokio::test]
+    async fn test_adjust_duplicate_keys_for_namespace_resolution() {
+        let client = MockKubeClient::with_default_namespace("ctx-default");
+        let mut duplicates = HashMap::new();
+        duplicates.insert(
+            ResourceKey {
+                gvk: crate::kubernetes::GroupVersionKind {
+                    group: String::new(),
+                    version: "v1".to_string(),
+                    kind: "ServiceAccount".to_string(),
+                },
+                namespace: None,
+                name: "sa".to_string(),
+            },
+            2,
+        );
+
+        let adjusted = adjust_duplicate_keys_for_namespace_resolution(&client, &duplicates, Some("release"))
+            .await
+            .unwrap();
+        assert!(adjusted.contains_key(&ResourceKey {
+            gvk: crate::kubernetes::GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ServiceAccount".to_string(),
+            },
+            namespace: Some("release".to_string()),
+            name: "sa".to_string(),
+        }));
+        assert_eq!(adjusted.values().next().copied(), Some(2));
     }
 }

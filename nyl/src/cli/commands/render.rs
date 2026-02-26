@@ -358,9 +358,12 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
 
 fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> bool {
     !offline
-        && manifests
-            .iter()
-            .any(|manifest| crate::kubernetes::extract_namespace(manifest).is_none())
+        && manifests.iter().any(|manifest| {
+            crate::kubernetes::extract_namespace(manifest)
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+        })
 }
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
