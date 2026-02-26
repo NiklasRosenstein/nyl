@@ -328,9 +328,25 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     // In online mode, resolve missing namespaces for namespaced resources.
     // Skip cluster access when no resource is missing metadata.namespace.
     if should_resolve_namespaces(&final_manifests, args.offline) {
-        let client = KubeRsClient::from_profile(&profile, None).await?;
-        let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
-        resolve_manifest_namespaces(&client, &mut final_manifests, release_namespace_hint).await?;
+        match KubeRsClient::from_profile(&profile, None).await {
+            Ok(client) => {
+                let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
+                if let Err(error) =
+                    resolve_manifest_namespaces(&client, &mut final_manifests, release_namespace_hint).await
+                {
+                    tracing::warn!(
+                        "Failed to resolve missing namespaces from cluster metadata, continuing without namespace inference: {}",
+                        error
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to initialize Kubernetes client for namespace inference, continuing without namespace inference: {}",
+                    error
+                );
+            }
+        }
     }
 
     // Print duplicate warning summary if any
@@ -1625,10 +1641,14 @@ fn add_parent_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
     static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_appgen_override_env() -> MutexGuard<'static, ()> {
+        APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn test_project_config() -> ProjectConfig {
         ProjectConfig {
@@ -2111,7 +2131,7 @@ metadata:
         use std::fs;
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path().join("clusters/default");
         fs::create_dir_all(&source_dir).unwrap();
@@ -2160,7 +2180,7 @@ metadata:
         };
         use std::collections::HashMap;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         std::env::set_var("NYL_APPGEN_REPO_PATH_OVERRIDE", "/definitely/not/a/real/path");
 
         let generator = ApplicationGenerator {
@@ -2207,7 +2227,7 @@ metadata:
         use std::collections::HashMap;
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         let temp = TempDir::new().unwrap();
         std::env::set_var("NYL_APPGEN_REPO_PATH_OVERRIDE", temp.path());
 
@@ -2265,7 +2285,7 @@ metadata:
         use std::fs;
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
 
         let repo_dir = TempDir::new().unwrap();
@@ -2325,14 +2345,16 @@ metadata:
     fn test_resolve_override_root_path_prefers_pwd_for_relative_paths() {
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         let temp = TempDir::new().unwrap();
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         std::env::set_var("PWD", temp.path());
 
         let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "repo").unwrap();
-        assert_eq!(resolved, repo);
+        let resolved = std::fs::canonicalize(resolved).unwrap();
+        let expected = std::fs::canonicalize(repo).unwrap();
+        assert_eq!(resolved, expected);
         std::env::remove_var("PWD");
     }
 
@@ -2341,7 +2363,7 @@ metadata:
         use git2::Repository;
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         let temp = TempDir::new().unwrap();
         let repo_root = temp.path().join("repo");
         let nested = repo_root.join("nested/path");
@@ -2350,7 +2372,9 @@ metadata:
         std::env::set_var("PWD", &nested);
 
         let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "@git").unwrap();
-        assert_eq!(resolved, repo_root);
+        let resolved = std::fs::canonicalize(resolved).unwrap();
+        let expected = std::fs::canonicalize(repo_root).unwrap();
+        assert_eq!(resolved, expected);
         std::env::remove_var("PWD");
     }
 
@@ -2358,7 +2382,7 @@ metadata:
     fn test_resolve_override_root_path_at_git_errors_when_pwd_not_in_repo() {
         use tempfile::TempDir;
 
-        let _guard = APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap();
+        let _guard = lock_appgen_override_env();
         let temp = TempDir::new().unwrap();
         std::env::set_var("PWD", temp.path());
 

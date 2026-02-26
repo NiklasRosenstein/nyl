@@ -36,7 +36,15 @@ data:
     // Run render command with --max-depth
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--max-depth").arg("5").arg("test-resource.yaml");
+    cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
+        .arg("--max-depth")
+        .arg("5")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -157,7 +165,14 @@ data:
     // Run render command with --track-parent
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--track-parent").arg("test-resource.yaml");
+    cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
+        .arg("--track-parent")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -286,6 +301,11 @@ data:
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
         .arg("--max-depth")
         .arg("3")
         .arg("--track-parent")
