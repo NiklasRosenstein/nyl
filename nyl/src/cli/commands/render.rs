@@ -325,28 +325,20 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         &args.common.exclude_kind,
     )?;
 
+    // In online mode, require cluster connectivity.
+    let kube_client = if args.offline {
+        None
+    } else {
+        Some(KubeRsClient::from_profile(&profile, None).await?)
+    };
+
     // In online mode, resolve missing namespaces for namespaced resources.
-    // Skip cluster access when no resource is missing metadata.namespace.
     if should_resolve_namespaces(&final_manifests, args.offline) {
-        match KubeRsClient::from_profile(&profile, None).await {
-            Ok(client) => {
-                let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
-                if let Err(error) =
-                    resolve_manifest_namespaces(&client, &mut final_manifests, release_namespace_hint).await
-                {
-                    tracing::warn!(
-                        "Failed to resolve missing namespaces from cluster metadata, continuing without namespace inference: {}",
-                        error
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Failed to initialize Kubernetes client for namespace inference, continuing without namespace inference: {}",
-                    error
-                );
-            }
-        }
+        let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
+        let client = kube_client
+            .as_ref()
+            .expect("kube client must exist when namespace resolution is enabled");
+        resolve_manifest_namespaces(client, &mut final_manifests, release_namespace_hint).await?;
     }
 
     // Print duplicate warning summary if any
