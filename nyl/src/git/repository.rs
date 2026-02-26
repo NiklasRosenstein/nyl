@@ -1,4 +1,4 @@
-use git2::{FetchOptions, Oid, Repository};
+use git2::{ErrorCode, FetchOptions, Oid, Repository};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,6 +13,37 @@ pub struct BareRepository {
 }
 
 impl BareRepository {
+    fn resolve_object_to_commit_oid(&self, oid: Oid) -> Result<Oid> {
+        let object = match self.repo.find_object(oid, None) {
+            Ok(object) => object,
+            Err(error) if error.code() == ErrorCode::NotFound => {
+                self.fetch_objects(oid)?;
+                self.repo.find_object(oid, None)?
+            }
+            Err(error) => return Err(GitError::Repository(error)),
+        };
+
+        let commit = object.peel_to_commit()?;
+        let commit_oid = commit.id();
+        if commit_oid != oid {
+            tracing::debug!("Resolved object {} to commit {}", oid, commit_oid);
+        }
+        Ok(commit_oid)
+    }
+
+    fn resolve_reference_to_commit_oid(&self, reference_name: &str) -> Result<Option<Oid>> {
+        let reference = match self.repo.find_reference(reference_name) {
+            Ok(reference) => reference,
+            Err(_) => return Ok(None),
+        };
+
+        if let Some(oid) = reference.target() {
+            return self.resolve_object_to_commit_oid(oid).map(Some);
+        }
+
+        Ok(None)
+    }
+
     /// Get or create a bare repository at the specified path
     pub fn get_or_create(url: &str, path: &Path, credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
         let repo = if path.exists() {
@@ -124,50 +155,39 @@ impl BareRepository {
     /// Resolve a ref (branch, tag, or commit) to an OID
     pub fn resolve_ref(&self, ref_name: &str) -> Result<Oid> {
         // Try direct ref lookup first (branches, tags)
-        if let Ok(reference) = self.repo.find_reference(ref_name) {
-            if let Some(oid) = reference.target() {
-                return Ok(oid);
-            }
+        if let Some(oid) = self.resolve_reference_to_commit_oid(ref_name)? {
+            return Ok(oid);
         }
 
         // Try with refs/heads/ prefix (branches)
         let branch_ref = format!("refs/heads/{}", ref_name);
-        if let Ok(reference) = self.repo.find_reference(&branch_ref) {
-            if let Some(oid) = reference.target() {
-                return Ok(oid);
-            }
+        if let Some(oid) = self.resolve_reference_to_commit_oid(&branch_ref)? {
+            return Ok(oid);
         }
 
         // Try with refs/tags/ prefix (tags)
         let tag_ref = format!("refs/tags/{}", ref_name);
-        if let Ok(reference) = self.repo.find_reference(&tag_ref) {
-            if let Some(oid) = reference.target() {
-                return Ok(oid);
-            }
+        if let Some(oid) = self.resolve_reference_to_commit_oid(&tag_ref)? {
+            return Ok(oid);
         }
 
         // Try parsing as OID (commit hash)
         if let Ok(oid) = Oid::from_str(ref_name) {
-            // Verify the object exists
-            if self.repo.find_object(oid, None).is_ok() {
-                return Ok(oid);
+            if let Ok(commit_oid) = self.resolve_object_to_commit_oid(oid) {
+                return Ok(commit_oid);
             }
         }
 
         // Try HEAD if ref_name is "HEAD"
         if ref_name == "HEAD" {
-            if let Ok(head) = self.repo.head() {
-                if let Some(oid) = head.target() {
-                    return Ok(oid);
-                }
+            if let Some(oid) = self.resolve_reference_to_commit_oid("HEAD")? {
+                return Ok(oid);
             }
 
             // Bare repos created via init+fetch have no local HEAD.
             // Use the remote HEAD fetched into refs/remotes/origin/HEAD.
-            if let Ok(reference) = self.repo.find_reference("refs/remotes/origin/HEAD") {
-                if let Some(oid) = reference.target() {
-                    return Ok(oid);
-                }
+            if let Some(oid) = self.resolve_reference_to_commit_oid("refs/remotes/origin/HEAD")? {
+                return Ok(oid);
             }
         }
 
