@@ -32,9 +32,8 @@ impl BareRepository {
     }
 
     fn resolve_reference_to_commit_oid(&self, reference_name: &str) -> Result<Option<Oid>> {
-        let reference = match self.repo.find_reference(reference_name) {
-            Ok(reference) => reference,
-            Err(_) => return Ok(None),
+        let Ok(reference) = self.repo.find_reference(reference_name) else {
+            return Ok(None);
         };
 
         if let Some(oid) = reference.target() {
