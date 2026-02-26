@@ -111,6 +111,13 @@ fn create_test_git_repo(repo_dir: &Path) {
         .current_dir(repo_dir)
         .output()
         .expect("Failed to create tag");
+
+    // Create an annotated tag
+    Command::new("git")
+        .args(["tag", "-a", "v1.1.0", "-m", "Annotated release v1.1.0"])
+        .current_dir(repo_dir)
+        .output()
+        .expect("Failed to create annotated tag");
 }
 
 #[test]
@@ -253,6 +260,32 @@ fn test_git_manager_cache_reuse() {
             .resolve_ref(&path_to_file_url(temp_repo.path()), Some("main"), None)
             .unwrap();
 
+        assert!(result.exists());
+        assert!(result.join("test.txt").exists());
+    }
+}
+
+#[test]
+fn test_git_manager_cache_reuse_annotated_tag() {
+    setup_test_env();
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_git_repo(temp_repo.path());
+
+    let cache_dir = TempDir::new().unwrap();
+    let cache_path = cache_dir.path().to_path_buf();
+    let repo_url = path_to_file_url(temp_repo.path());
+
+    {
+        let mut manager = GitManager::with_cache_dir(&cache_path);
+        let result = manager.resolve_ref(&repo_url, Some("v1.1.0"), None).unwrap();
+        assert!(result.exists());
+        assert!(result.join("test.txt").exists());
+    }
+
+    {
+        let mut manager = GitManager::with_cache_dir(&cache_path);
+        let result = manager.resolve_ref(&repo_url, Some("v1.1.0"), None).unwrap();
         assert!(result.exists());
         assert!(result.join("test.txt").exists());
     }
