@@ -2344,9 +2344,7 @@ metadata:
         std::env::set_var("PWD", temp.path());
 
         let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "repo").unwrap();
-        let resolved = std::fs::canonicalize(resolved).unwrap();
-        let expected = std::fs::canonicalize(repo).unwrap();
-        assert_eq!(resolved, expected);
+        assert_eq!(resolved.canonicalize().unwrap(), repo.canonicalize().unwrap());
         std::env::remove_var("PWD");
     }
 
@@ -2364,9 +2362,7 @@ metadata:
         std::env::set_var("PWD", &nested);
 
         let resolved = resolve_override_root_path("NYL_APPGEN_REPO_PATH_OVERRIDE", "@git").unwrap();
-        let resolved = std::fs::canonicalize(resolved).unwrap();
-        let expected = std::fs::canonicalize(repo_root).unwrap();
-        assert_eq!(resolved, expected);
+        assert_eq!(resolved.canonicalize().unwrap(), repo_root.canonicalize().unwrap());
         std::env::remove_var("PWD");
     }
 
