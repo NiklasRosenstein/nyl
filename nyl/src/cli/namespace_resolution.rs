@@ -150,8 +150,82 @@ fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kubernetes::MockKubeClient;
+    use crate::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
+    use async_trait::async_trait;
+    use kube::api::DynamicObject;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    struct CountingKubeClient {
+        inner: MockKubeClient,
+        is_namespaced_calls: Arc<Mutex<HashMap<GroupVersionKind, usize>>>,
+    }
+
+    impl CountingKubeClient {
+        fn new(inner: MockKubeClient) -> Self {
+            Self {
+                inner,
+                is_namespaced_calls: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        fn is_namespaced_call_count(&self, gvk: &GroupVersionKind) -> usize {
+            self.is_namespaced_calls.lock().unwrap().get(gvk).copied().unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl KubeClient for CountingKubeClient {
+        async fn get_resource(
+            &self,
+            gvk: &GroupVersionKind,
+            namespace: Option<&str>,
+            name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            self.inner.get_resource(gvk, namespace, name).await
+        }
+
+        async fn apply_resource(
+            &self,
+            resource: &DynamicObject,
+            field_manager: &str,
+            dry_run: bool,
+        ) -> Result<ApplyOutcome> {
+            self.inner.apply_resource(resource, field_manager, dry_run).await
+        }
+
+        async fn get_server_version(&self) -> Result<String> {
+            self.inner.get_server_version().await
+        }
+
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            self.inner.get_api_versions().await
+        }
+
+        async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            {
+                let mut counts = self.is_namespaced_calls.lock().unwrap();
+                *counts.entry(gvk.clone()).or_insert(0) += 1;
+            }
+            self.inner.is_namespaced(gvk).await
+        }
+
+        fn default_namespace(&self) -> &str {
+            self.inner.default_namespace()
+        }
+
+        async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+            self.inner.delete_resource(gvk, namespace, name).await
+        }
+
+        async fn get_normalized_resource(
+            &self,
+            resource: &DynamicObject,
+            field_manager: &str,
+        ) -> Result<DynamicObject> {
+            self.inner.get_normalized_resource(resource, field_manager).await
+        }
+    }
 
     #[tokio::test]
     async fn test_resolve_manifest_namespaces_keeps_explicit_namespace() {
@@ -285,5 +359,65 @@ mod tests {
             name: "sa".to_string(),
         }));
         assert_eq!(adjusted.values().next().copied(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_manifest_namespaces_caches_scope_lookup_per_gvk() {
+        let inner = MockKubeClient::with_default_namespace("ctx-default");
+        let client = CountingKubeClient::new(inner);
+        let mut manifests = vec![
+            json!({
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": "sa-one"}
+            }),
+            json!({
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": "sa-two"}
+            }),
+        ];
+
+        resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+            .await
+            .unwrap();
+
+        let gvk = GroupVersionKind {
+            group: String::new(),
+            version: "v1".to_string(),
+            kind: "ServiceAccount".to_string(),
+        };
+        assert_eq!(client.is_namespaced_call_count(&gvk), 1);
+    }
+
+    #[tokio::test]
+    async fn test_adjust_duplicate_keys_caches_scope_lookup_per_gvk() {
+        let inner = MockKubeClient::with_default_namespace("ctx-default");
+        let client = CountingKubeClient::new(inner);
+        let mut duplicates = HashMap::new();
+        let key = ResourceKey {
+            gvk: GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ServiceAccount".to_string(),
+            },
+            namespace: None,
+            name: "sa".to_string(),
+        };
+        duplicates.insert(key.clone(), 2);
+        duplicates.insert(
+            ResourceKey {
+                gvk: key.gvk.clone(),
+                namespace: None,
+                name: "sa-2".to_string(),
+            },
+            2,
+        );
+
+        adjust_duplicate_keys_for_namespace_resolution(&client, &duplicates, Some("release"))
+            .await
+            .unwrap();
+
+        assert_eq!(client.is_namespaced_call_count(&key.gvk), 1);
     }
 }

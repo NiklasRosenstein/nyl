@@ -13,6 +13,7 @@
   - [Troubleshooting Components](./components/troubleshooting.md)
 - [Git Integration](./git-integration.md)
 - [Commands](./commands/README.md)
+  - [Rendering Pipeline](./commands/rendering-pipeline.md)
   - [new](./commands/new.md)
   - [validate](./commands/validate.md)
   - [render](./commands/render.md)

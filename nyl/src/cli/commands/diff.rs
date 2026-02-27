@@ -1,16 +1,14 @@
 use clap::{Args, ValueEnum};
 use colored::Colorize;
-use kube::Client;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     cli::{
-        commands::render::{render_manifests_complete, RenderOptions},
+        commands::render::{run_render_preflight, RenderOptions, RenderPreflightOptions},
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        extract_name, DiffEngine, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
-        ResourceKey,
+        extract_name, DiffEngine, KubeClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage, ResourceKey,
     },
     NylError, Result,
 };
@@ -65,25 +63,27 @@ pub struct DiffArgs {
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
-    // 1. Render desired manifests using complete pipeline
-    let (mut desired_manifests, nyl_release, profile, _env_name, duplicates) = render_manifests_complete(
-        &args.common.path,
-        args.common.only_source_kind.as_deref(),
-        args.common.profile.as_deref(),
-        false, // offline
-        None,  // cli_kube_version
-        &[],   // cli_api_versions
-        args.common.max_depth,
-        args.common.track_parent,
-    )
+    let preflight = run_render_preflight(RenderPreflightOptions {
+        common: &args.common,
+        offline: false,
+        kube_version: None,
+        kube_api_versions: &[],
+        context_override: args.context.as_deref(),
+        resolve_namespaces: false,
+        release_namespace_hint: None,
+        adjust_duplicate_keys: false,
+    })
     .await?;
 
-    // Apply post-render kind filtering
-    desired_manifests = crate::cli::filter::filter_manifests_by_kind(
-        desired_manifests,
-        &args.common.only_kind,
-        &args.common.exclude_kind,
-    )?;
+    let mut desired_manifests = preflight.manifests;
+    let nyl_release = preflight.nyl_release;
+    let mut duplicates = preflight.duplicates;
+    let kube_client = preflight
+        .kube_client
+        .ok_or_else(|| NylError::Config("Kubernetes client unavailable in online mode".to_string()))?;
+    let client = preflight
+        .raw_client
+        .ok_or_else(|| NylError::Config("Raw Kubernetes client unavailable in online mode".to_string()))?;
 
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to diff");
@@ -104,14 +104,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         (name, namespace)
     };
 
-    // 4. Initialize Kubernetes client
-    let config = KubeRsClient::load_kube_config_from_profile(&profile, args.context.as_deref()).await?;
-    let client = Client::try_from(config)?;
-    let kube_client = KubeRsClient::from_client(client.clone()).await?;
-
-    // Resolve missing namespaces for namespaced resources.
+    // Resolve missing namespaces with release namespace hint for diff/apply parity.
     resolve_manifest_namespaces(&kube_client, &mut desired_manifests, Some(&release_namespace)).await?;
-    let duplicates =
+    duplicates =
         adjust_duplicate_keys_for_namespace_resolution(&kube_client, &duplicates, Some(&release_namespace)).await?;
 
     // Display duplicate resources warning if any

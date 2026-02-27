@@ -1,11 +1,13 @@
 use clap::Args;
 use glob::{glob, Pattern};
+use kube::Client;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
-    cli::namespace_resolution::resolve_manifest_namespaces,
+    cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     config::ProjectConfig,
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
     helm::{HelmChartResolver, HelmTemplateExecutor},
@@ -84,6 +86,87 @@ enum OutputFormat {
     Yaml,
     #[allow(dead_code)]
     Json,
+}
+
+/// Shared render preflight arguments for render/diff/apply commands.
+pub struct RenderPreflightOptions<'a> {
+    pub common: &'a RenderOptions,
+    pub offline: bool,
+    pub kube_version: Option<&'a str>,
+    pub kube_api_versions: &'a [String],
+    pub context_override: Option<&'a str>,
+    pub resolve_namespaces: bool,
+    pub release_namespace_hint: Option<&'a str>,
+    pub adjust_duplicate_keys: bool,
+}
+
+/// Shared render preflight output for render/diff/apply commands.
+pub struct RenderPreflightResult {
+    pub manifests: Vec<serde_json::Value>,
+    pub nyl_release: Option<NylRelease>,
+    pub profile: Profile,
+    pub env_name: String,
+    pub duplicates: HashMap<ResourceKey, usize>,
+    pub kube_client: Option<KubeRsClient>,
+    pub raw_client: Option<Client>,
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
+    let (mut manifests, nyl_release, profile, env_name, mut duplicates) = render_manifests_complete(
+        &options.common.path,
+        options.common.only_source_kind.as_deref(),
+        options.common.profile.as_deref(),
+        options.offline,
+        options.kube_version,
+        options.kube_api_versions,
+        options.common.max_depth,
+        options.common.track_parent,
+    )
+    .await?;
+
+    manifests = crate::cli::filter::filter_manifests_by_kind(
+        manifests,
+        &options.common.only_kind,
+        &options.common.exclude_kind,
+    )?;
+
+    // In non-offline mode, require cluster connectivity before proceeding.
+    let (kube_client, raw_client) = if options.offline {
+        (None, None)
+    } else {
+        let config = KubeRsClient::load_kube_config_from_profile(&profile, options.context_override).await?;
+        let client = Client::try_from(config)?;
+        (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
+    };
+
+    let release_namespace_hint = options
+        .release_namespace_hint
+        .or_else(|| nyl_release.as_ref().map(|release| release.metadata.namespace.as_str()));
+
+    if options.resolve_namespaces && should_resolve_namespaces(&manifests, options.offline) {
+        let client = kube_client
+            .as_ref()
+            .expect("kube client must exist when namespace resolution is enabled");
+        resolve_manifest_namespaces(client, &mut manifests, release_namespace_hint).await?;
+    }
+
+    if options.adjust_duplicate_keys {
+        if let Some(client) = kube_client.as_ref() {
+            duplicates =
+                adjust_duplicate_keys_for_namespace_resolution(client, &duplicates, release_namespace_hint).await?;
+        }
+    }
+
+    Ok(RenderPreflightResult {
+        manifests,
+        nyl_release,
+        profile,
+        env_name,
+        duplicates,
+        kube_client,
+        raw_client,
+    })
 }
 
 /// Complete manifest rendering pipeline used by render, diff, and apply.
@@ -306,45 +389,22 @@ fn select_profile_from_project(project_config: &ProjectConfig, requested: Option
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    let (mut final_manifests, nyl_release, profile, _, duplicates) = render_manifests_complete(
-        &args.common.path,
-        args.common.only_source_kind.as_deref(),
-        args.common.profile.as_deref(),
-        args.offline,
-        args.kube_version.as_deref(),
-        &args.kube_api_versions,
-        args.common.max_depth,
-        args.common.track_parent,
-    )
+    let preflight = run_render_preflight(RenderPreflightOptions {
+        common: &args.common,
+        offline: args.offline,
+        kube_version: args.kube_version.as_deref(),
+        kube_api_versions: &args.kube_api_versions,
+        context_override: None,
+        resolve_namespaces: true,
+        release_namespace_hint: None,
+        adjust_duplicate_keys: false,
+    })
     .await?;
 
-    // Apply post-render kind filtering
-    final_manifests = crate::cli::filter::filter_manifests_by_kind(
-        final_manifests,
-        &args.common.only_kind,
-        &args.common.exclude_kind,
-    )?;
-
-    // In online mode, require cluster connectivity.
-    let kube_client = if args.offline {
-        None
-    } else {
-        Some(KubeRsClient::from_profile(&profile, None).await?)
-    };
-
-    // In online mode, resolve missing namespaces for namespaced resources.
-    if should_resolve_namespaces(&final_manifests, args.offline) {
-        let release_namespace_hint = nyl_release.as_ref().map(|release| release.metadata.namespace.as_str());
-        let client = kube_client
-            .as_ref()
-            .expect("kube client must exist when namespace resolution is enabled");
-        resolve_manifest_namespaces(client, &mut final_manifests, release_namespace_hint).await?;
-    }
-
     // Print duplicate warning summary if any
-    if !duplicates.is_empty() {
-        let total_unique = duplicates.len();
-        let total_ignored: usize = duplicates.values().map(|count| count - 1).sum();
+    if !preflight.duplicates.is_empty() {
+        let total_unique = preflight.duplicates.len();
+        let total_ignored: usize = preflight.duplicates.values().map(|count| count - 1).sum();
         tracing::warn!(
             "Found {} unique resources with duplicates ({} total duplicates ignored, keeping last occurrence)",
             total_unique,
@@ -352,7 +412,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         );
     }
 
-    output_manifests(&final_manifests, OutputFormat::Yaml)?;
+    output_manifests(&preflight.manifests, OutputFormat::Yaml)?;
     Ok(())
 }
 

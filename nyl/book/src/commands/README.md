@@ -11,6 +11,7 @@ nyl provides several commands for managing Kubernetes manifests:
 
 ### Phase 2+ (Coming Soon)
 
+- [`rendering-pipeline`](./rendering-pipeline.md) - Shared rendering pipeline used by render/diff/apply
 - [`render`](./render.md) - Render Kubernetes manifests
 - [`diff`](./diff.md) - Show diff between rendered manifests and cluster state
 - [`apply`](./apply.md) - Apply rendered manifests to the cluster
