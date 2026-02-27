@@ -62,6 +62,7 @@ pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
     api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
+    crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
 }
 
 impl KubeRsClient {
@@ -151,6 +152,7 @@ impl KubeRsClient {
             client,
             discovery,
             api_resources,
+            crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -162,6 +164,7 @@ impl KubeRsClient {
             client,
             discovery,
             api_resources,
+            crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -221,6 +224,10 @@ impl KubeRsClient {
             return Ok(None);
         }
 
+        if let Some(cached) = self.crd_scope_cache.lock().unwrap().get(gvk).cloned() {
+            return Ok(cached);
+        }
+
         let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
         let crds = match crd_api.list(&ListParams::default()).await {
             Ok(crds) => crds,
@@ -230,6 +237,7 @@ impl KubeRsClient {
                     message = %err.message,
                     "Unable to list CRDs for scope fallback; proceeding without CRD fallback"
                 );
+                self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
                 return Ok(None);
             }
             Err(err) => return Err(err.into()),
@@ -237,10 +245,15 @@ impl KubeRsClient {
 
         for crd in crds.items {
             if let Some(namespaced) = scope_from_crd_for_gvk(&crd, gvk) {
+                self.crd_scope_cache
+                    .lock()
+                    .unwrap()
+                    .insert(gvk.clone(), Some(namespaced));
                 return Ok(Some(namespaced));
             }
         }
 
+        self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
         Ok(None)
     }
 }

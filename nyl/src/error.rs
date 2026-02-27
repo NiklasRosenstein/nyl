@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-pub const API_RESOURCE_NOT_FOUND_PREFIX: &str = "API resource not found for ";
+pub(crate) const API_RESOURCE_NOT_FOUND_PREFIX: &str = "API resource not found for ";
 
 /// Main error type for nyl
 #[derive(Error, Debug)]
