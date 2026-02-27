@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    error::API_RESOURCE_NOT_FOUND_PREFIX,
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
     profiles::{KubeconfigSource, Profile},
     NylError, Result,
@@ -213,7 +214,7 @@ impl KubeRsClient {
         };
 
         Err(NylError::Config(format!(
-            "API resource not found for {}/{}{}",
+            "{API_RESOURCE_NOT_FOUND_PREFIX}{}/{}{}",
             group_version, gvk.kind, versions_hint
         )))
     }
@@ -541,8 +542,8 @@ impl MockKubeClient {
         overrides.insert(kind.to_string(), namespaced);
     }
 
-    fn default_scope_for_kind(kind: &str) -> bool {
-        !is_known_cluster_scoped_kind(kind)
+    fn default_scope_for_gvk(gvk: &GroupVersionKind) -> bool {
+        !is_known_cluster_scoped_gvk(gvk)
     }
 }
 
@@ -726,7 +727,7 @@ impl KubeClient for MockKubeClient {
         Ok(overrides
             .get(&gvk.kind)
             .copied()
-            .unwrap_or_else(|| Self::default_scope_for_kind(&gvk.kind)))
+            .unwrap_or_else(|| Self::default_scope_for_gvk(gvk)))
     }
 
     fn default_namespace(&self) -> &str {

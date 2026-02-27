@@ -215,7 +215,9 @@ mod tests {
 
     #[test]
     fn test_is_api_resource_not_found_error() {
-        let err = NylError::Config("API resource not found for kyverno.io/v1/ClusterPolicy".to_string());
+        let err = NylError::Config(format!(
+            "{API_RESOURCE_NOT_FOUND_PREFIX}kyverno.io/v1/ClusterPolicy"
+        ));
         assert!(err.is_api_resource_not_found_error());
 
         let other = NylError::Config("some other config error".to_string());
