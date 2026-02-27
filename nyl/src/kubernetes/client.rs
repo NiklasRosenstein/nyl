@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kube::{
-    api::{Api, DynamicObject, Patch, PatchParams},
+    api::{Api, DynamicObject, ListParams, Patch, PatchParams},
     discovery::{ApiCapabilities, ApiResource, Discovery, Scope},
     Client, ResourceExt,
 };
@@ -237,7 +237,7 @@ impl KubeRsClient {
         }
 
         let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
-        let crds = crd_api.list(&Default::default()).await?;
+        let crds = crd_api.list(&ListParams::default()).await?;
 
         for crd in crds.items {
             if let Some(namespaced) = scope_from_crd_for_gvk(&crd, gvk) {
