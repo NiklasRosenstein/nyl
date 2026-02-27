@@ -39,6 +39,12 @@ pub trait KubeClient: Send + Sync {
     /// Get all available API versions from the cluster
     async fn get_api_versions(&self) -> Result<Vec<String>>;
 
+    /// Return true if the resource kind is namespaced.
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool>;
+
+    /// Return the default namespace from kubeconfig/context.
+    fn default_namespace(&self) -> &str;
+
     /// Delete a resource from the cluster
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()>;
 
@@ -55,6 +61,7 @@ pub trait KubeClient: Send + Sync {
 pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
+    api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
 }
 
 impl KubeRsClient {
@@ -137,31 +144,48 @@ impl KubeRsClient {
         let client = Client::try_from(config)?;
         tracing::debug!("Running Kubernetes API discovery");
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
+        let api_resources = Self::build_api_resource_index(&discovery);
         tracing::debug!("Kubernetes client initialization complete");
 
-        Ok(Self { client, discovery })
+        Ok(Self {
+            client,
+            discovery,
+            api_resources,
+        })
     }
 
     /// Create a new Kubernetes client from an existing kube::Client
     pub async fn from_client(client: Client) -> Result<Self> {
         let discovery = Arc::new(Discovery::new(client.clone()).run().await?);
-        Ok(Self { client, discovery })
+        let api_resources = Self::build_api_resource_index(&discovery);
+        Ok(Self {
+            client,
+            discovery,
+            api_resources,
+        })
+    }
+
+    fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
+        let mut index = HashMap::new();
+
+        for group in discovery.groups() {
+            for (ar, caps) in group.recommended_resources() {
+                let gvk = GroupVersionKind {
+                    group: ar.group.clone(),
+                    version: ar.version.clone(),
+                    kind: ar.kind.clone(),
+                };
+                index.entry(gvk).or_insert_with(|| (ar.clone(), caps.clone()));
+            }
+        }
+
+        index
     }
 
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        // Search through all groups for matching resource
-        for group in self.discovery.groups() {
-            for (ar, caps) in group.recommended_resources() {
-                // Match by kind and version
-                if ar.kind == gvk.kind && ar.version == gvk.version {
-                    // For core resources (empty group), ar.group is also empty
-                    // For other resources, check group matches
-                    if (gvk.group.is_empty() && ar.group.is_empty()) || ar.group == gvk.group {
-                        return Ok((ar, caps));
-                    }
-                }
-            }
+        if let Some((ar, caps)) = self.api_resources.get(gvk) {
+            return Ok((ar.clone(), caps.clone()));
         }
 
         let group_version = if gvk.group.is_empty() {
@@ -337,6 +361,15 @@ impl KubeClient for KubeRsClient {
         Ok(result)
     }
 
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+        let (_ar, caps) = self.discover_api_resource(gvk)?;
+        Ok(caps.scope == Scope::Namespaced)
+    }
+
+    fn default_namespace(&self) -> &str {
+        self.client.default_namespace()
+    }
+
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
         let (ar, caps) = self.discover_api_resource(gvk)?;
 
@@ -392,13 +425,22 @@ impl KubeClient for KubeRsClient {
 /// Mock Kubernetes client for testing
 pub struct MockKubeClient {
     resources: Arc<Mutex<HashMap<ResourceKey, DynamicObject>>>,
+    kind_scope_overrides: Arc<Mutex<HashMap<String, bool>>>,
+    default_namespace: String,
 }
 
 impl MockKubeClient {
     /// Create a new mock client
     pub fn new() -> Self {
+        Self::with_default_namespace("default")
+    }
+
+    /// Create a new mock client with a specific default namespace.
+    pub fn with_default_namespace(default_namespace: impl Into<String>) -> Self {
         Self {
             resources: Arc::new(Mutex::new(HashMap::new())),
+            kind_scope_overrides: Arc::new(Mutex::new(HashMap::new())),
+            default_namespace: default_namespace.into(),
         }
     }
 
@@ -412,6 +454,32 @@ impl MockKubeClient {
     pub fn get_all_resources(&self) -> HashMap<ResourceKey, DynamicObject> {
         let store = self.resources.lock().unwrap();
         store.clone()
+    }
+
+    /// Set namespaced scope for a given Kind for testing.
+    pub fn set_kind_scope(&self, kind: &str, namespaced: bool) {
+        let mut overrides = self.kind_scope_overrides.lock().unwrap();
+        overrides.insert(kind.to_string(), namespaced);
+    }
+
+    fn default_scope_for_kind(kind: &str) -> bool {
+        // Most resources are namespaced. Explicitly list common cluster-scoped kinds.
+        !matches!(
+            kind,
+            "APIService"
+                | "ClusterRole"
+                | "ClusterRoleBinding"
+                | "CustomResourceDefinition"
+                | "MutatingWebhookConfiguration"
+                | "Namespace"
+                | "Node"
+                | "PersistentVolume"
+                | "PriorityClass"
+                | "RuntimeClass"
+                | "StorageClass"
+                | "ValidatingWebhookConfiguration"
+                | "VolumeAttachment"
+        )
     }
 }
 
@@ -513,6 +581,18 @@ impl KubeClient for MockKubeClient {
             "v1/Pod".to_string(),
             "v1/Service".to_string(),
         ])
+    }
+
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+        let overrides = self.kind_scope_overrides.lock().unwrap();
+        Ok(overrides
+            .get(&gvk.kind)
+            .copied()
+            .unwrap_or_else(|| Self::default_scope_for_kind(&gvk.kind)))
+    }
+
+    fn default_namespace(&self) -> &str {
+        &self.default_namespace
     }
 
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
@@ -745,5 +825,25 @@ mod tests {
         // Delete a resource that doesn't exist - should not error
         let result = client.delete_resource(&gvk, Some("default"), "test").await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_is_namespaced_override() {
+        let client = MockKubeClient::new();
+        let gvk = GroupVersionKind {
+            group: String::new(),
+            version: "v1".to_string(),
+            kind: "ServiceAccount".to_string(),
+        };
+
+        assert!(client.is_namespaced(&gvk).await.unwrap());
+        client.set_kind_scope("ServiceAccount", false);
+        assert!(!client.is_namespaced(&gvk).await.unwrap());
+    }
+
+    #[test]
+    fn test_mock_client_default_namespace() {
+        let client = MockKubeClient::with_default_namespace("custom");
+        assert_eq!(client.default_namespace(), "custom");
     }
 }

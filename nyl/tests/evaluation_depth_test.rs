@@ -36,7 +36,15 @@ data:
     // Run render command with --max-depth
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--max-depth").arg("5").arg("test-resource.yaml");
+    cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
+        .arg("--max-depth")
+        .arg("5")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -157,7 +165,14 @@ data:
     // Run render command with --track-parent
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("--track-parent").arg("test-resource.yaml");
+    cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
+        .arg("--track-parent")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
@@ -286,6 +301,11 @@ data:
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
         .arg("--max-depth")
         .arg("3")
         .arg("--track-parent")
@@ -321,9 +341,10 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // The command will succeed with no manifests, but we're testing that flags are accepted
+    // Command should parse flags, then fail when cluster connectivity cannot be established.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
+    cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
     cmd.arg("apply")
         .arg("--max-depth")
         .arg("5")
@@ -331,8 +352,9 @@ helm_chart_search_paths = ["."]
         .arg("--no-release")
         .arg("test-resource.yaml");
 
-    // Should succeed but with no manifests message
-    cmd.assert().success();
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to infer config"));
 }
 
 #[test]
@@ -401,15 +423,17 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // The command will succeed with no manifests, but we're testing that flags are accepted
+    // Command should parse flags, then fail when cluster connectivity cannot be established.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
+    cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
     cmd.arg("diff")
         .arg("--max-depth")
         .arg("5")
         .arg("--track-parent")
         .arg("test-resource.yaml");
 
-    // Should succeed but with no manifests message
-    cmd.assert().success();
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to infer config"));
 }

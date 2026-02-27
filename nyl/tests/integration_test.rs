@@ -70,7 +70,13 @@ data:
     // Run render command with file path
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render").arg("test-resource.yaml");
+    cmd.arg("render")
+        .arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1")
+        .arg("test-resource.yaml");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))

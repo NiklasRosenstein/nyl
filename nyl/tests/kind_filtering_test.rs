@@ -3,6 +3,14 @@ use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
+fn add_offline_render_args(cmd: &mut Command) {
+    cmd.arg("--offline")
+        .arg("--kube-version")
+        .arg("1.28.0")
+        .arg("--kube-api-versions")
+        .arg("v1,apps/v1");
+}
+
 /// Helper to create a test project structure with multiple resource types
 fn create_test_project(temp: &TempDir) {
     fs::write(
@@ -79,8 +87,9 @@ fn test_render_only_kind_crds_only() {
     // Render with --only-kind=CustomResourceDefinition
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml")
         .arg("--only-kind=CustomResourceDefinition");
 
     let output = cmd.assert().success();
@@ -104,8 +113,9 @@ fn test_render_exclude_kind_no_crds() {
     // Render with --exclude-kind=CustomResourceDefinition
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml")
         .arg("--exclude-kind=CustomResourceDefinition");
 
     let output = cmd.assert().success();
@@ -128,9 +138,9 @@ fn test_render_only_kind_multiple() {
     // Render with multiple kinds: --only-kind=ConfigMap,Secret
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
-        .arg("--only-kind=ConfigMap,Secret");
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml").arg("--only-kind=ConfigMap,Secret");
 
     let output = cmd.assert().success();
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
@@ -152,9 +162,9 @@ fn test_render_exclude_kind_multiple() {
     // Render with multiple exclude kinds: --exclude-kind=Secret,ConfigMap
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
-        .arg("--exclude-kind=Secret,ConfigMap");
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml").arg("--exclude-kind=Secret,ConfigMap");
 
     let output = cmd.assert().success();
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
@@ -194,9 +204,9 @@ metadata:
     // Filter by full apiVersion/kind
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("versioned-resources.yaml")
-        .arg("--only-kind=v1/Secret");
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("versioned-resources.yaml").arg("--only-kind=v1/Secret");
 
     let output = cmd.assert().success();
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
@@ -214,8 +224,9 @@ fn test_render_mutually_exclusive_flags() {
     // Try to use both --only-kind and --exclude-kind (should fail)
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml")
         .arg("--only-kind=ConfigMap")
         .arg("--exclude-kind=Secret");
 
@@ -232,9 +243,9 @@ fn test_render_case_sensitive() {
     // Filter with wrong case should return no results
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("render")
-        .arg("multi-resource.yaml")
-        .arg("--only-kind=configmap"); // lowercase
+    cmd.arg("render");
+    add_offline_render_args(&mut cmd);
+    cmd.arg("multi-resource.yaml").arg("--only-kind=configmap"); // lowercase
 
     let output = cmd.assert().success();
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
