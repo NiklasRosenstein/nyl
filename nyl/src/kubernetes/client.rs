@@ -224,7 +224,7 @@ impl KubeRsClient {
             return Ok(None);
         }
 
-        if let Some(cached) = self.crd_scope_cache.lock().unwrap().get(gvk).cloned() {
+        if let Some(cached) = self.crd_scope_cache.lock().unwrap().get(gvk).copied() {
             return Ok(cached);
         }
 
