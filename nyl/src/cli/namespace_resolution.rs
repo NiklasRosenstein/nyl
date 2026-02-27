@@ -39,7 +39,7 @@ pub async fn resolve_manifest_namespaces(
         } else {
             let discovered = match client.is_namespaced(&key.gvk).await {
                 Ok(v) => v,
-                Err(err) if is_api_resource_not_found_error(&err) => {
+                Err(err) if err.is_api_resource_not_found_error() => {
                     tracing::warn!(
                         api_version = %format_api_version(&key.gvk),
                         kind = %key.gvk.kind,
@@ -115,7 +115,7 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
         } else {
             let discovered = match client.is_namespaced(&key.gvk).await {
                 Ok(v) => v,
-                Err(err) if is_api_resource_not_found_error(&err) => {
+                Err(err) if err.is_api_resource_not_found_error() => {
                     tracing::warn!(
                         api_version = %format_api_version(&key.gvk),
                         kind = %key.gvk.kind,
@@ -165,10 +165,6 @@ fn format_api_version(gvk: &GroupVersionKind) -> String {
     }
 }
 
-fn is_api_resource_not_found_error(err: &NylError) -> bool {
-    matches!(err, NylError::Config(message) if message.starts_with("API resource not found for "))
-}
-
 fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
     let root = manifest
         .as_object_mut()
@@ -208,6 +204,24 @@ mod tests {
 
         fn is_namespaced_call_count(&self, gvk: &GroupVersionKind) -> usize {
             self.is_namespaced_calls.lock().unwrap().get(gvk).copied().unwrap_or(0)
+        }
+    }
+
+    struct ErroringKubeClient {
+        default_namespace: String,
+        call_counts: Arc<Mutex<HashMap<GroupVersionKind, usize>>>,
+    }
+
+    impl ErroringKubeClient {
+        fn new(default_namespace: &str) -> Self {
+            Self {
+                default_namespace: default_namespace.to_string(),
+                call_counts: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        fn call_count(&self, gvk: &GroupVersionKind) -> usize {
+            self.call_counts.lock().unwrap().get(gvk).copied().unwrap_or(0)
         }
     }
 
@@ -261,6 +275,67 @@ mod tests {
             field_manager: &str,
         ) -> Result<DynamicObject> {
             self.inner.get_normalized_resource(resource, field_manager).await
+        }
+    }
+
+    #[async_trait]
+    impl KubeClient for ErroringKubeClient {
+        async fn get_resource(
+            &self,
+            _gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            Ok(None)
+        }
+
+        async fn apply_resource(
+            &self,
+            _resource: &DynamicObject,
+            _field_manager: &str,
+            _dry_run: bool,
+        ) -> Result<ApplyOutcome> {
+            Err(NylError::Other("not used in this test".to_string()))
+        }
+
+        async fn get_server_version(&self) -> Result<String> {
+            Ok("1.30.0".to_string())
+        }
+
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            {
+                let mut counts = self.call_counts.lock().unwrap();
+                *counts.entry(gvk.clone()).or_insert(0) += 1;
+            }
+            Err(NylError::Config(format!(
+                "API resource not found for {}/{}",
+                if gvk.group.is_empty() {
+                    gvk.version.clone()
+                } else {
+                    format!("{}/{}", gvk.group, gvk.version)
+                },
+                gvk.kind
+            )))
+        }
+
+        fn default_namespace(&self) -> &str {
+            &self.default_namespace
+        }
+
+        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_normalized_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+        ) -> Result<DynamicObject> {
+            Ok(resource.clone())
         }
     }
 
@@ -456,5 +531,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.is_namespaced_call_count(&key.gvk), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_manifest_namespaces_skips_api_not_found_and_caches() {
+        let client = ErroringKubeClient::new("ctx-default");
+        let gvk = GroupVersionKind {
+            group: "kyverno.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterPolicy".to_string(),
+        };
+        let mut manifests = vec![
+            json!({
+                "apiVersion": "kyverno.io/v1",
+                "kind": "ClusterPolicy",
+                "metadata": {"name": "policy-1"}
+            }),
+            json!({
+                "apiVersion": "kyverno.io/v1",
+                "kind": "ClusterPolicy",
+                "metadata": {"name": "policy-2"}
+            }),
+        ];
+
+        let resolved = resolve_manifest_namespaces(&client, &mut manifests, Some("release"))
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, 0);
+        assert_eq!(client.call_count(&gvk), 1);
+    }
+
+    #[tokio::test]
+    async fn test_adjust_duplicate_keys_skips_api_not_found_and_caches() {
+        let client = ErroringKubeClient::new("ctx-default");
+        let gvk = GroupVersionKind {
+            group: "kyverno.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterPolicy".to_string(),
+        };
+
+        let mut duplicates = HashMap::new();
+        duplicates.insert(
+            ResourceKey {
+                gvk: gvk.clone(),
+                namespace: None,
+                name: "policy-1".to_string(),
+            },
+            2,
+        );
+        duplicates.insert(
+            ResourceKey {
+                gvk: gvk.clone(),
+                namespace: None,
+                name: "policy-2".to_string(),
+            },
+            1,
+        );
+
+        let adjusted = adjust_duplicate_keys_for_namespace_resolution(&client, &duplicates, Some("release"))
+            .await
+            .unwrap();
+
+        assert_eq!(adjusted.len(), 2);
+        assert_eq!(client.call_count(&gvk), 1);
     }
 }

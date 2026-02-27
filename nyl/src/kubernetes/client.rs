@@ -188,31 +188,20 @@ impl KubeRsClient {
             return Ok((ar.clone(), caps.clone()));
         }
 
-        if let Some((ar, caps)) = self.find_api_resource_by_group_kind(gvk) {
-            tracing::debug!(
-                requested_group = %gvk.group,
-                requested_version = %gvk.version,
-                requested_kind = %gvk.kind,
-                resolved_group = %ar.group,
-                resolved_version = %ar.version,
-                resolved_kind = %ar.kind,
-                "Falling back to discovered API resource with matching group/kind but different version"
-            );
-            return Ok((ar, caps));
-        }
-
         let group_version = if gvk.group.is_empty() {
             gvk.version.clone()
         } else {
             format!("{}/{}", gvk.group, gvk.version)
         };
 
-        let available_versions: Vec<String> = self
+        let mut available_versions: Vec<String> = self
             .api_resources
             .keys()
             .filter(|known| known.group == gvk.group && known.kind == gvk.kind)
             .map(|known| known.version.clone())
             .collect();
+        available_versions.sort();
+        available_versions.dedup();
 
         let versions_hint = if available_versions.is_empty() {
             String::new()
@@ -226,10 +215,6 @@ impl KubeRsClient {
         )))
     }
 
-    fn find_api_resource_by_group_kind(&self, gvk: &GroupVersionKind) -> Option<(ApiResource, ApiCapabilities)> {
-        find_api_resource_by_group_kind_in_index(&self.api_resources, gvk)
-    }
-
     async fn try_resolve_scope_from_crd(&self, gvk: &GroupVersionKind) -> Result<Option<bool>> {
         // Core API resources cannot be represented by CRDs.
         if gvk.group.is_empty() {
@@ -237,7 +222,18 @@ impl KubeRsClient {
         }
 
         let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
-        let crds = crd_api.list(&ListParams::default()).await?;
+        let crds = match crd_api.list(&ListParams::default()).await {
+            Ok(crds) => crds,
+            Err(kube::Error::Api(err)) if err.code == 403 || err.code == 404 => {
+                tracing::debug!(
+                    code = err.code,
+                    message = %err.message,
+                    "Unable to list CRDs for scope fallback; proceeding without CRD fallback"
+                );
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         for crd in crds.items {
             if let Some(namespaced) = scope_from_crd_for_gvk(&crd, gvk) {
@@ -247,16 +243,6 @@ impl KubeRsClient {
 
         Ok(None)
     }
-}
-
-fn find_api_resource_by_group_kind_in_index(
-    api_resources: &HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
-    gvk: &GroupVersionKind,
-) -> Option<(ApiResource, ApiCapabilities)> {
-    api_resources
-        .iter()
-        .find(|(known, _)| known.group == gvk.group && known.kind == gvk.kind)
-        .map(|(_, value)| value.clone())
 }
 
 #[async_trait]
@@ -420,15 +406,25 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
-        if is_known_cluster_scoped_kind(&gvk.kind) {
+        if is_known_cluster_scoped_gvk(gvk) {
             return Ok(false);
         }
         match self.discover_api_resource(gvk) {
             Ok((_ar, caps)) => Ok(caps.scope == Scope::Namespaced),
             Err(err) => {
-                if is_api_resource_not_found_config_error(&err) {
-                    if let Some(namespaced) = self.try_resolve_scope_from_crd(gvk).await? {
-                        return Ok(namespaced);
+                if err.is_api_resource_not_found_error() {
+                    match self.try_resolve_scope_from_crd(gvk).await {
+                        Ok(Some(namespaced)) => return Ok(namespaced),
+                        Ok(None) => {}
+                        Err(crd_err) => {
+                            tracing::debug!(
+                                requested_group = %gvk.group,
+                                requested_version = %gvk.version,
+                                requested_kind = %gvk.kind,
+                                error = %crd_err,
+                                "Failed CRD scope fallback; preserving original API resource discovery error"
+                            );
+                        }
                     }
                 }
                 Err(err)
@@ -556,6 +552,23 @@ fn is_known_cluster_scoped_kind(kind: &str) -> bool {
     )
 }
 
+fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
+    match gvk.group.as_str() {
+        "" => is_known_cluster_scoped_kind(&gvk.kind),
+        "rbac.authorization.k8s.io" => matches!(gvk.kind.as_str(), "ClusterRole" | "ClusterRoleBinding"),
+        "storage.k8s.io" => matches!(gvk.kind.as_str(), "StorageClass" | "VolumeAttachment"),
+        "admissionregistration.k8s.io" => {
+            matches!(
+                gvk.kind.as_str(),
+                "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration"
+            )
+        }
+        "apiregistration.k8s.io" => matches!(gvk.kind.as_str(), "APIService"),
+        "apiextensions.k8s.io" => matches!(gvk.kind.as_str(), "CustomResourceDefinition"),
+        _ => false,
+    }
+}
+
 fn crd_api_resource() -> ApiResource {
     ApiResource {
         group: "apiextensions.k8s.io".to_string(),
@@ -593,10 +606,6 @@ fn scope_from_crd_for_gvk(crd: &DynamicObject, gvk: &GroupVersionKind) -> Option
         "Cluster" => Some(false),
         _ => None,
     }
-}
-
-fn is_api_resource_not_found_config_error(err: &NylError) -> bool {
-    matches!(err, NylError::Config(message) if message.starts_with("API resource not found for "))
 }
 
 impl Default for MockKubeClient {
@@ -964,39 +973,20 @@ mod tests {
     }
 
     #[test]
-    fn test_find_api_resource_by_group_kind_falls_back_to_other_version() {
-        let mut api_resources = HashMap::new();
-
-        let known_gvk = GroupVersionKind {
-            group: "kyverno.io".to_string(),
-            version: "v2".to_string(),
-            kind: "ClusterPolicy".to_string(),
-        };
-        let ar = ApiResource {
-            group: "kyverno.io".to_string(),
-            version: "v2".to_string(),
-            api_version: "kyverno.io/v2".to_string(),
-            kind: "ClusterPolicy".to_string(),
-            plural: "clusterpolicies".to_string(),
-        };
-        let caps = ApiCapabilities {
-            scope: Scope::Cluster,
-            subresources: vec![],
-            operations: vec![],
-        };
-        api_resources.insert(known_gvk, (ar.clone(), caps.clone()));
-
-        let requested = GroupVersionKind {
-            group: "kyverno.io".to_string(),
+    fn test_is_known_cluster_scoped_gvk_respects_group() {
+        let built_in = GroupVersionKind {
+            group: String::new(),
             version: "v1".to_string(),
-            kind: "ClusterPolicy".to_string(),
+            kind: "Namespace".to_string(),
         };
+        assert!(is_known_cluster_scoped_gvk(&built_in));
 
-        let (resolved_ar, resolved_caps) =
-            find_api_resource_by_group_kind_in_index(&api_resources, &requested).unwrap();
-        assert_eq!(resolved_ar.version, "v2");
-        assert_eq!(resolved_ar.kind, "ClusterPolicy");
-        assert_eq!(resolved_caps.scope, Scope::Cluster);
+        let custom_same_kind = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v1".to_string(),
+            kind: "Namespace".to_string(),
+        };
+        assert!(!is_known_cluster_scoped_gvk(&custom_same_kind));
     }
 
     #[test]

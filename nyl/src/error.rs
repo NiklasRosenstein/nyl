@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+pub const API_RESOURCE_NOT_FOUND_PREFIX: &str = "API resource not found for ";
+
 /// Main error type for nyl
 #[derive(Error, Debug)]
 pub enum NylError {
@@ -114,6 +116,11 @@ impl NylError {
     pub fn is_git_error(&self) -> bool {
         matches!(self, NylError::Git(_))
     }
+
+    /// Returns true if this is an API discovery miss for a specific GVK.
+    pub fn is_api_resource_not_found_error(&self) -> bool {
+        matches!(self, NylError::Config(message) if message.starts_with(API_RESOURCE_NOT_FOUND_PREFIX))
+    }
 }
 
 impl From<kube::Error> for NylError {
@@ -204,6 +211,15 @@ mod tests {
         let display = format!("{}", helm_err);
         assert!(display.contains("Hint:"));
         assert!(display.contains("helm version"));
+    }
+
+    #[test]
+    fn test_is_api_resource_not_found_error() {
+        let err = NylError::Config("API resource not found for kyverno.io/v1/ClusterPolicy".to_string());
+        assert!(err.is_api_resource_not_found_error());
+
+        let other = NylError::Config("some other config error".to_string());
+        assert!(!other.is_api_resource_not_found_error());
     }
 
     #[test]
