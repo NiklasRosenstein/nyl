@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kube::{
-    api::{Api, DynamicObject, Patch, PatchParams},
+    api::{Api, DynamicObject, ListParams, Patch, PatchParams},
     discovery::{ApiCapabilities, ApiResource, Discovery, Scope},
     Client, ResourceExt,
 };
@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    error::API_RESOURCE_NOT_FOUND_PREFIX,
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
     profiles::{KubeconfigSource, Profile},
     NylError, Result,
@@ -62,6 +63,7 @@ pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
     api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
+    crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
 }
 
 impl KubeRsClient {
@@ -151,6 +153,7 @@ impl KubeRsClient {
             client,
             discovery,
             api_resources,
+            crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -162,6 +165,7 @@ impl KubeRsClient {
             client,
             discovery,
             api_resources,
+            crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -194,10 +198,64 @@ impl KubeRsClient {
             format!("{}/{}", gvk.group, gvk.version)
         };
 
+        let mut available_versions: Vec<String> = self
+            .api_resources
+            .keys()
+            .filter(|known| known.group == gvk.group && known.kind == gvk.kind)
+            .map(|known| known.version.clone())
+            .collect();
+        available_versions.sort();
+        available_versions.dedup();
+
+        let versions_hint = if available_versions.is_empty() {
+            String::new()
+        } else {
+            format!(" (available versions for this kind: {})", available_versions.join(", "))
+        };
+
         Err(NylError::Config(format!(
-            "API resource not found for {}/{}",
-            group_version, gvk.kind
+            "{API_RESOURCE_NOT_FOUND_PREFIX}{}/{}{}",
+            group_version, gvk.kind, versions_hint
         )))
+    }
+
+    async fn try_resolve_scope_from_crd(&self, gvk: &GroupVersionKind) -> Result<Option<bool>> {
+        // Core API resources cannot be represented by CRDs.
+        if gvk.group.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(cached) = self.crd_scope_cache.lock().unwrap().get(gvk).copied() {
+            return Ok(cached);
+        }
+
+        let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
+        let crds = match crd_api.list(&ListParams::default()).await {
+            Ok(crds) => crds,
+            Err(kube::Error::Api(err)) if err.code == 403 || err.code == 404 => {
+                tracing::debug!(
+                    code = err.code,
+                    message = %err.message,
+                    "Unable to list CRDs for scope fallback; proceeding without CRD fallback"
+                );
+                self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        for crd in crds.items {
+            if let Some(namespaced) = scope_from_crd_for_gvk(&crd, gvk) {
+                self.crd_scope_cache
+                    .lock()
+                    .unwrap()
+                    .insert(gvk.clone(), Some(namespaced));
+                return Ok(Some(namespaced));
+            }
+        }
+
+        self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
+        Ok(None)
     }
 }
 
@@ -362,8 +420,30 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
-        let (_ar, caps) = self.discover_api_resource(gvk)?;
-        Ok(caps.scope == Scope::Namespaced)
+        if is_known_cluster_scoped_gvk(gvk) {
+            return Ok(false);
+        }
+        match self.discover_api_resource(gvk) {
+            Ok((_ar, caps)) => Ok(caps.scope == Scope::Namespaced),
+            Err(err) => {
+                if err.is_api_resource_not_found_error() {
+                    match self.try_resolve_scope_from_crd(gvk).await {
+                        Ok(Some(namespaced)) => return Ok(namespaced),
+                        Ok(None) => {}
+                        Err(crd_err) => {
+                            tracing::debug!(
+                                requested_group = %gvk.group,
+                                requested_version = %gvk.version,
+                                requested_kind = %gvk.kind,
+                                error = %crd_err,
+                                "Failed CRD scope fallback; preserving original API resource discovery error"
+                            );
+                        }
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     fn default_namespace(&self) -> &str {
@@ -462,24 +542,83 @@ impl MockKubeClient {
         overrides.insert(kind.to_string(), namespaced);
     }
 
-    fn default_scope_for_kind(kind: &str) -> bool {
-        // Most resources are namespaced. Explicitly list common cluster-scoped kinds.
-        !matches!(
-            kind,
-            "APIService"
-                | "ClusterRole"
-                | "ClusterRoleBinding"
-                | "CustomResourceDefinition"
-                | "MutatingWebhookConfiguration"
-                | "Namespace"
-                | "Node"
-                | "PersistentVolume"
-                | "PriorityClass"
-                | "RuntimeClass"
-                | "StorageClass"
-                | "ValidatingWebhookConfiguration"
-                | "VolumeAttachment"
-        )
+    fn default_scope_for_gvk(gvk: &GroupVersionKind) -> bool {
+        !is_known_cluster_scoped_gvk(gvk)
+    }
+}
+
+fn is_known_cluster_scoped_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "APIService"
+            | "ClusterRole"
+            | "ClusterRoleBinding"
+            | "CustomResourceDefinition"
+            | "MutatingWebhookConfiguration"
+            | "Namespace"
+            | "Node"
+            | "PersistentVolume"
+            | "PriorityClass"
+            | "RuntimeClass"
+            | "StorageClass"
+            | "ValidatingWebhookConfiguration"
+            | "VolumeAttachment"
+    )
+}
+
+fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
+    match gvk.group.as_str() {
+        "" => is_known_cluster_scoped_kind(&gvk.kind),
+        "rbac.authorization.k8s.io" => matches!(gvk.kind.as_str(), "ClusterRole" | "ClusterRoleBinding"),
+        "storage.k8s.io" => matches!(gvk.kind.as_str(), "StorageClass" | "VolumeAttachment"),
+        "admissionregistration.k8s.io" => {
+            matches!(
+                gvk.kind.as_str(),
+                "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration"
+            )
+        }
+        "apiregistration.k8s.io" => matches!(gvk.kind.as_str(), "APIService"),
+        "apiextensions.k8s.io" => matches!(gvk.kind.as_str(), "CustomResourceDefinition"),
+        _ => false,
+    }
+}
+
+fn crd_api_resource() -> ApiResource {
+    ApiResource {
+        group: "apiextensions.k8s.io".to_string(),
+        version: "v1".to_string(),
+        api_version: "apiextensions.k8s.io/v1".to_string(),
+        kind: "CustomResourceDefinition".to_string(),
+        plural: "customresourcedefinitions".to_string(),
+    }
+}
+
+fn scope_from_crd_for_gvk(crd: &DynamicObject, gvk: &GroupVersionKind) -> Option<bool> {
+    let value = serde_json::to_value(crd).ok()?;
+    let spec = value.get("spec")?;
+    let group = spec.get("group")?.as_str()?;
+    let kind = spec.get("names")?.get("kind")?.as_str()?;
+    let scope = spec.get("scope")?.as_str()?;
+    let versions = spec.get("versions")?.as_array()?;
+
+    if group != gvk.group || kind != gvk.kind {
+        return None;
+    }
+
+    // Mirror Kubernetes behavior: only served versions are requestable.
+    let version_is_served = versions.iter().any(|v| {
+        let name = v.get("name").and_then(serde_json::Value::as_str);
+        let served = v.get("served").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        name == Some(gvk.version.as_str()) && served
+    });
+    if !version_is_served {
+        return None;
+    }
+
+    match scope {
+        "Namespaced" => Some(true),
+        "Cluster" => Some(false),
+        _ => None,
     }
 }
 
@@ -588,7 +727,7 @@ impl KubeClient for MockKubeClient {
         Ok(overrides
             .get(&gvk.kind)
             .copied()
-            .unwrap_or_else(|| Self::default_scope_for_kind(&gvk.kind)))
+            .unwrap_or_else(|| Self::default_scope_for_gvk(gvk)))
     }
 
     fn default_namespace(&self) -> &str {
@@ -845,5 +984,127 @@ mod tests {
     fn test_mock_client_default_namespace() {
         let client = MockKubeClient::with_default_namespace("custom");
         assert_eq!(client.default_namespace(), "custom");
+    }
+
+    #[test]
+    fn test_is_known_cluster_scoped_gvk_respects_group() {
+        let built_in = GroupVersionKind {
+            group: String::new(),
+            version: "v1".to_string(),
+            kind: "Namespace".to_string(),
+        };
+        assert!(is_known_cluster_scoped_gvk(&built_in));
+
+        let custom_same_kind = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v1".to_string(),
+            kind: "Namespace".to_string(),
+        };
+        assert!(!is_known_cluster_scoped_gvk(&custom_same_kind));
+    }
+
+    #[test]
+    fn test_scope_from_crd_for_gvk_cluster() {
+        let crd: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "clusterpolicies.kyverno.io"},
+            "spec": {
+                "group": "kyverno.io",
+                "names": {"kind": "ClusterPolicy"},
+                "scope": "Cluster",
+                "versions": [
+                    {"name": "v1", "served": true}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let gvk = GroupVersionKind {
+            group: "kyverno.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterPolicy".to_string(),
+        };
+
+        assert_eq!(scope_from_crd_for_gvk(&crd, &gvk), Some(false));
+    }
+
+    #[test]
+    fn test_scope_from_crd_for_gvk_namespaced() {
+        let crd: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "widgets.example.com"},
+            "spec": {
+                "group": "example.com",
+                "names": {"kind": "Widget"},
+                "scope": "Namespaced",
+                "versions": [
+                    {"name": "v1", "served": true}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let gvk = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v1".to_string(),
+            kind: "Widget".to_string(),
+        };
+
+        assert_eq!(scope_from_crd_for_gvk(&crd, &gvk), Some(true));
+    }
+
+    #[test]
+    fn test_scope_from_crd_for_gvk_rejects_unserved_version() {
+        let crd: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "clusterpolicies.kyverno.io"},
+            "spec": {
+                "group": "kyverno.io",
+                "names": {"kind": "ClusterPolicy"},
+                "scope": "Cluster",
+                "versions": [
+                    {"name": "v1", "served": false},
+                    {"name": "v2beta1", "served": true}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let gvk = GroupVersionKind {
+            group: "kyverno.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterPolicy".to_string(),
+        };
+
+        assert_eq!(scope_from_crd_for_gvk(&crd, &gvk), None);
+    }
+
+    #[test]
+    fn test_scope_from_crd_for_gvk_rejects_missing_version() {
+        let crd: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "clusterpolicies.kyverno.io"},
+            "spec": {
+                "group": "kyverno.io",
+                "names": {"kind": "ClusterPolicy"},
+                "scope": "Cluster",
+                "versions": [
+                    {"name": "v2beta1", "served": true}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let gvk = GroupVersionKind {
+            group: "kyverno.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterPolicy".to_string(),
+        };
+
+        assert_eq!(scope_from_crd_for_gvk(&crd, &gvk), None);
     }
 }
