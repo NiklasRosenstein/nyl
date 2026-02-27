@@ -37,7 +37,19 @@ pub async fn resolve_manifest_namespaces(
         let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
             *cached
         } else {
-            let discovered = client.is_namespaced(&key.gvk).await?;
+            let discovered = match client.is_namespaced(&key.gvk).await {
+                Ok(v) => v,
+                Err(err) if is_api_resource_not_found_error(&err) => {
+                    tracing::warn!(
+                        api_version = %format_api_version(&key.gvk),
+                        kind = %key.gvk.kind,
+                        "Skipping namespace resolution for resource with unknown API discovery"
+                    );
+                    scope_cache.insert(key.gvk.clone(), false);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             scope_cache.insert(key.gvk.clone(), discovered);
             discovered
         };
@@ -101,7 +113,20 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
         let is_namespaced = if let Some(cached) = scope_cache.get(&key.gvk) {
             *cached
         } else {
-            let discovered = client.is_namespaced(&key.gvk).await?;
+            let discovered = match client.is_namespaced(&key.gvk).await {
+                Ok(v) => v,
+                Err(err) if is_api_resource_not_found_error(&err) => {
+                    tracing::warn!(
+                        api_version = %format_api_version(&key.gvk),
+                        kind = %key.gvk.kind,
+                        "Skipping duplicate-key namespace adjustment for resource with unknown API discovery"
+                    );
+                    scope_cache.insert(key.gvk.clone(), false);
+                    adjusted.insert(key.clone(), *count);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             scope_cache.insert(key.gvk.clone(), discovered);
             discovered
         };
@@ -130,6 +155,18 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
     }
 
     Ok(adjusted)
+}
+
+fn format_api_version(gvk: &GroupVersionKind) -> String {
+    if gvk.group.is_empty() {
+        gvk.version.clone()
+    } else {
+        format!("{}/{}", gvk.group, gvk.version)
+    }
+}
+
+fn is_api_resource_not_found_error(err: &NylError) -> bool {
+    matches!(err, NylError::Config(message) if message.starts_with("API resource not found for "))
 }
 
 fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
