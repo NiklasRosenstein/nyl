@@ -707,8 +707,7 @@ fn generate_resource(
             Ok(manifests)
         }
     } else if kind == Some("RemoteManifest") && api_version == Some(API_VERSION) {
-        let remote_manifest: RemoteManifest = serde_json::from_value(resource.clone())
-            .map_err(|e| NylError::Config(format!("Failed to parse RemoteManifest: {}", e)))?;
+        let remote_manifest = RemoteManifest::from_value(resource)?;
         remote_manifest.validate()?;
         fetch_remote_manifest_documents(&remote_manifest)
     } else if is_nyl_component(resource)
@@ -865,31 +864,46 @@ fn generate_resource(
 
 fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
     let url = remote_manifest.spec.url.trim();
+    let sanitized_url = crate::util::sanitize_url(url);
     let output = std::process::Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location", url])
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "30",
+            url,
+        ])
         .output()
         .map_err(|e| {
             NylError::Process(format!(
                 "Failed to execute curl for RemoteManifest '{}' from {}: {}",
-                remote_manifest.metadata.name, url, e
+                remote_manifest.metadata.name, sanitized_url, e
             ))
         })?;
     if !output.status.success() {
-        return Err(NylError::Config(format!(
+        return Err(NylError::Process(format!(
             "Failed to fetch RemoteManifest '{}' from {}: curl exited with status {}: {}",
             remote_manifest.metadata.name,
-            url,
+            sanitized_url,
             output.status,
             String::from_utf8_lossy(&output.stderr)
         )));
     }
     let body = String::from_utf8(output.stdout).map_err(|e| {
-        NylError::Config(format!(
+        NylError::Process(format!(
             "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
-            remote_manifest.metadata.name, url, e
+            remote_manifest.metadata.name, sanitized_url, e
         ))
     })?;
-    let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{url}")));
+    let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{sanitized_url}")));
     let mut documents = source_ctx.parse_yaml_documents(&body)?;
     if remote_manifest.spec.override_namespace {
         override_fetched_manifest_namespaces(&mut documents, remote_manifest.metadata.namespace.as_deref());
