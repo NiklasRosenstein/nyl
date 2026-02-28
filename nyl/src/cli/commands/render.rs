@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
@@ -865,39 +866,51 @@ fn generate_resource(
 fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
     let url = remote_manifest.spec.url.trim();
     let sanitized_url = crate::util::sanitize_url(url);
-    let output = std::process::Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            "30",
-            url,
-        ])
-        .output()
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
         .map_err(|e| {
             NylError::Process(format!(
-                "Failed to execute curl for RemoteManifest '{}' from {}: {}",
+                "Failed to initialize HTTPS client for RemoteManifest '{}' from {}: {}",
                 remote_manifest.metadata.name, sanitized_url, e
             ))
         })?;
-    if !output.status.success() {
+    let response = client.get(url).send().map_err(|e| {
+        let detail = if e.is_timeout() {
+            "request timed out"
+        } else if e.is_connect() {
+            "connection failed"
+        } else {
+            "request failed"
+        };
+        NylError::Process(format!(
+            "Failed to fetch RemoteManifest '{}' from {}: {}",
+            remote_manifest.metadata.name, sanitized_url, detail
+        ))
+    })?;
+    if !response.status().is_success() {
         return Err(NylError::Process(format!(
-            "Failed to fetch RemoteManifest '{}' from {}: curl exited with status {}: {}",
+            "Failed to fetch RemoteManifest '{}' from {}: HTTP {}",
             remote_manifest.metadata.name,
             sanitized_url,
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+            response.status()
         )));
     }
-    let body = String::from_utf8(output.stdout).map_err(|e| {
+    let body_bytes = response.bytes().map_err(|e| {
+        NylError::Process(format!(
+            "Failed to read RemoteManifest response body from {}: {}",
+            sanitized_url, e
+        ))
+    })?;
+    let body = String::from_utf8(body_bytes.to_vec()).map_err(|e| {
         NylError::Process(format!(
             "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
             remote_manifest.metadata.name, sanitized_url, e

@@ -61,6 +61,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Git
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 regex = "1.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 # Diff and output
 colored = "2.1"
