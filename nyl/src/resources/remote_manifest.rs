@@ -14,6 +14,9 @@ use crate::{NylError, Result};
 pub struct RemoteManifestSpec {
     /// HTTPS URL to fetch manifest documents from
     pub url: String,
+    /// Overwrite fetched manifest metadata.namespace with RemoteManifest metadata.namespace
+    #[serde(default, rename = "overrideNamespace", skip_serializing_if = "std::ops::Not::not")]
+    pub override_namespace: bool,
 }
 
 /// RemoteManifest resource
@@ -112,6 +115,33 @@ mod tests {
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let err = remote.validate().unwrap_err();
         assert!(err.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn test_remote_manifest_override_namespace_defaults_to_false() {
+        let manifest = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {"url": "https://example.com/manifests.yaml"}
+        });
+        let remote = RemoteManifest::from_value(&manifest).unwrap();
+        assert!(!remote.spec.override_namespace);
+    }
+
+    #[test]
+    fn test_remote_manifest_override_namespace_true() {
+        let manifest = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {
+                "url": "https://example.com/manifests.yaml",
+                "overrideNamespace": true
+            }
+        });
+        let remote = RemoteManifest::from_value(&manifest).unwrap();
+        assert!(remote.spec.override_namespace);
     }
 
     #[test]

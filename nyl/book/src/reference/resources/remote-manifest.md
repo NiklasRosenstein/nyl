@@ -16,11 +16,13 @@ metadata:
   name: <name>
 spec:
   url: https://example.com/path/manifests.yaml
+  overrideNamespace: false
 ```
 
 ### Fields
 
 - `spec.url` (required): HTTPS URL containing one or more YAML/JSON documents.
+- `spec.overrideNamespace` (optional, default `false`): when `true`, fetched resources that already have `metadata.namespace` will have that value replaced with `RemoteManifest.metadata.namespace`.
 
 ## Behavior
 
@@ -28,6 +30,7 @@ spec:
 - Content is parsed as YAML multi-document stream.
 - Parsed resources are processed recursively like local resources.
 - Remote content is not rendered as a Jinja template.
+- When `spec.overrideNamespace: true`, remote manifests with `metadata.namespace` are rewritten to `RemoteManifest.metadata.namespace`.
 - Fetch or parse failures stop the command (`render`, `diff`, `apply`).
 
 ## Example

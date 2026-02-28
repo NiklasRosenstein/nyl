@@ -890,7 +890,35 @@ fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<V
         ))
     })?;
     let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{url}")));
-    source_ctx.parse_yaml_documents(&body)
+    let mut documents = source_ctx.parse_yaml_documents(&body)?;
+    if remote_manifest.spec.override_namespace {
+        override_fetched_manifest_namespaces(&mut documents, remote_manifest.metadata.namespace.as_deref());
+    }
+    Ok(documents)
+}
+
+fn override_fetched_manifest_namespaces(manifests: &mut [serde_json::Value], namespace: Option<&str>) {
+    let Some(namespace) = namespace else {
+        return;
+    };
+
+    for manifest in manifests {
+        let Some(obj) = manifest.as_object_mut() else {
+            continue;
+        };
+        let metadata = obj
+            .entry("metadata")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(metadata_obj) = metadata.as_object_mut() else {
+            continue;
+        };
+        if metadata_obj.contains_key("namespace") {
+            metadata_obj.insert(
+                "namespace".to_string(),
+                serde_json::Value::String(namespace.to_string()),
+            );
+        }
+    }
 }
 
 /// Render a Helm chart
@@ -2930,6 +2958,41 @@ metadata:
         let result = generate_resource(&resource, &context, &config, "", &[], None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
+    }
+
+    #[test]
+    fn test_override_fetched_manifest_namespaces_overwrites_existing_namespace() {
+        let mut manifests = vec![
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "cm", "namespace": "old"}
+            }),
+            serde_json::json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "dep"}
+            }),
+        ];
+
+        override_fetched_manifest_namespaces(&mut manifests, Some("target"));
+
+        assert_eq!(manifests[0]["metadata"]["namespace"], "target");
+        assert!(manifests[1]["metadata"]["namespace"].is_null());
+    }
+
+    #[test]
+    fn test_override_fetched_manifest_namespaces_no_namespace_hint_is_noop() {
+        let original = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "cm", "namespace": "old"}
+        });
+        let mut manifests = vec![original.clone()];
+
+        override_fetched_manifest_namespaces(&mut manifests, None);
+
+        assert_eq!(manifests[0], original);
     }
 
     #[test]
