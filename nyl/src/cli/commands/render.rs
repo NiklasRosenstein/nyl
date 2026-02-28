@@ -426,13 +426,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
 }
 
 fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> bool {
-    !offline
-        && manifests.iter().any(|manifest| {
-            crate::kubernetes::extract_namespace(manifest)
-                .as_deref()
-                .map(str::trim)
-                .is_none_or(str::is_empty)
-        })
+    !offline && manifests.iter().any(manifest_requires_namespace_resolution)
 }
 
 fn should_initialize_cluster_clients(
@@ -446,6 +440,19 @@ fn should_initialize_cluster_clients(
         && (cluster_client_requirement == ClusterClientRequirement::Required
             || adjust_duplicate_keys
             || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
+}
+
+fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool {
+    let has_namespace = crate::kubernetes::extract_namespace(manifest)
+        .as_deref()
+        .is_some_and(|ns| !ns.trim().is_empty());
+    if has_namespace {
+        return false;
+    }
+
+    crate::kubernetes::extract_gvk(manifest)
+        .map(|gvk| !crate::kubernetes::is_known_cluster_scoped_gvk(&gvk))
+        .unwrap_or(true)
 }
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
@@ -594,6 +601,7 @@ fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig)
 /// - Missing character (e.g., ".co" instead of ".com")
 /// - Extra character (e.g., "githubb" instead of "github")
 const MAX_TYPO_DISTANCE: usize = 3;
+const MAX_REMOTE_MANIFEST_BYTES: usize = 30 * 1024 * 1024;
 
 /// Check if an API version looks like it might be a Nyl resource API version
 fn is_nyl_like_api_version(api_version: &str) -> bool {
@@ -893,7 +901,7 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
                 remote_manifest.metadata.name, sanitized_url, e
             ))
         })?;
-    let response = client.get(url).send().await.map_err(|e| {
+    let mut response = client.get(url).send().await.map_err(|e| {
         let detail = if e.is_timeout() {
             "request timed out"
         } else if e.is_connect() {
@@ -914,13 +922,32 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
             response.status()
         )));
     }
-    let body_bytes = response.bytes().await.map_err(|e| {
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_REMOTE_MANIFEST_BYTES as u64 {
+            return Err(NylError::Process(format!(
+                "RemoteManifest '{}' from {} exceeds size limit ({} bytes > {} bytes)",
+                remote_manifest.metadata.name, sanitized_url, content_length, MAX_REMOTE_MANIFEST_BYTES
+            )));
+        }
+    }
+
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
         NylError::Process(format!(
             "Failed to read RemoteManifest response body from {}: {}",
             sanitized_url, e
         ))
-    })?;
-    let body = String::from_utf8(body_bytes.to_vec()).map_err(|e| {
+    })? {
+        if body_bytes.len() + chunk.len() > MAX_REMOTE_MANIFEST_BYTES {
+            return Err(NylError::Process(format!(
+                "RemoteManifest '{}' from {} exceeds size limit (>{} bytes)",
+                remote_manifest.metadata.name, sanitized_url, MAX_REMOTE_MANIFEST_BYTES
+            )));
+        }
+        body_bytes.extend_from_slice(&chunk);
+    }
+
+    let body = String::from_utf8(body_bytes).map_err(|e| {
         NylError::Process(format!(
             "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
             remote_manifest.metadata.name, sanitized_url, e
@@ -3229,6 +3256,16 @@ metadata:
     }
 
     #[test]
+    fn test_should_not_resolve_namespaces_for_known_cluster_scoped_resources() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": "infra"}
+        })];
+        assert!(!should_resolve_namespaces(&manifests, false));
+    }
+
+    #[test]
     fn test_should_initialize_cluster_clients_offline() {
         assert!(!should_initialize_cluster_clients(
             true,
@@ -3259,6 +3296,23 @@ metadata:
         })];
 
         assert!(should_initialize_cluster_clients(
+            false,
+            ClusterClientRequirement::OnDemand,
+            true,
+            &manifests,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_should_not_initialize_cluster_clients_for_cluster_scoped_resources() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": "infra"}
+        })];
+
+        assert!(!should_initialize_cluster_clients(
             false,
             ClusterClientRequirement::OnDemand,
             true,

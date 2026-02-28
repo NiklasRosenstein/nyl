@@ -566,7 +566,7 @@ fn is_known_cluster_scoped_kind(kind: &str) -> bool {
     )
 }
 
-fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
+pub(crate) fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
     match gvk.group.as_str() {
         "" => is_known_cluster_scoped_kind(&gvk.kind),
         "rbac.authorization.k8s.io" => matches!(gvk.kind.as_str(), "ClusterRole" | "ClusterRoleBinding"),

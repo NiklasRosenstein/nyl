@@ -10,6 +10,7 @@ mod ordering;
 mod resource;
 mod state;
 
+pub(crate) use client::is_known_cluster_scoped_gvk;
 pub use client::{KubeClient, KubeRsClient, MockKubeClient};
 pub use diff::DiffEngine;
 pub use ordering::ResourceOrdering;

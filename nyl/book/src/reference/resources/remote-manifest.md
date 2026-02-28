@@ -29,6 +29,7 @@ spec:
 - URL must use `https://`.
 - Fetching uses Nyl's native HTTPS client (no shell-out), with HTTPS-only redirect policy.
 - Request timeouts are enforced (connect: 5s, total: 30s).
+- Response size is limited to 30 MiB; larger payloads fail fast.
 - Content is parsed as YAML multi-document stream.
 - Parsed resources are processed recursively like local resources.
 - Remote content is not rendered as a Jinja template.
