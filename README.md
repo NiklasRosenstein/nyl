@@ -1,75 +1,87 @@
-# Nyl Repository
+# Nyl
 
-This repository contains the Nyl project and related components for Kubernetes manifest generation.
+Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, profile-aware rendering, and ArgoCD integration.
 
-## 📦 Repository Contents
+## Highlights
 
-### [`nyl/`](nyl/) - The Nyl Tool
-Fast, efficient Kubernetes manifest generator.
+- Component-oriented workflow (Helm chart-backed resources)
+- `RemoteManifest` resources for HTTPS-hosted YAML/JSON
+- Jinja2-compatible templating (MiniJinja)
+- Profile-based environment config (for example: `dev`, `staging`, `prod`)
+- `render`, `diff`, and `apply` commands
+- ArgoCD integration via CMP container, Helm chart, and `ApplicationGenerator` resource
 
-**Key features:**
-- 🚀 Blazing fast manifest generation
-- 🔧 Helm integration
-- 🎨 Jinja2-compatible templating
-
-→ See [nyl/README.md](nyl/README.md) for installation and usage details.
-
-### [`docker/`](docker/) - ArgoCD Config Management Plugin
-Docker image containing Nyl and ArgoCD CMP Server for use as an ArgoCD plugin.
-
-**Includes:**
-- Nyl (Rust binary)
-- ArgoCD CMP Server
-- Helm, SOPS, Kyverno
-
-→ See [docker/README.md](docker/README.md) for build instructions.
-
-### [`chart/`](chart/) - ArgoCD Helm Chart
-Helm chart to deploy ArgoCD with Nyl as a Config Management Plugin.
-
-→ See [chart/README.md](chart/README.md) for installation instructions.
-
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
-# Install Nyl from releases
+# install from release (Linux x86_64)
 curl -LO https://github.com/NiklasRosenstein/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
 tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
 sudo mv nyl /usr/local/bin/
 
-# Create a new project
 nyl new project my-app
 cd my-app
-
-# Render manifests
-nyl render --profile dev
+nyl render --profile dev  # profile name is project-defined; "dev" is only an example
 ```
 
-## 🔧 Development
+## Feature Examples
 
-Install development tools with [mise](https://mise.jdx.dev/):
+### Component
+
+```yaml
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: example/v1/Nginx
+metadata:
+  name: my-nginx
+  namespace: default
+spec:
+  replicas: 3
+  image: nginx:1.25
+```
+
+Render:
 
 ```bash
-mise install
-eval "$(mise activate)"
-
-# Build and test
-mise run build       # Build release binary
-mise run test        # Run tests
-mise run lint        # Run clippy
-mise run fmt         # Format code
-mise run pre-commit  # Run all checks
-
-# Documentation
-mise run docs-serve  # Serve mdbook documentation
+nyl render examples/components/manifests/nginx.yaml --offline --kube-version 1.30.0 --kube-api-versions v1
 ```
 
-## 📚 Documentation
+### RemoteManifest
 
-- **[Nyl Tool Documentation](nyl/README.md)** - Installation, commands, examples
-- **[Component System Guide](nyl/book/src/components/overview.md)** - Component authoring, resolution, shortcuts, aliases
-- **[Online Docs](https://niklasrosenstein.github.io/nyl/)** - Complete documentation (mdbook)
+```yaml
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: RemoteManifest
+metadata:
+  name: shared-crds
+spec:
+  url: https://example.com/platform/crds.yaml
+```
 
-## 📄 License
+### ArgoCD Bootstrap
 
-MIT License - see LICENSE for details.
+Nyl ships ArgoCD integration assets in this repo:
+
+- `docker/`: Nyl CMP container image
+- `chart/`: Helm chart to deploy ArgoCD with Nyl
+- `examples/argocd-bootstrap/`: self-managing ArgoCD bootstrap using `ApplicationGenerator`
+
+```bash
+export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
+nyl apply examples/argocd-bootstrap/bootstrap.yaml
+```
+
+## Repository Layout
+
+- `nyl/`: main Rust crate and CLI
+- `docker/`: ArgoCD CMP image
+- `chart/`: ArgoCD Helm chart
+- `examples/`: runnable examples
+
+## Docs
+
+- Full docs: https://niklasrosenstein.github.io/nyl/
+- CLI and development details: [nyl/README.md](nyl/README.md)
+- Components guide: [nyl/book/src/components/overview.md](nyl/book/src/components/overview.md)
+
+## License
+
+MIT (see `LICENSE`).
