@@ -37,6 +37,7 @@ schemars = "0.8"
 # Kubernetes
 kube = { version = "0.95", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.23", features = ["latest"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 # Error handling
 thiserror = "2.0"
@@ -61,6 +62,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Git
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 regex = "1.10"
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls"] }
 
 # Diff and output
 colored = "2.1"
