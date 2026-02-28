@@ -31,7 +31,8 @@ spec:
 - Parsed resources are processed recursively like local resources.
 - Remote content is not rendered as a Jinja template.
 - When `spec.overrideNamespace: true`, remote manifests with `metadata.namespace` are rewritten to `RemoteManifest.metadata.namespace`.
-- Special case: for `ClusterRoleBinding` (`rbac.authorization.k8s.io/*`), `subjects[*].namespace` is also rewritten (ServiceAccount subjects are forced to the override namespace).
+- Special case: for `RoleBinding` and `ClusterRoleBinding` (`rbac.authorization.k8s.io/*`), `subjects[*].namespace` is also rewritten (ServiceAccount subjects are forced to the override namespace).
+- Potential future rewrite targets (currently not handled): webhook service namespaces (`MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, CRD conversion webhook), and `APIService.spec.service.namespace`.
 - Fetch or parse failures stop the command (`render`, `diff`, `apply`).
 
 ## Example

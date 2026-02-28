@@ -919,14 +919,17 @@ fn override_fetched_manifest_namespaces(manifests: &mut [serde_json::Value], nam
             );
         }
 
-        // Special case: ClusterRoleBinding subjects can carry namespaced ServiceAccount references.
+        // Special case: RoleBinding/ClusterRoleBinding subjects can carry namespaced ServiceAccount references.
         // Rewrite subject namespace references alongside metadata.namespace overrides.
-        let is_cluster_role_binding = obj.get("kind").and_then(|v| v.as_str()) == Some("ClusterRoleBinding")
-            && obj
-                .get("apiVersion")
-                .and_then(|v| v.as_str())
-                .is_some_and(|v| v.starts_with("rbac.authorization.k8s.io/"));
-        if is_cluster_role_binding {
+        let is_rbac_binding_kind = obj
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .is_some_and(|k| k == "RoleBinding" || k == "ClusterRoleBinding");
+        let is_rbac_api_group = obj
+            .get("apiVersion")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.starts_with("rbac.authorization.k8s.io/"));
+        if is_rbac_binding_kind && is_rbac_api_group {
             let Some(spec_subjects) = obj.get_mut("subjects").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
@@ -3032,6 +3035,27 @@ metadata:
                 {"kind": "User", "name": "alice"}
             ],
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "view"}
+        })];
+
+        override_fetched_manifest_namespaces(&mut manifests, Some("target"));
+        let subjects = manifests[0]["subjects"].as_array().unwrap();
+        assert_eq!(subjects[0]["namespace"], "target");
+        assert_eq!(subjects[1]["namespace"], "target");
+        assert!(subjects[2]["namespace"].is_null());
+    }
+
+    #[test]
+    fn test_override_fetched_manifest_namespaces_rewrites_role_binding_subject_namespaces() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {"name": "bind", "namespace": "source"},
+            "subjects": [
+                {"kind": "ServiceAccount", "name": "sa-a", "namespace": "old-a"},
+                {"kind": "ServiceAccount", "name": "sa-b"},
+                {"kind": "User", "name": "alice"}
+            ],
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "view"}
         })];
 
         override_fetched_manifest_namespaces(&mut manifests, Some("target"));
