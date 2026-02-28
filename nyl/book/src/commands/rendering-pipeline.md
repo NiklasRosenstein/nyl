@@ -8,7 +8,7 @@
 2. Load secrets and build the template context.
 3. Load the input manifest file and render Jinja templates.
 4. Apply `--only-source-kind` filtering on top-level input resources (before expansion).
-5. Expand resources recursively (`HelmChart`, `Component`, aliases) with `--max-depth`.
+5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`.
 6. Process `ApplicationGenerator` resources into Argo CD `Application` manifests.
 7. Apply Kyverno policies (Global scope currently supported).
 8. Deduplicate final manifests (last occurrence wins).

@@ -18,6 +18,7 @@ use crate::{
         component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
         is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_field_path, join_field_path_segments,
         parse_component_kind, path_matches_glob, ChartRef, HelmChart, KyvernoScope, NylComponent, NylRelease,
+        RemoteManifest,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -296,6 +297,7 @@ pub async fn render_manifests(
         let kind = r.get("kind").and_then(|k| k.as_str());
         let api_version = r.get("apiVersion").and_then(|a| a.as_str());
         (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+            || (kind == Some("RemoteManifest") && api_version == Some(API_VERSION))
             || api_version == Some(API_VERSION_COMPONENTS)
             || api_version
                 .zip(kind)
@@ -545,6 +547,7 @@ fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) 
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
     (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+        || (kind == Some("RemoteManifest") && api_version == Some(API_VERSION))
         || is_nyl_component(resource)
         || api_version
             .zip(kind)
@@ -642,6 +645,11 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
         return true;
     }
 
+    // Check for RemoteManifest
+    if RemoteManifest::is_remote_manifest(resource) {
+        return true;
+    }
+
     // Check for ApplicationGenerator
     if let Some(api_ver) = api_version {
         if api_ver == API_VERSION_ARGOCD && kind == Some("ApplicationGenerator") {
@@ -698,6 +706,11 @@ fn generate_resource(
         } else {
             Ok(manifests)
         }
+    } else if kind == Some("RemoteManifest") && api_version == Some(API_VERSION) {
+        let remote_manifest: RemoteManifest = serde_json::from_value(resource.clone())
+            .map_err(|e| NylError::Config(format!("Failed to parse RemoteManifest: {}", e)))?;
+        remote_manifest.validate()?;
+        fetch_remote_manifest_documents(&remote_manifest)
     } else if is_nyl_component(resource)
         || api_version
             .zip(kind)
@@ -836,7 +849,7 @@ fn generate_resource(
                     "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
                      It will be treated as a regular Kubernetes manifest. \
                      Known Nyl apiVersions: {}. \
-                     Known kinds: HelmChart, NylRelease, ApplicationGenerator, and any Component kind.",
+                     Known kinds: HelmChart, RemoteManifest, NylRelease, ApplicationGenerator, and any Component kind.",
                     api_ver,
                     kind_str,
                     api_versions_str
@@ -848,6 +861,36 @@ fn generate_resource(
         // Phase 4+: Use generator for component instantiation
         Ok(vec![resource.clone()])
     }
+}
+
+fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
+    let url = remote_manifest.spec.url.trim();
+    let output = std::process::Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--location", url])
+        .output()
+        .map_err(|e| {
+            NylError::Process(format!(
+                "Failed to execute curl for RemoteManifest '{}' from {}: {}",
+                remote_manifest.metadata.name, url, e
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(NylError::Config(format!(
+            "Failed to fetch RemoteManifest '{}' from {}: curl exited with status {}: {}",
+            remote_manifest.metadata.name,
+            url,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let body = String::from_utf8(output.stdout).map_err(|e| {
+        NylError::Config(format!(
+            "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
+            remote_manifest.metadata.name, url, e
+        ))
+    })?;
+    let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{url}")));
+    source_ctx.parse_yaml_documents(&body)
 }
 
 /// Render a Helm chart
@@ -2667,6 +2710,17 @@ metadata:
     }
 
     #[test]
+    fn test_is_known_nyl_resource_remote_manifest() {
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "test"},
+            "spec": {"url": "https://example.com/manifests.yaml"}
+        });
+        assert!(is_known_nyl_resource(&resource));
+    }
+
+    #[test]
     fn test_is_known_nyl_resource_application_generator() {
         let resource = serde_json::json!({
             "apiVersion": "argocd.nyl.niklasrosenstein.github.com/v1",
@@ -2821,6 +2875,18 @@ metadata:
     }
 
     #[test]
+    fn test_is_renderable_resource_remote_manifest() {
+        let config = test_project_config();
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "test"},
+            "spec": {"url": "https://example.com/manifests.yaml"}
+        });
+        assert!(is_renderable_resource(&resource, &config));
+    }
+
+    #[test]
     fn test_is_renderable_resource_alias() {
         let mut config = test_project_config();
         config.config.project.aliases.insert(
@@ -2844,6 +2910,26 @@ metadata:
             "metadata": {"name": "test"}
         });
         assert!(!is_renderable_resource(&resource, &config));
+    }
+
+    #[test]
+    fn test_generate_resource_remote_manifest_rejects_http_url() {
+        let config = test_project_config();
+        let context = TemplateContext {
+            values: serde_json::json!({}),
+            secrets: serde_json::json!({}),
+            profile: "default".to_string(),
+        };
+        let resource = serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {"url": "http://example.com/manifests.yaml"}
+        });
+
+        let result = generate_resource(&resource, &context, &config, "", &[], None, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("https://"));
     }
 
     #[test]
