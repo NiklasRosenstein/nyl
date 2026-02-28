@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     cli::{
-        commands::render::{run_render_preflight, RenderOptions, RenderPreflightOptions},
+        commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
@@ -69,6 +69,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         kube_version: None,
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
+        cluster_client_requirement: ClusterClientRequirement::Required,
         resolve_namespaces: false,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,

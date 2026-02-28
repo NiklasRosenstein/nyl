@@ -90,6 +90,12 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterClientRequirement {
+    OnDemand,
+    Required,
+}
+
 /// Shared render preflight arguments for render/diff/apply commands.
 pub struct RenderPreflightOptions<'a> {
     pub common: &'a RenderOptions,
@@ -97,6 +103,7 @@ pub struct RenderPreflightOptions<'a> {
     pub kube_version: Option<&'a str>,
     pub kube_api_versions: &'a [String],
     pub context_override: Option<&'a str>,
+    pub cluster_client_requirement: ClusterClientRequirement,
     pub resolve_namespaces: bool,
     pub release_namespace_hint: Option<&'a str>,
     pub adjust_duplicate_keys: bool,
@@ -133,13 +140,20 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         &options.common.exclude_kind,
     )?;
 
-    // In non-offline mode, require cluster connectivity before proceeding.
-    let (kube_client, raw_client) = if options.offline {
-        (None, None)
-    } else {
+    let should_initialize_clients = should_initialize_cluster_clients(
+        options.offline,
+        options.cluster_client_requirement,
+        options.resolve_namespaces,
+        &manifests,
+        options.adjust_duplicate_keys,
+    );
+
+    let (kube_client, raw_client) = if should_initialize_clients {
         let config = KubeRsClient::load_kube_config_from_profile(&profile, options.context_override).await?;
         let client = Client::try_from(config)?;
         (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
+    } else {
+        (None, None)
     };
 
     let release_namespace_hint = options
@@ -294,17 +308,7 @@ pub async fn render_manifests(
     let filtered = filter_resources(resources, only_source_kind)?;
 
     // 7. Check if any resources need Helm rendering (HelmChart or Component)
-    let needs_helm_rendering = filtered.iter().any(|r| {
-        let kind = r.get("kind").and_then(|k| k.as_str());
-        let api_version = r.get("apiVersion").and_then(|a| a.as_str());
-        (kind == Some("HelmChart") && api_version == Some(API_VERSION))
-            || (kind == Some("RemoteManifest") && api_version == Some(API_VERSION))
-            || api_version == Some(API_VERSION_COMPONENTS)
-            || api_version
-                .zip(kind)
-                .and_then(|(av, k)| project_config.get_alias_target_for_kind(av, k))
-                .is_some()
-    });
+    let needs_helm_rendering = needs_helm_rendering(&filtered, &project_config);
 
     // 8. Determine kube_version and api_versions (only if needed)
     let (kube_version, api_versions) = if !needs_helm_rendering {
@@ -346,7 +350,8 @@ pub async fn render_manifests(
                 &api_versions,
                 credential_provider.clone(),
                 track_parent,
-            )?;
+            )
+            .await?;
             for manifest in manifests {
                 if is_renderable_resource(&manifest, &project_config) {
                     next_pending.push(manifest);
@@ -398,6 +403,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         kube_version: args.kube_version.as_deref(),
         kube_api_versions: &args.kube_api_versions,
         context_override: None,
+        cluster_client_requirement: ClusterClientRequirement::OnDemand,
         resolve_namespaces: true,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,
@@ -427,6 +433,19 @@ fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> 
                 .map(str::trim)
                 .is_none_or(str::is_empty)
         })
+}
+
+fn should_initialize_cluster_clients(
+    offline: bool,
+    cluster_client_requirement: ClusterClientRequirement,
+    resolve_namespaces: bool,
+    manifests: &[serde_json::Value],
+    adjust_duplicate_keys: bool,
+) -> bool {
+    !offline
+        && (cluster_client_requirement == ClusterClientRequirement::Required
+            || adjust_duplicate_keys
+            || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
 }
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
@@ -556,6 +575,19 @@ fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) 
             .is_some()
 }
 
+fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig) -> bool {
+    resources.iter().any(|resource| {
+        let kind = resource.get("kind").and_then(|k| k.as_str());
+        let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+        (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+            || api_version == Some(API_VERSION_COMPONENTS)
+            || api_version
+                .zip(kind)
+                .and_then(|(av, k)| config.get_alias_target_for_kind(av, k))
+                .is_some()
+    })
+}
+
 /// Maximum Levenshtein distance for considering an API version as "similar" to a known Nyl domain.
 /// Distance of 3 allows for common typos like:
 /// - Single character substitution (e.g., "nikolas" instead of "niklas")
@@ -663,7 +695,7 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
 
 /// Generate manifests from a resource
 #[allow(clippy::too_many_lines)]
-fn generate_resource(
+async fn generate_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
@@ -689,28 +721,26 @@ fn generate_resource(
             credential_provider.clone(),
         )?;
 
-        // Add parent tracking annotations if enabled
-        if track_parent {
-            Ok(manifests
-                .into_iter()
-                .map(|mut m| {
-                    add_parent_annotations(
-                        &mut m,
-                        &chart.api_version,
-                        &chart.kind,
-                        &chart.metadata.name,
-                        chart.metadata.namespace.as_deref(),
-                    );
-                    m
-                })
-                .collect())
-        } else {
-            Ok(manifests)
-        }
+        Ok(apply_parent_tracking_annotations(
+            manifests,
+            track_parent,
+            &chart.api_version,
+            &chart.kind,
+            &chart.metadata.name,
+            chart.metadata.namespace.as_deref(),
+        ))
     } else if kind == Some("RemoteManifest") && api_version == Some(API_VERSION) {
         let remote_manifest = RemoteManifest::from_value(resource)?;
         remote_manifest.validate()?;
-        fetch_remote_manifest_documents(&remote_manifest)
+        let manifests = fetch_remote_manifest_documents(&remote_manifest).await?;
+        Ok(apply_parent_tracking_annotations(
+            manifests,
+            track_parent,
+            &remote_manifest.api_version,
+            &remote_manifest.kind,
+            &remote_manifest.metadata.name,
+            remote_manifest.metadata.namespace.as_deref(),
+        ))
     } else if is_nyl_component(resource)
         || api_version
             .zip(kind)
@@ -764,24 +794,14 @@ fn generate_resource(
                 credential_provider.clone(),
             )?;
 
-            // Add parent tracking annotations if enabled
-            if track_parent {
-                Ok(manifests
-                    .into_iter()
-                    .map(|mut m| {
-                        add_parent_annotations(
-                            &mut m,
-                            &component_api_version,
-                            &component_kind,
-                            &component_name,
-                            release_namespace.as_deref(),
-                        );
-                        m
-                    })
-                    .collect())
-            } else {
-                Ok(manifests)
-            }
+            Ok(apply_parent_tracking_annotations(
+                manifests,
+                track_parent,
+                &component_api_version,
+                &component_kind,
+                &component_name,
+                release_namespace.as_deref(),
+            ))
         } else {
             // Local component path - use existing component resolution mechanism
             let chart_dir = config.resolve_component_chart_dir(&component.kind)?;
@@ -813,24 +833,14 @@ fn generate_resource(
                 credential_provider.clone(),
             )?;
 
-            // Add parent tracking annotations if enabled
-            if track_parent {
-                Ok(manifests
-                    .into_iter()
-                    .map(|mut m| {
-                        add_parent_annotations(
-                            &mut m,
-                            &component_api_version,
-                            &component_kind,
-                            &component_name,
-                            release_namespace.as_deref(),
-                        );
-                        m
-                    })
-                    .collect())
-            } else {
-                Ok(manifests)
-            }
+            Ok(apply_parent_tracking_annotations(
+                manifests,
+                track_parent,
+                &component_api_version,
+                &component_kind,
+                &component_name,
+                release_namespace.as_deref(),
+            ))
         }
     } else {
         // Check if this looks like an unknown Nyl resource
@@ -863,10 +873,10 @@ fn generate_resource(
     }
 }
 
-fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
+async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
     let url = remote_manifest.spec.url.trim();
     let sanitized_url = crate::util::sanitize_url(url);
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -883,7 +893,7 @@ fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<V
                 remote_manifest.metadata.name, sanitized_url, e
             ))
         })?;
-    let response = client.get(url).send().map_err(|e| {
+    let response = client.get(url).send().await.map_err(|e| {
         let detail = if e.is_timeout() {
             "request timed out"
         } else if e.is_connect() {
@@ -904,7 +914,7 @@ fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<V
             response.status()
         )));
     }
-    let body_bytes = response.bytes().map_err(|e| {
+    let body_bytes = response.bytes().await.map_err(|e| {
         NylError::Process(format!(
             "Failed to read RemoteManifest response body from {}: {}",
             sanitized_url, e
@@ -933,10 +943,7 @@ fn override_fetched_manifest_namespaces(manifests: &mut [serde_json::Value], nam
         let Some(obj) = manifest.as_object_mut() else {
             continue;
         };
-        let metadata = obj
-            .entry("metadata")
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        let Some(metadata_obj) = metadata.as_object_mut() else {
+        let Some(metadata_obj) = obj.get_mut("metadata").and_then(|v| v.as_object_mut()) else {
             continue;
         };
         if metadata_obj.contains_key("namespace") {
@@ -974,6 +981,33 @@ fn override_fetched_manifest_namespaces(manifests: &mut [serde_json::Value], nam
             }
         }
     }
+}
+
+fn apply_parent_tracking_annotations(
+    manifests: Vec<serde_json::Value>,
+    track_parent: bool,
+    parent_api_version: &str,
+    parent_kind: &str,
+    parent_name: &str,
+    parent_namespace: Option<&str>,
+) -> Vec<serde_json::Value> {
+    if !track_parent {
+        return manifests;
+    }
+
+    manifests
+        .into_iter()
+        .map(|mut manifest| {
+            add_parent_annotations(
+                &mut manifest,
+                parent_api_version,
+                parent_kind,
+                parent_name,
+                parent_namespace,
+            );
+            manifest
+        })
+        .collect()
 }
 
 /// Render a Helm chart
@@ -2925,6 +2959,66 @@ metadata:
     }
 
     #[test]
+    fn test_apply_parent_tracking_annotations_remote_manifest() {
+        use crate::constants::{ANNOTATION_PARENT_KIND, ANNOTATION_PARENT_NAME, ANNOTATION_PARENT_NAMESPACE};
+
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "cm"}
+        })];
+
+        let manifests = apply_parent_tracking_annotations(
+            manifests,
+            true,
+            "nyl.niklasrosenstein.github.com/v1",
+            "RemoteManifest",
+            "remote-a",
+            Some("apps"),
+        );
+
+        let annotations = manifests[0]["metadata"]["annotations"].as_object().unwrap();
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_KIND).unwrap().as_str().unwrap(),
+            "RemoteManifest"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_NAME).unwrap().as_str().unwrap(),
+            "remote-a"
+        );
+        assert_eq!(
+            annotations.get(ANNOTATION_PARENT_NAMESPACE).unwrap().as_str().unwrap(),
+            "apps"
+        );
+    }
+
+    #[test]
+    fn test_needs_helm_rendering_ignores_remote_manifest() {
+        let config = test_project_config();
+        let resources = vec![serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {"url": "https://example.com/manifest.yaml"}
+        })];
+
+        assert!(!needs_helm_rendering(&resources, &config));
+    }
+
+    #[test]
+    fn test_needs_helm_rendering_detects_helm_chart() {
+        let config = test_project_config();
+        let resources = vec![serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "HelmChart",
+            "metadata": {"name": "chart"},
+            "spec": {"chart": {"name": "nginx"}}
+        })];
+
+        assert!(needs_helm_rendering(&resources, &config));
+    }
+
+    #[test]
     fn test_is_renderable_resource_helm_chart() {
         let config = test_project_config();
         let resource = serde_json::json!({
@@ -2995,8 +3089,8 @@ metadata:
         assert!(!is_renderable_resource(&resource, &config));
     }
 
-    #[test]
-    fn test_generate_resource_remote_manifest_rejects_http_url() {
+    #[tokio::test]
+    async fn test_generate_resource_remote_manifest_rejects_http_url() {
         let config = test_project_config();
         let context = TemplateContext {
             values: serde_json::json!({}),
@@ -3010,7 +3104,7 @@ metadata:
             "spec": {"url": "http://example.com/manifests.yaml"}
         });
 
-        let result = generate_resource(&resource, &context, &config, "", &[], None, false);
+        let result = generate_resource(&resource, &context, &config, "", &[], None, false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
     }
@@ -3034,6 +3128,18 @@ metadata:
 
         assert_eq!(manifests[0]["metadata"]["namespace"], "target");
         assert!(manifests[1]["metadata"]["namespace"].is_null());
+    }
+
+    #[test]
+    fn test_override_fetched_manifest_namespaces_does_not_add_metadata() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap"
+        })];
+
+        override_fetched_manifest_namespaces(&mut manifests, Some("target"));
+
+        assert!(manifests[0].get("metadata").is_none());
     }
 
     #[test]
@@ -3120,5 +3226,72 @@ metadata:
             "metadata": {"name": "sa", "namespace": "default"}
         })];
         assert!(!should_resolve_namespaces(&manifests, false));
+    }
+
+    #[test]
+    fn test_should_initialize_cluster_clients_offline() {
+        assert!(!should_initialize_cluster_clients(
+            true,
+            ClusterClientRequirement::Required,
+            true,
+            &[],
+            true
+        ));
+    }
+
+    #[test]
+    fn test_should_initialize_cluster_clients_required() {
+        assert!(should_initialize_cluster_clients(
+            false,
+            ClusterClientRequirement::Required,
+            false,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn test_should_initialize_cluster_clients_for_namespace_resolution() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa"}
+        })];
+
+        assert!(should_initialize_cluster_clients(
+            false,
+            ClusterClientRequirement::OnDemand,
+            true,
+            &manifests,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_should_not_initialize_cluster_clients_when_not_needed() {
+        let manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": "sa", "namespace": "default"}
+        })];
+
+        assert!(!should_initialize_cluster_clients(
+            false,
+            ClusterClientRequirement::OnDemand,
+            true,
+            &manifests,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_should_initialize_cluster_clients_for_duplicate_adjustment() {
+        assert!(should_initialize_cluster_clients(
+            false,
+            ClusterClientRequirement::OnDemand,
+            false,
+            &[],
+            true
+        ));
     }
 }

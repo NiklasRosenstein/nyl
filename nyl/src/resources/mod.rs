@@ -26,4 +26,4 @@ pub use kyverno::{
 };
 pub use nyl_release::{extract_nyl_release, NylRelease, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec};
 pub use path_glob::{join_segments as join_field_path_segments, path_matches_glob, validate_path_glob_pattern};
-pub use remote_manifest::RemoteManifest;
+pub use remote_manifest::{RemoteManifest, RemoteManifestSpec};

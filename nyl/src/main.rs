@@ -1,11 +1,14 @@
 use clap::Parser;
 use nyl::cli::Cli;
 use nyl::NylError;
+use rustls::crypto::aws_lc_rs;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    install_rustls_crypto_provider();
+
     // Parse CLI first to get verbose flag and color choice
     let cli = Cli::parse();
     let render_input_path = cli.render_input_path().map(std::string::ToString::to_string);
@@ -35,6 +38,11 @@ async fn main() {
         }
         std::process::exit(1);
     }
+}
+
+fn install_rustls_crypto_provider() {
+    // reqwest's rustls backend requires a process-global provider in rustls 0.23.
+    let _ = aws_lc_rs::default_provider().install_default();
 }
 
 fn emit_argocd_file_not_found_diagnostics(error: &NylError, render_input_path: &str) {
