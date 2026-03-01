@@ -10,7 +10,7 @@ In your project's `renovate.json`:
 {
   "extends": [
     "config:recommended",
-    "github>NiklasRosenstein/nyl:.github/renovate/nyl-helm-components.json5"
+    "github>NiklasRosenstein/nyl//.github/renovate/nyl-helm-components.json5"
   ]
 }
 ```
