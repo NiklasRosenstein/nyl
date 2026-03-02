@@ -3,7 +3,7 @@ name: chart
 description: ArgoCD Helm chart with Nyl Config Management Plugin
 type: application
 version: 0.1.0
-appVersion: "7.4.3"
+appVersion: "9.4.6"
 keywords:
   - argocd
   - nyl
