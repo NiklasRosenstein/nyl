@@ -5,9 +5,7 @@ This is a Helm chart to install ArgoCD with Nyl as a Config Management Plugin. T
 ## Goals
 
 * Bootstrap an ArgoCD instance with Nyl as a Config Management Plugin from zero to fully functional in a single command.
-* Have ArgoCD immediately own its own installation after bootstrapping.
 * If anything goes wrong, be able to easily re-run the command to get back to a fully functional state.
-* Demonstrate using SOPS to inject secrets into manifests and Helm chart values.
 
 ## Installation
 
@@ -53,26 +51,14 @@ namespace:
 nyl:
   image:
     tag: "1.0.0"
-  envSecret:
-    enabled: true
-    name: argocd-nyl-env
-    data:
-      SOPS_AGE_KEY: "your-sops-key-here"
 
-selfManage:
-  enabled: true
-  repoURL: https://github.com/your-org/your-repo.git
-  path: chart
-
-additionalValues:
-  configs:
-    secret:
-      argocdServerAdminPassword: "\$2a\$10\$..."  # bcrypt hash
-  server:
-    ingress:
-      enabled: true
-      hosts:
-        - argocd.example.com
+argocd:
+  values:
+    server:
+      ingress:
+        enabled: true
+        hosts:
+          - argocd.example.com
 EOF
 
 # Install with custom values
@@ -94,8 +80,7 @@ chart/
 ├── templates/              -- Helm templates
 │   ├── namespace.yaml      -- ArgoCD namespace
 │   ├── nyl-secret.yaml     -- Secret for Nyl environment variables (optional)
-│   ├── argocd-helmchart.yaml -- Nyl HelmChart resource for ArgoCD
-│   └── argocd-application.yaml -- Self-management Application (optional)
+│   └── argocd-helmchart.yaml -- Nyl HelmChart resource for ArgoCD
 ├── .helmignore             -- Files to exclude from package
 └── README.md               -- This file
 ```
