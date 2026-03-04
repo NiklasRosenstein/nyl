@@ -192,7 +192,7 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
         tempfile::NamedTempFile::new().map_err(|e| NylError::Config(format!("Failed to create temp file: {}", e)))?;
 
     let yaml =
-        serde_norway::to_string(values).map_err(|e| NylError::Config(format!("Failed to serialize values: {}", e)))?;
+        crate::yaml::serialize_yaml_document(values).map_err(|e| NylError::Config(format!("Failed to serialize values: {}", e)))?;
 
     temp_file
         .write_all(yaml.as_bytes())
