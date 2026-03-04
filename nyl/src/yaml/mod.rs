@@ -308,4 +308,18 @@ items:
         assert!(!yaml.contains("value: ''"));
         assert!(!yaml.contains("value: \"\""));
     }
+
+    #[test]
+    fn test_roundtrip_ambiguous_strings_preserved() {
+        let original = serde_json::json!({
+            "command": ["yes", "no", "on", "off", "true", "false"],
+            "enabled": "yes",
+            "label": "safe-string",
+        });
+
+        let yaml = serialize_yaml_document(&original).unwrap();
+        let docs = parse_yaml_documents_k8s_compatible(&yaml).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0], original);
+    }
 }
