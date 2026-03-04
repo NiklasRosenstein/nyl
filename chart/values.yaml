@@ -11,17 +11,10 @@ argocd:
   chart:
     repository: https://argoproj.github.io/argo-helm
     name: argo-cd
-    version: "7.4.3"
+    version: "9.4.6"
   
-  # ArgoCD Helm chart values
-  values:
-    dex:
-      enabled: false
-    
-    repoServer:
-      # Enable cluster role rules for in-cluster Helm and Nyl lookups
-      clusterRoleRules:
-        enabled: true
+  # ArgoCD Helm chart values (merged with nyl sidecar and additionalValues)
+  values: {}
 
 # Nyl Config Management Plugin settings
 nyl:

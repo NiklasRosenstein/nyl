@@ -38,7 +38,7 @@ spec:
     
     {{- /* Build repoServer configuration */ -}}
     {{- $repoServerValues := dict "extraContainers" (list $nylContainer) "volumes" (list (dict "name" "cmp-tmp" "emptyDir" dict)) }}
-    {{- $repoServerValues = merge $repoServerValues $defaultValues.repoServer }}
+    {{- $repoServerValues = merge $repoServerValues (default dict $defaultValues.repoServer) }}
     
     {{- /* Merge all values */ -}}
     {{- $mergedValues := merge (dict "repoServer" $repoServerValues) $defaultValues .Values.additionalValues }}
