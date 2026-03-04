@@ -13,7 +13,7 @@ argocd:
     name: argo-cd
     version: "9.4.6"
   
-  # ArgoCD Helm chart values (merged with nyl sidecar and additionalValues)
+  # ArgoCD Helm chart values (merged with nyl sidecar configuration)
   values: {}
 
 # Nyl Config Management Plugin settings
@@ -33,32 +33,7 @@ nyl:
     runAsNonRoot: true
     runAsUser: 999
   
-  # Secret containing environment variables for Nyl (e.g., SOPS_AGE_KEY)
-  # Set to null if you don't need a secret
+  # Secret containing environment variables for the Nyl CMP container
   envSecret:
     enabled: false
     name: argocd-nyl-env
-    # data:
-    #   SOPS_AGE_KEY: ""  # Set your SOPS_AGE_KEY here if needed
-
-# ArgoCD Application settings for self-management
-# Set selfManage.enabled to true to have ArgoCD manage its own installation
-selfManage:
-  enabled: false
-  repoURL: https://github.com/NiklasRosenstein/nyl.git
-  targetRevision: HEAD
-  path: chart
-
-# Additional ArgoCD Helm chart values to merge
-# This allows full customization of the ArgoCD installation
-additionalValues: {}
-  # Example: Configure admin password
-  # configs:
-  #   secret:
-  #     argocdServerAdminPassword: $2a$10$...  # bcrypt hash
-  # Example: Enable Ingress
-  # server:
-  #   ingress:
-  #     enabled: true
-  #     hosts:
-  #       - argocd.example.com

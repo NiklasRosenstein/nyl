@@ -41,5 +41,5 @@ spec:
     {{- $repoServerValues = merge $repoServerValues (default dict $defaultValues.repoServer) }}
     
     {{- /* Merge all values */ -}}
-    {{- $mergedValues := merge (dict "repoServer" $repoServerValues) $defaultValues .Values.additionalValues }}
+    {{- $mergedValues := merge (dict "repoServer" $repoServerValues) $defaultValues }}
     {{- $mergedValues | toYaml | nindent 4 }}
