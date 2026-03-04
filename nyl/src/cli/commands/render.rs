@@ -719,7 +719,7 @@ async fn generate_resource(
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
-            .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
+            .map_err(|e| crate::util::map_resource_parse_error("HelmChart", &e))?;
         let manifests = render_helm_chart(
             &chart,
             context,
@@ -757,7 +757,7 @@ async fn generate_resource(
     {
         // Parse as Component and render via the existing Helm path
         let mut component: NylComponent = serde_json::from_value(resource.clone())
-            .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
+            .map_err(|e| crate::util::map_resource_parse_error("Component", &e))?;
         if let Some(target) = config.get_alias_target_for_kind(&component.api_version, &component.kind) {
             component.kind = target.to_string();
         }

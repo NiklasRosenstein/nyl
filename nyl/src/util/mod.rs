@@ -7,9 +7,11 @@
 use sha2::{Digest, Sha256};
 
 pub mod fs;
+pub mod resource_parse_error;
 pub mod source_context;
 
 pub use fs::{find_config_file, resolve_path, resolve_paths};
+pub use resource_parse_error::map_resource_parse_error;
 pub use source_context::SourceContext;
 
 /// Compute SHA256 hash of a string
