@@ -33,8 +33,34 @@ const VALID_APPLICATION_PATH_PATTERNS: &[&str] = &[
     "spec.info.**",
 ];
 
+/// Known ArgoCD Application field-path patterns whose values are arrays and can
+/// therefore support `+field` append semantics in NylRelease overrides.
+const VALID_APPLICATION_ARRAY_FIELD_PATTERNS: &[&str] = &[
+    "metadata.finalizers",
+    "spec.source.helm.valueFiles",
+    "spec.source.helm.parameters",
+    "spec.source.helm.fileParameters",
+    "spec.source.kustomize.images",
+    "spec.source.kustomize.replicas",
+    "spec.source.kustomize.components",
+    "spec.source.kustomize.patches",
+    "spec.source.jsonnet.extVars",
+    "spec.source.jsonnet.tlas",
+    "spec.source.plugin.env",
+    "spec.sources",
+    "spec.syncPolicy.syncOptions",
+    "spec.ignoreDifferences",
+    "spec.info",
+];
+
 pub fn is_supported_application_field_path(path: &str) -> bool {
     VALID_APPLICATION_PATH_PATTERNS
+        .iter()
+        .any(|pattern| path_matches_glob(path, pattern).unwrap_or(false))
+}
+
+pub fn is_supported_application_array_field_path(path: &str) -> bool {
+    VALID_APPLICATION_ARRAY_FIELD_PATTERNS
         .iter()
         .any(|pattern| path_matches_glob(path, pattern).unwrap_or(false))
 }
@@ -58,10 +84,26 @@ mod tests {
     }
 
     #[test]
+    fn test_supported_array_field_path() {
+        assert!(is_supported_application_array_field_path("spec.syncPolicy.syncOptions"));
+        assert!(is_supported_application_array_field_path("spec.info"));
+    }
+
+    #[test]
+    fn test_unsupported_array_field_path() {
+        assert!(!is_supported_application_array_field_path("spec.syncPolicy.automated"));
+    }
+
+    #[test]
     fn test_field_catalog_patterns_are_valid() {
         for pattern in VALID_APPLICATION_PATH_PATTERNS {
             validate_path_glob_pattern(pattern).unwrap_or_else(|e| {
                 panic!("invalid field catalog pattern '{}': {}", pattern, e);
+            });
+        }
+        for pattern in VALID_APPLICATION_ARRAY_FIELD_PATTERNS {
+            validate_path_glob_pattern(pattern).unwrap_or_else(|e| {
+                panic!("invalid array field catalog pattern '{}': {}", pattern, e);
             });
         }
     }
