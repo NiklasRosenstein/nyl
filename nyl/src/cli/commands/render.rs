@@ -1258,12 +1258,162 @@ fn resolve_application_generator_source_path(
         }
     }
 
+    if let Some(local_repo_root) = try_resolve_application_generator_source_from_local_git_repo(generator) {
+        return Ok(local_repo_root);
+    }
+
     let mut git_manager = crate::git::GitManager::with_credential_provider(credential_provider)?;
     Ok(git_manager.resolve_ref(
         &generator.spec.source.repo_url,
         Some(&generator.spec.source.target_revision),
         None,
     )?)
+}
+
+fn try_resolve_application_generator_source_from_local_git_repo(
+    generator: &crate::resources::ApplicationGenerator,
+) -> Option<PathBuf> {
+    let cwd = match resolve_current_pwd() {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::trace!(
+                "Skipping local git worktree reuse for ApplicationGenerator {}: failed to resolve current directory: {}",
+                generator.metadata.name,
+                err
+            );
+            return None;
+        }
+    };
+
+    let repo = match git2::Repository::discover(&cwd) {
+        Ok(repo) => repo,
+        Err(err) => {
+            tracing::trace!(
+                "Skipping local git worktree reuse for ApplicationGenerator {}: no Git repository discovered from {}: {}",
+                generator.metadata.name,
+                cwd.display(),
+                err
+            );
+            return None;
+        }
+    };
+
+    let Some(repo_root) = repo_root_path(&repo) else {
+        tracing::trace!(
+            "Skipping local git worktree reuse for ApplicationGenerator {}: discovered repository has no worktree root",
+            generator.metadata.name
+        );
+        return None;
+    };
+
+    let requested_url = crate::git::normalize_git_url_for_equality(&generator.spec.source.repo_url);
+    let remote_urls = local_git_remote_urls(&repo);
+    if remote_urls.is_empty() {
+        tracing::trace!(
+            "Skipping local git worktree reuse for ApplicationGenerator {}: discovered repository has no remote URLs",
+            generator.metadata.name
+        );
+        return None;
+    }
+
+    if !remote_urls
+        .iter()
+        .any(|remote_url| crate::git::normalize_git_url_for_equality(remote_url) == requested_url)
+    {
+        let local_remote_urls = remote_urls
+            .iter()
+            .map(|url| crate::util::sanitize_url(url))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::trace!(
+            "Skipping local git worktree reuse for ApplicationGenerator {}: repoURL mismatch (requested={}, local remotes=[{}])",
+            generator.metadata.name,
+            crate::util::sanitize_url(&generator.spec.source.repo_url),
+            local_remote_urls
+        );
+        return None;
+    }
+
+    let requested_revision = generator.spec.source.target_revision.trim();
+    if requested_revision == "HEAD" {
+        tracing::debug!(
+            "Reusing local git worktree for ApplicationGenerator {} at {} (repoURL={}, targetRevision=HEAD)",
+            generator.metadata.name,
+            repo_root.display(),
+            crate::util::sanitize_url(&generator.spec.source.repo_url)
+        );
+        return Some(repo_root);
+    }
+
+    let Some(current_branch) = current_local_branch_name(&repo) else {
+        tracing::trace!(
+            "Skipping local git worktree reuse for ApplicationGenerator {}: current checkout is detached HEAD and targetRevision requires branch match (requested={})",
+            generator.metadata.name,
+            requested_revision
+        );
+        return None;
+    };
+
+    if requested_revision != current_branch {
+        tracing::trace!(
+            "Skipping local git worktree reuse for ApplicationGenerator {}: targetRevision mismatch (requested={}, current branch={})",
+            generator.metadata.name,
+            requested_revision,
+            current_branch
+        );
+        return None;
+    }
+
+    tracing::debug!(
+        "Reusing local git worktree for ApplicationGenerator {} at {} (repoURL={}, targetRevision={})",
+        generator.metadata.name,
+        repo_root.display(),
+        crate::util::sanitize_url(&generator.spec.source.repo_url),
+        requested_revision
+    );
+    Some(repo_root)
+}
+
+fn repo_root_path(repo: &git2::Repository) -> Option<PathBuf> {
+    repo.workdir().map(Path::to_path_buf).or_else(|| {
+        if repo.is_bare() {
+            Some(repo.path().to_path_buf())
+        } else {
+            repo.path().parent().map(Path::to_path_buf)
+        }
+    })
+}
+
+fn local_git_remote_urls(repo: &git2::Repository) -> Vec<String> {
+    let mut urls = std::collections::BTreeSet::new();
+    let Ok(remotes) = repo.remotes() else {
+        return Vec::new();
+    };
+
+    for remote_name in remotes.iter().flatten() {
+        let Ok(remote) = repo.find_remote(remote_name) else {
+            continue;
+        };
+
+        if let Some(url) = remote.url() {
+            urls.insert(url.to_string());
+        }
+        if let Some(push_url) = remote.pushurl() {
+            urls.insert(push_url.to_string());
+        }
+    }
+
+    urls.into_iter().collect()
+}
+
+fn current_local_branch_name(repo: &git2::Repository) -> Option<String> {
+    let Ok(head) = repo.head() else {
+        return None;
+    };
+    if !head.is_branch() {
+        return None;
+    }
+    head.shorthand().map(str::to_string)
 }
 
 /// Resolve override root path from env var value.
@@ -2005,6 +2155,7 @@ fn add_parent_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git2::{Repository, RepositoryInitOptions, Signature};
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
@@ -2086,6 +2237,92 @@ mod tests {
                 release_customization,
             },
         }
+    }
+
+    struct PwdCwdGuard {
+        pwd: Option<String>,
+        cwd: std::path::PathBuf,
+    }
+
+    impl PwdCwdGuard {
+        fn new() -> Self {
+            Self {
+                pwd: std::env::var("PWD").ok(),
+                cwd: std::env::current_dir().unwrap(),
+            }
+        }
+    }
+
+    impl Drop for PwdCwdGuard {
+        fn drop(&mut self) {
+            match &self.pwd {
+                Some(pwd) => std::env::set_var("PWD", pwd),
+                None => std::env::remove_var("PWD"),
+            }
+            let _ = std::env::set_current_dir(&self.cwd);
+        }
+    }
+
+    fn create_test_application_generator(
+        repo_url: &str,
+        target_revision: &str,
+    ) -> crate::resources::ApplicationGenerator {
+        use crate::resources::{
+            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+            ApplicationSource,
+        };
+        use std::collections::HashMap;
+
+        ApplicationGenerator {
+            api_version: API_VERSION_ARGOCD.to_string(),
+            kind: "ApplicationGenerator".to_string(),
+            metadata: ApplicationGeneratorMetadata {
+                name: "apps".to_string(),
+                namespace: Some("argocd".to_string()),
+            },
+            spec: ApplicationGeneratorSpec {
+                destination: ApplicationDestination {
+                    server: "https://kubernetes.default.svc".to_string(),
+                    namespace: "argocd".to_string(),
+                },
+                source: ApplicationSource {
+                    repo_url: repo_url.to_string(),
+                    target_revision: target_revision.to_string(),
+                    path: Some("clusters/default".to_string()),
+                    paths: None,
+                    include: vec!["*.yaml".to_string()],
+                    exclude: vec![".*".to_string()],
+                },
+                project: "default".to_string(),
+                sync_policy: None,
+                application_name_template: "{{ .release.name }}".to_string(),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                release_customization: None,
+            },
+        }
+    }
+
+    fn create_local_git_repo(branch: &str, remote_url: &str) -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let mut init = RepositoryInitOptions::new();
+        init.initial_head(branch);
+        let repo = Repository::init_opts(temp.path(), &init).unwrap();
+
+        std::fs::write(temp.path().join("README.md"), "test\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+        drop(tree);
+
+        let remote = repo.remote("origin", remote_url).unwrap();
+        drop(remote);
+
+        (temp, repo)
     }
 
     fn test_application_generator_for_warning() -> crate::resources::ApplicationGenerator {
@@ -2784,6 +3021,118 @@ metadata:
         assert_eq!(resolved, temp.path());
 
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+    }
+
+    #[test]
+    fn test_resolve_application_generator_source_path_reuses_local_git_repo_for_head() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+
+        let (repo_dir, _repo) = create_local_git_repo("main", "git@gitlab.com:NiklasRosenstein/config.git");
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        std::env::set_var("PWD", repo_dir.path());
+
+        let generator = create_test_application_generator("git@gitlab.com:NiklasRosenstein/config.git", "HEAD");
+
+        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            repo_dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_application_generator_source_path_reuses_local_git_repo_for_current_branch() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+        std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
+
+        let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        std::env::set_var("PWD", repo_dir.path());
+
+        let generator = create_test_application_generator("ssh://git@github.com/example/repo", "main");
+
+        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            repo_dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_repo_root_path_returns_bare_repo_path() {
+        let temp = TempDir::new().unwrap();
+        let bare_repo_path = temp.path().join("repo.git");
+        let repo = Repository::init_bare(&bare_repo_path).unwrap();
+
+        assert_eq!(
+            repo_root_path(&repo).unwrap().canonicalize().unwrap(),
+            bare_repo_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_repo_mismatch() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+
+        let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        std::env::set_var("PWD", repo_dir.path());
+
+        let generator = create_test_application_generator("git@github.com:example/other.git", "HEAD");
+
+        let resolved = try_resolve_application_generator_source_from_local_git_repo(&generator);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_target_revision_mismatch() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+
+        let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        std::env::set_var("PWD", repo_dir.path());
+
+        let generator = create_test_application_generator("git@github.com:example/repo.git", "develop");
+
+        let resolved = try_resolve_application_generator_source_from_local_git_repo(&generator);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_detached_head() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+
+        let (repo_dir, repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.set_head_detached(head_commit.id()).unwrap();
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        std::env::set_var("PWD", repo_dir.path());
+
+        let generator = create_test_application_generator("git@github.com:example/repo.git", "main");
+
+        let resolved = try_resolve_application_generator_source_from_local_git_repo(&generator);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_try_resolve_application_generator_source_from_local_git_repo_skips_outside_git_repo() {
+        let _guard = lock_appgen_override_env();
+        let _pwd_guard = PwdCwdGuard::new();
+
+        let temp = TempDir::new().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        std::env::set_var("PWD", temp.path());
+
+        let generator = create_test_application_generator("git@github.com:example/repo.git", "HEAD");
+
+        let resolved = try_resolve_application_generator_source_from_local_git_repo(&generator);
+        assert!(resolved.is_none());
     }
 
     #[test]

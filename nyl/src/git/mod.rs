@@ -198,7 +198,7 @@ fn derive_repo_root_from_source_path(raw_source_path: &str) -> Option<PathBuf> {
     None
 }
 
-fn normalize_git_url_for_equality(url: &str) -> String {
+pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
     let mut normalized = url.trim().to_lowercase();
 
     if let Some(at_pos) = normalized.find('@') {
