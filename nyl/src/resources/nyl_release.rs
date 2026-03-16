@@ -5,6 +5,7 @@
 /// When absent, these values must be provided via CLI flags.
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::config::StripEmptyMetadataLabelsMode;
 use crate::constants::API_VERSION;
 use crate::{NylError, Result};
 
@@ -34,6 +35,14 @@ pub struct NylReleaseMetadata {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NylReleaseSpec {
+    /// Control when empty `metadata.labels` maps are stripped from emitted manifests.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stripEmptyMetadataLabels"
+    )]
+    pub strip_empty_metadata_labels: Option<StripEmptyMetadataLabelsMode>,
+
     /// ArgoCD-specific options.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argocd: Option<NylReleaseArgoCdSpec>,
@@ -197,6 +206,7 @@ mod tests {
                 "namespace": "production"
             },
             "spec": {
+                "stripEmptyMetadataLabels": "never",
                 "argocd": {
                     "applicationOverride": {
                         "spec": {
@@ -215,9 +225,14 @@ mod tests {
         let application_override = release
             .spec
             .argocd
-            .and_then(|a| a.application_override)
+            .as_ref()
+            .and_then(|a| a.application_override.clone())
             .expect("applicationOverride should be parsed");
         assert!(application_override.contains_key("spec"));
+        assert_eq!(
+            release.spec.strip_empty_metadata_labels,
+            Some(StripEmptyMetadataLabelsMode::Never)
+        );
     }
 
     #[test]
@@ -339,5 +354,23 @@ spec:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("applicationOverride must be a YAML/JSON object"));
+    }
+
+    #[test]
+    fn test_nyl_release_parses_strip_empty_metadata_labels_override() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: test
+  namespace: default
+spec:
+  stripEmptyMetadataLabels: argocd
+";
+        let release: NylRelease = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(
+            release.spec.strip_empty_metadata_labels,
+            Some(StripEmptyMetadataLabelsMode::Argocd)
+        );
     }
 }

@@ -49,9 +49,44 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "strip_empty_metadata_labels": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/StripEmptyMetadataLabelsMode"
+            }
+          ],
+          "default": "always",
+          "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
         }
       },
       "type": "object"
+    },
+    "StripEmptyMetadataLabelsMode": {
+      "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
+      "oneOf": [
+        {
+          "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
+          "enum": [
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
+          "enum": [
+            "argocd"
+          ],
+          "type": "string"
+        }
+      ]
     }
   },
   "description": "Root structure of `nyl.toml`.",
@@ -79,7 +114,8 @@
         ],
         "helm_chart_search_paths": [
           "."
-        ]
+        ],
+        "strip_empty_metadata_labels": "always"
       }
     }
   },

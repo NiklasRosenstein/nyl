@@ -29,6 +29,32 @@ fn default_profile_values() -> BTreeMap<String, BTreeMap<String, serde_json::Val
     BTreeMap::new()
 }
 
+/// Controls when empty `metadata.labels` maps are stripped from emitted manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StripEmptyMetadataLabelsMode {
+    /// Always strip empty `metadata.labels` maps from emitted manifests.
+    #[default]
+    Always,
+
+    /// Never strip empty `metadata.labels` maps from emitted manifests.
+    Never,
+
+    /// Strip empty `metadata.labels` maps only when running in an ArgoCD environment.
+    Argocd,
+}
+
+impl StripEmptyMetadataLabelsMode {
+    /// Return whether empty metadata labels should be stripped for the current environment.
+    pub fn should_strip(self, is_argocd: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Argocd => is_argocd,
+        }
+    }
+}
+
 /// Project settings in `[project]` section of `nyl.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -42,6 +68,9 @@ pub struct ProjectSettings {
     /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
     /// Values are component kind targets (local component path or remote shortcut URL).
     pub aliases: BTreeMap<String, String>,
+
+    /// Control when empty `metadata.labels` maps are stripped from emitted manifests.
+    pub strip_empty_metadata_labels: StripEmptyMetadataLabelsMode,
 }
 
 impl Default for ProjectSettings {
@@ -50,6 +79,7 @@ impl Default for ProjectSettings {
             components_search_paths: default_components_search_paths(),
             helm_chart_search_paths: default_helm_chart_search_paths(),
             aliases: default_aliases(),
+            strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
         }
     }
 }
@@ -243,6 +273,11 @@ impl ProjectConfig {
         self.get_alias_target(&key)
     }
 
+    /// Return the configured empty-label stripping mode for emitted manifests.
+    pub fn get_strip_empty_metadata_labels_mode(&self) -> StripEmptyMetadataLabelsMode {
+        self.config.project.strip_empty_metadata_labels
+    }
+
     /// Return whether any profile values are configured.
     pub fn has_profiles(&self) -> bool {
         !self.config.profile.values.is_empty()
@@ -320,6 +355,10 @@ mod tests {
         assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
         assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
         assert!(settings.aliases.is_empty());
+        assert_eq!(
+            settings.strip_empty_metadata_labels,
+            StripEmptyMetadataLabelsMode::Always
+        );
     }
 
     #[test]
@@ -337,6 +376,7 @@ mod tests {
 [project]
 components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
+strip_empty_metadata_labels = "argocd"
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
 "#;
@@ -350,6 +390,10 @@ helm_chart_search_paths = ["lib", "vendor"]
         assert_eq!(
             config.get_alias_target_for_kind("myapi.io/v1", "MyKind"),
             Some("oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4")
+        );
+        assert_eq!(
+            config.get_strip_empty_metadata_labels_mode(),
+            StripEmptyMetadataLabelsMode::Argocd
         );
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
@@ -365,6 +409,10 @@ helm_chart_search_paths = ["lib", "vendor"]
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
         assert!(config.config.project.aliases.is_empty());
+        assert_eq!(
+            config.get_strip_empty_metadata_labels_mode(),
+            StripEmptyMetadataLabelsMode::Always
+        );
         assert!(!config.has_profiles());
     }
 
@@ -503,5 +551,21 @@ replicas = 1
 
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
         assert!(err.contains("Failed to parse TOML config"));
+    }
+
+    #[test]
+    fn test_invalid_strip_empty_metadata_labels_mode_rejected() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+strip_empty_metadata_labels = "sometimes"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("Failed to parse TOML config"));
+        assert!(err.contains("strip_empty_metadata_labels"));
     }
 }
