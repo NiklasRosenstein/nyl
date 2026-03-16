@@ -181,22 +181,46 @@ spec:
 ```
 
 When rendered, Nyl will:
-1. Resolve repository source location (reuse ArgoCD local checkout when possible)
-2. Check out the `main` branch
+1. Resolve repository source location (override, local checkout reuse, ArgoCD checkout reuse, or cached Git worktree)
+2. Use the `main` revision
 3. Navigate to the `apps/` directory
 4. Scan for YAML files matching the include/exclude patterns
 5. Generate ArgoCD Application manifests for each NylRelease found
 
+### ApplicationGenerator Resolution Order
+
+For `ApplicationGenerator`, Nyl resolves the source repository in this order:
+
+1. `NYL_APPGEN_REPO_PATH_OVERRIDE`, if set
+2. The current local Git checkout, if the current `PWD` is inside a repository whose remote matches `spec.source.repoURL`, and `spec.source.targetRevision` is `HEAD` or the current branch name
+3. ArgoCD's local checkout via `ARGOCD_APP_SOURCE_*`
+4. The normal Git cache/worktree flow
+
+If one step does not match, Nyl falls through to the next step automatically.
+
+### Current Local Checkout Reuse
+
+When you run Nyl from inside the same repository referenced by an `ApplicationGenerator`, Nyl can skip clone/worktree operations and reuse the current local checkout.
+
+Reuse is enabled only when all of these conditions match:
+- The current `PWD` is inside a Git repository
+- At least one local remote matches `spec.source.repoURL` after normalization
+- `spec.source.targetRevision` is `HEAD`, or exactly matches the current checked-out branch name
+
+Notes:
+- Detached `HEAD` only matches `targetRevision: HEAD`
+- If the remote or revision does not match, Nyl falls back to ArgoCD checkout reuse or the normal Git cache/worktree flow
+
 ### ArgoCD Local Checkout Reuse
 
-When running in ArgoCD plugin context, Nyl can skip clone/worktree operations and reuse the local checkout that ArgoCD already prepared.
+When running in ArgoCD plugin context, Nyl can also reuse the local checkout that ArgoCD already prepared.
 
 Reuse is enabled only when all of these conditions match exactly:
 - `spec.source.repoURL` equals `ARGOCD_APP_SOURCE_REPO_URL` (normalized URL comparison)
 - `spec.source.targetRevision` equals `ARGOCD_APP_SOURCE_TARGET_REVISION` (exact string match)
 - `ARGOCD_APP_SOURCE_PATH` can be resolved relative to the current working directory
 
-If any condition does not match, Nyl falls back to normal Git cache/worktree resolution.
+If any condition does not match, Nyl falls back to the normal Git cache/worktree resolution.
 
 ### Local Worktree Override (Testing)
 
@@ -215,7 +239,7 @@ nyl render apps.yaml
 Behavior:
 - If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set to a local path, Nyl resolves `spec.source.path`/`spec.source.paths` selectors under that path.
 - If `NYL_APPGEN_REPO_PATH_OVERRIDE=@git`, Nyl discovers the Git repository root from the current `PWD` and resolves selectors under that root.
-- If unset, Nyl uses normal Git clone/cache/worktree resolution from `spec.source.repoURL` and `spec.source.targetRevision`.
+- If unset, Nyl tries current local checkout reuse first, then ArgoCD checkout reuse, then normal Git clone/cache/worktree resolution from `spec.source.repoURL` and `spec.source.targetRevision`.
 - If the override path is invalid, or `@git` is used outside a Git repository, rendering fails immediately.
 
 Selector behavior:
