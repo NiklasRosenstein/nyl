@@ -174,8 +174,6 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         }
     }
 
-    normalize_emitted_manifests(&mut manifests);
-
     Ok(RenderPreflightResult {
         manifests,
         nyl_release,
@@ -444,10 +442,16 @@ fn should_initialize_cluster_clients(
             || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
 }
 
-pub(crate) fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
+fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
     for manifest in manifests {
         strip_empty_metadata_labels(manifest);
     }
+}
+
+fn prepare_manifests_for_output(manifests: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut emitted_manifests = manifests.to_vec();
+    normalize_emitted_manifests(&mut emitted_manifests);
+    emitted_manifests
 }
 
 fn strip_empty_metadata_labels(manifest: &mut serde_json::Value) {
@@ -1095,6 +1099,8 @@ fn render_helm_chart(
 
 /// Output manifests in the specified format
 fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Result<()> {
+    let manifests = prepare_manifests_for_output(manifests);
+
     match format {
         OutputFormat::Yaml => {
             for (i, manifest) in manifests.iter().enumerate() {
@@ -1106,7 +1112,7 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
             }
         }
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(manifests)
+            let json = serde_json::to_string_pretty(&manifests)
                 .map_err(|e| NylError::Config(format!("Failed to serialize JSON: {}", e)))?;
             println!("{}", json);
         }
@@ -3959,7 +3965,7 @@ metadata:
 
     #[test]
     fn test_normalize_emitted_manifests_removes_empty_labels_from_emitted_yaml() {
-        let mut manifests = vec![serde_json::json!({
+        let original = vec![serde_json::json!({
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {
@@ -3968,12 +3974,30 @@ metadata:
             }
         })];
 
-        normalize_emitted_manifests(&mut manifests);
+        let manifests = prepare_manifests_for_output(&original);
 
         let yaml = crate::yaml::serialize_yaml_document(&manifests[0]).unwrap();
         assert!(!yaml.contains("labels: {}"));
         assert!(!yaml.contains("labels:\n"));
         assert!(yaml.contains("name: cm"));
+        assert_eq!(original[0]["metadata"]["labels"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_prepare_manifests_for_output_preserves_original_manifests() {
+        let original = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        let emitted = prepare_manifests_for_output(&original);
+
+        assert_eq!(original[0]["metadata"]["labels"], serde_json::json!({}));
+        assert!(emitted[0]["metadata"]["labels"].is_null());
     }
 
     #[test]
