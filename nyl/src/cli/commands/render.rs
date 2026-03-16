@@ -1375,9 +1375,13 @@ fn try_resolve_application_generator_source_from_local_git_repo(
 }
 
 fn repo_root_path(repo: &git2::Repository) -> Option<PathBuf> {
-    repo.workdir()
-        .map(Path::to_path_buf)
-        .or_else(|| repo.path().parent().map(Path::to_path_buf))
+    repo.workdir().map(Path::to_path_buf).or_else(|| {
+        if repo.is_bare() {
+            Some(repo.path().to_path_buf())
+        } else {
+            repo.path().parent().map(Path::to_path_buf)
+        }
+    })
 }
 
 fn local_git_remote_urls(repo: &git2::Repository) -> Vec<String> {
@@ -2030,7 +2034,6 @@ fn add_parent_annotations(
 mod tests {
     use super::*;
     use git2::{Repository, RepositoryInitOptions, Signature};
-    use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
@@ -2683,6 +2686,18 @@ metadata:
         assert_eq!(
             resolved.canonicalize().unwrap(),
             repo_dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_repo_root_path_returns_bare_repo_path() {
+        let temp = TempDir::new().unwrap();
+        let bare_repo_path = temp.path().join("repo.git");
+        let repo = Repository::init_bare(&bare_repo_path).unwrap();
+
+        assert_eq!(
+            repo_root_path(&repo).unwrap().canonicalize().unwrap(),
+            bare_repo_path.canonicalize().unwrap()
         );
     }
 
