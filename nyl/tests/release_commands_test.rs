@@ -46,13 +46,13 @@ impl ReleaseStorage for MockReleaseStorage {
         revision: u32,
     ) -> nyl::Result<Option<ReleaseState>> {
         let store = self.releases.lock().unwrap();
-        let key = format!("{}/{}", namespace, release_name);
+        let key = format!("{namespace}/{release_name}");
         Ok(store.get(&(key, revision)).cloned())
     }
 
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> nyl::Result<Vec<u32>> {
         let store = self.releases.lock().unwrap();
-        let key_prefix = format!("{}/{}", namespace, release_name);
+        let key_prefix = format!("{namespace}/{release_name}");
         let mut revisions: Vec<u32> = store
             .keys()
             .filter(|(c, _)| c == &key_prefix)
@@ -71,7 +71,7 @@ impl ReleaseStorage for MockReleaseStorage {
         error: Option<String>,
     ) -> nyl::Result<()> {
         let mut store = self.releases.lock().unwrap();
-        let key = format!("{}/{}", namespace, release_name);
+        let key = format!("{namespace}/{release_name}");
         if let Some(release) = store.get_mut(&(key, revision)) {
             release.status = status;
             release.error = error;
@@ -134,7 +134,7 @@ impl ReleaseStorage for MockReleaseStorage {
 
     async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> nyl::Result<()> {
         let mut store = self.releases.lock().unwrap();
-        let key = (format!("{}/{}", namespace, release_name), revision);
+        let key = (format!("{namespace}/{release_name}"), revision);
         store.remove(&key);
         Ok(())
     }
@@ -167,7 +167,7 @@ fn create_test_release(
                 kind: "ConfigMap".to_string(),
             },
             namespace: Some(namespace.to_string()),
-            name: format!("resource-{}", i),
+            name: format!("resource-{i}"),
         })
         .collect();
 
@@ -178,7 +178,7 @@ fn create_test_release(
         release_namespace: namespace.to_string(),
         revision,
         resource_keys,
-        manifest: format!("# Test manifest for {} revision {}", name, revision),
+        manifest: format!("# Test manifest for {name} revision {revision}"),
         status,
         rendered_at: Utc::now(),
         applied_at: if is_deployed { Some(Utc::now()) } else { None },
@@ -372,7 +372,7 @@ async fn test_get_release_with_different_statuses() {
     ];
 
     for (i, status) in statuses.iter().enumerate() {
-        let mut release = create_test_release(&format!("app{}", i), "default", 1, status.clone(), 5);
+        let mut release = create_test_release(&format!("app{i}"), "default", 1, status.clone(), 5);
         if status == &ReleaseStatus::Failed {
             release.error = Some("Test error message".to_string());
         }
@@ -382,7 +382,7 @@ async fn test_get_release_with_different_statuses() {
     // Verify each release has correct status
     for (i, status) in statuses.iter().enumerate() {
         let release = storage
-            .get_release(&format!("app{}", i), "default", 1)
+            .get_release(&format!("app{i}"), "default", 1)
             .await
             .unwrap()
             .unwrap();
