@@ -95,6 +95,17 @@ mod tests {
     }
 
     #[test]
+    fn test_array_field_patterns_are_subset_of_path_patterns() {
+        for pattern in VALID_APPLICATION_ARRAY_FIELD_PATTERNS {
+            assert!(
+                is_supported_application_field_path(pattern),
+                "array field pattern '{}' is not covered by VALID_APPLICATION_PATH_PATTERNS",
+                pattern
+            );
+        }
+    }
+
+    #[test]
     fn test_field_catalog_patterns_are_valid() {
         for pattern in VALID_APPLICATION_PATH_PATTERNS {
             validate_path_glob_pattern(pattern).unwrap_or_else(|e| {

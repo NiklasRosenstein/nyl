@@ -1532,7 +1532,7 @@ struct IgnoredOverride {
     reason: IgnoredOverrideReason,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum OverrideLeafOperation {
     Append,
     Replace,
@@ -1541,10 +1541,23 @@ enum OverrideLeafOperation {
 #[derive(Debug, Clone)]
 struct OverrideLeaf {
     segments: Vec<String>,
+    /// Canonical dotted path (without `+` prefixes), used for policy checks.
     path: String,
-    original_path: String,
+    /// Original key of the leaf segment (e.g. `+syncOptions`), used in warning messages.
+    original_key: String,
     value: serde_json::Value,
     operation: OverrideLeafOperation,
+}
+
+impl OverrideLeaf {
+    /// Return the display path for warning messages, using the original key (with `+` prefix if present).
+    fn display_path(&self) -> String {
+        let mut segments = self.segments.clone();
+        if let Some(last) = segments.last_mut() {
+            last.clone_from(&self.original_key);
+        }
+        join_field_path_segments(&segments)
+    }
 }
 
 /// Create ArgoCD Application from generator config
@@ -1640,13 +1653,10 @@ fn apply_release_customization_overrides(
     };
 
     let mut override_leaves = Vec::new();
-    let mut original_prefix = Vec::new();
-    let mut canonical_prefix = Vec::new();
+    let mut prefix = Vec::new();
     flatten_override_leaves(
         &serde_json::Value::Object(application_override),
-        &mut original_prefix,
-        &mut canonical_prefix,
-        OverrideLeafOperation::Replace,
+        &mut prefix,
         &mut override_leaves,
     );
 
@@ -1673,7 +1683,7 @@ fn apply_release_customization_overrides(
     for leaf in override_leaves {
         if !is_supported_application_field_path(&leaf.path) {
             ignored.push(IgnoredOverride {
-                path: leaf.original_path,
+                path: leaf.display_path(),
                 reason: IgnoredOverrideReason::Unsupported,
             });
             continue;
@@ -1681,7 +1691,7 @@ fn apply_release_customization_overrides(
 
         if path_matches_any(&leaf.path, IMMUTABLE_APPLICATION_PATH_PATTERNS)? {
             ignored.push(IgnoredOverride {
-                path: leaf.original_path,
+                path: leaf.display_path(),
                 reason: IgnoredOverrideReason::Disallowed,
             });
             continue;
@@ -1691,7 +1701,7 @@ fn apply_release_customization_overrides(
         let allowed = path_matches_any(&leaf.path, &allowed_paths)?;
         if denied || !allowed {
             ignored.push(IgnoredOverride {
-                path: leaf.original_path,
+                path: leaf.display_path(),
                 reason: IgnoredOverrideReason::Disallowed,
             });
         } else {
@@ -1702,7 +1712,7 @@ fn apply_release_customization_overrides(
                         append_leaves.push(leaf);
                     } else {
                         ignored.push(IgnoredOverride {
-                            path: leaf.original_path,
+                            path: leaf.display_path(),
                             reason: IgnoredOverrideReason::Invalid,
                         });
                     }
@@ -1717,9 +1727,17 @@ fn apply_release_customization_overrides(
     }
 
     for leaf in append_leaves {
-        if let Err(reason) = append_override_value(app, &leaf) {
+        let serde_json::Value::Array(items) = &leaf.value else {
             ignored.push(IgnoredOverride {
-                path: leaf.original_path,
+                path: leaf.display_path(),
+                reason: IgnoredOverrideReason::Invalid,
+            });
+            continue;
+        };
+        let items = items.clone();
+        if let Err(reason) = append_override_items(app, &leaf.segments, items) {
+            ignored.push(IgnoredOverride {
+                path: leaf.display_path(),
                 reason,
             });
         }
@@ -1732,47 +1750,36 @@ fn apply_release_customization_overrides(
     Ok(())
 }
 
-fn flatten_override_leaves(
-    value: &serde_json::Value,
-    original_prefix: &mut Vec<String>,
-    canonical_prefix: &mut Vec<String>,
-    operation: OverrideLeafOperation,
-    leaves: &mut Vec<OverrideLeaf>,
-) {
+fn flatten_override_leaves(value: &serde_json::Value, prefix: &mut Vec<String>, leaves: &mut Vec<OverrideLeaf>) {
     if let serde_json::Value::Object(map) = value {
         if map.is_empty() {
             return;
         }
         for (key, child) in map {
-            let (canonical_key, key_operation) = parse_override_key(key);
-            original_prefix.push(key.clone());
-            canonical_prefix.push(canonical_key);
-            if matches!(key_operation, OverrideLeafOperation::Append) {
+            let (canonical_key, operation) = parse_override_key(key);
+            prefix.push(canonical_key);
+            if matches!(operation, OverrideLeafOperation::Append) {
                 leaves.push(OverrideLeaf {
-                    segments: canonical_prefix.clone(),
-                    path: join_field_path_segments(canonical_prefix),
-                    original_path: join_override_path_segments(original_prefix),
+                    segments: prefix.clone(),
+                    path: join_field_path_segments(prefix),
+                    original_key: key.clone(),
                     value: child.clone(),
                     operation: OverrideLeafOperation::Append,
                 });
-                canonical_prefix.pop();
-                original_prefix.pop();
-                continue;
+            } else {
+                flatten_override_leaves(child, prefix, leaves);
             }
-
-            flatten_override_leaves(child, original_prefix, canonical_prefix, operation.clone(), leaves);
-            canonical_prefix.pop();
-            original_prefix.pop();
+            prefix.pop();
         }
         return;
     }
 
     leaves.push(OverrideLeaf {
-        segments: canonical_prefix.clone(),
-        path: join_field_path_segments(canonical_prefix),
-        original_path: join_override_path_segments(original_prefix),
+        segments: prefix.clone(),
+        path: join_field_path_segments(prefix),
+        original_key: prefix.last().cloned().unwrap_or_default(),
         value: value.clone(),
-        operation,
+        operation: OverrideLeafOperation::Replace,
     });
 }
 
@@ -1783,35 +1790,6 @@ fn parse_override_key(key: &str) -> (String, OverrideLeafOperation) {
         }
     }
     (key.to_string(), OverrideLeafOperation::Replace)
-}
-
-fn join_override_path_segments(segments: &[String]) -> String {
-    segments
-        .iter()
-        .map(|segment| {
-            if is_simple_override_segment(segment) {
-                segment.clone()
-            } else {
-                let escaped = segment.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("\"{}\"", escaped)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn is_simple_override_segment(segment: &str) -> bool {
-    if let Some(stripped) = segment.strip_prefix('+') {
-        return !stripped.is_empty()
-            && stripped
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    }
-
-    !segment.is_empty()
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn build_override_value(leaves: &[OverrideLeaf]) -> serde_json::Value {
@@ -1855,16 +1833,15 @@ fn path_matches_any(path: &str, patterns: &[impl AsRef<str>]) -> Result<bool> {
     Ok(false)
 }
 
-fn append_override_value(
-    app: &mut serde_json::Value,
-    leaf: &OverrideLeaf,
-) -> std::result::Result<(), IgnoredOverrideReason> {
-    let items = match &leaf.value {
-        serde_json::Value::Array(items) => items.clone(),
-        _ => return Err(IgnoredOverrideReason::Invalid),
-    };
-
-    append_override_items(app, &leaf.segments, items)
+fn coerce_to_object(value: &mut serde_json::Value) -> std::result::Result<(), IgnoredOverrideReason> {
+    match value {
+        serde_json::Value::Object(_) => Ok(()),
+        serde_json::Value::Null => {
+            *value = serde_json::Value::Object(serde_json::Map::new());
+            Ok(())
+        }
+        _ => Err(IgnoredOverrideReason::Invalid),
+    }
 }
 
 fn append_override_items(
@@ -1876,15 +1853,8 @@ fn append_override_items(
         return Err(IgnoredOverrideReason::Invalid);
     }
 
-    if !current.is_object() {
-        if current.is_null() {
-            *current = serde_json::Value::Object(serde_json::Map::new());
-        } else {
-            return Err(IgnoredOverrideReason::Invalid);
-        }
-    }
-
-    let map = current.as_object_mut().ok_or(IgnoredOverrideReason::Invalid)?;
+    coerce_to_object(current)?;
+    let map = current.as_object_mut().unwrap();
 
     if segments.len() == 1 {
         let entry = map
@@ -1905,13 +1875,7 @@ fn append_override_items(
         let entry = map
             .entry(segments[0].clone())
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        if !entry.is_object() {
-            if entry.is_null() {
-                *entry = serde_json::Value::Object(serde_json::Map::new());
-            } else {
-                return Err(IgnoredOverrideReason::Invalid);
-            }
-        }
+        coerce_to_object(entry)?;
         append_override_items(entry, &segments[1..], items)
     }
 }
