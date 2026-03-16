@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-fn is_argocd_env() -> bool {
+pub(crate) fn is_argocd_env() -> bool {
     std::env::var_os("ARGOCD_APP_NAME").is_some() || std::env::var_os("ARGOCD_APP_NAMESPACE").is_some()
 }
 

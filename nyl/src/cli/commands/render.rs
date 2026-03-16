@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use crate::{
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
-    config::ProjectConfig,
+    config::{ProjectConfig, StripEmptyMetadataLabelsMode},
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
+    git::is_argocd_env,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeClient, KubeRsClient, ResourceKey},
     postprocess::apply_kyverno_policies,
@@ -113,6 +114,7 @@ pub struct RenderPreflightOptions<'a> {
 pub struct RenderPreflightResult {
     pub manifests: Vec<serde_json::Value>,
     pub nyl_release: Option<NylRelease>,
+    pub strip_empty_metadata_labels: bool,
     pub profile: Profile,
     pub env_name: String,
     pub duplicates: HashMap<ResourceKey, usize>,
@@ -122,17 +124,18 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
-    let (mut manifests, nyl_release, profile, env_name, mut duplicates) = render_manifests_complete(
-        &options.common.path,
-        options.common.only_source_kind.as_deref(),
-        options.common.profile.as_deref(),
-        options.offline,
-        options.kube_version,
-        options.kube_api_versions,
-        options.common.max_depth,
-        options.common.track_parent,
-    )
-    .await?;
+    let (mut manifests, nyl_release, strip_empty_metadata_labels_mode, profile, env_name, mut duplicates) =
+        render_manifests_complete(
+            &options.common.path,
+            options.common.only_source_kind.as_deref(),
+            options.common.profile.as_deref(),
+            options.offline,
+            options.kube_version,
+            options.kube_api_versions,
+            options.common.max_depth,
+            options.common.track_parent,
+        )
+        .await?;
 
     manifests = crate::cli::filter::filter_manifests_by_kind(
         manifests,
@@ -177,6 +180,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     Ok(RenderPreflightResult {
         manifests,
         nyl_release,
+        strip_empty_metadata_labels: strip_empty_metadata_labels_mode.should_strip(is_argocd_env()),
         profile,
         env_name,
         duplicates,
@@ -188,7 +192,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 /// Complete manifest rendering pipeline used by render, diff, and apply.
 /// Returns final manifests ready for output/apply/diff, with all Nyl resources processed.
 /// Also returns the extracted NylRelease metadata (if present) for diff/apply commands.
-/// Returns: (manifests, nyl_release, profile, env_name, duplicate_resources)
+/// Returns: (manifests, nyl_release, strip_empty_metadata_labels_mode, profile, env_name, duplicate_resources)
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests_complete(
     path: &str,
@@ -202,12 +206,13 @@ pub async fn render_manifests_complete(
 ) -> Result<(
     Vec<serde_json::Value>,
     Option<NylRelease>,
+    StripEmptyMetadataLabelsMode,
     Profile,
     String,
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, profile, env_name, credential_provider) = render_manifests(
+    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider) = render_manifests(
         path,
         only_source_kind,
         environment,
@@ -221,6 +226,8 @@ pub async fn render_manifests_complete(
 
     // 2. Extract NylRelease metadata (before filtering it out)
     let (nyl_release, manifests) = extract_nyl_release(&manifests)?;
+    let strip_empty_metadata_labels_mode =
+        resolve_strip_empty_metadata_labels_mode(strip_empty_metadata_labels_mode, nyl_release.as_ref());
 
     // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
@@ -266,11 +273,18 @@ pub async fn render_manifests_complete(
     // 5. Detect and deduplicate resources (after all generation/transformation is complete)
     let (final_manifests, duplicates) = deduplicate_manifests(final_manifests)?;
 
-    Ok((final_manifests, nyl_release, profile, env_name, duplicates))
+    Ok((
+        final_manifests,
+        nyl_release,
+        strip_empty_metadata_labels_mode,
+        profile,
+        env_name,
+        duplicates,
+    ))
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-/// Returns: (manifests, profile, env_name)
+/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name)
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests(
     path: &str,
@@ -283,6 +297,7 @@ pub async fn render_manifests(
     track_parent: bool,
 ) -> Result<(
     Vec<serde_json::Value>,
+    StripEmptyMetadataLabelsMode,
     Profile,
     String,
     Option<Arc<crate::git::CredentialProvider>>,
@@ -370,7 +385,13 @@ pub async fn render_manifests(
     // This happens when max_depth is reached before all resources are expanded
     all_manifests.extend(pending);
 
-    Ok((all_manifests, profile, profile_name, credential_provider))
+    Ok((
+        all_manifests,
+        project_config.get_strip_empty_metadata_labels_mode(),
+        profile,
+        profile_name,
+        credential_provider,
+    ))
 }
 
 fn select_profile_from_project(project_config: &ProjectConfig, requested: Option<&str>) -> Result<(Profile, String)> {
@@ -421,7 +442,11 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         );
     }
 
-    output_manifests(&preflight.manifests, OutputFormat::Yaml)?;
+    output_manifests(
+        &preflight.manifests,
+        OutputFormat::Yaml,
+        preflight.strip_empty_metadata_labels,
+    )?;
     Ok(())
 }
 
@@ -440,6 +465,47 @@ fn should_initialize_cluster_clients(
         && (cluster_client_requirement == ClusterClientRequirement::Required
             || adjust_duplicate_keys
             || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
+}
+
+fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
+    for manifest in manifests {
+        strip_empty_metadata_labels(manifest);
+    }
+}
+
+fn resolve_strip_empty_metadata_labels_mode(
+    project_mode: StripEmptyMetadataLabelsMode,
+    release: Option<&NylRelease>,
+) -> StripEmptyMetadataLabelsMode {
+    release
+        .and_then(|release| release.spec.strip_empty_metadata_labels)
+        .unwrap_or(project_mode)
+}
+
+fn prepare_manifests_for_output(
+    manifests: &[serde_json::Value],
+    strip_empty_metadata_labels: bool,
+) -> Vec<serde_json::Value> {
+    let mut emitted_manifests = manifests.to_vec();
+    if strip_empty_metadata_labels {
+        normalize_emitted_manifests(&mut emitted_manifests);
+    }
+    emitted_manifests
+}
+
+fn strip_empty_metadata_labels(manifest: &mut serde_json::Value) {
+    let Some(metadata) = manifest.get_mut("metadata").and_then(|value| value.as_object_mut()) else {
+        return;
+    };
+
+    let should_remove = metadata
+        .get("labels")
+        .and_then(|value| value.as_object())
+        .is_some_and(serde_json::Map::is_empty);
+
+    if should_remove {
+        metadata.remove("labels");
+    }
 }
 
 fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool {
@@ -1071,7 +1137,13 @@ fn render_helm_chart(
 }
 
 /// Output manifests in the specified format
-fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Result<()> {
+fn output_manifests(
+    manifests: &[serde_json::Value],
+    format: OutputFormat,
+    strip_empty_metadata_labels: bool,
+) -> Result<()> {
+    let manifests = prepare_manifests_for_output(manifests, strip_empty_metadata_labels);
+
     match format {
         OutputFormat::Yaml => {
             for (i, manifest) in manifests.iter().enumerate() {
@@ -1083,7 +1155,7 @@ fn output_manifests(manifests: &[serde_json::Value], format: OutputFormat) -> Re
             }
         }
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(manifests)
+            let json = serde_json::to_string_pretty(&manifests)
                 .map_err(|e| NylError::Config(format!("Failed to serialize JSON: {}", e)))?;
             println!("{}", json);
         }
@@ -2155,6 +2227,7 @@ fn add_parent_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::StripEmptyMetadataLabelsMode;
     use crate::resources::{
         ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
         ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
@@ -2196,6 +2269,7 @@ mod tests {
                 namespace: "web".to_string(),
             },
             spec: NylReleaseSpec {
+                strip_empty_metadata_labels: None,
                 argocd: Some(NylReleaseArgoCdSpec {
                     application_override: Some(serde_json::from_value(override_value).unwrap()),
                 }),
@@ -2577,6 +2651,7 @@ metadata:
                 namespace: "web".to_string(),
             },
             spec: NylReleaseSpec {
+                strip_empty_metadata_labels: None,
                 argocd: Some(NylReleaseArgoCdSpec {
                     application_override: Some(serde_json::from_value(override_map).unwrap()),
                 }),
@@ -3869,6 +3944,161 @@ metadata:
         assert_eq!(subjects[0]["namespace"], "target");
         assert_eq!(subjects[1]["namespace"], "target");
         assert!(subjects[2]["namespace"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_strips_empty_metadata_labels() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        let metadata = manifests[0]["metadata"].as_object().unwrap();
+        assert!(!metadata.contains_key("labels"));
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_preserves_non_empty_metadata_labels() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {"app": "demo"}
+            }
+        })];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0]["metadata"]["labels"]["app"], "demo");
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_leaves_missing_metadata_unchanged() {
+        let original = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap"
+        });
+        let mut manifests = vec![original.clone()];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0], original);
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_leaves_non_object_labels_unchanged() {
+        let original = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": "unexpected"
+            }
+        });
+        let mut manifests = vec![original.clone()];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0], original);
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_removes_empty_labels_from_emitted_yaml() {
+        let original = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        let manifests = prepare_manifests_for_output(&original, true);
+
+        let yaml = crate::yaml::serialize_yaml_document(&manifests[0]).unwrap();
+        assert!(!yaml.contains("labels: {}"));
+        assert!(!yaml.contains("labels:\n"));
+        assert!(yaml.contains("name: cm"));
+        assert_eq!(original[0]["metadata"]["labels"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_prepare_manifests_for_output_preserves_original_manifests() {
+        let original = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        let emitted = prepare_manifests_for_output(&original, true);
+
+        assert_eq!(original[0]["metadata"]["labels"], serde_json::json!({}));
+        assert!(emitted[0]["metadata"]["labels"].is_null());
+    }
+
+    #[test]
+    fn test_prepare_manifests_for_output_preserves_empty_labels_when_disabled() {
+        let original = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        let emitted = prepare_manifests_for_output(&original, false);
+
+        assert_eq!(emitted[0]["metadata"]["labels"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_resolve_strip_empty_metadata_labels_mode_uses_project_default() {
+        assert_eq!(
+            resolve_strip_empty_metadata_labels_mode(StripEmptyMetadataLabelsMode::Argocd, None),
+            StripEmptyMetadataLabelsMode::Argocd
+        );
+    }
+
+    #[test]
+    fn test_resolve_strip_empty_metadata_labels_mode_release_override_takes_precedence() {
+        let release = NylRelease {
+            api_version: API_VERSION.to_string(),
+            kind: "NylRelease".to_string(),
+            metadata: NylReleaseMetadata {
+                name: "nginx".to_string(),
+                namespace: "web".to_string(),
+            },
+            spec: NylReleaseSpec {
+                strip_empty_metadata_labels: Some(StripEmptyMetadataLabelsMode::Never),
+                argocd: Some(NylReleaseArgoCdSpec {
+                    application_override: None,
+                }),
+            },
+        };
+
+        assert_eq!(
+            resolve_strip_empty_metadata_labels_mode(StripEmptyMetadataLabelsMode::Always, Some(&release)),
+            StripEmptyMetadataLabelsMode::Never
+        );
+    }
+
+    #[test]
+    fn test_strip_empty_metadata_labels_mode_should_strip_respects_argocd_environment() {
+        assert!(StripEmptyMetadataLabelsMode::Always.should_strip(false));
+        assert!(!StripEmptyMetadataLabelsMode::Never.should_strip(true));
+        assert!(StripEmptyMetadataLabelsMode::Argocd.should_strip(true));
+        assert!(!StripEmptyMetadataLabelsMode::Argocd.should_strip(false));
     }
 
     #[test]
