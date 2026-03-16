@@ -2167,9 +2167,7 @@ metadata:
         }
     }
 
-    fn make_test_generator(
-        release_customization: Option<ReleaseCustomizationPolicy>,
-    ) -> ApplicationGenerator {
+    fn make_test_generator(release_customization: Option<ReleaseCustomizationPolicy>) -> ApplicationGenerator {
         use std::collections::HashMap;
         ApplicationGenerator {
             api_version: API_VERSION_ARGOCD.to_string(),
