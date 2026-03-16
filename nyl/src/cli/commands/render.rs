@@ -2234,6 +2234,12 @@ metadata:
 
         let override_map = serde_json::from_value(serde_json::json!({
             "spec": {
+                "ignoreDifferences": [
+                    {
+                        "kind": "Deployment",
+                        "jsonPointers": ["/spec/replicas"]
+                    }
+                ],
                 "syncPolicy": {
                     "automated": {
                         "selfHeal": true
@@ -2292,6 +2298,8 @@ metadata:
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
+        assert_eq!(app["spec"]["ignoreDifferences"][0]["kind"], "Deployment");
+        assert_eq!(app["spec"]["ignoreDifferences"][0]["jsonPointers"][0], "/spec/replicas");
         assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
     }
 
@@ -2305,6 +2313,13 @@ metadata:
 
         let override_map = serde_json::from_value(serde_json::json!({
             "spec": {
+                "ignoreDifferences": [
+                    {
+                        "group": "apps",
+                        "kind": "Deployment",
+                        "jsonPointers": ["/spec/replicas"]
+                    }
+                ],
                 "syncPolicy": {
                     "automated": {
                         "selfHeal": true
@@ -2360,6 +2375,8 @@ metadata:
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
+        assert_eq!(app["spec"]["ignoreDifferences"][0]["group"], "apps");
+        assert_eq!(app["spec"]["ignoreDifferences"][0]["kind"], "Deployment");
         assert_eq!(app["spec"]["syncPolicy"]["automated"]["selfHeal"], true);
     }
 
