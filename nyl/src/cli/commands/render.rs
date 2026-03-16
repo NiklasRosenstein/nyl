@@ -1883,6 +1883,10 @@ fn add_parent_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::{
+        ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
+        ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
+    };
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
@@ -2147,29 +2151,8 @@ metadata:
         assert_eq!(template_input, "nginx.yaml");
     }
 
-    #[test]
-    fn test_release_customization_appends_warning_to_existing_info_entries() {
-        use crate::resources::{
-            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
-            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
-        };
-        use std::collections::HashMap;
-
-        let override_map = serde_json::from_value(serde_json::json!({
-            "spec": {
-                "info": [
-                    {"name": "team-note", "value": "kept"}
-                ],
-                "syncPolicy": {
-                    "automated": {
-                        "prune": true
-                    }
-                }
-            }
-        }))
-        .unwrap();
-
-        let release = NylRelease {
+    fn make_test_release(override_map: serde_json::Value) -> NylRelease {
+        NylRelease {
             api_version: API_VERSION.to_string(),
             kind: "NylRelease".to_string(),
             metadata: NylReleaseMetadata {
@@ -2178,12 +2161,17 @@ metadata:
             },
             spec: NylReleaseSpec {
                 argocd: Some(NylReleaseArgoCdSpec {
-                    application_override: Some(override_map),
+                    application_override: Some(serde_json::from_value(override_map).unwrap()),
                 }),
             },
-        };
+        }
+    }
 
-        let generator = ApplicationGenerator {
+    fn make_test_generator(
+        release_customization: Option<ReleaseCustomizationPolicy>,
+    ) -> ApplicationGenerator {
+        use std::collections::HashMap;
+        ApplicationGenerator {
             api_version: API_VERSION_ARGOCD.to_string(),
             kind: "ApplicationGenerator".to_string(),
             metadata: ApplicationGeneratorMetadata {
@@ -2208,12 +2196,30 @@ metadata:
                 application_name_template: "{{ .release.name }}".to_string(),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
-                release_customization: Some(ReleaseCustomizationPolicy {
-                    allowed_paths: Some(vec!["spec.info.**".to_string(), "spec.syncPolicy.**".to_string()]),
-                    denied_paths: vec!["spec.syncPolicy.automated.prune".to_string()],
-                }),
+                release_customization,
             },
-        };
+        }
+    }
+
+    #[test]
+    fn test_release_customization_appends_warning_to_existing_info_entries() {
+        let release = make_test_release(serde_json::json!({
+            "spec": {
+                "info": [
+                    {"name": "team-note", "value": "kept"}
+                ],
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true
+                    }
+                }
+            }
+        }));
+
+        let generator = make_test_generator(Some(ReleaseCustomizationPolicy {
+            allowed_paths: Some(vec!["spec.info.**".to_string(), "spec.syncPolicy.**".to_string()]),
+            denied_paths: vec!["spec.syncPolicy.automated.prune".to_string()],
+        }));
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
@@ -2225,14 +2231,8 @@ metadata:
     }
 
     #[test]
-    fn test_release_customization_uses_default_allowed_paths() {
-        use crate::resources::{
-            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
-            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
-        };
-        use std::collections::HashMap;
-
-        let override_map = serde_json::from_value(serde_json::json!({
+    fn test_default_allowed_paths_permit_ignore_differences_and_sync_policy() {
+        let release = make_test_release(serde_json::json!({
             "spec": {
                 "ignoreDifferences": [
                     {
@@ -2246,54 +2246,12 @@ metadata:
                     }
                 }
             }
-        }))
-        .unwrap();
+        }));
 
-        let release = NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
-                name: "nginx".to_string(),
-                namespace: "web".to_string(),
-            },
-            spec: NylReleaseSpec {
-                argocd: Some(NylReleaseArgoCdSpec {
-                    application_override: Some(override_map),
-                }),
-            },
-        };
-
-        let generator = ApplicationGenerator {
-            api_version: API_VERSION_ARGOCD.to_string(),
-            kind: "ApplicationGenerator".to_string(),
-            metadata: ApplicationGeneratorMetadata {
-                name: "apps".to_string(),
-                namespace: Some("argocd".to_string()),
-            },
-            spec: ApplicationGeneratorSpec {
-                destination: ApplicationDestination {
-                    server: "https://kubernetes.default.svc".to_string(),
-                    namespace: "argocd".to_string(),
-                },
-                source: ApplicationSource {
-                    repo_url: "https://github.com/example/repo.git".to_string(),
-                    target_revision: "HEAD".to_string(),
-                    path: Some("clusters/default".to_string()),
-                    paths: None,
-                    include: vec!["*.yaml".to_string()],
-                    exclude: vec![".*".to_string()],
-                },
-                project: "default".to_string(),
-                sync_policy: None,
-                application_name_template: "{{ .release.name }}".to_string(),
-                labels: HashMap::new(),
-                annotations: HashMap::new(),
-                release_customization: Some(ReleaseCustomizationPolicy {
-                    allowed_paths: None,
-                    denied_paths: Vec::new(),
-                }),
-            },
-        };
+        let generator = make_test_generator(Some(ReleaseCustomizationPolicy {
+            allowed_paths: None,
+            denied_paths: Vec::new(),
+        }));
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
@@ -2304,14 +2262,8 @@ metadata:
     }
 
     #[test]
-    fn test_release_customization_defaults_apply_when_policy_omitted() {
-        use crate::resources::{
-            ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
-            ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec,
-        };
-        use std::collections::HashMap;
-
-        let override_map = serde_json::from_value(serde_json::json!({
+    fn test_default_allowed_paths_apply_when_customization_policy_omitted() {
+        let release = make_test_release(serde_json::json!({
             "spec": {
                 "ignoreDifferences": [
                     {
@@ -2326,51 +2278,9 @@ metadata:
                     }
                 }
             }
-        }))
-        .unwrap();
+        }));
 
-        let release = NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
-                name: "nginx".to_string(),
-                namespace: "web".to_string(),
-            },
-            spec: NylReleaseSpec {
-                argocd: Some(NylReleaseArgoCdSpec {
-                    application_override: Some(override_map),
-                }),
-            },
-        };
-
-        let generator = ApplicationGenerator {
-            api_version: API_VERSION_ARGOCD.to_string(),
-            kind: "ApplicationGenerator".to_string(),
-            metadata: ApplicationGeneratorMetadata {
-                name: "apps".to_string(),
-                namespace: Some("argocd".to_string()),
-            },
-            spec: ApplicationGeneratorSpec {
-                destination: ApplicationDestination {
-                    server: "https://kubernetes.default.svc".to_string(),
-                    namespace: "argocd".to_string(),
-                },
-                source: ApplicationSource {
-                    repo_url: "https://github.com/example/repo.git".to_string(),
-                    target_revision: "HEAD".to_string(),
-                    path: Some("clusters/default".to_string()),
-                    paths: None,
-                    include: vec!["*.yaml".to_string()],
-                    exclude: vec![".*".to_string()],
-                },
-                project: "default".to_string(),
-                sync_policy: None,
-                application_name_template: "{{ .release.name }}".to_string(),
-                labels: HashMap::new(),
-                annotations: HashMap::new(),
-                release_customization: None,
-            },
-        };
+        let generator = make_test_generator(None);
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
