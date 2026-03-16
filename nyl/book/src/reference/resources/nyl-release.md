@@ -35,7 +35,11 @@ spec: {}              # Reserved for future use
 - **Description**: Partial ArgoCD `Application` override for use with `ApplicationGenerator` release customization policy
 - **Behavior**:
   - Override fields are applied only if allowed by `ApplicationGenerator.spec.releaseCustomization`
+  - Plain keys replace the generated `Application` value at that field path
+  - Keys prefixed with `+` append to list-valued `Application` fields instead of replacing them
+  - `+<field>` uses the canonical field path without `+` for allow/deny checks
   - Unsupported or disallowed fields are ignored
+  - Invalid append operations (for example using `+` on a non-list field or with a non-list value) are ignored
   - Ignored fields are reported as a warning in generated `Application.spec.info`
 
 ## Behavior
@@ -167,6 +171,45 @@ spec:
           value: myapp          # From NylRelease.metadata.name
         - name: NYL_RELEASE_NAMESPACE
           value: production     # From NylRelease.metadata.namespace
+```
+
+### Appending Sync Options
+
+`applicationOverride` can append to list-valued Application fields by prefixing the field name with `+`.
+
+```yaml
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: service-proxies
+  namespace: home-proxy
+spec:
+  argocd:
+    applicationOverride:
+      spec:
+        syncPolicy:
+          +syncOptions:
+            - RespectIgnoreDifferences=false
+```
+
+When combined with an `ApplicationGenerator` default such as:
+
+```yaml
+syncPolicy:
+  syncOptions:
+    - ServerSideApply=true
+    - ApplyOutOfSyncOnly=true
+```
+
+the generated ArgoCD `Application` contains all three entries in order:
+
+```yaml
+spec:
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=false
 ```
 
 ### ApplicationGenerator Discovery

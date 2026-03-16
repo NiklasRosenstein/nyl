@@ -145,6 +145,8 @@ annotations:
 Controls project-level `NylRelease.spec.argocd.applicationOverride` customization of generated Applications.
 
 - `NylRelease` overrides are always evaluated against effective `allowedPaths`/`deniedPaths`.
+- `+<field>` append overrides are matched against the canonical field path without the `+` prefix.
+  - Example: `spec.syncPolicy.+syncOptions` is checked as `spec.syncPolicy.syncOptions`.
 - If `releaseCustomization` is omitted, defaults are used.
 - `allowedPaths` and `deniedPaths` use dotted field globs:
   - `*` matches one segment (does not cross dots)
@@ -156,7 +158,7 @@ Controls project-level `NylRelease.spec.argocd.applicationOverride` customizatio
   - `spec.syncPolicy.**`
 - If `allowedPaths` is an empty list, no fields are allowed.
 
-Ignored fields (unsupported/disallowed) are not applied and are reported in generated `Application.spec.info`.
+Ignored fields (unsupported/disallowed/invalid) are not applied and are reported in generated `Application.spec.info`.
 
 ## File Filtering
 
@@ -243,6 +245,61 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - PruneLast=true
+```
+
+### With Release-Level `+syncOptions`
+
+Generator defaults can be extended from a discovered `NylRelease` instead of replaced.
+
+ApplicationGenerator:
+
+```yaml
+apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
+kind: ApplicationGenerator
+metadata:
+  name: home-lab
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: git@gitlab.com:NiklasRosenstein/config.git
+    targetRevision: HEAD
+    path: kasoku.netbird.selfhosted/gitops/home-lab
+  project: home-lab
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+```
+
+NylRelease:
+
+```yaml
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: service-proxies
+  namespace: home-proxy
+spec:
+  argocd:
+    applicationOverride:
+      spec:
+        syncPolicy:
+          +syncOptions:
+            - RespectIgnoreDifferences=false
+```
+
+Generated Application excerpt:
+
+```yaml
+spec:
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=false
 ```
 
 ### Custom File Filtering
