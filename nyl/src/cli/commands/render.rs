@@ -174,6 +174,8 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         }
     }
 
+    normalize_emitted_manifests(&mut manifests);
+
     Ok(RenderPreflightResult {
         manifests,
         nyl_release,
@@ -440,6 +442,27 @@ fn should_initialize_cluster_clients(
         && (cluster_client_requirement == ClusterClientRequirement::Required
             || adjust_duplicate_keys
             || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
+}
+
+pub(crate) fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
+    for manifest in manifests {
+        strip_empty_metadata_labels(manifest);
+    }
+}
+
+fn strip_empty_metadata_labels(manifest: &mut serde_json::Value) {
+    let Some(metadata) = manifest.get_mut("metadata").and_then(|value| value.as_object_mut()) else {
+        return;
+    };
+
+    let should_remove = metadata
+        .get("labels")
+        .and_then(|value| value.as_object())
+        .is_some_and(serde_json::Map::is_empty);
+
+    if should_remove {
+        metadata.remove("labels");
+    }
 }
 
 fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool {
@@ -3572,6 +3595,88 @@ metadata:
         assert_eq!(subjects[0]["namespace"], "target");
         assert_eq!(subjects[1]["namespace"], "target");
         assert!(subjects[2]["namespace"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_strips_empty_metadata_labels() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        let metadata = manifests[0]["metadata"].as_object().unwrap();
+        assert!(!metadata.contains_key("labels"));
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_preserves_non_empty_metadata_labels() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {"app": "demo"}
+            }
+        })];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0]["metadata"]["labels"]["app"], "demo");
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_leaves_missing_metadata_unchanged() {
+        let original = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap"
+        });
+        let mut manifests = vec![original.clone()];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0], original);
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_leaves_non_object_labels_unchanged() {
+        let original = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": "unexpected"
+            }
+        });
+        let mut manifests = vec![original.clone()];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        assert_eq!(manifests[0], original);
+    }
+
+    #[test]
+    fn test_normalize_emitted_manifests_removes_empty_labels_from_emitted_yaml() {
+        let mut manifests = vec![serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "labels": {}
+            }
+        })];
+
+        normalize_emitted_manifests(&mut manifests);
+
+        let yaml = crate::yaml::serialize_yaml_document(&manifests[0]).unwrap();
+        assert!(!yaml.contains("labels: {}"));
+        assert!(!yaml.contains("labels:\n"));
+        assert!(yaml.contains("name: cm"));
     }
 
     #[test]
