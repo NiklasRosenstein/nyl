@@ -74,8 +74,7 @@ spec:
     // Verify the label was added by the mutation policy
     assert!(
         stdout.contains("managedBy: nyl") || stdout.contains("managedBy: \"nyl\""),
-        "Expected label 'managedBy: nyl' to be added by Kyverno policy, got:\n{}",
-        stdout
+        "Expected label 'managedBy: nyl' to be added by Kyverno policy, got:\n{stdout}"
     );
 }
 
@@ -144,8 +143,7 @@ spec:
     // Verify ClusterPolicy mutation was applied
     assert!(
         stdout.contains("team: platform"),
-        "Expected label 'team: platform' to be added by ClusterPolicy mutation, got:\n{}",
-        stdout
+        "Expected label 'team: platform' to be added by ClusterPolicy mutation, got:\n{stdout}"
     );
 }
 
@@ -339,8 +337,7 @@ spec:
     // The policy should NOT have been applied (managedBy label should not exist)
     assert!(
         !stdout.contains("managedBy"),
-        "Unannotated policy should not be applied by Nyl, got:\n{}",
-        stdout
+        "Unannotated policy should not be applied by Nyl, got:\n{stdout}"
     );
 }
 
@@ -430,8 +427,7 @@ data:
     assert!(stdout.contains("ConfigMap"));
     assert!(
         stdout.contains("mutated: \"true\"") || stdout.contains("mutated: 'true'"),
-        "Expected ConfigMap to be mutated, got:\n{}",
-        stdout
+        "Expected ConfigMap to be mutated, got:\n{stdout}"
     );
 }
 
@@ -496,8 +492,7 @@ spec:
     // Should warn about non-Global scope
     assert!(
         stderr.contains("non-Global") || stderr.contains("Immediate"),
-        "Expected warning about non-Global scope policies, got:\n{}",
-        stderr
+        "Expected warning about non-Global scope policies, got:\n{stderr}"
     );
 }
 

@@ -14,7 +14,9 @@ pub use application_generator::{
     extract_application_generators, ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata,
     ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, ReleaseCustomizationPolicy, SyncPolicy,
 };
-pub use argocd_application_field_catalog::is_supported_application_field_path;
+pub use argocd_application_field_catalog::{
+    is_supported_application_array_field_path, is_supported_application_field_path,
+};
 pub use component::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind,
     ComponentKindParsed, NylComponent,
