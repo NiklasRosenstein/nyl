@@ -588,10 +588,10 @@ fn test_git_chart_with_dependencies() {
                 || msg.contains("could not retrieve list of tags")
                 || msg.contains("Temporary failure in name resolution")
             {
-                eprintln!("Skipping network-dependent dependency build assertion: {}", msg);
+                eprintln!("Skipping network-dependent dependency build assertion: {msg}");
                 return;
             }
-            panic!("Unexpected resolve_chart error: {}", msg);
+            panic!("Unexpected resolve_chart error: {msg}");
         }
     };
     assert!(resolved.path.exists());

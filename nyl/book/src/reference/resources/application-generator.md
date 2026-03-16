@@ -43,6 +43,7 @@ Key behavior:
 - A directory selector is scanned non-recursively by default.
 - Use glob selectors in `path`/`paths` when you want recursive discovery.
 - `include`/`exclude` patterns are matched against file paths relative to the repository root.
+- Source resolution can reuse a matching current local Git checkout before falling back to ArgoCD checkout reuse or Nyl's Git cache/worktree flow.
 - `NylRelease.spec.argocd.applicationOverride` is always evaluated against `allowedPaths`/`deniedPaths`.
 - `allowedPaths`/`deniedPaths` use dotted globs where `*` matches one segment and `**` matches multiple segments.
 - If both allow and deny match, deny wins. Ignored fields are reported in generated `Application.spec.info`.

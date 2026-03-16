@@ -22,15 +22,14 @@ spec:
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    println!("Error message: {}", err_msg);
+    println!("Error message: {err_msg}");
 
     // Verify error message contains file path
     assert!(err_msg.contains("app.yaml"), "Error should contain file path");
     // Verify it mentions unknown field
     assert!(
         err_msg.contains("unknown field") || err_msg.contains("Unknown field"),
-        "Error should mention unknown field: {}",
-        err_msg
+        "Error should mention unknown field: {err_msg}"
     );
     // Verify it has a hint
     assert!(err_msg.contains("Hint:"), "Error should contain a hint");
@@ -56,14 +55,13 @@ spec:
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    println!("Error message: {}", err_msg);
+    println!("Error message: {err_msg}");
 
     // Verify error message contains useful information
     assert!(err_msg.contains("nested.yaml"), "Error should contain file path");
     assert!(
         err_msg.contains("unknown field") || err_msg.contains("Unknown field"),
-        "Error should mention unknown field: {}",
-        err_msg
+        "Error should mention unknown field: {err_msg}"
     );
     assert!(err_msg.contains("Hint:"), "Error should contain a hint");
 }
@@ -85,7 +83,7 @@ spec:
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    println!("Error message: {}", err_msg);
+    println!("Error message: {err_msg}");
 
     // Verify error message contains file path and hints about type
     assert!(err_msg.contains("types.yaml"), "Error should contain file path");
@@ -109,13 +107,12 @@ metadata:
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    println!("Error message: {}", err_msg);
+    println!("Error message: {err_msg}");
 
     assert!(err_msg.contains("release.yaml"), "Error should contain file path");
     assert!(
         err_msg.contains("unknown field") || err_msg.contains("Unknown field"),
-        "Error should mention unknown field: {}",
-        err_msg
+        "Error should mention unknown field: {err_msg}"
     );
     assert!(err_msg.contains("Hint:"), "Error should contain a hint");
 }
@@ -163,12 +160,11 @@ spec:
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    println!("Error message: {}", err_msg);
+    println!("Error message: {err_msg}");
 
     // The hint should suggest checking for typos
     assert!(
         err_msg.contains("typo") || err_msg.contains("API documentation"),
-        "Error should suggest checking for typos or documentation: {}",
-        err_msg
+        "Error should suggest checking for typos or documentation: {err_msg}"
     );
 }

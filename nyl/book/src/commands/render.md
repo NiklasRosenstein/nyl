@@ -80,6 +80,6 @@ nyl render -p staging --max-depth 3 --track-parent manifest.yaml
 
 - Nyl processes single files only. Directory paths are not supported.
 - See [Rendering Pipeline](./rendering-pipeline.md) for namespace resolution, filter semantics, and online/offline behavior.
-- In ArgoCD plugin runs, Git-based `ApplicationGenerator` source resolution reuses the local ArgoCD checkout when `repoURL` and `targetRevision` exactly match `ARGOCD_APP_SOURCE_REPO_URL` and `ARGOCD_APP_SOURCE_TARGET_REVISION`.
+- `ApplicationGenerator` source resolution first honors `NYL_APPGEN_REPO_PATH_OVERRIDE`, then tries to reuse the current local Git checkout when `repoURL` matches a local remote and `targetRevision` is `HEAD` or the current branch, then falls back to ArgoCD checkout reuse and normal Git cache/worktree resolution.
 - Local ApplicationGenerator testing override: set `NYL_APPGEN_REPO_PATH_OVERRIDE` to a local repository root (or `@git` to auto-detect the Git root from the current `PWD`) to make ApplicationGenerator scan the local filesystem instead of cloning. This affects `render`, `diff`, and `apply` (all use the same render pipeline). Using `@git` outside a Git repository fails with a configuration error.
 - ApplicationGenerator discovery semantics: `source.path` scans non-recursively by default; use glob selectors (or `source.paths`) for recursive discovery, and include/exclude patterns match relative paths.
