@@ -19,3 +19,4 @@ todo.txt
 # Added by cargo
 
 /target
+.codex
