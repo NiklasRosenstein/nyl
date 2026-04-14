@@ -1253,12 +1253,17 @@ fn process_application_generator(
             // Generate ArgoCD Application
             let mut app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
 
-            // If rendering failed, create a "husk" application: add error info and disable auto-sync
+            // If rendering or parsing failed, create a "husk" application: add error info and disable auto-sync
             if let Some(ref error_msg) = render_error {
+                let display_path = file_path
+                    .strip_prefix(&source_root)
+                    .unwrap_or(&file_path)
+                    .display()
+                    .to_string();
                 disable_automated_sync(&mut app);
-                append_render_error_info(&mut app, &file_path, error_msg)?;
+                append_render_error_info(&mut app, &display_path, error_msg)?;
                 tracing::warn!(
-                    "Generated husk ArgoCD Application {} from NylRelease in {} (rendering failed: {})",
+                    "Generated husk ArgoCD Application {} from NylRelease in {} (rendering or parsing failed: {})",
                     release.metadata.name,
                     file_path.display(),
                     error_msg
@@ -1330,7 +1335,7 @@ fn split_yaml_documents(raw: &str) -> Vec<&str> {
 
     for line in raw.split_inclusive('\n') {
         let line_content = line.trim_end_matches(['\r', '\n']);
-        if line_content.trim() == "---" {
+        if line_content == "---" {
             if offset > start {
                 docs.push(&raw[start..offset]);
             }
@@ -1358,8 +1363,8 @@ fn disable_automated_sync(app: &mut serde_json::Value) {
     }
 }
 
-/// Add a rendering error entry to the Application's spec.info field.
-fn append_render_error_info(app: &mut serde_json::Value, file_path: &Path, error_msg: &str) -> Result<()> {
+/// Add a rendering/parsing error entry to the Application's spec.info field.
+fn append_render_error_info(app: &mut serde_json::Value, file_path: &str, error_msg: &str) -> Result<()> {
     let spec = app
         .get_mut("spec")
         .and_then(|v| v.as_object_mut())
@@ -1376,7 +1381,7 @@ fn append_render_error_info(app: &mut serde_json::Value, file_path: &Path, error
         .ok_or_else(|| NylError::Config("Application spec.info is not an array".to_string()))?;
     info_items.push(serde_json::json!({
         "name": "nyl-render-error",
-        "value": format!("Failed to render {}: {}", file_path.display(), error_msg),
+        "value": format!("Failed to render or parse {}: {}", file_path, error_msg),
     }));
     Ok(())
 }
@@ -4447,13 +4452,13 @@ data:
         let mut app = serde_json::json!({
             "spec": {}
         });
-        let file_path = Path::new("/test/file.yaml");
+        let file_path = "test/file.yaml";
         append_render_error_info(&mut app, file_path, "undefined variable 'foo'").unwrap();
         let info = app["spec"]["info"].as_array().unwrap();
         assert_eq!(info.len(), 1);
         assert_eq!(info[0]["name"], "nyl-render-error");
         assert!(info[0]["value"].as_str().unwrap().contains("undefined variable"));
-        assert!(info[0]["value"].as_str().unwrap().contains("/test/file.yaml"));
+        assert!(info[0]["value"].as_str().unwrap().contains("test/file.yaml"));
     }
 
     #[test]
@@ -4465,7 +4470,7 @@ data:
                 ]
             }
         });
-        let file_path = Path::new("/test/file.yaml");
+        let file_path = "test/file.yaml";
         append_render_error_info(&mut app, file_path, "error").unwrap();
         let info = app["spec"]["info"].as_array().unwrap();
         assert_eq!(info.len(), 2);

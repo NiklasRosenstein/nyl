@@ -105,7 +105,7 @@ fn generate_argocd_applications(
         tracing::debug!("Reading YAML file: {}", file_path.display());
 
         // Read and parse file, falling back to best-effort parsing if the file
-        // contains Jinja syntax that makes it unparseable as plain YAML.
+        // contains Jinja syntax or is otherwise unparseable as plain YAML.
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read {}: {}", file_path.display(), e)))?;
 
