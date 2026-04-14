@@ -1,7 +1,5 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "additionalProperties": false,
-  "definitions": {
+  "$defs": {
     "ProfileSettings": {
       "additionalProperties": false,
       "description": "Profile configuration in `[profile]` section of `nyl.toml`.",
@@ -12,7 +10,7 @@
             "type": "object"
           },
           "default": {},
-          "description": "Per-profile template values, keyed by profile name.\n\nExample: `[profile.values.dev]` `replicas = 2`",
+          "description": "Per-profile template values, keyed by profile name.\n\nExample:\n`[profile.values.dev]`\n`replicas = 2`",
           "type": "object"
         }
       },
@@ -27,7 +25,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`. Values are component kind targets (local component path or remote shortcut URL).",
+          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`.\nValues are component kind targets (local component path or remote shortcut URL).",
           "type": "object"
         },
         "components_search_paths": {
@@ -51,11 +49,7 @@
           "type": "array"
         },
         "strip_empty_metadata_labels": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/StripEmptyMetadataLabelsMode"
-            }
-          ],
+          "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
           "default": "always",
           "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
         }
@@ -66,47 +60,35 @@
       "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
       "oneOf": [
         {
+          "const": "always",
           "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
-          "enum": [
-            "always"
-          ],
           "type": "string"
         },
         {
+          "const": "never",
           "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
-          "enum": [
-            "never"
-          ],
           "type": "string"
         },
         {
+          "const": "argocd",
           "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
-          "enum": [
-            "argocd"
-          ],
           "type": "string"
         }
       ]
     }
   },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Root structure of `nyl.toml`.",
   "properties": {
     "profile": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/ProfileSettings"
-        }
-      ],
+      "$ref": "#/$defs/ProfileSettings",
       "default": {
         "values": {}
       }
     },
     "project": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/ProjectSettings"
-        }
-      ],
+      "$ref": "#/$defs/ProjectSettings",
       "default": {
         "aliases": {},
         "components_search_paths": [
