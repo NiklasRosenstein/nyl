@@ -724,9 +724,9 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
         *cell = j;
     }
 
-    for i in 0..len1 {
-        for j in 0..len2 {
-            let cost = usize::from(chars1[i] != chars2[j]);
+    for (i, c1) in chars1.iter().enumerate() {
+        for (j, c2) in chars2.iter().enumerate() {
+            let cost = usize::from(c1 != c2);
             matrix[i + 1][j + 1] = (matrix[i][j + 1] + 1)
                 .min(matrix[i + 1][j] + 1)
                 .min(matrix[i][j] + cost);

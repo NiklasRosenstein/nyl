@@ -1,7 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use nyl::template::TemplateEngine;
 use serde::Deserialize;
 use serde_json::json;
+use std::hint::black_box;
 
 fn bench_template_creation(c: &mut Criterion) {
     c.bench_function("template_engine_new", |b| {
