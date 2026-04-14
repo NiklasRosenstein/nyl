@@ -104,13 +104,23 @@ fn generate_argocd_applications(
     for file_path in yaml_files {
         tracing::debug!("Reading YAML file: {}", file_path.display());
 
-        // Read and parse file
+        // Read and parse file, falling back to best-effort parsing if the file
+        // contains Jinja syntax that makes it unparseable as plain YAML.
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read {}: {}", file_path.display(), e)))?;
 
-        // Parse YAML documents with source context for better error messages
         let source_ctx = crate::util::SourceContext::new(file_path.clone());
-        let manifests: Vec<serde_json::Value> = source_ctx.parse_yaml_documents(&content)?;
+        let manifests: Vec<serde_json::Value> = match source_ctx.parse_yaml_documents(&content) {
+            Ok(docs) => docs,
+            Err(e) => {
+                tracing::warn!(
+                    "YAML parse error in {}: {}. Attempting best-effort document extraction.",
+                    file_path.display(),
+                    e
+                );
+                super::render::best_effort_parse_yaml_documents(&content)
+            }
+        };
 
         // Extract NylRelease metadata
         let (nyl_release, _) = extract_nyl_release(&manifests)?;
