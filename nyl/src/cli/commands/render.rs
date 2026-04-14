@@ -212,17 +212,18 @@ pub async fn render_manifests_complete(
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider) = render_manifests(
-        path,
-        only_source_kind,
-        environment,
-        offline,
-        cli_kube_version,
-        cli_api_versions,
-        max_depth,
-        track_parent,
-    )
-    .await?;
+    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context) =
+        render_manifests(
+            path,
+            only_source_kind,
+            environment,
+            offline,
+            cli_kube_version,
+            cli_api_versions,
+            max_depth,
+            track_parent,
+        )
+        .await?;
 
     // 2. Extract NylRelease metadata (before filtering it out)
     let (nyl_release, manifests) = extract_nyl_release(&manifests)?;
@@ -239,7 +240,8 @@ pub async fn render_manifests_complete(
         );
     }
     for generator in generators {
-        let applications = process_application_generator(&generator, path, credential_provider.clone())?;
+        let applications =
+            process_application_generator(&generator, path, credential_provider.clone(), &template_context)?;
         final_manifests.extend(applications);
     }
 
@@ -284,9 +286,9 @@ pub async fn render_manifests_complete(
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name)
+/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context)
 #[allow(clippy::too_many_arguments)]
-pub async fn render_manifests(
+pub(crate) async fn render_manifests(
     path: &str,
     only_source_kind: Option<&str>,
     environment: Option<&str>,
@@ -301,6 +303,7 @@ pub async fn render_manifests(
     Profile,
     String,
     Option<Arc<crate::git::CredentialProvider>>,
+    TemplateContext,
 )> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
@@ -391,6 +394,7 @@ pub async fn render_manifests(
         profile,
         profile_name,
         credential_provider,
+        context,
     ))
 }
 
@@ -1164,10 +1168,53 @@ fn output_manifests(
 }
 
 /// Process ApplicationGenerator - scan directory and generate Applications
+/// Read a YAML file, render it with Jinja, and parse the result.
+/// Falls back to best-effort document extraction on render or parse failure.
+fn render_yaml_file_with_jinja(
+    file_path: &Path,
+    source_root: &Path,
+    engine: &TemplateEngine,
+    ctx_json: &serde_json::Value,
+) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    let raw = std::fs::read_to_string(file_path)
+        .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
+    let source_ctx = crate::util::SourceContext::new(file_path.to_path_buf());
+    let rel_path = file_path
+        .strip_prefix(source_root)
+        .unwrap_or(file_path)
+        .display()
+        .to_string();
+
+    Ok(match engine.render_named(&rel_path, &raw, ctx_json) {
+        Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
+            Ok(docs) => (docs, None),
+            Err(e) => {
+                tracing::warn!(
+                    "YAML parse error after Jinja rendering in {}: {}. \
+                         Attempting best-effort document extraction.",
+                    file_path.display(),
+                    e
+                );
+                (best_effort_parse_yaml_documents(&rendered), Some(e.to_string()))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "Jinja template rendering failed for {}: {}. \
+                     Attempting best-effort document extraction.",
+                file_path.display(),
+                e
+            );
+            (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
+        }
+    })
+}
+
 fn process_application_generator(
     generator: &crate::resources::ApplicationGenerator,
     _base_dir: &str,
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+    template_context: &TemplateContext,
 ) -> Result<Vec<serde_json::Value>> {
     let source_selectors = application_generator_source_selectors(generator);
     tracing::debug!(
@@ -1199,6 +1246,9 @@ fn process_application_generator(
     );
     let scanned_file_count = yaml_files.len();
 
+    let engine = TemplateEngine::new();
+    let ctx_json = template_context.to_json();
+
     let mut applications = Vec::new();
     let mut missing_release_files = Vec::new();
     let mut missing_release_count = 0usize;
@@ -1206,23 +1256,37 @@ fn process_application_generator(
     for file_path in yaml_files {
         tracing::debug!("Reading YAML file: {}", file_path.display());
 
-        // Read and parse file
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
-        let source_ctx = crate::util::SourceContext::new(file_path.clone());
-        let docs = source_ctx.parse_yaml_documents(&content)?;
+        let (docs, render_error) = render_yaml_file_with_jinja(&file_path, &source_root, &engine, &ctx_json)?;
 
         // Extract NylRelease
         let (nyl_release, _) = extract_nyl_release(&docs)?;
 
         if let Some(release) = nyl_release {
             // Generate ArgoCD Application
-            let app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
-            tracing::debug!(
-                "Generated ArgoCD Application {} from NylRelease in {}",
-                release.metadata.name,
-                file_path.display()
-            );
+            let mut app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
+
+            // If rendering or parsing failed, create a "husk" application: add error info and disable auto-sync
+            if let Some(ref error_msg) = render_error {
+                let rel_path = file_path
+                    .strip_prefix(&source_root)
+                    .unwrap_or(&file_path)
+                    .display()
+                    .to_string();
+                disable_automated_sync(&mut app);
+                append_render_error_info(&mut app, &rel_path, error_msg)?;
+                tracing::warn!(
+                    "Generated husk ArgoCD Application {} from NylRelease in {} (rendering or parsing failed: {})",
+                    release.metadata.name,
+                    file_path.display(),
+                    error_msg
+                );
+            } else {
+                tracing::debug!(
+                    "Generated ArgoCD Application {} from NylRelease in {}",
+                    release.metadata.name,
+                    file_path.display()
+                );
+            }
             applications.push(app);
         } else {
             tracing::trace!("No NylRelease found in {}, skipping", file_path.display());
@@ -1252,6 +1316,85 @@ fn process_application_generator(
         applications.len()
     );
     Ok(applications)
+}
+
+/// Parse a multi-document YAML string on a best-effort basis.
+///
+/// Splits the input on YAML document separators (`---`) and tries to parse each
+/// document individually. Documents that fail to parse (e.g., because they contain
+/// unrendered Jinja syntax) are silently skipped. This allows extracting parseable
+/// documents (like NylRelease) even when other documents in the file are unparseable.
+pub(super) fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
+    let mut docs = Vec::new();
+    for doc_str in split_yaml_documents(raw) {
+        let trimmed = doc_str.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = crate::yaml::parse_yaml_documents_k8s_compatible(trimmed) {
+            docs.extend(parsed);
+        }
+    }
+    docs
+}
+
+/// Split a YAML string into individual document strings by `---` separators.
+fn split_yaml_documents(raw: &str) -> Vec<&str> {
+    let mut docs = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+
+    for line in raw.split_inclusive('\n') {
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        if line_content == "---" {
+            if offset > start {
+                docs.push(&raw[start..offset]);
+            }
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+
+    // Handle last line without trailing newline
+    if offset > start {
+        let remainder = &raw[start..offset];
+        if !remainder.trim().is_empty() {
+            docs.push(remainder);
+        }
+    }
+    docs
+}
+
+/// Remove automated sync policy from an ArgoCD Application manifest.
+fn disable_automated_sync(app: &mut serde_json::Value) {
+    if let Some(spec) = app.get_mut("spec").and_then(|v| v.as_object_mut()) {
+        if let Some(sync_policy) = spec.get_mut("syncPolicy").and_then(|v| v.as_object_mut()) {
+            sync_policy.remove("automated");
+        }
+    }
+}
+
+/// Add a rendering/parsing error entry to the Application's spec.info field.
+fn append_render_error_info(app: &mut serde_json::Value, file_path: &str, error_msg: &str) -> Result<()> {
+    let spec = app
+        .get_mut("spec")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| NylError::Config("Generated Application is missing spec".to_string()))?;
+    let info_value = spec
+        .entry("info".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !info_value.is_array() {
+        let previous = std::mem::take(info_value);
+        *info_value = serde_json::Value::Array(vec![previous]);
+    }
+    let info_items = info_value
+        .as_array_mut()
+        .ok_or_else(|| NylError::Config("Application spec.info is not an array".to_string()))?;
+    info_items.push(serde_json::json!({
+        "name": "nyl-render-error",
+        "value": format!("Failed to render or parse {}: {}", file_path, error_msg),
+    }));
+    Ok(())
 }
 
 fn missing_nyl_release_warning_message(
@@ -4223,5 +4366,126 @@ metadata:
             &[],
             true
         ));
+    }
+
+    #[test]
+    fn test_split_yaml_documents_single() {
+        let raw = "apiVersion: v1\nkind: ConfigMap\n";
+        let docs = split_yaml_documents(raw);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].contains("ConfigMap"));
+    }
+
+    #[test]
+    fn test_split_yaml_documents_multiple() {
+        let raw = "apiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Service\n";
+        let docs = split_yaml_documents(raw);
+        assert_eq!(docs.len(), 2);
+        assert!(docs[0].contains("ConfigMap"));
+        assert!(docs[1].contains("Service"));
+    }
+
+    #[test]
+    fn test_split_yaml_documents_leading_separator() {
+        let raw = "---\napiVersion: v1\nkind: ConfigMap\n";
+        let docs = split_yaml_documents(raw);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].contains("ConfigMap"));
+    }
+
+    #[test]
+    fn test_best_effort_parse_yaml_documents_valid() {
+        let raw = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n";
+        let docs = best_effort_parse_yaml_documents(raw);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["kind"], "ConfigMap");
+    }
+
+    #[test]
+    fn test_best_effort_parse_yaml_documents_skips_jinja() {
+        let raw = r"apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: NylRelease
+metadata:
+  name: my-app
+  namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ values.config_name }}
+data:
+  key: {{ values.some_value }}
+";
+        let docs = best_effort_parse_yaml_documents(raw);
+        // The NylRelease should parse, the ConfigMap with Jinja should be skipped
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["kind"], "NylRelease");
+        assert_eq!(docs[0]["metadata"]["name"], "my-app");
+    }
+
+    #[test]
+    fn test_best_effort_parse_yaml_documents_all_invalid() {
+        let raw = "key: {{ values.foo }}\n---\nother: {{ values.bar }}\n";
+        let docs = best_effort_parse_yaml_documents(raw);
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn test_disable_automated_sync() {
+        let mut app = serde_json::json!({
+            "spec": {
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true,
+                        "selfHeal": true
+                    },
+                    "syncOptions": ["CreateNamespace=true"]
+                }
+            }
+        });
+        disable_automated_sync(&mut app);
+        assert!(app["spec"]["syncPolicy"]["automated"].is_null());
+        assert_eq!(app["spec"]["syncPolicy"]["syncOptions"][0], "CreateNamespace=true");
+    }
+
+    #[test]
+    fn test_disable_automated_sync_no_sync_policy() {
+        let mut app = serde_json::json!({
+            "spec": {}
+        });
+        disable_automated_sync(&mut app);
+        // Should not panic or error
+        assert!(app["spec"]["syncPolicy"].is_null());
+    }
+
+    #[test]
+    fn test_append_render_error_info() {
+        let mut app = serde_json::json!({
+            "spec": {}
+        });
+        let file_path = "test/file.yaml";
+        append_render_error_info(&mut app, file_path, "undefined variable 'foo'").unwrap();
+        let info = app["spec"]["info"].as_array().unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0]["name"], "nyl-render-error");
+        assert!(info[0]["value"].as_str().unwrap().contains("undefined variable"));
+        assert!(info[0]["value"].as_str().unwrap().contains("test/file.yaml"));
+    }
+
+    #[test]
+    fn test_append_render_error_info_preserves_existing() {
+        let mut app = serde_json::json!({
+            "spec": {
+                "info": [
+                    {"name": "existing", "value": "entry"}
+                ]
+            }
+        });
+        let file_path = "test/file.yaml";
+        append_render_error_info(&mut app, file_path, "error").unwrap();
+        let info = app["spec"]["info"].as_array().unwrap();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0]["name"], "existing");
+        assert_eq!(info[1]["name"], "nyl-render-error");
     }
 }
