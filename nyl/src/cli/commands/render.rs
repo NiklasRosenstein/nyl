@@ -288,7 +288,7 @@ pub async fn render_manifests_complete(
 /// Shared manifest rendering logic used by render, diff, and apply
 /// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name)
 #[allow(clippy::too_many_arguments)]
-pub async fn render_manifests(
+pub(crate) async fn render_manifests(
     path: &str,
     only_source_kind: Option<&str>,
     environment: Option<&str>,
@@ -1232,7 +1232,7 @@ fn process_application_generator(
                         file_path.display(),
                         e
                     );
-                    (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
+                    (best_effort_parse_yaml_documents(&rendered), Some(e.to_string()))
                 }
             },
             Err(e) => {
@@ -1307,7 +1307,7 @@ fn process_application_generator(
 /// document individually. Documents that fail to parse (e.g., because they contain
 /// unrendered Jinja syntax) are silently skipped. This allows extracting parseable
 /// documents (like NylRelease) even when other documents in the file are unparseable.
-pub fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
+pub(super) fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
     let mut docs = Vec::new();
     for doc_str in split_yaml_documents(raw) {
         let trimmed = doc_str.trim();
@@ -1326,26 +1326,22 @@ pub fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
 fn split_yaml_documents(raw: &str) -> Vec<&str> {
     let mut docs = Vec::new();
     let mut start = 0;
-    for line in raw.lines() {
-        if line.trim() == "---" {
-            let byte_end = raw[start..].find(line).map_or(start, |pos| start + pos);
-            if byte_end > start {
-                docs.push(&raw[start..byte_end]);
+    let mut offset = 0;
+
+    for line in raw.split_inclusive('\n') {
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        if line_content.trim() == "---" {
+            if offset > start {
+                docs.push(&raw[start..offset]);
             }
-            start = byte_end + line.len();
-            // Skip the newline after "---"
-            if start < raw.len() && raw.as_bytes().get(start) == Some(&b'\n') {
-                start += 1;
-            } else if start + 1 < raw.len()
-                && raw.as_bytes().get(start) == Some(&b'\r')
-                && raw.as_bytes().get(start + 1) == Some(&b'\n')
-            {
-                start += 2;
-            }
+            start = offset + line.len();
         }
+        offset += line.len();
     }
-    if start < raw.len() {
-        let remainder = &raw[start..];
+
+    // Handle last line without trailing newline
+    if offset > start {
+        let remainder = &raw[start..offset];
         if !remainder.trim().is_empty() {
             docs.push(remainder);
         }
