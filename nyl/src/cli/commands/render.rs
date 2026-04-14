@@ -212,17 +212,18 @@ pub async fn render_manifests_complete(
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context) = render_manifests(
-        path,
-        only_source_kind,
-        environment,
-        offline,
-        cli_kube_version,
-        cli_api_versions,
-        max_depth,
-        track_parent,
-    )
-    .await?;
+    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context) =
+        render_manifests(
+            path,
+            only_source_kind,
+            environment,
+            offline,
+            cli_kube_version,
+            cli_api_versions,
+            max_depth,
+            track_parent,
+        )
+        .await?;
 
     // 2. Extract NylRelease metadata (before filtering it out)
     let (nyl_release, manifests) = extract_nyl_release(&manifests)?;
@@ -239,7 +240,8 @@ pub async fn render_manifests_complete(
         );
     }
     for generator in generators {
-        let applications = process_application_generator(&generator, path, credential_provider.clone(), &template_context)?;
+        let applications =
+            process_application_generator(&generator, path, credential_provider.clone(), &template_context)?;
         final_manifests.extend(applications);
     }
 
@@ -1220,30 +1222,29 @@ fn process_application_generator(
         // Try Jinja rendering, then parse YAML. On failure, fall back to best-effort parsing
         // of individual YAML documents so we can still extract NylRelease metadata (which
         // typically doesn't use Jinja) even when other documents in the file do.
-        let (docs, render_error) =
-            match engine.render_named(&file_path.display().to_string(), &raw, &ctx_json) {
-                Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
-                    Ok(docs) => (docs, None),
-                    Err(e) => {
-                        tracing::warn!(
-                            "YAML parse error after Jinja rendering in {}: {}. \
-                             Attempting best-effort document extraction.",
-                            file_path.display(),
-                            e
-                        );
-                        (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
-                    }
-                },
+        let (docs, render_error) = match engine.render_named(&file_path.display().to_string(), &raw, &ctx_json) {
+            Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
+                Ok(docs) => (docs, None),
                 Err(e) => {
                     tracing::warn!(
-                        "Jinja template rendering failed for {}: {}. \
-                         Attempting best-effort document extraction.",
+                        "YAML parse error after Jinja rendering in {}: {}. \
+                             Attempting best-effort document extraction.",
                         file_path.display(),
                         e
                     );
                     (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
                 }
-            };
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Jinja template rendering failed for {}: {}. \
+                         Attempting best-effort document extraction.",
+                    file_path.display(),
+                    e
+                );
+                (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
+            }
+        };
 
         // Extract NylRelease
         let (nyl_release, _) = extract_nyl_release(&docs)?;
@@ -1315,7 +1316,7 @@ pub fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
         }
         match crate::yaml::parse_yaml_documents_k8s_compatible(trimmed) {
             Ok(parsed) => docs.extend(parsed),
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
     docs
@@ -1325,12 +1326,9 @@ pub fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
 fn split_yaml_documents(raw: &str) -> Vec<&str> {
     let mut docs = Vec::new();
     let mut start = 0;
-    for (i, line) in raw.lines().enumerate() {
+    for line in raw.lines() {
         if line.trim() == "---" {
-            let byte_end = raw[start..]
-                .find(line)
-                .map(|pos| start + pos)
-                .unwrap_or(start);
+            let byte_end = raw[start..].find(line).map_or(start, |pos| start + pos);
             if byte_end > start {
                 docs.push(&raw[start..byte_end]);
             }
@@ -1345,7 +1343,6 @@ fn split_yaml_documents(raw: &str) -> Vec<&str> {
                 start += 2;
             }
         }
-        let _ = i;
     }
     if start < raw.len() {
         let remainder = &raw[start..];
