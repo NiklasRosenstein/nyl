@@ -4,7 +4,21 @@
         "config:recommended"
     ],
     "rebaseWhen": "conflicted",
+    "vulnerabilityAlerts": {
+        "labels": ["security"],
+        "automerge": true,
+        "schedule": ["at any time"]
+    },
     "packageRules": [
+        {
+            "description": "Auto-merge security/vulnerability patches immediately",
+            "matchCategories": ["rust"],
+            "matchUpdateTypes": ["patch"],
+            "isVulnerabilityAlert": true,
+            "automerge": true,
+            "schedule": ["at any time"],
+            "prPriority": 10
+        },
         {
             "groupName": "minor and patch updates",
             "matchUpdateTypes": [
