@@ -333,7 +333,7 @@ jobs:
           nyl --version
 
       - name: Start Minikube
-        uses: medyagh/setup-minikube@v0.0.18
+        uses: medyagh/setup-minikube@v0.0.21
         with:
           cpus: 2
           memory: 4096
