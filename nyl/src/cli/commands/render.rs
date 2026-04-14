@@ -1168,6 +1168,48 @@ fn output_manifests(
 }
 
 /// Process ApplicationGenerator - scan directory and generate Applications
+/// Read a YAML file, render it with Jinja, and parse the result.
+/// Falls back to best-effort document extraction on render or parse failure.
+fn render_yaml_file_with_jinja(
+    file_path: &Path,
+    source_root: &Path,
+    engine: &TemplateEngine,
+    ctx_json: &serde_json::Value,
+) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    let raw = std::fs::read_to_string(file_path)
+        .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
+    let source_ctx = crate::util::SourceContext::new(file_path.to_path_buf());
+    let rel_path = file_path
+        .strip_prefix(source_root)
+        .unwrap_or(file_path)
+        .display()
+        .to_string();
+
+    Ok(match engine.render_named(&rel_path, &raw, ctx_json) {
+        Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
+            Ok(docs) => (docs, None),
+            Err(e) => {
+                tracing::warn!(
+                    "YAML parse error after Jinja rendering in {}: {}. \
+                         Attempting best-effort document extraction.",
+                    file_path.display(),
+                    e
+                );
+                (best_effort_parse_yaml_documents(&rendered), Some(e.to_string()))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "Jinja template rendering failed for {}: {}. \
+                     Attempting best-effort document extraction.",
+                file_path.display(),
+                e
+            );
+            (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
+        }
+    })
+}
+
 fn process_application_generator(
     generator: &crate::resources::ApplicationGenerator,
     _base_dir: &str,
@@ -1214,42 +1256,7 @@ fn process_application_generator(
     for file_path in yaml_files {
         tracing::debug!("Reading YAML file: {}", file_path.display());
 
-        // Read file
-        let raw = std::fs::read_to_string(&file_path)
-            .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
-        let source_ctx = crate::util::SourceContext::new(file_path.clone());
-        let rel_path = file_path
-            .strip_prefix(&source_root)
-            .unwrap_or(&file_path)
-            .display()
-            .to_string();
-
-        // Try Jinja rendering, then parse YAML. On failure, fall back to best-effort parsing
-        // of individual YAML documents so we can still extract NylRelease metadata (which
-        // typically doesn't use Jinja) even when other documents in the file do.
-        let (docs, render_error) = match engine.render_named(&rel_path, &raw, &ctx_json) {
-            Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
-                Ok(docs) => (docs, None),
-                Err(e) => {
-                    tracing::warn!(
-                        "YAML parse error after Jinja rendering in {}: {}. \
-                             Attempting best-effort document extraction.",
-                        file_path.display(),
-                        e
-                    );
-                    (best_effort_parse_yaml_documents(&rendered), Some(e.to_string()))
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Jinja template rendering failed for {}: {}. \
-                         Attempting best-effort document extraction.",
-                    file_path.display(),
-                    e
-                );
-                (best_effort_parse_yaml_documents(&raw), Some(e.to_string()))
-            }
-        };
+        let (docs, render_error) = render_yaml_file_with_jinja(&file_path, &source_root, &engine, &ctx_json)?;
 
         // Extract NylRelease
         let (nyl_release, _) = extract_nyl_release(&docs)?;
@@ -1260,6 +1267,11 @@ fn process_application_generator(
 
             // If rendering or parsing failed, create a "husk" application: add error info and disable auto-sync
             if let Some(ref error_msg) = render_error {
+                let rel_path = file_path
+                    .strip_prefix(&source_root)
+                    .unwrap_or(&file_path)
+                    .display()
+                    .to_string();
                 disable_automated_sync(&mut app);
                 append_render_error_info(&mut app, &rel_path, error_msg)?;
                 tracing::warn!(
@@ -1319,9 +1331,8 @@ pub(super) fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Val
         if trimmed.is_empty() {
             continue;
         }
-        match crate::yaml::parse_yaml_documents_k8s_compatible(trimmed) {
-            Ok(parsed) => docs.extend(parsed),
-            Err(_) => {}
+        if let Ok(parsed) = crate::yaml::parse_yaml_documents_k8s_compatible(trimmed) {
+            docs.extend(parsed);
         }
     }
     docs
@@ -4392,7 +4403,7 @@ metadata:
 
     #[test]
     fn test_best_effort_parse_yaml_documents_skips_jinja() {
-        let raw = r#"apiVersion: nyl.niklasrosenstein.github.com/v1
+        let raw = r"apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
   name: my-app
@@ -4404,7 +4415,7 @@ metadata:
   name: {{ values.config_name }}
 data:
   key: {{ values.some_value }}
-"#;
+";
         let docs = best_effort_parse_yaml_documents(raw);
         // The NylRelease should parse, the ConfigMap with Jinja should be skipped
         assert_eq!(docs.len(), 1);
