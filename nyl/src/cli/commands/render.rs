@@ -286,7 +286,7 @@ pub async fn render_manifests_complete(
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name)
+/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context)
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn render_manifests(
     path: &str,
@@ -1218,11 +1218,16 @@ fn process_application_generator(
         let raw = std::fs::read_to_string(&file_path)
             .map_err(|e| NylError::Config(format!("Failed to read file {}: {}", file_path.display(), e)))?;
         let source_ctx = crate::util::SourceContext::new(file_path.clone());
+        let rel_path = file_path
+            .strip_prefix(&source_root)
+            .unwrap_or(&file_path)
+            .display()
+            .to_string();
 
         // Try Jinja rendering, then parse YAML. On failure, fall back to best-effort parsing
         // of individual YAML documents so we can still extract NylRelease metadata (which
         // typically doesn't use Jinja) even when other documents in the file do.
-        let (docs, render_error) = match engine.render_named(&file_path.display().to_string(), &raw, &ctx_json) {
+        let (docs, render_error) = match engine.render_named(&rel_path, &raw, &ctx_json) {
             Ok(rendered) => match source_ctx.parse_yaml_documents(&rendered) {
                 Ok(docs) => (docs, None),
                 Err(e) => {
@@ -1255,13 +1260,8 @@ fn process_application_generator(
 
             // If rendering or parsing failed, create a "husk" application: add error info and disable auto-sync
             if let Some(ref error_msg) = render_error {
-                let display_path = file_path
-                    .strip_prefix(&source_root)
-                    .unwrap_or(&file_path)
-                    .display()
-                    .to_string();
                 disable_automated_sync(&mut app);
-                append_render_error_info(&mut app, &display_path, error_msg)?;
+                append_render_error_info(&mut app, &rel_path, error_msg)?;
                 tracing::warn!(
                     "Generated husk ArgoCD Application {} from NylRelease in {} (rendering or parsing failed: {})",
                     release.metadata.name,
