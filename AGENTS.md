@@ -69,9 +69,9 @@ mise run docs-rustdoc     # Generate API docs
 
 ### Commit Guidelines
 
-1. **Always run `mise pre-commit` before committing**
-2. Commit at regular intervals with descriptive messages
-3. Run `cargo fmt` to format the code
+1. **Formatting and linting MUST pass before committing or creating PRs.** Run `cargo fmt` and `cargo clippy -- -D warnings` (or `mise run fmt` and `mise run lint`) and fix all issues before committing. CI will reject PRs that fail these checks.
+2. **Always run `mise pre-commit` before committing** (runs fmt-check, lint, and tests)
+3. Commit at regular intervals with descriptive messages
 4. Ensure all tests pass
 5. Update documentation if changing public APIs
 
