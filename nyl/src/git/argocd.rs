@@ -182,7 +182,7 @@ impl ArgoCDCredentialDiscovery {
 
         // Combine both sets of secrets, filtering for type="git" only
         let mut secrets = HashMap::new();
-        for secret in repo_secrets.items.into_iter().chain(creds_secrets.items.into_iter()) {
+        for secret in repo_secrets.items.into_iter().chain(creds_secrets.items) {
             // Check if secret type is "git" (or not specified, which defaults to "git")
             let repo_type = secret
                 .data

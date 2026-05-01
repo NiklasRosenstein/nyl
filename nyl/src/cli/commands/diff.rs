@@ -799,7 +799,7 @@ mod tests {
         async fn is_namespaced(&self, _gvk: &GroupVersionKind) -> Result<bool> {
             Ok(true)
         }
-        fn default_namespace(&self) -> &str {
+        fn default_namespace(&self) -> &'static str {
             "default"
         }
         async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {

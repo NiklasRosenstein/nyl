@@ -27,9 +27,7 @@ pub async fn resolve_manifest_namespaces(
         if key
             .namespace
             .as_deref()
-            .map(str::trim)
-            .filter(|ns| !ns.is_empty())
-            .is_some()
+            .is_some_and(|ns| !ns.trim().is_empty())
         {
             continue;
         }
@@ -102,9 +100,7 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
         if key
             .namespace
             .as_deref()
-            .map(str::trim)
-            .filter(|ns| !ns.is_empty())
-            .is_some()
+            .is_some_and(|ns| !ns.trim().is_empty())
         {
             adjusted.insert(key.clone(), *count);
             continue;
