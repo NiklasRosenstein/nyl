@@ -24,11 +24,7 @@ pub async fn resolve_manifest_namespaces(
 
     for manifest in manifests {
         let key = ResourceKey::from_json_value(manifest)?;
-        if key
-            .namespace
-            .as_deref()
-            .is_some_and(|ns| !ns.trim().is_empty())
-        {
+        if key.namespace.as_deref().is_some_and(|ns| !ns.trim().is_empty()) {
             continue;
         }
 
@@ -97,11 +93,7 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
     let default_namespace = client.default_namespace();
 
     for (key, count) in duplicates {
-        if key
-            .namespace
-            .as_deref()
-            .is_some_and(|ns| !ns.trim().is_empty())
-        {
+        if key.namespace.as_deref().is_some_and(|ns| !ns.trim().is_empty()) {
             adjusted.insert(key.clone(), *count);
             continue;
         }
