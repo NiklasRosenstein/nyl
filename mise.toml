@@ -1,6 +1,6 @@
 [tools]
 # Rust toolchain (PRIMARY)
-rust = "1.94.1"
+rust = "1.95.0"
 
 # Cargo extensions for development and release
 "cargo:cargo-dist" = "latest"
