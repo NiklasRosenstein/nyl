@@ -24,6 +24,9 @@ pub struct HelmTemplateExecutor {
 
     /// API versions to pass to Helm
     api_versions: Vec<String>,
+
+    /// Whether to pass --include-crds to helm template (default: true)
+    include_crds: bool,
 }
 
 impl HelmTemplateExecutor {
@@ -32,6 +35,7 @@ impl HelmTemplateExecutor {
         Self {
             kube_version: None,
             api_versions: Vec::new(),
+            include_crds: true,
         }
     }
 
@@ -46,6 +50,13 @@ impl HelmTemplateExecutor {
     #[must_use]
     pub fn with_api_versions(mut self, versions: Vec<String>) -> Self {
         self.api_versions = versions;
+        self
+    }
+
+    /// Set whether to include CRDs in the rendered output (default: true)
+    #[must_use]
+    pub fn with_include_crds(mut self, include_crds: bool) -> Self {
+        self.include_crds = include_crds;
         self
     }
 
@@ -87,6 +98,11 @@ impl HelmTemplateExecutor {
         if let Some(file_path) = params.values_file {
             cmd.arg("--values");
             cmd.arg(file_path);
+        }
+
+        // Include CRDs from the chart's crds/ directory
+        if self.include_crds {
+            cmd.arg("--include-crds");
         }
 
         cmd
@@ -180,6 +196,7 @@ impl std::fmt::Debug for HelmTemplateExecutor {
         f.debug_struct("HelmTemplateExecutor")
             .field("kube_version", &self.kube_version)
             .field("api_versions", &self.api_versions)
+            .field("include_crds", &self.include_crds)
             .finish()
     }
 }
@@ -321,6 +338,40 @@ mod tests {
         assert!(args.contains(&"--api-versions".to_string()));
         assert!(args.contains(&"apps/v1".to_string()));
         assert!(args.contains(&"v1".to_string()));
+    }
+
+    #[test]
+    fn test_build_command_includes_crds_by_default() {
+        let executor = HelmTemplateExecutor::new();
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/nginx"),
+            chart_ref: ChartRef::default(),
+        };
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(args.contains(&"--include-crds".to_string()));
+    }
+
+    #[test]
+    fn test_build_command_include_crds_disabled() {
+        let executor = HelmTemplateExecutor::new().with_include_crds(false);
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/nginx"),
+            chart_ref: ChartRef::default(),
+        };
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(!args.contains(&"--include-crds".to_string()));
     }
 
     #[test]

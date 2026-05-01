@@ -99,6 +99,11 @@ pub struct HelmChartSpec {
     /// Values to pass to the chart
     #[serde(default)]
     pub values: serde_json::Value,
+
+    /// Whether to include CRDs from the chart's crds/ directory in the rendered output.
+    /// Defaults to true when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
+    pub include_crds: Option<bool>,
 }
 
 impl Default for HelmChartSpec {
@@ -106,6 +111,7 @@ impl Default for HelmChartSpec {
         Self {
             chart: ChartRef::default(),
             values: serde_json::Value::Object(serde_json::Map::new()),
+            include_crds: None,
         }
     }
 }
