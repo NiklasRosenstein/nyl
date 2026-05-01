@@ -12,7 +12,7 @@ pub enum NylError {
     #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
 
-    #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed in the cluster.")]
+    #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed, or the apiVersion/kind may not be supported by the cluster.")]
     ApiResourceNotFound(String),
 
     #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl.toml file.")]
