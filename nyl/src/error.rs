@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-pub(crate) const API_RESOURCE_NOT_FOUND_PREFIX: &str = "API resource not found for ";
-
 /// Main error type for nyl
 #[derive(Error, Debug)]
 pub enum NylError {
@@ -13,6 +11,9 @@ pub enum NylError {
 
     #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
+
+    #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed, or the apiVersion/kind may not be supported by the cluster.")]
+    ApiResourceNotFound(String),
 
     #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl.toml file.")]
     ConfigNotFound(String),
@@ -119,7 +120,7 @@ impl NylError {
 
     /// Returns true if this is an API discovery miss for a specific GVK.
     pub fn is_api_resource_not_found_error(&self) -> bool {
-        matches!(self, NylError::Config(message) if message.starts_with(API_RESOURCE_NOT_FOUND_PREFIX))
+        matches!(self, NylError::ApiResourceNotFound(_))
     }
 }
 
@@ -215,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_is_api_resource_not_found_error() {
-        let err = NylError::Config(format!("{API_RESOURCE_NOT_FOUND_PREFIX}kyverno.io/v1/ClusterPolicy"));
+        let err = NylError::ApiResourceNotFound("kyverno.io/v1/ClusterPolicy".to_string());
         assert!(err.is_api_resource_not_found_error());
 
         let other = NylError::Config("some other config error".to_string());
