@@ -285,6 +285,67 @@ mod tests {
     fn test_helm_chart_spec_defaults() {
         let spec = HelmChartSpec::default();
         assert!(spec.values.is_object());
+        assert_eq!(spec.include_crds, None);
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_explicit_false() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  includeCrds: false
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, Some(false));
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_explicit_true() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  includeCrds: true
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, Some(true));
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_omitted_is_none() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, None);
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_not_serialized_when_none() {
+        let helm_chart = HelmChart::new(
+            "test",
+            ChartRef {
+                name: Some("mychart".to_string()),
+                ..Default::default()
+            },
+        );
+        let yaml = serde_norway::to_string(&helm_chart).unwrap();
+        assert!(!yaml.contains("includeCrds"));
     }
 
     #[test]
