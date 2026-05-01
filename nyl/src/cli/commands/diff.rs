@@ -233,6 +233,7 @@ impl DiffResult {
 }
 
 /// Compute diff between desired manifests and LIVE cluster state
+#[allow(clippy::too_many_lines)]
 async fn compute_diff_from_live(
     client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
@@ -413,7 +414,7 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     // Show added resources
     for (key, note) in &diff.added {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
-        let note_annotation = format_added_note(note);
+        let note_annotation = format_added_note(note.as_ref());
         println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
     }
     if !diff.added.is_empty() {
@@ -471,7 +472,7 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
 fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     for (key, note) in &diff.added {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
-        let note_annotation = format_added_note(note);
+        let note_annotation = format_added_note(note.as_ref());
         println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
     }
 
@@ -513,7 +514,7 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     );
 }
 
-fn format_added_note(note: &Option<AddedNote>) -> String {
+fn format_added_note(note: Option<&AddedNote>) -> String {
     match note {
         Some(n) if n.is_error => format!(" {}", format!("({})", n.message).red()),
         Some(n) => format!(" {}", format!("({})", n.message).yellow()),
