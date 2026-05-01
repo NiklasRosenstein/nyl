@@ -8,7 +8,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        extract_name, DiffEngine, KubeClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage, ResourceKey,
+        extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseStatus,
+        ReleaseStorage, ResourceKey,
     },
     NylError, Result,
 };
@@ -201,10 +202,17 @@ pub fn extract_component_name(manifests: &[serde_json::Value]) -> Result<String>
     Ok(name)
 }
 
+/// Annotation attached to an added resource
+#[derive(Debug)]
+struct AddedNote {
+    message: String,
+    is_error: bool,
+}
+
 /// Diff result categorization
 #[derive(Debug)]
 struct DiffResult {
-    added: Vec<ResourceKey>,
+    added: Vec<(ResourceKey, Option<AddedNote>)>,
     modified: Vec<(ResourceKey, String, Option<String>)>, // (key, unified_diff_text, optional_error)
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
@@ -212,14 +220,20 @@ struct DiffResult {
 }
 
 impl DiffResult {
-    /// Count total errors including normalization failures
+    /// Count total errors including normalization failures and added resources with errors
     fn total_error_count(&self) -> usize {
         let normalization_errors = self.modified.iter().filter(|(_, _, err)| err.is_some()).count();
-        self.errors.len() + normalization_errors
+        let added_errors = self
+            .added
+            .iter()
+            .filter(|(_, note)| note.as_ref().is_some_and(|n| n.is_error))
+            .count();
+        self.errors.len() + normalization_errors + added_errors
     }
 }
 
 /// Compute diff between desired manifests and LIVE cluster state
+#[allow(clippy::too_many_lines)]
 async fn compute_diff_from_live(
     client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
@@ -234,15 +248,19 @@ async fn compute_diff_from_live(
 
     // Fetch live resources for desired manifests
     let mut live_resources = HashMap::new();
+    let mut crd_not_found_keys: HashSet<ResourceKey> = HashSet::new();
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
-        if let Some(resource) = client
-            .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-            .await?
-        {
-            // Convert DynamicObject to JSON for comparison
-            let live_json = serde_json::to_value(&resource)?;
-            live_resources.insert(key.clone(), live_json);
+        match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+            Ok(Some(resource)) => {
+                let live_json = serde_json::to_value(&resource)?;
+                live_resources.insert(key.clone(), live_json);
+            }
+            Ok(None) => {}
+            Err(e) if e.is_api_resource_not_found_error() => {
+                crd_not_found_keys.insert(key);
+            }
+            Err(e) => return Err(e),
         }
     }
 
@@ -254,15 +272,20 @@ async fn compute_diff_from_live(
     for key in &previous_keys {
         if !desired_keys.contains(key) {
             // This resource is being deleted - check if it still exists in cluster
-            if let Some(resource) = client
-                .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                .await?
-            {
-                let live_json = serde_json::to_value(&resource)?;
-                live_resources.insert(key.clone(), live_json);
+            match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+                Ok(Some(resource)) => {
+                    let live_json = serde_json::to_value(&resource)?;
+                    live_resources.insert(key.clone(), live_json);
+                }
+                Ok(None) => {}
+                Err(e) if e.is_api_resource_not_found_error() => {}
+                Err(e) => return Err(e),
             }
         }
     }
+
+    // Precompute the set of CRD (group, kind, version) tuples present in desired_manifests.
+    let crd_set = build_crd_version_set(desired_manifests);
 
     // Categorize changes
     let mut added = Vec::new();
@@ -322,7 +345,22 @@ async fn compute_diff_from_live(
                 }
             }
         } else {
-            added.push(key);
+            let note = if crd_not_found_keys.contains(&key) {
+                if crd_in_manifests(&key.gvk, &crd_set) {
+                    Some(AddedNote {
+                        message: "CRD will be installed".to_string(),
+                        is_error: false,
+                    })
+                } else {
+                    Some(AddedNote {
+                        message: "CRD not installed in cluster".to_string(),
+                        is_error: true,
+                    })
+                }
+            } else {
+                None
+            };
+            added.push((key, note));
         }
     }
 
@@ -377,9 +415,10 @@ fn print_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
 /// Display diff results with kubectl-style unified diff output
 fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     // Show added resources
-    for key in &diff.added {
+    for (key, note) in &diff.added {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
-        println!("{} {}{}", "+".green().bold(), key, dup_annotation);
+        let note_annotation = format_added_note(note.as_ref());
+        println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
     }
     if !diff.added.is_empty() {
         println!();
@@ -432,8 +471,33 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     print_summary(diff, duplicates);
 }
 
-/// Display summary only (counts, no detailed diff)
+/// Display resource list and counts, without unified diff content
 fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
+    for (key, note) in &diff.added {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        let note_annotation = format_added_note(note.as_ref());
+        println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
+    }
+
+    for (key, _, error) in &diff.modified {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        let error_annotation = if let Some(err) = error {
+            format!(" {}", format!("({})", err).red())
+        } else {
+            String::new()
+        };
+        println!("{} {}{}{}", "~".yellow().bold(), key, dup_annotation, error_annotation);
+    }
+
+    for key in &diff.deleted {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "-".red().bold(), key, dup_annotation);
+    }
+
+    if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+        println!();
+    }
+
     print_summary(diff, duplicates);
 }
 
@@ -453,6 +517,14 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     );
 }
 
+fn format_added_note(note: Option<&AddedNote>) -> String {
+    match note {
+        Some(n) if n.is_error => format!(" {}", format!("({})", n.message).red()),
+        Some(n) => format!(" {}", format!("({})", n.message).yellow()),
+        None => String::new(),
+    }
+}
+
 /// Get duplicate annotation for a ResourceKey if it's a duplicate
 fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
     if let Some(count) = duplicates.get(key) {
@@ -461,6 +533,63 @@ fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<Reso
         return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
     }
     String::new()
+}
+
+/// Build a set of (group, kind, version) tuples from CRDs present in the manifests.
+/// For v1 CRDs only versions with `served: true` are included.
+/// For v1beta1 CRDs both `spec.version` (single) and `spec.versions[]` are checked.
+fn build_crd_version_set(manifests: &[serde_json::Value]) -> HashSet<(String, String, String)> {
+    let mut set = HashSet::new();
+    for m in manifests {
+        let api_version = m.get("apiVersion").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = m.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "CustomResourceDefinition"
+            || (api_version != "apiextensions.k8s.io/v1" && api_version != "apiextensions.k8s.io/v1beta1")
+        {
+            continue;
+        }
+        let spec = m.get("spec");
+        let Some(group) = spec.and_then(|s| s.get("group")).and_then(|g| g.as_str()) else {
+            continue;
+        };
+        let Some(crd_kind) = spec
+            .and_then(|s| s.get("names"))
+            .and_then(|n| n.get("kind"))
+            .and_then(|k| k.as_str())
+        else {
+            continue;
+        };
+        if api_version == "apiextensions.k8s.io/v1" {
+            if let Some(versions) = spec.and_then(|s| s.get("versions")).and_then(|v| v.as_array()) {
+                for ver in versions {
+                    let served = ver.get("served").and_then(|s| s.as_bool()).unwrap_or(false);
+                    if !served {
+                        continue;
+                    }
+                    if let Some(ver_name) = ver.get("name").and_then(|v| v.as_str()) {
+                        set.insert((group.to_string(), crd_kind.to_string(), ver_name.to_string()));
+                    }
+                }
+            }
+        } else {
+            // v1beta1: spec.version (single string) or spec.versions (array)
+            if let Some(ver) = spec.and_then(|s| s.get("version")).and_then(|v| v.as_str()) {
+                set.insert((group.to_string(), crd_kind.to_string(), ver.to_string()));
+            }
+            if let Some(versions) = spec.and_then(|s| s.get("versions")).and_then(|v| v.as_array()) {
+                for ver_entry in versions {
+                    if let Some(ver_name) = ver_entry.get("name").and_then(|v| v.as_str()) {
+                        set.insert((group.to_string(), crd_kind.to_string(), ver_name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    set
+}
+
+fn crd_in_manifests(gvk: &GroupVersionKind, crd_set: &HashSet<(String, String, String)>) -> bool {
+    crd_set.contains(&(gvk.group.clone(), gvk.kind.clone(), gvk.version.clone()))
 }
 
 fn missing_release_warning_message(namespace: &str, release_name: &str) -> String {
@@ -527,12 +656,248 @@ async fn merge_with_previous_release(
 
 #[cfg(test)]
 mod tests {
-    use super::missing_release_warning_message;
+    use super::*;
+    use crate::kubernetes::ApplyOutcome;
+    use async_trait::async_trait;
+    use kube::api::DynamicObject;
+    use serde_json::json;
 
     #[test]
     fn test_missing_release_warning_message_mentions_prune_limitation() {
         let msg = missing_release_warning_message("default", "demo");
         assert!(msg.contains("default/demo"));
         assert!(msg.contains("prune candidates cannot be determined"));
+    }
+
+    #[test]
+    fn test_build_crd_version_set_v1_served_only() {
+        let manifests = vec![json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "spec": {
+                "group": "example.com",
+                "names": { "kind": "MyResource" },
+                "versions": [
+                    { "name": "v1", "served": true, "storage": true },
+                    { "name": "v1beta1", "served": false, "storage": false }
+                ]
+            }
+        })];
+        let set = build_crd_version_set(&manifests);
+        assert!(set.contains(&("example.com".to_string(), "MyResource".to_string(), "v1".to_string())));
+        assert!(!set.contains(&(
+            "example.com".to_string(),
+            "MyResource".to_string(),
+            "v1beta1".to_string()
+        )));
+    }
+
+    #[test]
+    fn test_build_crd_version_set_v1beta1_single_version() {
+        let manifests = vec![json!({
+            "apiVersion": "apiextensions.k8s.io/v1beta1",
+            "kind": "CustomResourceDefinition",
+            "spec": {
+                "group": "example.com",
+                "names": { "kind": "MyResource" },
+                "version": "v1alpha1"
+            }
+        })];
+        let set = build_crd_version_set(&manifests);
+        assert!(set.contains(&(
+            "example.com".to_string(),
+            "MyResource".to_string(),
+            "v1alpha1".to_string()
+        )));
+    }
+
+    #[test]
+    fn test_crd_in_manifests_matches_group_kind_and_version() {
+        let manifests = vec![json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "spec": {
+                "group": "example.com",
+                "names": { "kind": "MyResource" },
+                "versions": [{ "name": "v1", "served": true, "storage": true }]
+            }
+        })];
+        let set = build_crd_version_set(&manifests);
+
+        let matching_gvk = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v1".to_string(),
+            kind: "MyResource".to_string(),
+        };
+        assert!(crd_in_manifests(&matching_gvk, &set));
+
+        let wrong_version = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v2".to_string(),
+            kind: "MyResource".to_string(),
+        };
+        assert!(!crd_in_manifests(&wrong_version, &set));
+
+        let wrong_group = GroupVersionKind {
+            group: "other.io".to_string(),
+            version: "v1".to_string(),
+            kind: "MyResource".to_string(),
+        };
+        assert!(!crd_in_manifests(&wrong_group, &set));
+    }
+
+    /// A KubeClient that returns ApiResourceNotFound for a specific set of GVKs and Ok(None) for all others.
+    struct SelectiveApiResourceNotFoundClient {
+        error_gvks: HashSet<(String, String, String)>,
+    }
+
+    impl SelectiveApiResourceNotFoundClient {
+        fn new(error_gvks: impl IntoIterator<Item = (&'static str, &'static str, &'static str)>) -> Self {
+            Self {
+                error_gvks: error_gvks
+                    .into_iter()
+                    .map(|(g, v, k)| (g.to_string(), v.to_string(), k.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl KubeClient for SelectiveApiResourceNotFoundClient {
+        async fn get_resource(
+            &self,
+            gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            if self
+                .error_gvks
+                .contains(&(gvk.group.clone(), gvk.version.clone(), gvk.kind.clone()))
+            {
+                Err(NylError::ApiResourceNotFound(format!(
+                    "{}/{}/{}",
+                    gvk.group, gvk.version, gvk.kind
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn apply_resource(
+            &self,
+            _resource: &DynamicObject,
+            _field_manager: &str,
+            _dry_run: bool,
+        ) -> Result<ApplyOutcome> {
+            Err(NylError::Other("not used".to_string()))
+        }
+        async fn get_server_version(&self) -> Result<String> {
+            Ok("1.30.0".to_string())
+        }
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn is_namespaced(&self, _gvk: &GroupVersionKind) -> Result<bool> {
+            Ok(true)
+        }
+        fn default_namespace(&self) -> &'static str {
+            "default"
+        }
+        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_normalized_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+        ) -> Result<DynamicObject> {
+            Ok(resource.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_diff_api_resource_not_found_crd_will_be_installed() {
+        let crd = json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": { "name": "mypolicies.kyverno.io" },
+            "spec": {
+                "group": "kyverno.io",
+                "names": { "kind": "ClusterPolicy", "plural": "clusterpolicies" },
+                "versions": [{ "name": "v1", "served": true, "storage": true }],
+                "scope": "Cluster"
+            }
+        });
+        let cr = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": { "name": "my-policy" }
+        });
+        let manifests = vec![crd, cr];
+        // Only the CR's GVK is unknown; the CRD manifest type is always available.
+        let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        // The CR should be in `added` with a non-error note ("CRD will be installed")
+        let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
+        assert!(cr_entry.is_some(), "ClusterPolicy should appear in added");
+        let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
+        assert!(!note.is_error, "note should not be an error when CRD is in manifests");
+        assert!(note.message.contains("CRD will be installed"));
+        assert_eq!(result.total_error_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_diff_api_resource_not_found_crd_not_installed() {
+        let cr = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": { "name": "my-policy" }
+        });
+        let manifests = vec![cr];
+        let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
+        assert!(cr_entry.is_some(), "ClusterPolicy should appear in added");
+        let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
+        assert!(note.is_error, "note should be an error when CRD is not in manifests");
+        assert!(note.message.contains("CRD not installed"));
+        assert_eq!(result.total_error_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_diff_api_resource_not_found_wrong_version_counts_as_error() {
+        // CRD in manifests but only serves v1beta1, resource requests v1
+        let crd = json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": { "name": "mypolicies.kyverno.io" },
+            "spec": {
+                "group": "kyverno.io",
+                "names": { "kind": "ClusterPolicy", "plural": "clusterpolicies" },
+                "versions": [{ "name": "v1beta1", "served": true, "storage": true }],
+                "scope": "Cluster"
+            }
+        });
+        let cr = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": { "name": "my-policy" }
+        });
+        let manifests = vec![crd, cr];
+        let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
+        assert!(cr_entry.is_some());
+        let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
+        assert!(note.is_error, "should be an error: CRD in manifests but wrong version");
+        assert_eq!(result.total_error_count(), 1);
     }
 }

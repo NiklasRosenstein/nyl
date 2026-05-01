@@ -24,13 +24,7 @@ pub async fn resolve_manifest_namespaces(
 
     for manifest in manifests {
         let key = ResourceKey::from_json_value(manifest)?;
-        if key
-            .namespace
-            .as_deref()
-            .map(str::trim)
-            .filter(|ns| !ns.is_empty())
-            .is_some()
-        {
+        if key.namespace.as_deref().is_some_and(|ns| !ns.trim().is_empty()) {
             continue;
         }
 
@@ -99,13 +93,7 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
     let default_namespace = client.default_namespace();
 
     for (key, count) in duplicates {
-        if key
-            .namespace
-            .as_deref()
-            .map(str::trim)
-            .filter(|ns| !ns.is_empty())
-            .is_some()
-        {
+        if key.namespace.as_deref().is_some_and(|ns| !ns.trim().is_empty()) {
             adjusted.insert(key.clone(), *count);
             continue;
         }
@@ -183,7 +171,6 @@ fn set_manifest_namespace(manifest: &mut Value, namespace: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::API_RESOURCE_NOT_FOUND_PREFIX;
     use crate::kubernetes::{ApplyOutcome, GroupVersionKind, MockKubeClient};
     use async_trait::async_trait;
     use kube::api::DynamicObject;
@@ -312,8 +299,8 @@ mod tests {
                 let mut counts = self.call_counts.lock().unwrap();
                 *counts.entry(gvk.clone()).or_insert(0) += 1;
             }
-            Err(NylError::Config(format!(
-                "{API_RESOURCE_NOT_FOUND_PREFIX}{}/{}",
+            Err(NylError::ApiResourceNotFound(format!(
+                "{}/{}",
                 if gvk.group.is_empty() {
                     gvk.version.clone()
                 } else {

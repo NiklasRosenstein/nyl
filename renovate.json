@@ -11,6 +11,12 @@
     },
     "packageRules": [
         {
+            "description": "Group rust-toolchain.toml, mise.toml, and CI action Rust version bumps into a single PR",
+            "matchManagers": ["rust-toolchain", "mise", "github-actions"],
+            "matchPackageNames": ["rust", "dtolnay/rust-toolchain"],
+            "groupName": "Rust toolchain"
+        },
+        {
             "description": "Auto-merge security/vulnerability patches immediately",
             "matchCategories": ["rust"],
             "matchUpdateTypes": ["patch"],

@@ -520,9 +520,7 @@ fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool 
         return false;
     }
 
-    crate::kubernetes::extract_gvk(manifest)
-        .map(|gvk| !crate::kubernetes::is_known_cluster_scoped_gvk(&gvk))
-        .unwrap_or(true)
+    crate::kubernetes::extract_gvk(manifest).map_or(true, |gvk| !crate::kubernetes::is_known_cluster_scoped_gvk(&gvk))
 }
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
