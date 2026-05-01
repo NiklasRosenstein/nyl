@@ -858,6 +858,7 @@ async fn generate_resource(
                 spec: crate::resources::HelmChartSpec {
                     chart: chart_ref,
                     values: component.spec,
+                    include_crds: None,
                 },
             };
 
@@ -897,6 +898,7 @@ async fn generate_resource(
                         ..Default::default()
                     },
                     values: component.spec,
+                    include_crds: None,
                 },
             };
 
@@ -1130,7 +1132,8 @@ fn render_helm_chart(
 
     let executor = HelmTemplateExecutor::new()
         .with_kube_version(kube_version.to_string())
-        .with_api_versions(api_versions.to_vec());
+        .with_api_versions(api_versions.to_vec())
+        .with_include_crds(chart.spec.include_crds.unwrap_or(true));
 
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));
