@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    error::API_RESOURCE_NOT_FOUND_PREFIX,
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
     profiles::{KubeconfigSource, Profile},
     NylError, Result,
@@ -213,8 +212,8 @@ impl KubeRsClient {
             format!(" (available versions for this kind: {})", available_versions.join(", "))
         };
 
-        Err(NylError::Config(format!(
-            "{API_RESOURCE_NOT_FOUND_PREFIX}{}/{}{}",
+        Err(NylError::ApiResourceNotFound(format!(
+            "{}/{}{}",
             group_version, gvk.kind, versions_hint
         )))
     }

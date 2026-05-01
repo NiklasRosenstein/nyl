@@ -8,7 +8,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        extract_name, DiffEngine, KubeClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage, ResourceKey,
+        extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseStatus,
+        ReleaseStorage, ResourceKey,
     },
     NylError, Result,
 };
@@ -201,10 +202,17 @@ pub fn extract_component_name(manifests: &[serde_json::Value]) -> Result<String>
     Ok(name)
 }
 
+/// Annotation attached to an added resource
+#[derive(Debug)]
+struct AddedNote {
+    message: String,
+    is_error: bool,
+}
+
 /// Diff result categorization
 #[derive(Debug)]
 struct DiffResult {
-    added: Vec<ResourceKey>,
+    added: Vec<(ResourceKey, Option<AddedNote>)>,
     modified: Vec<(ResourceKey, String, Option<String>)>, // (key, unified_diff_text, optional_error)
     deleted: Vec<ResourceKey>,
     unchanged: Vec<ResourceKey>,
@@ -212,10 +220,15 @@ struct DiffResult {
 }
 
 impl DiffResult {
-    /// Count total errors including normalization failures
+    /// Count total errors including normalization failures and added resources with errors
     fn total_error_count(&self) -> usize {
         let normalization_errors = self.modified.iter().filter(|(_, _, err)| err.is_some()).count();
-        self.errors.len() + normalization_errors
+        let added_errors = self
+            .added
+            .iter()
+            .filter(|(_, note)| note.as_ref().is_some_and(|n| n.is_error))
+            .count();
+        self.errors.len() + normalization_errors + added_errors
     }
 }
 
@@ -234,15 +247,19 @@ async fn compute_diff_from_live(
 
     // Fetch live resources for desired manifests
     let mut live_resources = HashMap::new();
+    let mut crd_not_found_keys: HashSet<ResourceKey> = HashSet::new();
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
-        if let Some(resource) = client
-            .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-            .await?
-        {
-            // Convert DynamicObject to JSON for comparison
-            let live_json = serde_json::to_value(&resource)?;
-            live_resources.insert(key.clone(), live_json);
+        match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+            Ok(Some(resource)) => {
+                let live_json = serde_json::to_value(&resource)?;
+                live_resources.insert(key.clone(), live_json);
+            }
+            Ok(None) => {}
+            Err(e) if e.is_api_resource_not_found_error() => {
+                crd_not_found_keys.insert(key);
+            }
+            Err(e) => return Err(e),
         }
     }
 
@@ -254,12 +271,14 @@ async fn compute_diff_from_live(
     for key in &previous_keys {
         if !desired_keys.contains(key) {
             // This resource is being deleted - check if it still exists in cluster
-            if let Some(resource) = client
-                .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                .await?
-            {
-                let live_json = serde_json::to_value(&resource)?;
-                live_resources.insert(key.clone(), live_json);
+            match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+                Ok(Some(resource)) => {
+                    let live_json = serde_json::to_value(&resource)?;
+                    live_resources.insert(key.clone(), live_json);
+                }
+                Ok(None) => {}
+                Err(e) if e.is_api_resource_not_found_error() => {}
+                Err(e) => return Err(e),
             }
         }
     }
@@ -322,7 +341,22 @@ async fn compute_diff_from_live(
                 }
             }
         } else {
-            added.push(key);
+            let note = if crd_not_found_keys.contains(&key) {
+                if crd_in_manifests(&key.gvk, desired_manifests) {
+                    Some(AddedNote {
+                        message: "CRD will be installed".to_string(),
+                        is_error: false,
+                    })
+                } else {
+                    Some(AddedNote {
+                        message: "CRD not installed in cluster".to_string(),
+                        is_error: true,
+                    })
+                }
+            } else {
+                None
+            };
+            added.push((key, note));
         }
     }
 
@@ -377,9 +411,10 @@ fn print_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
 /// Display diff results with kubectl-style unified diff output
 fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     // Show added resources
-    for key in &diff.added {
+    for (key, note) in &diff.added {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
-        println!("{} {}{}", "+".green().bold(), key, dup_annotation);
+        let note_annotation = format_added_note(note);
+        println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
     }
     if !diff.added.is_empty() {
         println!();
@@ -432,8 +467,33 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
     print_summary(diff, duplicates);
 }
 
-/// Display summary only (counts, no detailed diff)
+/// Display resource list and counts, without unified diff content
 fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
+    for (key, note) in &diff.added {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        let note_annotation = format_added_note(note);
+        println!("{} {}{}{}", "+".green().bold(), key, dup_annotation, note_annotation);
+    }
+
+    for (key, _, error) in &diff.modified {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        let error_annotation = if let Some(err) = error {
+            format!(" {}", format!("({})", err).red())
+        } else {
+            String::new()
+        };
+        println!("{} {}{}{}", "~".yellow().bold(), key, dup_annotation, error_annotation);
+    }
+
+    for key in &diff.deleted {
+        let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
+        println!("{} {}{}", "-".red().bold(), key, dup_annotation);
+    }
+
+    if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+        println!();
+    }
+
     print_summary(diff, duplicates);
 }
 
@@ -453,6 +513,14 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     );
 }
 
+fn format_added_note(note: &Option<AddedNote>) -> String {
+    match note {
+        Some(n) if n.is_error => format!(" {}", format!("({})", n.message).red()),
+        Some(n) => format!(" {}", format!("({})", n.message).yellow()),
+        None => String::new(),
+    }
+}
+
 /// Get duplicate annotation for a ResourceKey if it's a duplicate
 fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
     if let Some(count) = duplicates.get(key) {
@@ -461,6 +529,29 @@ fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<Reso
         return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
     }
     String::new()
+}
+
+fn crd_in_manifests(gvk: &GroupVersionKind, manifests: &[serde_json::Value]) -> bool {
+    manifests.iter().any(|m| {
+        let api_version = m.get("apiVersion").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = m.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "CustomResourceDefinition"
+            || (api_version != "apiextensions.k8s.io/v1" && api_version != "apiextensions.k8s.io/v1beta1")
+        {
+            return false;
+        }
+        let spec = m.get("spec");
+        let group_matches = spec
+            .and_then(|s| s.get("group"))
+            .and_then(|g| g.as_str())
+            .is_some_and(|g| g == gvk.group);
+        let kind_matches = spec
+            .and_then(|s| s.get("names"))
+            .and_then(|n| n.get("kind"))
+            .and_then(|k| k.as_str())
+            .is_some_and(|k| k == gvk.kind);
+        group_matches && kind_matches
+    })
 }
 
 fn missing_release_warning_message(namespace: &str, release_name: &str) -> String {
