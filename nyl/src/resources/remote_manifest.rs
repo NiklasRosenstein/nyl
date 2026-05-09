@@ -93,6 +93,15 @@ impl RemoteManifest {
                         "RemoteManifest spec.urls must not be empty".to_string(),
                     ));
                 }
+                if let Some(params) = &self.spec.params {
+                    for (key, value) in params {
+                        if value.contains('{') || value.contains('}') {
+                            return Err(NylError::Config(format!(
+                                "RemoteManifest spec.params value for '{key}' must not contain '{{' or '}}' characters"
+                            )));
+                        }
+                    }
+                }
                 for url in urls {
                     let trimmed = url.trim();
                     let resolved = match &self.spec.params {
@@ -101,7 +110,7 @@ impl RemoteManifest {
                     };
                     if !resolved.starts_with("https://") {
                         return Err(NylError::Config(format!(
-                            "RemoteManifest spec.urls entry must use https:// scheme, got '{url}'"
+                            "RemoteManifest spec.urls entry must use https:// scheme, got '{resolved}' (from template '{url}')"
                         )));
                     }
                 }
@@ -125,6 +134,11 @@ impl RemoteManifest {
             }
             return Err(NylError::Config(format!(
                 "Malformed placeholder (unclosed '{{') in RemoteManifest URL template '{template}'"
+            )));
+        }
+        if result.contains('}') {
+            return Err(NylError::Config(format!(
+                "Malformed placeholder (unmatched '}}') in RemoteManifest URL template '{template}'"
             )));
         }
         Ok(result)
@@ -351,11 +365,7 @@ mod tests {
     #[test]
     fn test_apply_params_substitutes_placeholders() {
         let params = HashMap::from([("version".to_string(), "1.5.1".to_string())]);
-        let result = RemoteManifest::apply_params(
-            "https://example.com/v{version}/crds.yaml",
-            &params,
-        )
-        .unwrap();
+        let result = RemoteManifest::apply_params("https://example.com/v{version}/crds.yaml", &params).unwrap();
         assert_eq!(result, "https://example.com/v1.5.1/crds.yaml");
     }
 
@@ -365,22 +375,14 @@ mod tests {
             ("version".to_string(), "1.5.1".to_string()),
             ("name".to_string(), "gatewayclasses".to_string()),
         ]);
-        let result = RemoteManifest::apply_params(
-            "https://example.com/v{version}/{name}.yaml",
-            &params,
-        )
-        .unwrap();
+        let result = RemoteManifest::apply_params("https://example.com/v{version}/{name}.yaml", &params).unwrap();
         assert_eq!(result, "https://example.com/v1.5.1/gatewayclasses.yaml");
     }
 
     #[test]
     fn test_apply_params_rejects_unresolved_placeholder() {
         let params = HashMap::from([("version".to_string(), "1.5.1".to_string())]);
-        let err = RemoteManifest::apply_params(
-            "https://example.com/v{version}/{unknown}.yaml",
-            &params,
-        )
-        .unwrap_err();
+        let err = RemoteManifest::apply_params("https://example.com/v{version}/{unknown}.yaml", &params).unwrap_err();
         assert!(err.to_string().contains("Unresolved placeholder"));
         assert!(err.to_string().contains("{unknown}"));
     }
@@ -388,12 +390,31 @@ mod tests {
     #[test]
     fn test_apply_params_rejects_unclosed_brace() {
         let params = HashMap::from([("version".to_string(), "1.5.1".to_string())]);
-        let err = RemoteManifest::apply_params(
-            "https://example.com/v{version}/{unclosed",
-            &params,
-        )
-        .unwrap_err();
+        let err = RemoteManifest::apply_params("https://example.com/v{version}/{unclosed", &params).unwrap_err();
         assert!(err.to_string().contains("Malformed placeholder"));
+    }
+
+    #[test]
+    fn test_apply_params_rejects_stray_closing_brace() {
+        let params = HashMap::from([("version".to_string(), "1.5.1".to_string())]);
+        let err = RemoteManifest::apply_params("https://example.com/v{version}/stray}brace", &params).unwrap_err();
+        assert!(err.to_string().contains("Malformed placeholder"));
+    }
+
+    #[test]
+    fn test_validate_rejects_params_value_with_braces() {
+        let manifest = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {
+                "params": {"version": "1.5.1", "path": "{version}/sub"},
+                "urls": ["https://example.com/{version}/{path}.yaml"]
+            }
+        });
+        let remote = RemoteManifest::from_value(&manifest).unwrap();
+        let err = remote.validate().unwrap_err();
+        assert!(err.to_string().contains("must not contain"));
     }
 
     #[test]
@@ -419,10 +440,7 @@ mod tests {
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let urls = remote.resolve_urls().unwrap();
-        assert_eq!(urls, vec![
-            "https://example.com/a.yaml",
-            "https://example.com/b.yaml",
-        ]);
+        assert_eq!(urls, vec!["https://example.com/a.yaml", "https://example.com/b.yaml",]);
     }
 
     #[test]
@@ -441,9 +459,9 @@ mod tests {
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let urls = remote.resolve_urls().unwrap();
-        assert_eq!(urls, vec![
-            "https://example.com/v1.5.1/a.yaml",
-            "https://example.com/v1.5.1/b.yaml",
-        ]);
+        assert_eq!(
+            urls,
+            vec!["https://example.com/v1.5.1/a.yaml", "https://example.com/v1.5.1/b.yaml",]
+        );
     }
 }
