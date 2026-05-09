@@ -14,13 +14,13 @@ use crate::{NylError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteManifestSpec {
-    /// Single HTTPS URL to fetch (mutually exclusive with `sources`)
+    /// Single HTTPS URL to fetch (mutually exclusive with `urls`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// List of HTTPS URL templates to fetch (mutually exclusive with `url`)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sources: Option<Vec<String>>,
-    /// Parameters for `{key}` substitution in `sources` URL templates
+    pub urls: Option<Vec<String>>,
+    /// Parameters for `{key}` substitution in `urls` URL templates
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<HashMap<String, String>>,
     /// Overwrite fetched manifest metadata.namespace with RemoteManifest metadata.namespace
@@ -58,21 +58,21 @@ impl RemoteManifest {
 
     /// Validate the RemoteManifest configuration
     pub fn validate(&self) -> Result<()> {
-        match (&self.spec.url, &self.spec.sources) {
+        match (&self.spec.url, &self.spec.urls) {
             (Some(_), Some(_)) => {
                 return Err(NylError::Config(
-                    "RemoteManifest spec.url and spec.sources are mutually exclusive".to_string(),
+                    "RemoteManifest spec.url and spec.urls are mutually exclusive".to_string(),
                 ))
             }
             (None, None) => {
                 return Err(NylError::Config(
-                    "RemoteManifest must specify either spec.url or spec.sources".to_string(),
+                    "RemoteManifest must specify either spec.url or spec.urls".to_string(),
                 ))
             }
             (Some(url), None) => {
                 if self.spec.params.is_some() {
                     return Err(NylError::Config(
-                        "RemoteManifest spec.params requires spec.sources".to_string(),
+                        "RemoteManifest spec.params requires spec.urls".to_string(),
                     ));
                 }
                 let url = url.trim();
@@ -87,20 +87,21 @@ impl RemoteManifest {
                     )));
                 }
             }
-            (None, Some(sources)) => {
-                if sources.is_empty() {
+            (None, Some(urls)) => {
+                if urls.is_empty() {
                     return Err(NylError::Config(
-                        "RemoteManifest spec.sources must not be empty".to_string(),
+                        "RemoteManifest spec.urls must not be empty".to_string(),
                     ));
                 }
-                for source in sources {
+                for url in urls {
+                    let trimmed = url.trim();
                     let resolved = match &self.spec.params {
-                        Some(params) => Self::apply_params(source, params)?,
-                        None => source.clone(),
+                        Some(params) => Self::apply_params(trimmed, params)?,
+                        None => trimmed.to_string(),
                     };
-                    if !resolved.trim().starts_with("https://") {
+                    if !resolved.starts_with("https://") {
                         return Err(NylError::Config(format!(
-                            "RemoteManifest spec.sources entry must use https:// scheme, got '{source}'"
+                            "RemoteManifest spec.urls entry must use https:// scheme, got '{url}'"
                         )));
                     }
                 }
@@ -122,26 +123,31 @@ impl RemoteManifest {
                     "Unresolved placeholder '{placeholder}' in RemoteManifest URL template '{template}'"
                 )));
             }
+            return Err(NylError::Config(format!(
+                "Malformed placeholder (unclosed '{{') in RemoteManifest URL template '{template}'"
+            )));
         }
         Ok(result)
     }
 
     /// Resolve the list of concrete HTTPS URLs to fetch.
+    ///
+    /// Callers must invoke `validate()` before calling this method.
     pub fn resolve_urls(&self) -> Result<Vec<String>> {
         if let Some(url) = &self.spec.url {
             Ok(vec![url.trim().to_string()])
-        } else if let Some(sources) = &self.spec.sources {
-            sources
-                .iter()
-                .map(|s| match &self.spec.params {
-                    Some(params) => Self::apply_params(s, params),
-                    None => Ok(s.clone()),
+        } else if let Some(urls) = &self.spec.urls {
+            urls.iter()
+                .map(|s| {
+                    let trimmed = s.trim();
+                    match &self.spec.params {
+                        Some(params) => Self::apply_params(trimmed, params),
+                        None => Ok(trimmed.to_string()),
+                    }
                 })
                 .collect()
         } else {
-            Err(NylError::Config(
-                "RemoteManifest must specify either spec.url or spec.sources".to_string(),
-            ))
+            unreachable!("resolve_urls called on unvalidated RemoteManifest (neither url nor urls set)")
         }
     }
 }
@@ -199,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_neither_url_nor_sources() {
+    fn test_remote_manifest_validate_rejects_neither_url_nor_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
@@ -208,18 +214,18 @@ mod tests {
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let err = remote.validate().unwrap_err();
-        assert!(err.to_string().contains("spec.url or spec.sources"));
+        assert!(err.to_string().contains("spec.url or spec.urls"));
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_both_url_and_sources() {
+    fn test_remote_manifest_validate_rejects_both_url_and_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
                 "url": "https://example.com/a.yaml",
-                "sources": ["https://example.com/b.yaml"]
+                "urls": ["https://example.com/b.yaml"]
             }
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
@@ -228,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_params_without_sources() {
+    fn test_remote_manifest_validate_rejects_params_without_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
@@ -240,29 +246,29 @@ mod tests {
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let err = remote.validate().unwrap_err();
-        assert!(err.to_string().contains("spec.params requires spec.sources"));
+        assert!(err.to_string().contains("spec.params requires spec.urls"));
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_empty_sources() {
+    fn test_remote_manifest_validate_rejects_empty_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
-            "spec": {"sources": []}
+            "spec": {"urls": []}
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let err = remote.validate().unwrap_err();
-        assert!(err.to_string().contains("spec.sources must not be empty"));
+        assert!(err.to_string().contains("spec.urls must not be empty"));
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_non_https_in_sources() {
+    fn test_remote_manifest_validate_rejects_non_https_in_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
-            "spec": {"sources": ["https://example.com/a.yaml", "http://example.com/b.yaml"]}
+            "spec": {"urls": ["https://example.com/a.yaml", "http://example.com/b.yaml"]}
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
         let err = remote.validate().unwrap_err();
@@ -270,14 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_manifest_validate_accepts_sources_with_params() {
+    fn test_remote_manifest_validate_accepts_urls_with_params() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
                 "params": {"version": "1.5.1"},
-                "sources": [
+                "urls": [
                     "https://example.com/v{version}/a.yaml",
                     "https://example.com/v{version}/b.yaml"
                 ]
@@ -288,14 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_manifest_validate_rejects_unresolved_placeholder_in_sources() {
+    fn test_remote_manifest_validate_rejects_unresolved_placeholder_in_urls() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
                 "params": {"version": "1.5.1"},
-                "sources": ["https://example.com/{version}/{unknown}/a.yaml"]
+                "urls": ["https://example.com/{version}/{unknown}/a.yaml"]
             }
         });
         let remote = RemoteManifest::from_value(&manifest).unwrap();
@@ -380,6 +386,17 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_params_rejects_unclosed_brace() {
+        let params = HashMap::from([("version".to_string(), "1.5.1".to_string())]);
+        let err = RemoteManifest::apply_params(
+            "https://example.com/v{version}/{unclosed",
+            &params,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Malformed placeholder"));
+    }
+
+    #[test]
     fn test_resolve_urls_from_url() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
@@ -393,14 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_urls_from_sources_with_params() {
+    fn test_resolve_urls_trims_whitespace() {
+        let manifest = json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {"urls": ["  https://example.com/a.yaml  ", " https://example.com/b.yaml "]}
+        });
+        let remote = RemoteManifest::from_value(&manifest).unwrap();
+        let urls = remote.resolve_urls().unwrap();
+        assert_eq!(urls, vec![
+            "https://example.com/a.yaml",
+            "https://example.com/b.yaml",
+        ]);
+    }
+
+    #[test]
+    fn test_resolve_urls_from_urls_with_params() {
         let manifest = json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
                 "params": {"version": "1.5.1"},
-                "sources": [
+                "urls": [
                     "https://example.com/v{version}/a.yaml",
                     "https://example.com/v{version}/b.yaml"
                 ]
