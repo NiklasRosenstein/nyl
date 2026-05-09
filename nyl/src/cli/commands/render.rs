@@ -952,8 +952,6 @@ async fn generate_resource(
 }
 
 async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
-    let url = remote_manifest.spec.url.trim();
-    let sanitized_url = crate::util::sanitize_url(url);
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
@@ -967,10 +965,29 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
         .build()
         .map_err(|e| {
             NylError::Process(format!(
-                "Failed to initialize HTTPS client for RemoteManifest '{}' from {}: {}",
-                remote_manifest.metadata.name, sanitized_url, e
+                "Failed to initialize HTTPS client for RemoteManifest '{}': {}",
+                remote_manifest.metadata.name, e
             ))
         })?;
+
+    let urls = remote_manifest.resolve_urls()?;
+    let mut all_documents = Vec::new();
+    for url in &urls {
+        let docs = fetch_single_remote_url(&client, remote_manifest, url).await?;
+        all_documents.extend(docs);
+    }
+    if remote_manifest.spec.override_namespace {
+        override_fetched_manifest_namespaces(&mut all_documents, remote_manifest.metadata.namespace.as_deref());
+    }
+    Ok(all_documents)
+}
+
+async fn fetch_single_remote_url(
+    client: &reqwest::Client,
+    remote_manifest: &RemoteManifest,
+    url: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let sanitized_url = crate::util::sanitize_url(url);
     let mut response = client.get(url).send().await.map_err(|e| {
         let detail = if e.is_timeout() {
             "request timed out"
@@ -1024,11 +1041,7 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
         ))
     })?;
     let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{sanitized_url}")));
-    let mut documents = source_ctx.parse_yaml_documents(&body)?;
-    if remote_manifest.spec.override_namespace {
-        override_fetched_manifest_namespaces(&mut documents, remote_manifest.metadata.namespace.as_deref());
-    }
-    Ok(documents)
+    source_ctx.parse_yaml_documents(&body)
 }
 
 fn override_fetched_manifest_namespaces(manifests: &mut [serde_json::Value], namespace: Option<&str>) {
