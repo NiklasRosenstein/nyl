@@ -67,7 +67,7 @@ This creates:
 nyl new component v1.example.io MyApp
 ```
 
-This creates a new component at `components/v1.example.io/MyApp/` with:
+This creates a new [local component](/nyl/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
 - `Chart.yaml` - Helm chart metadata
 - `values.yaml` - Default values
 - `values.schema.json` - JSON schema for validation
