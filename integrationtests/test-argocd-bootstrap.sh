@@ -179,7 +179,7 @@ echo "======================================="
 echo "Waiting for ArgoCD deployments"
 echo "======================================="
 
-for deployment in argocd-server argocd-repo-server argocd-application-controller; do
+for deployment in argocd-server argocd-repo-server; do
     echo "Waiting for ${deployment}..."
 
     if ! kubectl rollout status deployment/${deployment} -n "${NAMESPACE}" \
@@ -196,6 +196,21 @@ for deployment in argocd-server argocd-repo-server argocd-application-controller
 
     echo "✓ ${deployment} is ready"
 done
+
+# argocd-application-controller is a StatefulSet, not a Deployment
+echo "Waiting for argocd-application-controller..."
+if ! kubectl rollout status statefulset/argocd-application-controller -n "${NAMESPACE}" \
+    --timeout="${DEPLOYMENT_TIMEOUT}s"; then
+    echo "ERROR: StatefulSet argocd-application-controller failed to become ready"
+    echo ""
+    echo "StatefulSet details:"
+    kubectl describe statefulset/argocd-application-controller -n "${NAMESPACE}"
+    echo ""
+    echo "Recent logs:"
+    kubectl logs statefulset/argocd-application-controller -n "${NAMESPACE}" --tail=50 || true
+    exit 1
+fi
+echo "✓ argocd-application-controller is ready"
 
 echo ""
 echo "✓ All ArgoCD deployments are ready"
