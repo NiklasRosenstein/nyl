@@ -69,6 +69,7 @@ api_versions = ["v1", "apps/v1", "networking.k8s.io/v1"]
 - Type: object/table
 - Default: empty
 - Meaning: Default Kubernetes target metadata for `nyl render --offline`.
+- Typical use: Commit this when using [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) so CI can render deterministically without connecting to a cluster.
 - Fields:
   - `kube_version`: Kubernetes version passed to Helm, for example `"1.30.0"`.
   - `api_versions`: array of Kubernetes API versions passed to Helm, for example `["v1", "apps/v1"]`.
