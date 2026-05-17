@@ -117,6 +117,7 @@
 <li>Type: object/table</li>
 <li>Default: empty</li>
 <li>Meaning: Default Kubernetes target metadata for <code dir="auto">nyl render --offline</code>.</li>
+<li>Typical use: Commit this when using <a href="/nyl/pr-preview/pr-83/deployment-workflows/rendered-manifests/">rendered manifest GitOps</a> so CI can render deterministically without connecting to a cluster.</li>
 <li>Fields:
 <ul>
 <li><code dir="auto">kube_version</code>: Kubernetes version passed to Helm, for example <code dir="auto">"1.30.0"</code>.</li>
