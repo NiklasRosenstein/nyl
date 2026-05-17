@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  deployments: write
   issues: write
   pull-requests: write
 
@@ -91,9 +92,70 @@ jobs:
           path: dist
 
       - name: Deploy preview
+        id: preview
         uses: rossjrw/pr-preview-action@v1
         with:
           source-dir: dist
           preview-branch: gh-pages
           umbrella-dir: pr-preview
           wait-for-pages-deployment: true
+
+      - name: Create GitHub deployment
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.preview-url }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const environment = `docs-preview-pr-${pr.number}`;
+
+            const deployment = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref: pr.head.sha,
+              auto_merge: false,
+              required_contexts: [],
+              environment,
+              transient_environment: true,
+              description: `Documentation preview for PR #${pr.number}`,
+            });
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: deployment.data.id,
+              state: "success",
+              environment,
+              environment_url: process.env.PREVIEW_URL,
+              log_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              description: "Documentation preview is ready.",
+            });
+
+      - name: Deactivate GitHub deployment
+        if: steps.preview.outputs.deployment-action == 'remove'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const environment = `docs-preview-pr-${pr.number}`;
+
+            const deployments = await github.paginate(github.rest.repos.listDeployments, {
+              owner,
+              repo,
+              environment,
+            });
+
+            for (const deployment of deployments) {
+              await github.rest.repos.createDeploymentStatus({
+                owner,
+                repo,
+                deployment_id: deployment.id,
+                state: "inactive",
+                environment,
+                log_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+                description: "Documentation preview was removed.",
+              });
+            }
