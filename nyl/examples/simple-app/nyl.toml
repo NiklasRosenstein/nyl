@@ -2,11 +2,11 @@
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
 
-[profile.values.dev]
+[profile.dev.values]
 image_tag = "dev-latest"
 
-[profile.values.staging]
+[profile.staging.values]
 image_tag = "staging-v1.0.0"
 
-[profile.values.prod]
+[profile.prod.values]
 image_tag = "v1.0.0"

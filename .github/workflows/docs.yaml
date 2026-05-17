@@ -1,58 +1,174 @@
 name: Documentation
 
 on:
+  workflow_dispatch:
   push:
     branches: [develop]
     paths:
       - "nyl/book/**"
       - ".github/workflows/docs.yaml"
   pull_request:
-    paths:
-      - "nyl/book/**"
-      - ".github/workflows/docs.yaml"
+    types: [opened, reopened, synchronize, closed]
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
+  deployments: write
+  issues: write
+  pull-requests: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+# This workflow expects repository Pages settings to use "Deploy from a branch"
+# with the gh-pages branch and the repository root as the source.
 concurrency:
-  group: "pages"
+  group: docs-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build mdBook
+    name: Build Starlight
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
+    env:
+      BASE_PATH: ${{ github.event_name == 'pull_request' && format('/nyl/pr-preview/pr-{0}', github.event.number) || '/nyl' }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          mdbook-version: 'latest'
+          node-version: 22
+          cache: npm
+          cache-dependency-path: nyl/book/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: nyl/book
 
       - name: Build book
-        run: mdbook build
+        run: npm run build
         working-directory: nyl/book
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          path: nyl/book/book
+          name: docs-site
+          path: nyl/book/dist
+          if-no-files-found: error
 
-  deploy:
-    name: Deploy to GitHub Pages
-    if: github.event_name == 'push'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  deploy-production:
+    name: Deploy production docs
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: dist
+
+      - name: Deploy to GitHub Pages branch
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: dist
+          clean-exclude: pr-preview
+          force: false
+
+  deploy-preview:
+    name: Deploy PR preview
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.action == 'closed' || needs.build.result == 'success')
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        if: github.event.action != 'closed'
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: dist
+
+      - name: Deploy preview
+        id: preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: dist
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          wait-for-pages-deployment: true
+
+      - name: Prepare Pages root marker
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        run: |
+          mkdir pages-root
+          touch pages-root/.nojekyll
+
+      - name: Disable Jekyll for Pages branch
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: pages-root
+          clean: false
+          force: false
+
+      - name: Create GitHub deployment
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.preview-url }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const environment = `docs-preview-pr-${pr.number}`;
+
+            const deployment = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref: pr.head.sha,
+              auto_merge: false,
+              required_contexts: [],
+              environment,
+              transient_environment: true,
+              description: `Documentation preview for PR #${pr.number}`,
+            });
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: deployment.data.id,
+              state: "success",
+              environment,
+              environment_url: process.env.PREVIEW_URL,
+              log_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              description: "Documentation preview is ready.",
+            });
+
+      - name: Deactivate GitHub deployment
+        if: steps.preview.outputs.deployment-action == 'remove'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const environment = `docs-preview-pr-${pr.number}`;
+
+            const deployments = await github.paginate(github.rest.repos.listDeployments, {
+              owner,
+              repo,
+              environment,
+            });
+
+            for (const deployment of deployments) {
+              await github.rest.repos.createDeploymentStatus({
+                owner,
+                repo,
+                deployment_id: deployment.id,
+                state: "inactive",
+                environment,
+                log_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+                description: "Documentation preview was removed.",
+              });
+            }

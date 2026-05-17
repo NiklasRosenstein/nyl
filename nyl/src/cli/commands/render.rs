@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::{
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
-    config::{ProjectConfig, StripEmptyMetadataLabelsMode},
+    config::{KubernetesTarget, ProjectConfig, StripEmptyMetadataLabelsMode},
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
     git::is_argocd_env,
     helm::{HelmChartResolver, HelmTemplateExecutor},
@@ -75,12 +75,12 @@ pub struct RenderArgs {
     #[arg(long)]
     pub offline: bool,
 
-    /// Kubernetes version for Helm templating (required with --offline)
-    #[arg(long, required_if_eq("offline", "true"))]
+    /// Kubernetes version for Helm templating (used with --offline; overrides nyl.toml)
+    #[arg(long)]
     pub kube_version: Option<String>,
 
-    /// Kubernetes API versions for Helm (required with --offline, comma-separated or repeated)
-    #[arg(long, required_if_eq("offline", "true"), value_delimiter = ',')]
+    /// Kubernetes API versions for Helm (used with --offline; overrides nyl.toml, comma-separated or repeated)
+    #[arg(long, value_delimiter = ',')]
     pub kube_api_versions: Vec<String>,
 }
 
@@ -334,11 +334,7 @@ pub(crate) async fn render_manifests(
         // No HelmCharts, version info not needed
         (String::new(), Vec::new())
     } else if offline {
-        // In offline mode, use CLI arguments (required by clap)
-        (
-            cli_kube_version.unwrap_or_default().to_string(),
-            cli_api_versions.to_vec(),
-        )
+        resolve_offline_kubernetes_target(&project_config, &profile_name, cli_kube_version, cli_api_versions)?
     } else {
         // In non-offline mode, fetch from cluster unless CLI args override
         let client = KubeRsClient::from_profile(&profile, None).await?;
@@ -396,6 +392,63 @@ pub(crate) async fn render_manifests(
         profile_name,
         credential_provider,
         context,
+    ))
+}
+
+fn resolve_offline_kubernetes_target(
+    project_config: &ProjectConfig,
+    profile_name: &str,
+    cli_kube_version: Option<&str>,
+    cli_api_versions: &[String],
+) -> Result<(String, Vec<String>)> {
+    let project_target = project_config.get_project_kubernetes_target();
+    let profile_target = project_config.get_profile_kubernetes_target(profile_name);
+
+    let kube_version = cli_kube_version
+        .map(ToOwned::to_owned)
+        .or_else(|| profile_target.and_then(|target| target.kube_version.clone()))
+        .or_else(|| project_target.kube_version.clone());
+
+    let api_versions = if !cli_api_versions.is_empty() {
+        cli_api_versions.to_vec()
+    } else if let Some(versions) = profile_target.and_then(non_empty_api_versions) {
+        versions.to_vec()
+    } else {
+        project_target.api_versions.clone()
+    };
+
+    let Some(kube_version) = kube_version.filter(|version| !version.trim().is_empty()) else {
+        return Err(missing_offline_kubernetes_target_error(
+            profile_name,
+            "kube_version",
+            "--kube-version",
+        ));
+    };
+
+    if api_versions.is_empty() {
+        return Err(missing_offline_kubernetes_target_error(
+            profile_name,
+            "api_versions",
+            "--kube-api-versions",
+        ));
+    }
+
+    Ok((kube_version, api_versions))
+}
+
+fn non_empty_api_versions(target: &KubernetesTarget) -> Option<&[String]> {
+    if target.api_versions.is_empty() {
+        None
+    } else {
+        Some(&target.api_versions)
+    }
+}
+
+fn missing_offline_kubernetes_target_error(profile_name: &str, field_name: &str, cli_flag: &str) -> NylError {
+    NylError::Config(format!(
+        "Offline rendering is missing Kubernetes target metadata field '{}' for profile '{}'. \
+         Pass {}, or configure {} in [project.kubernetes] / [profile.{}.kubernetes] in nyl.toml.",
+        field_name, profile_name, cli_flag, field_name, profile_name
     ))
 }
 
@@ -2420,6 +2473,92 @@ mod tests {
             file: None,
             config: crate::config::ProjectFile::default(),
         }
+    }
+
+    fn test_project_config_with_kubernetes_targets() -> ProjectConfig {
+        use crate::config::{KubernetesTarget, ProfileSettings, ProjectSettings};
+        use std::collections::BTreeMap;
+
+        ProjectConfig {
+            file: None,
+            config: crate::config::ProjectFile {
+                project: ProjectSettings {
+                    kubernetes: KubernetesTarget {
+                        kube_version: Some("1.29.0".to_string()),
+                        api_versions: vec!["v1".to_string(), "apps/v1".to_string()],
+                    },
+                    ..ProjectSettings::default()
+                },
+                profile: BTreeMap::from([(
+                    "prod".to_string(),
+                    ProfileSettings {
+                        kubernetes: KubernetesTarget {
+                            kube_version: Some("1.30.0".to_string()),
+                            api_versions: vec!["v1".to_string(), "batch/v1".to_string()],
+                        },
+                        ..ProfileSettings::default()
+                    },
+                )]),
+            },
+        }
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_uses_project_config() {
+        let config = test_project_config_with_kubernetes_targets();
+        let (kube_version, api_versions) = resolve_offline_kubernetes_target(&config, "default", None, &[]).unwrap();
+
+        assert_eq!(kube_version, "1.29.0");
+        assert_eq!(api_versions, vec!["v1".to_string(), "apps/v1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_uses_profile_config() {
+        let config = test_project_config_with_kubernetes_targets();
+        let (kube_version, api_versions) = resolve_offline_kubernetes_target(&config, "prod", None, &[]).unwrap();
+
+        assert_eq!(kube_version, "1.30.0");
+        assert_eq!(api_versions, vec!["v1".to_string(), "batch/v1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_cli_overrides_config_independently() {
+        let config = test_project_config_with_kubernetes_targets();
+        let cli_api_versions = vec!["v1".to_string(), "networking.k8s.io/v1".to_string()];
+
+        let (kube_version, api_versions) =
+            resolve_offline_kubernetes_target(&config, "prod", Some("1.31.0"), &cli_api_versions).unwrap();
+
+        assert_eq!(kube_version, "1.31.0");
+        assert_eq!(api_versions, cli_api_versions);
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_errors_when_missing() {
+        let config = test_project_config();
+        let err = resolve_offline_kubernetes_target(&config, "default", None, &[])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'kube_version'"));
+        assert!(err.contains("--kube-version"));
+        assert!(err.contains("[project.kubernetes]"));
+        assert!(err.contains("[profile.default.kubernetes]"));
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_errors_when_api_versions_missing() {
+        let mut config = test_project_config();
+        config.config.project.kubernetes.kube_version = Some("1.30.0".to_string());
+
+        let err = resolve_offline_kubernetes_target(&config, "default", None, &[])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'api_versions'"));
+        assert!(err.contains("--kube-api-versions"));
+        assert!(err.contains("[project.kubernetes]"));
+        assert!(err.contains("[profile.default.kubernetes]"));
     }
 
     fn create_test_worktree_paths() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {

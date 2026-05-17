@@ -1,0 +1,122 @@
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+
+const basePath = process.env.BASE_PATH ?? "/nyl";
+const authoredDocsBase = "/nyl";
+
+function rewriteNylLinks() {
+  return (tree) => {
+    function visit(node) {
+      if (!node || typeof node !== "object") {
+        return;
+      }
+
+      // Markdown sources should use production-style `/nyl/...` links. This
+      // rewrites them for PR preview deployments with a deeper BASE_PATH.
+      if (
+        typeof node.url === "string" &&
+        (node.url === authoredDocsBase || node.url.startsWith(`${authoredDocsBase}/`))
+      ) {
+        node.url = `${basePath}${node.url.slice(authoredDocsBase.length)}`;
+      }
+
+      if (Array.isArray(node.children)) {
+        node.children.forEach(visit);
+      }
+    }
+
+    visit(tree);
+  };
+}
+
+export default defineConfig({
+  site: "https://niklasrosenstein.github.io",
+  base: basePath,
+  markdown: {
+    remarkPlugins: [rewriteNylLinks],
+  },
+  integrations: [
+    starlight({
+      title: "Nyl",
+      description: "A fast Kubernetes manifest generator for rendered manifest GitOps, CLI workflows, and ArgoCD CMP integration.",
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/NiklasRosenstein/nyl",
+        },
+      ],
+      customCss: ["./src/styles/custom.css"],
+      sidebar: [
+        {
+          label: "Start Here",
+          items: [
+            "index",
+            "getting-started",
+            "deployment-workflows/rendered-manifests",
+            "deployment-workflows/cli-workflows",
+          ],
+        },
+        {
+          label: "User Guide",
+          items: [
+            "configuration",
+            {
+              label: "Component System",
+              items: [
+                "components/overview",
+                "components/authoring-local-components",
+                "components/resolution-and-lookup",
+                "components/remote-shortcuts-and-aliases",
+                "components/troubleshooting",
+              ],
+            },
+            "git-integration",
+            {
+              label: "Commands",
+              items: [
+                "commands",
+                "commands/rendering-pipeline",
+                "commands/new",
+                "commands/validate",
+                "commands/render",
+                "commands/diff",
+                "commands/apply",
+                "commands/generate",
+                "commands/cluster-info",
+              ],
+            },
+          ],
+        },
+        {
+          label: "ArgoCD Integration",
+          items: [
+            "argocd/overview",
+            "argocd/plugin",
+            "argocd/bootstrapping",
+            "argocd/application-generator",
+            "argocd/repository-secrets",
+            "argocd/best-practices",
+          ],
+        },
+        {
+          label: "Reference",
+          items: [
+            "reference/resources",
+            "reference/resources/component",
+            "reference/resources/helmchart",
+            "reference/resources/remote-manifest",
+            "reference/resources/nyl-release",
+            "reference/resources/application-generator",
+            "reference/kyverno-policies",
+            "reference/schemas",
+          ],
+        },
+        {
+          label: "Extras",
+          items: ["extras/renovate"],
+        },
+      ],
+    }),
+  ],
+});
