@@ -103,6 +103,10 @@ spec:
       selfHeal: true
 ```
 
+If you want ArgoCD to render Nyl source files directly during sync instead, use the [Nyl CMP integration](/nyl/argocd/overview/). The CMP path is useful when you need controller-side rendering, ArgoCD repository credential reuse, or `ApplicationGenerator` to run inside ArgoCD.
+
+`ApplicationGenerator` can also be run by `nyl render` outside of ArgoCD, so it is possible to generate ArgoCD `Application` manifests in CI and commit the result. Today those generated Applications are designed for the Nyl CMP workflow. To use `ApplicationGenerator` cleanly with rendered manifest GitOps, Nyl would need an option to generate standard directory Applications that point at rendered output instead of CMP-backed Nyl source files.
+
 ## Review and Promotion
 
 The rendered output can be handled like any other generated artifact:
