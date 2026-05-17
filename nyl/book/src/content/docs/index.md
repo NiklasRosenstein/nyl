@@ -6,7 +6,8 @@ Nyl is a fast Kubernetes manifest generator for teams that want Helm integration
 
 ## Choose a Workflow
 
-- [Rendered Manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) keeps Nyl in CI and lets ArgoCD, Flux, or another reconciler sync ordinary Kubernetes YAML.
+**Recommended:** [Rendered Manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) keeps Nyl in CI and lets ArgoCD, Flux, or another reconciler sync ordinary Kubernetes YAML. Start here unless you specifically need controller-side rendering.
+
 - [CLI-First Workflows](/nyl/deployment-workflows/cli-workflows/) use `nyl render`, `nyl diff`, and `nyl apply` for debugging, bootstrapping, testing, and direct operations.
 - [ArgoCD CMP Integration](/nyl/argocd/overview/) lets ArgoCD render Nyl inputs directly when you want controller-side rendering, repository credential reuse, or `ApplicationGenerator`.
 
