@@ -1,6 +1,7 @@
 name: Documentation
 
 on:
+  workflow_dispatch:
   push:
     branches: [develop]
     paths:
@@ -58,7 +59,7 @@ jobs:
 
   deploy-production:
     name: Deploy production docs
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: build
     steps:
