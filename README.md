@@ -24,8 +24,8 @@ version_prefix = "v"
 
 ```bash
 mise install
-nyl new project my-app
-cd my-app
+nyl new project platform
+cd platform
 nyl render --profile dev  # profile name is project-defined; "dev" is only an example
 ```
 

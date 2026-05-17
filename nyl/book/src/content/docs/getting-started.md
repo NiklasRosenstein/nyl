@@ -2,7 +2,7 @@
 title: 'Getting Started'
 ---
 
-This guide gets you from an empty project to rendered Kubernetes manifests, then points you at the workflow that matches how you deploy.
+This guide gets you from an empty GitOps source project to rendered Kubernetes manifests, then points you at the workflow that matches how you deploy.
 
 ## Installation
 
@@ -53,8 +53,8 @@ This installs `nyl` to `~/.cargo/bin/nyl`.
 ### 1. Create a Project
 
 ```bash
-nyl new project my-app
-cd my-app
+nyl new project platform
+cd platform
 ```
 
 This creates:
@@ -81,9 +81,9 @@ nyl validate
 
 Output:
 ```
-✓ Found project config: /path/to/my-app/nyl.toml
-✓ Components search path exists: /path/to/my-app/components
-✓ Helm chart search path exists: /path/to/my-app
+✓ Found project config: /path/to/platform/nyl.toml
+✓ Components search path exists: /path/to/platform/components
+✓ Helm chart search path exists: /path/to/platform
 
 ✓ Validation passed
 ```
@@ -99,19 +99,19 @@ nyl validate --strict
 Render a manifest file to stdout:
 
 ```bash
-nyl render app.yaml
+nyl render apps.yaml
 ```
 
 For deterministic CI rendering without cluster discovery, use offline mode and pass the Kubernetes version and API versions that Helm should target:
 
 ```bash
-nyl render --offline --kube-version 1.30.0 --kube-api-versions v1,apps/v1 app.yaml
+nyl render --offline --kube-version 1.30.0 --kube-api-versions v1,apps/v1 apps.yaml
 ```
 
 ## Project Structure
 
 ```
-my-app/
+platform/
 ├── nyl.toml                  # Project configuration
 ├── components/               # Component definitions
 │   └── v1.example.io/
