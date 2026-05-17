@@ -9,10 +9,10 @@ rust = "1.95.0"
 "cargo:cargo-audit" = "latest"
 
 # Kubernetes tools
-kyverno = "1.17.0"
-sops = "3.12.2"
-helm = "3.20.2"
-kubectl = "1.35.3"
+kyverno = "1.18.0"
+sops = "3.13.1"
+helm = "3.21.0"
+kubectl = "1.36.1"
 mdbook = "latest"
 
 # Primary Rust tasks (run from repository root)
