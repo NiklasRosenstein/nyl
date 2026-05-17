@@ -3,6 +3,7 @@ use glob::{glob, Pattern};
 use kube::Client;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -970,10 +971,25 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
             ))
         })?;
 
+    fetch_remote_manifest_documents_with_fetcher(remote_manifest, |url| {
+        let client = &client;
+        async move { fetch_single_remote_url(client, remote_manifest, &url).await }
+    })
+    .await
+}
+
+async fn fetch_remote_manifest_documents_with_fetcher<F, Fut>(
+    remote_manifest: &RemoteManifest,
+    mut fetcher: F,
+) -> Result<Vec<serde_json::Value>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<Vec<serde_json::Value>>>,
+{
     let urls = remote_manifest.resolve_urls()?;
     let mut all_documents = Vec::new();
-    for url in &urls {
-        let docs = fetch_single_remote_url(&client, remote_manifest, url).await?;
+    for url in urls {
+        let docs = fetcher(url).await?;
         all_documents.extend(docs);
     }
     if remote_manifest.spec.override_namespace {
@@ -2390,7 +2406,7 @@ mod tests {
         ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
     };
     use git2::{Repository, RepositoryInitOptions, Signature};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use tempfile::TempDir;
 
     static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -4012,6 +4028,100 @@ metadata:
         let result = generate_resource(&resource, &context, &config, "", &[], None, false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_remote_manifest_documents_fetches_urls_in_order_and_overrides_namespaces() {
+        let remote_manifest = RemoteManifest::from_value(&serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote", "namespace": "target"},
+            "spec": {
+                "overrideNamespace": true,
+                "params": {"version": "1.5.1"},
+                "urls": [
+                    "https://example.com/v{version}/a.yaml",
+                    "https://example.com/v{version}/b.yaml"
+                ]
+            }
+        }))
+        .unwrap();
+        remote_manifest.validate().unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_fetcher = Arc::clone(&calls);
+        let manifests = fetch_remote_manifest_documents_with_fetcher(&remote_manifest, move |url| {
+            let calls = Arc::clone(&calls_for_fetcher);
+            async move {
+                calls.lock().unwrap().push(url.clone());
+                let name = if url.ends_with("/a.yaml") { "a" } else { "b" };
+                Ok(vec![serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": name, "namespace": "source"}
+                })])
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "https://example.com/v1.5.1/a.yaml".to_string(),
+                "https://example.com/v1.5.1/b.yaml".to_string(),
+            ]
+        );
+        assert_eq!(manifests[0]["metadata"]["name"], "a");
+        assert_eq!(manifests[1]["metadata"]["name"], "b");
+        assert_eq!(manifests[0]["metadata"]["namespace"], "target");
+        assert_eq!(manifests[1]["metadata"]["namespace"], "target");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_remote_manifest_documents_stops_on_first_failed_url() {
+        let remote_manifest = RemoteManifest::from_value(&serde_json::json!({
+            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "kind": "RemoteManifest",
+            "metadata": {"name": "remote"},
+            "spec": {
+                "urls": [
+                    "https://example.com/a.yaml",
+                    "https://example.com/b.yaml",
+                    "https://example.com/c.yaml"
+                ]
+            }
+        }))
+        .unwrap();
+        remote_manifest.validate().unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_fetcher = Arc::clone(&calls);
+        let err = fetch_remote_manifest_documents_with_fetcher(&remote_manifest, move |url| {
+            let calls = Arc::clone(&calls_for_fetcher);
+            async move {
+                calls.lock().unwrap().push(url.clone());
+                if url.ends_with("/b.yaml") {
+                    return Err(NylError::Process(format!("fetch failed for {url}")));
+                }
+                Ok(vec![serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "ok"}
+                })])
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "https://example.com/a.yaml".to_string(),
+                "https://example.com/b.yaml".to_string(),
+            ]
+        );
+        assert!(err.to_string().contains("https://example.com/b.yaml"));
     }
 
     #[test]
