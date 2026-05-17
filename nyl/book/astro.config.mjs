@@ -1,9 +1,34 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
+const basePath = process.env.BASE_PATH ?? "/nyl";
+
+function rewriteNylLinks() {
+  return (tree) => {
+    function visit(node) {
+      if (!node || typeof node !== "object") {
+        return;
+      }
+
+      if (typeof node.url === "string" && node.url.startsWith("/nyl/")) {
+        node.url = `${basePath}${node.url.slice("/nyl".length)}`;
+      }
+
+      if (Array.isArray(node.children)) {
+        node.children.forEach(visit);
+      }
+    }
+
+    visit(tree);
+  };
+}
+
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
-  base: "/nyl",
+  base: basePath,
+  markdown: {
+    remarkPlugins: [rewriteNylLinks],
+  },
   integrations: [
     starlight({
       title: "Nyl",
