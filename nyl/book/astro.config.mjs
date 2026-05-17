@@ -20,7 +20,7 @@ export default defineConfig({
         {
           label: "Start Here",
           items: [
-            "introduction",
+            "index",
             "getting-started",
             "deployment-workflows/rendered-manifests",
             "deployment-workflows/cli-workflows",
