@@ -9,9 +9,6 @@ on:
       - ".github/workflows/docs.yaml"
   pull_request:
     types: [opened, reopened, synchronize, closed]
-    paths:
-      - "nyl/book/**"
-      - ".github/workflows/docs.yaml"
 
 permissions:
   contents: write
@@ -23,7 +20,7 @@ permissions:
 # with the gh-pages branch and the repository root as the source.
 concurrency:
   group: docs-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:

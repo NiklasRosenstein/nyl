@@ -257,13 +257,6 @@ impl ProjectConfig {
         tracing::debug!("Reading configuration file: {}", path.display());
 
         let contents = std::fs::read_to_string(path)?;
-        if contents.contains("[profile.values.") {
-            return Err(NylError::Config(
-                "Legacy profile syntax '[profile.values.<name>]' is no longer supported. \
-                 Use '[profile.<name>.values]' instead."
-                    .to_string(),
-            ));
-        }
         let mut project: ProjectFile =
             toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
 
@@ -623,24 +616,6 @@ replicas = 1
 
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
         assert!(err.contains("Failed to parse TOML config"));
-    }
-
-    #[test]
-    fn test_legacy_profile_values_shape_rejected_with_hint() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl.toml");
-
-        let toml_content = r#"
-[project]
-
-[profile.values.dev]
-replicas = 1
-"#;
-        fs::write(&config_path, toml_content).unwrap();
-
-        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
-        assert!(err.contains("Legacy profile syntax"));
-        assert!(err.contains("[profile.<name>.values]"));
     }
 
     #[test]

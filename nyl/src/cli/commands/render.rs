@@ -418,11 +418,19 @@ fn resolve_offline_kubernetes_target(
     };
 
     let Some(kube_version) = kube_version.filter(|version| !version.trim().is_empty()) else {
-        return Err(missing_offline_kubernetes_target_error(profile_name));
+        return Err(missing_offline_kubernetes_target_error(
+            profile_name,
+            "kube_version",
+            "--kube-version",
+        ));
     };
 
     if api_versions.is_empty() {
-        return Err(missing_offline_kubernetes_target_error(profile_name));
+        return Err(missing_offline_kubernetes_target_error(
+            profile_name,
+            "api_versions",
+            "--kube-api-versions",
+        ));
     }
 
     Ok((kube_version, api_versions))
@@ -436,12 +444,11 @@ fn non_empty_api_versions(target: &KubernetesTarget) -> Option<&[String]> {
     }
 }
 
-fn missing_offline_kubernetes_target_error(profile_name: &str) -> NylError {
+fn missing_offline_kubernetes_target_error(profile_name: &str, field_name: &str, cli_flag: &str) -> NylError {
     NylError::Config(format!(
-        "Offline rendering needs Kubernetes target metadata for profile '{}'. \
-         Pass --kube-version and --kube-api-versions, or configure [project.kubernetes] / \
-         [profile.{}.kubernetes] in nyl.toml.",
-        profile_name, profile_name
+        "Offline rendering is missing Kubernetes target metadata field '{}' for profile '{}'. \
+         Pass {}, or configure {} in [project.kubernetes] / [profile.{}.kubernetes] in nyl.toml.",
+        field_name, profile_name, cli_flag, field_name, profile_name
     ))
 }
 
@@ -2533,7 +2540,23 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("Offline rendering needs Kubernetes target metadata"));
+        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'kube_version'"));
+        assert!(err.contains("--kube-version"));
+        assert!(err.contains("[project.kubernetes]"));
+        assert!(err.contains("[profile.default.kubernetes]"));
+    }
+
+    #[test]
+    fn test_resolve_offline_kubernetes_target_errors_when_api_versions_missing() {
+        let mut config = test_project_config();
+        config.config.project.kubernetes.kube_version = Some("1.30.0".to_string());
+
+        let err = resolve_offline_kubernetes_target(&config, "default", None, &[])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'api_versions'"));
+        assert!(err.contains("--kube-api-versions"));
         assert!(err.contains("[project.kubernetes]"));
         assert!(err.contains("[profile.default.kubernetes]"));
     }

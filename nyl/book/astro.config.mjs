@@ -2,6 +2,7 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
+const authoredDocsBase = "/nyl";
 
 function rewriteNylLinks() {
   return (tree) => {
@@ -10,8 +11,13 @@ function rewriteNylLinks() {
         return;
       }
 
-      if (typeof node.url === "string" && node.url.startsWith("/nyl/")) {
-        node.url = `${basePath}${node.url.slice("/nyl".length)}`;
+      // Markdown sources should use production-style `/nyl/...` links. This
+      // rewrites them for PR preview deployments with a deeper BASE_PATH.
+      if (
+        typeof node.url === "string" &&
+        (node.url === authoredDocsBase || node.url.startsWith(`${authoredDocsBase}/`))
+      ) {
+        node.url = `${basePath}${node.url.slice(authoredDocsBase.length)}`;
       }
 
       if (Array.isArray(node.children)) {
