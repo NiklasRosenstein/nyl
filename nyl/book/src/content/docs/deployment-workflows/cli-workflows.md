@@ -18,7 +18,13 @@ Filter the rendered output when you only need part of the result:
 nyl render -p dev --only-kind Deployment,Service apps/web.yaml
 ```
 
-Use offline mode when you want repeatable rendering without Kubernetes discovery:
+Use offline mode when you want repeatable rendering without Kubernetes discovery. If `nyl.toml` defines `[project.kubernetes]` or `[profile.<name>.kubernetes]`, Nyl uses those values automatically:
+
+```bash
+nyl render --profile dev --offline apps/web.yaml
+```
+
+You can also pass the target metadata directly on the CLI:
 
 ```bash
 nyl render \

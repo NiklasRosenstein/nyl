@@ -33,9 +33,9 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 
 ### Offline Mode Options
 
-- `--offline` - Skip Kubernetes discovery and use CLI-provided API information (useful for CI/CD)
-- `--kube-version <KUBE_VERSION>` - Kubernetes version for Helm templating (required with --offline)
-- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for Helm (required with --offline, comma-separated)
+- `--offline` - Skip Kubernetes discovery and use CLI/config-provided API information (useful for CI/CD)
+- `--kube-version <KUBE_VERSION>` - Kubernetes version for Helm templating. Overrides `nyl.toml`.
+- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for Helm, comma-separated or repeated. Overrides `nyl.toml`.
 
 ## Examples
 
@@ -61,8 +61,11 @@ nyl render --only-kind Deployment,Service manifest.yaml
 ### Offline Mode
 
 ```bash
-# Render in offline mode (profile selection is unchanged)
+# Render in offline mode using CLI-provided Kubernetes target metadata
 nyl render --offline --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
+
+# Render in offline mode using [project.kubernetes] or [profile.<name>.kubernetes]
+nyl render --offline -p production manifest.yaml
 ```
 
 ### Advanced Options

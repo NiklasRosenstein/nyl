@@ -46,6 +46,24 @@ nyl render -p prod apps/web.yaml > rendered/prod/web.yaml
 
 For CI jobs that should not talk to a cluster, use offline rendering:
 
+```toml
+[project.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
+
+[profile.prod.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
+```
+
+With that metadata committed, CI can render without talking to the cluster:
+
+```bash
+nyl render --profile prod --offline apps/web.yaml > rendered/prod/web.yaml
+```
+
+You can still pass the values on the CLI when they are not committed:
+
 ```bash
 nyl render \
   --profile prod \
@@ -55,7 +73,13 @@ nyl render \
   apps/web.yaml > rendered/prod/web.yaml
 ```
 
-You can capture the API versions from a representative cluster with `kubectl`:
+You can capture the Kubernetes version and API versions from a representative cluster with Nyl:
+
+```bash
+nyl cluster-info --output csv
+```
+
+The first line is `kube_version`; the second line is the comma-separated `api_versions` value. You can also capture API versions directly with `kubectl`:
 
 ```bash
 kubectl api-versions | paste -sd, -

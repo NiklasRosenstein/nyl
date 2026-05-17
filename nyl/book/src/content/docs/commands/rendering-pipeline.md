@@ -32,7 +32,7 @@ When `--offline` is used (`render` only), namespace resolution is skipped.
 
 - `render --offline`:
   - does not connect to the cluster for API discovery during rendering;
-  - requires `--kube-version` and `--kube-api-versions`;
+  - uses `--kube-version` / `--kube-api-versions` or committed `nyl.toml` Kubernetes target metadata;
   - skips namespace resolution.
 - `render` (without `--offline`), `diff`, and `apply`:
   - require cluster connectivity;

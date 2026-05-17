@@ -25,7 +25,7 @@ fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
-fn default_profile_values() -> BTreeMap<String, BTreeMap<String, serde_json::Value>> {
+fn default_profile_values() -> BTreeMap<String, serde_json::Value> {
     BTreeMap::new()
 }
 
@@ -55,6 +55,17 @@ impl StripEmptyMetadataLabelsMode {
     }
 }
 
+/// Kubernetes target metadata used for offline rendering.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct KubernetesTarget {
+    /// Kubernetes server version to pass to Helm during offline rendering.
+    pub kube_version: Option<String>,
+
+    /// Kubernetes API versions to pass to Helm during offline rendering.
+    pub api_versions: Vec<String>,
+}
+
 /// Project settings in `[project]` section of `nyl.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -71,6 +82,9 @@ pub struct ProjectSettings {
 
     /// Control when empty `metadata.labels` maps are stripped from emitted manifests.
     pub strip_empty_metadata_labels: StripEmptyMetadataLabelsMode,
+
+    /// Default Kubernetes target metadata for offline rendering.
+    pub kubernetes: KubernetesTarget,
 }
 
 impl Default for ProjectSettings {
@@ -80,26 +94,31 @@ impl Default for ProjectSettings {
             helm_chart_search_paths: default_helm_chart_search_paths(),
             aliases: default_aliases(),
             strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
+            kubernetes: KubernetesTarget::default(),
         }
     }
 }
 
-/// Profile configuration in `[profile]` section of `nyl.toml`.
+/// Profile configuration in `[profile.<name>]` section of `nyl.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProfileSettings {
-    /// Per-profile template values, keyed by profile name.
+    /// Template values exposed as `values.*` for this profile.
     ///
     /// Example:
-    /// `[profile.values.dev]`
+    /// `[profile.dev.values]`
     /// `replicas = 2`
-    pub values: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    pub values: BTreeMap<String, serde_json::Value>,
+
+    /// Kubernetes target metadata for offline rendering with this profile.
+    pub kubernetes: KubernetesTarget,
 }
 
 impl Default for ProfileSettings {
     fn default() -> Self {
         Self {
             values: default_profile_values(),
+            kubernetes: KubernetesTarget::default(),
         }
     }
 }
@@ -109,7 +128,7 @@ impl Default for ProfileSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
-    pub profile: ProfileSettings,
+    pub profile: BTreeMap<String, ProfileSettings>,
 }
 
 /// Wrapper for project configuration file.
@@ -238,6 +257,13 @@ impl ProjectConfig {
         tracing::debug!("Reading configuration file: {}", path.display());
 
         let contents = std::fs::read_to_string(path)?;
+        if contents.contains("[profile.values.") {
+            return Err(NylError::Config(
+                "Legacy profile syntax '[profile.values.<name>]' is no longer supported. \
+                 Use '[profile.<name>.values]' instead."
+                    .to_string(),
+            ));
+        }
         let mut project: ProjectFile =
             toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
 
@@ -280,17 +306,32 @@ impl ProjectConfig {
 
     /// Return whether any profile values are configured.
     pub fn has_profiles(&self) -> bool {
-        !self.config.profile.values.is_empty()
+        !self.config.profile.is_empty()
     }
 
     /// Return configured profile names.
     pub fn profile_names(&self) -> Vec<&str> {
-        self.config.profile.values.keys().map(String::as_str).collect()
+        self.config.profile.keys().map(String::as_str).collect()
+    }
+
+    /// Return profile settings for a profile name.
+    pub fn get_profile(&self, name: &str) -> Option<&ProfileSettings> {
+        self.config.profile.get(name)
     }
 
     /// Return template values for a profile name.
     pub fn get_profile_values(&self, name: &str) -> Option<&BTreeMap<String, serde_json::Value>> {
-        self.config.profile.values.get(name)
+        self.get_profile(name).map(|profile| &profile.values)
+    }
+
+    /// Return project-level Kubernetes target metadata for offline rendering.
+    pub fn get_project_kubernetes_target(&self) -> &KubernetesTarget {
+        &self.config.project.kubernetes
+    }
+
+    /// Return profile-level Kubernetes target metadata for offline rendering.
+    pub fn get_profile_kubernetes_target(&self, name: &str) -> Option<&KubernetesTarget> {
+        self.get_profile(name).map(|profile| &profile.kubernetes)
     }
 
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
@@ -359,12 +400,16 @@ mod tests {
             settings.strip_empty_metadata_labels,
             StripEmptyMetadataLabelsMode::Always
         );
+        assert!(settings.kubernetes.kube_version.is_none());
+        assert!(settings.kubernetes.api_versions.is_empty());
     }
 
     #[test]
     fn test_default_profile_settings() {
         let settings = ProfileSettings::default();
         assert!(settings.values.is_empty());
+        assert!(settings.kubernetes.kube_version.is_none());
+        assert!(settings.kubernetes.api_versions.is_empty());
     }
 
     #[test]
@@ -377,6 +422,9 @@ mod tests {
 components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
 strip_empty_metadata_labels = "argocd"
+[project.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1"]
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
 "#;
@@ -394,6 +442,14 @@ strip_empty_metadata_labels = "argocd"
         assert_eq!(
             config.get_strip_empty_metadata_labels_mode(),
             StripEmptyMetadataLabelsMode::Argocd
+        );
+        assert_eq!(
+            config.get_project_kubernetes_target().kube_version.as_deref(),
+            Some("1.30.0")
+        );
+        assert_eq!(
+            config.get_project_kubernetes_target().api_versions,
+            vec!["v1".to_string(), "apps/v1".to_string()]
         );
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
@@ -428,7 +484,7 @@ strip_empty_metadata_labels = "argocd"
                     ]),
                     ..ProjectSettings::default()
                 },
-                profile: ProfileSettings::default(),
+                profile: BTreeMap::new(),
             },
         };
 
@@ -517,13 +573,17 @@ components_search_paths = ["comps1", "comps2"]
         let toml_content = r#"
 [project]
 
-[profile.values.dev]
+[profile.dev.values]
 replicas = 1
 image_tag = "dev-latest"
 
-[profile.values.prod]
+[profile.prod.values]
 replicas = 3
 image_tag = "v1.0.0"
+
+[profile.prod.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1"]
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
@@ -533,6 +593,18 @@ image_tag = "v1.0.0"
         assert_eq!(
             config.get_profile_values("dev").and_then(|v| v.get("replicas")),
             Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            config
+                .get_profile_kubernetes_target("prod")
+                .and_then(|target| target.kube_version.as_deref()),
+            Some("1.30.0")
+        );
+        assert_eq!(
+            config
+                .get_profile_kubernetes_target("prod")
+                .map(|target| target.api_versions.as_slice()),
+            Some(["v1".to_string(), "apps/v1".to_string()].as_slice())
         );
     }
 
@@ -551,6 +623,24 @@ replicas = 1
 
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
         assert!(err.contains("Failed to parse TOML config"));
+    }
+
+    #[test]
+    fn test_legacy_profile_values_shape_rejected_with_hint() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+
+[profile.values.dev]
+replicas = 1
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("Legacy profile syntax"));
+        assert!(err.contains("[profile.<name>.values]"));
     }
 
     #[test]

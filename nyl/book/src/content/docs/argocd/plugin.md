@@ -191,7 +191,7 @@ kubectl exec -it deployment/argocd-repo-server -n argocd -- nyl --version
 
 If Nyl reports "Profile 'default' not found":
 
-1. Ensure your repository defines `[profile.values.default]` in `nyl.toml`
+1. Ensure your repository defines `[profile.default.values]` in `nyl.toml`
 2. Check the profile name matches what you're referencing
 3. Verify `nyl.toml` is in the repository root or search path
 

@@ -52,6 +52,7 @@ export default defineConfig({
                 "commands/diff",
                 "commands/apply",
                 "commands/generate",
+                "commands/cluster-info",
               ],
             },
           ],

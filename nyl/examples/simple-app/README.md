@@ -72,7 +72,7 @@ nyl diff --profile dev
 
 To customize this example:
 
-1. Edit `nyl.toml` under `[profile.values.<name>]` to add or change profiles
+1. Edit `nyl.toml` under `[profile.<name>.values]` to add or change profiles
 2. Modify manifests in `manifests/` to add resources (Ingress, PVC, etc.)
 3. Adjust profile-specific conditionals (`{% if profile == ... %}`) in manifests
 
@@ -81,4 +81,4 @@ To customize this example:
 After mastering this example:
 1. Add a `HelmChart` resource to this project and render it with different profiles.
 2. Extract repeated manifest fragments into local components.
-3. Add `profile.values` entries in `nyl.toml` beyond `image_tag` and consume them via `values.*`.
+3. Add `profile.<name>.values` entries in `nyl.toml` beyond `image_tag` and consume them via `values.*`.

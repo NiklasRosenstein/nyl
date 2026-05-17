@@ -12,20 +12,30 @@ nyl searches for `nyl.toml` starting in the current directory and walking up par
 
 `nyl.toml` supports:
 - `[project]` for project settings
-- `[profile.values.<name>]` for profile values used in templates
+- `[project.kubernetes]` for default offline render Kubernetes metadata
+- `[profile.<name>.values]` for profile values used in templates
+- `[profile.<name>.kubernetes]` for profile-specific offline render Kubernetes metadata
 
 ```toml
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
 
-[profile.values.default]
+[project.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1", "batch/v1"]
+
+[profile.default.values]
 namespace = "default"
 replicas = 1
 
-[profile.values.dev]
+[profile.dev.values]
 namespace = "dev"
 replicas = 2
+
+[profile.dev.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1", "networking.k8s.io/v1"]
 
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
@@ -54,7 +64,16 @@ replicas = 2
 - Value format: same component shortcut format accepted in `kind` (`<repository>[#<name>][@<version>]`) or a local component path
 - Meaning: Treat matching resources as component-style resources and resolve them directly to the configured target instead of `components_search_paths`.
 
-### `profile.values.<name>`
+### `project.kubernetes`
+
+- Type: object/table
+- Default: empty
+- Meaning: Default Kubernetes target metadata for `nyl render --offline`.
+- Fields:
+  - `kube_version`: Kubernetes version passed to Helm, for example `"1.30.0"`.
+  - `api_versions`: array of Kubernetes API versions passed to Helm, for example `["v1", "apps/v1"]`.
+
+### `profile.<name>.values`
 
 - Type: object/map
 - Default: none
@@ -64,13 +83,28 @@ replicas = 2
 Example:
 
 ```toml
-[profile.values.dev]
+[profile.dev.values]
 my_value = "Hello!"
 replicas = 1
 
-[profile.values.prod]
+[profile.prod.values]
 my_value = "World!"
 replicas = 3
+```
+
+### `profile.<name>.kubernetes`
+
+- Type: object/table
+- Default: empty
+- Meaning: Profile-specific Kubernetes target metadata for `nyl render --offline`.
+- Precedence: CLI flags override profile config, profile config overrides `project.kubernetes`.
+
+Example:
+
+```toml
+[profile.prod.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
 ```
 
 Template usage:

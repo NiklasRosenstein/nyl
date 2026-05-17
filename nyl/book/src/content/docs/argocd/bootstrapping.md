@@ -50,7 +50,7 @@ gitops-repo/
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
 
-[profile.values.default]
+[profile.default.values]
 # default profile values
 ```
 

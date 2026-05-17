@@ -102,10 +102,10 @@ Render a manifest file to stdout:
 nyl render apps.yaml
 ```
 
-For deterministic CI rendering without cluster discovery, use offline mode and pass the Kubernetes version and API versions that Helm should target:
+For deterministic CI rendering without cluster discovery, use offline mode. If your `nyl.toml` defines `[project.kubernetes]` or `[profile.<name>.kubernetes]`, Nyl uses those values automatically:
 
 ```bash
-nyl render --offline --kube-version 1.30.0 --kube-api-versions v1,apps/v1 apps.yaml
+nyl render --offline -p dev apps.yaml
 ```
 
 ## Project Structure

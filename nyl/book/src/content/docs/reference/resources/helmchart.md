@@ -209,10 +209,10 @@ spec:
 Values from the active profile are automatically merged:
 
 ```toml
-[profile.values.production]
+[profile.production.values]
 replicas = 5
 
-[profile.values.production.resources.requests]
+[profile.production.values.resources.requests]
 cpu = "500m"
 memory = "512Mi"
 ```
@@ -287,21 +287,21 @@ spec:
 ```
 
 ```toml
-[profile.values.development]
+[profile.development.values]
 replicas = 1
 environment = "development"
 
-[profile.values.development.image]
+[profile.development.values.image]
 tag = "latest"
 
-[profile.values.production]
+[profile.production.values]
 replicas = 5
 environment = "production"
 
-[profile.values.production.image]
+[profile.production.values.image]
 tag = "v2.1.0"
 
-[profile.values.production.resources.requests]
+[profile.production.values.resources.requests]
 cpu = "1000m"
 ```
 

@@ -1,16 +1,44 @@
 {
   "$defs": {
+    "KubernetesTarget": {
+      "additionalProperties": false,
+      "description": "Kubernetes target metadata used for offline rendering.",
+      "properties": {
+        "api_versions": {
+          "default": [],
+          "description": "Kubernetes API versions to pass to Helm during offline rendering.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kube_version": {
+          "default": null,
+          "description": "Kubernetes server version to pass to Helm during offline rendering.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ProfileSettings": {
       "additionalProperties": false,
-      "description": "Profile configuration in `[profile]` section of `nyl.toml`.",
+      "description": "Profile configuration in `[profile.<name>]` section of `nyl.toml`.",
       "properties": {
-        "values": {
-          "additionalProperties": {
-            "additionalProperties": true,
-            "type": "object"
+        "kubernetes": {
+          "$ref": "#/$defs/KubernetesTarget",
+          "default": {
+            "api_versions": [],
+            "kube_version": null
           },
+          "description": "Kubernetes target metadata for offline rendering with this profile."
+        },
+        "values": {
+          "additionalProperties": true,
           "default": {},
-          "description": "Per-profile template values, keyed by profile name.\n\nExample:\n`[profile.values.dev]`\n`replicas = 2`",
+          "description": "Template values exposed as `values.*` for this profile.\n\nExample:\n`[profile.dev.values]`\n`replicas = 2`",
           "type": "object"
         }
       },
@@ -48,6 +76,14 @@
           },
           "type": "array"
         },
+        "kubernetes": {
+          "$ref": "#/$defs/KubernetesTarget",
+          "default": {
+            "api_versions": [],
+            "kube_version": null
+          },
+          "description": "Default Kubernetes target metadata for offline rendering."
+        },
         "strip_empty_metadata_labels": {
           "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
           "default": "always",
@@ -82,10 +118,11 @@
   "description": "Root structure of `nyl.toml`.",
   "properties": {
     "profile": {
-      "$ref": "#/$defs/ProfileSettings",
-      "default": {
-        "values": {}
-      }
+      "additionalProperties": {
+        "$ref": "#/$defs/ProfileSettings"
+      },
+      "default": {},
+      "type": "object"
     },
     "project": {
       "$ref": "#/$defs/ProjectSettings",
@@ -97,6 +134,10 @@
         "helm_chart_search_paths": [
           "."
         ],
+        "kubernetes": {
+          "api_versions": [],
+          "kube_version": null
+        },
         "strip_empty_metadata_labels": "always"
       }
     }
