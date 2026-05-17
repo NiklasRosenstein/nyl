@@ -14,12 +14,16 @@ Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based compo
 
 ## Quick Start
 
-```bash
-# install from release (Linux x86_64)
-curl -LO https://github.com/NiklasRosenstein/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
-tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
-sudo mv nyl /usr/local/bin/
+Install with mise:
 
+```toml
+[tools."github:NiklasRosenstein/nyl"]
+version = "0.4.1"
+version_prefix = "v"
+```
+
+```bash
+mise install
 nyl new project my-app
 cd my-app
 nyl render --profile dev  # profile name is project-defined; "dev" is only an example

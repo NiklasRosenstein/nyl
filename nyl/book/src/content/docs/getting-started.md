@@ -6,6 +6,22 @@ This guide gets you from an empty project to rendered Kubernetes manifests, then
 
 ## Installation
 
+### With mise
+
+Add Nyl to your `mise.toml`:
+
+```toml
+[tools."github:NiklasRosenstein/nyl"]
+version = "0.4.1"
+version_prefix = "v"
+```
+
+Then install it:
+
+```bash
+mise install
+```
+
 ### From Release
 
 ```bash
