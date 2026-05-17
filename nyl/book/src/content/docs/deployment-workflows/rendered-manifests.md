@@ -55,6 +55,27 @@ nyl render \
   apps/web.yaml > rendered/prod/web.yaml
 ```
 
+You can capture the API versions from a representative cluster with `kubectl`:
+
+```bash
+kubectl api-versions | paste -sd, -
+```
+
+That produces the comma-separated value expected by `--kube-api-versions`. In CI, either run this against the target cluster before rendering or store a checked-in value for each supported cluster version:
+
+```bash
+KUBE_API_VERSIONS="$(kubectl api-versions | paste -sd, -)"
+
+nyl render \
+  --profile prod \
+  --offline \
+  --kube-version 1.30.0 \
+  --kube-api-versions "$KUBE_API_VERSIONS" \
+  apps/web.yaml > rendered/prod/web.yaml
+```
+
+Prefer sourcing this list from Kubernetes discovery when possible, because it includes CRDs and aggregated APIs installed in the cluster. A dedicated Nyl utility command would mostly wrap this discovery step; until Nyl has one, `kubectl api-versions` is the most direct source of truth.
+
 Nyl renders one input file per command. For multiple applications, use an explicit script, Makefile target, or CI matrix so each input has a predictable output path.
 
 ## Sync Rendered Output
