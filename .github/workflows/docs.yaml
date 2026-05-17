@@ -101,6 +101,21 @@ jobs:
           umbrella-dir: pr-preview
           wait-for-pages-deployment: true
 
+      - name: Prepare Pages root marker
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        run: |
+          mkdir pages-root
+          touch pages-root/.nojekyll
+
+      - name: Disable Jekyll for Pages branch
+        if: steps.preview.outputs.deployment-action == 'deploy'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: pages-root
+          clean: false
+          force: false
+
       - name: Create GitHub deployment
         if: steps.preview.outputs.deployment-action == 'deploy'
         uses: actions/github-script@v7
