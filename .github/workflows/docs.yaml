@@ -25,24 +25,30 @@ concurrency:
 
 jobs:
   build:
-    name: Build mdBook
+    name: Build Starlight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          mdbook-version: 'latest'
+          node-version: 22
+          cache: npm
+          cache-dependency-path: nyl/book/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: nyl/book
 
       - name: Build book
-        run: mdbook build
+        run: npm run build
         working-directory: nyl/book
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: nyl/book/book
+          path: nyl/book/dist
 
   deploy:
     name: Deploy to GitHub Pages

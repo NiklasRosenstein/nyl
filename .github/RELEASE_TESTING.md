@@ -83,7 +83,7 @@ Before creating a real release, verify:
 - [ ] Formatting is correct: `cargo fmt --check`
 - [ ] Version number updated in `Cargo.toml`
 - [ ] CHANGELOG.md updated with release notes
-- [ ] Documentation builds: `mdbook build book`
+- [ ] Documentation builds: `mise run docs-build`
 - [ ] Test with prerelease tag (e.g., `v0.1.0-rc.1`)
 - [ ] Verify GitHub release artifacts are correct
 - [ ] Verify binary sizes are acceptable (<20MB)

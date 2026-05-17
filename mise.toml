@@ -13,7 +13,7 @@ kyverno = "1.18.0"
 sops = "3.13.1"
 helm = "3.21.0"
 kubectl = "1.36.1"
-mdbook = "latest"
+node = "22"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
@@ -95,14 +95,14 @@ dir = "nyl"
 run = "dist plan"
 
 [tasks.docs-build]
-description = "Build Rust mdbook docs"
-dir = "nyl"
-run = "mdbook build book"
+description = "Build documentation site"
+dir = "nyl/book"
+run = "npm run build"
 
 [tasks.docs-serve]
-description = "Serve Rust mdbook docs"
-dir = "nyl"
-run = "mdbook serve book --open"
+description = "Serve documentation site"
+dir = "nyl/book"
+run = "npm run dev"
 
 [tasks.docs-rustdoc]
 description = "Generate API docs"

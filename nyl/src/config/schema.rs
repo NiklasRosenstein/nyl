@@ -27,7 +27,7 @@ mod tests {
 
         let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("book")
-            .join("src")
+            .join("public")
             .join("reference")
             .join("schemas")
             .join("nyl.schema.json");
@@ -38,7 +38,7 @@ mod tests {
         assert_eq!(
             schema,
             published_json,
-            "Published schema is out of date. Regenerate with: cargo run -- generate schema config > book/src/reference/schemas/nyl.schema.json"
+            "Published schema is out of date. Regenerate with: cargo run -- generate schema config > book/public/reference/schemas/nyl.schema.json"
         );
     }
 }

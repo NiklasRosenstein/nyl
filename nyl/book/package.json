@@ -1,0 +1,17 @@
+{
+  "name": "nyl-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
+    "build": "ASTRO_TELEMETRY_DISABLED=1 astro check && ASTRO_TELEMETRY_DISABLED=1 astro build",
+    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.9",
+    "@astrojs/starlight": "0.39.2",
+    "astro": "6.3.3",
+    "typescript": "6.0.3"
+  }
+}
