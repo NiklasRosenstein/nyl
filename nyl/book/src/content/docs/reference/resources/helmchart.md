@@ -5,7 +5,7 @@ title: 'HelmChart'
 The HelmChart resource enables declarative Helm chart deployment with templating support. Charts can be referenced from local paths, chart names, or Git repositories.
 
 Use `HelmChart` when you want explicit chart fields in `spec.chart.*`.  
-Use `Component` when you want compact chart-backed resources with dynamic `kind` and optional alias indirection.
+Use [`Component`](/nyl/reference/resources/component/) when you want compact chart-backed resources with dynamic `kind` and optional [alias indirection](/nyl/components/remote-shortcuts-and-aliases/).
 
 > **Note**: Git chart references are fully supported. Repositories are cloned automatically to a local cache. See the [Git Integration](/nyl/git-integration/) guide for details.
 
