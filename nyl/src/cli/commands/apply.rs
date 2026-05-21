@@ -1,7 +1,11 @@
 use chrono::Utc;
 use clap::Args;
 use kube::api::DynamicObject;
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+use tokio::time::{sleep, Instant};
 
 use colored::Colorize;
 
@@ -11,8 +15,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
-        ResourceKey, ResourceOrdering,
+        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
+        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -299,6 +303,7 @@ async fn apply_manifests_with_bootstrap_phase(
     manifests: &[serde_json::Value],
 ) -> Result<ApplyExecutionResult> {
     let (bootstrap_manifests, remaining_manifests) = partition_bootstrap_manifests(manifests);
+    let bootstrap_crd_gvks = collect_crd_gvks_from_manifests(&bootstrap_manifests);
 
     let mut combined = ApplyExecutionResult {
         outcomes: Vec::new(),
@@ -308,6 +313,9 @@ async fn apply_manifests_with_bootstrap_phase(
 
     if !bootstrap_manifests.is_empty() {
         let phase_result = apply_sorted_manifests(kube_client, &bootstrap_manifests).await?;
+        if phase_result.failed_count == 0 && !bootstrap_crd_gvks.is_empty() && !remaining_manifests.is_empty() {
+            wait_for_crd_api_discovery(raw_client, &bootstrap_crd_gvks).await?;
+        }
         combined.outcomes.extend(phase_result.outcomes);
         combined.failed_count += phase_result.failed_count;
         combined.resource_keys.extend(phase_result.resource_keys);
@@ -335,6 +343,122 @@ fn partition_bootstrap_manifests(manifests: &[serde_json::Value]) -> (Vec<serde_
             Some("Namespace" | "CustomResourceDefinition")
         )
     })
+}
+
+fn collect_crd_gvks_from_manifests(manifests: &[serde_json::Value]) -> Vec<GroupVersionKind> {
+    let mut seen = HashSet::new();
+    let mut gvks = Vec::new();
+
+    for manifest in manifests {
+        let is_crd = manifest
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind == "CustomResourceDefinition");
+        if !is_crd {
+            continue;
+        }
+
+        let Some(group) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("group"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        let Some(kind) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("names"))
+            .and_then(|names| names.get("kind"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        if let Some(versions) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("versions"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for version in versions {
+                let is_served = version
+                    .get("served")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if !is_served {
+                    continue;
+                }
+                let Some(version_name) = version.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let gvk = GroupVersionKind {
+                    group: group.to_string(),
+                    version: version_name.to_string(),
+                    kind: kind.to_string(),
+                };
+                if seen.insert(gvk.clone()) {
+                    gvks.push(gvk);
+                }
+            }
+            continue;
+        }
+
+        if let Some(version_name) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("version"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let gvk = GroupVersionKind {
+                group: group.to_string(),
+                version: version_name.to_string(),
+                kind: kind.to_string(),
+            };
+            if seen.insert(gvk.clone()) {
+                gvks.push(gvk);
+            }
+        }
+    }
+
+    gvks
+}
+
+async fn wait_for_crd_api_discovery(raw_client: &kube::Client, crd_gvks: &[GroupVersionKind]) -> Result<()> {
+    const CRD_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+    const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+    const PROBE_RESOURCE_NAME: &str = "__nyl_crd_discovery_probe__";
+
+    let deadline = Instant::now() + CRD_DISCOVERY_TIMEOUT;
+    let mut unresolved = crd_gvks.to_vec();
+
+    loop {
+        let refreshed_client = KubeRsClient::from_client(raw_client.clone()).await?;
+        let mut next_unresolved = Vec::new();
+        for gvk in &unresolved {
+            match refreshed_client.get_resource(gvk, None, PROBE_RESOURCE_NAME).await {
+                Ok(_) => {}
+                Err(err) if err.is_api_resource_not_found_error() => next_unresolved.push(gvk.clone()),
+                Err(err) => return Err(err),
+            }
+        }
+        unresolved = next_unresolved;
+
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            let pending = unresolved
+                .iter()
+                .map(GroupVersionKind::format)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(NylError::Other(format!(
+                "Timed out waiting for CRD API discovery for: {pending}"
+            )));
+        }
+
+        sleep(RETRY_INTERVAL).await;
+    }
 }
 
 async fn apply_sorted_manifests(
@@ -687,5 +811,71 @@ mod tests {
 
         assert!(bootstrap.is_empty());
         assert_eq!(remaining, manifests);
+    }
+
+    #[test]
+    fn test_collect_crd_gvks_from_manifests_collects_served_versions() {
+        let manifests = vec![
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [
+                        {"name": "v1", "served": true, "storage": true},
+                        {"name": "v2", "served": false, "storage": false}
+                    ]
+                }
+            }),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "gadgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Gadget"},
+                    "version": "v1beta1"
+                }
+            }),
+        ];
+
+        let gvks = collect_crd_gvks_from_manifests(&manifests);
+
+        assert_eq!(gvks.len(), 2);
+        assert_eq!(gvks[0].format(), "example.com/v1/Widget");
+        assert_eq!(gvks[1].format(), "example.com/v1beta1/Gadget");
+    }
+
+    #[test]
+    fn test_collect_crd_gvks_from_manifests_deduplicates_entries() {
+        let manifests = vec![
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true}]
+                }
+            }),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets2.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true}]
+                }
+            }),
+        ];
+
+        let gvks = collect_crd_gvks_from_manifests(&manifests);
+
+        assert_eq!(gvks.len(), 1);
+        assert_eq!(gvks[0].format(), "example.com/v1/Widget");
     }
 }
