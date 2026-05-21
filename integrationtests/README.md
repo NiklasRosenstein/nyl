@@ -129,6 +129,7 @@ Validates that all resources are created successfully from a single apply comman
 
 **Duration:** ~10-20 seconds
 **Resources:** 1 namespace, 1 CRD, 1 custom resource
+**Optional:** `CRD_ESTABLISH_TIMEOUT` (default: `30s`)
 
 ### test-kind-filtering-append-release.sh
 

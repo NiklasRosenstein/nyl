@@ -15,6 +15,7 @@ NAMESPACE="test-${TEST_NAME}"
 CRD_NAME="widgets.example.com"
 CR_NAME="test-widget"
 MANIFEST_PATH="${SCRIPT_DIR}/${TEST_NAME}.yaml"
+CRD_ESTABLISH_TIMEOUT="${CRD_ESTABLISH_TIMEOUT:-30s}"
 
 echo "==================================="
 echo "Integration Test: ${TEST_NAME}"
@@ -109,7 +110,7 @@ echo "✓ Namespace created"
 kubectl get crd "${CRD_NAME}" > /dev/null
 echo "✓ CRD created"
 
-kubectl wait --for condition=established "crd/${CRD_NAME}" --timeout=30s > /dev/null
+kubectl wait --for condition=established "crd/${CRD_NAME}" --timeout="${CRD_ESTABLISH_TIMEOUT}" > /dev/null
 echo "✓ CRD established"
 
 kubectl get widget "${CR_NAME}" -n "${NAMESPACE}" > /dev/null
