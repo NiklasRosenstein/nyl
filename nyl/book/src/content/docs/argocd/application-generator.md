@@ -101,13 +101,15 @@ Configures the Git repository and directory scanning behavior.
 
 ### spec.syncPolicy
 
-Optional default sync policy applied to all generated Applications.
+Optional sync policy applied to all generated Applications. `ServerSideApply=true` is always added to
+`syncOptions` by default (even when `syncPolicy` is not set), ensuring that large resources such as CRDs
+do not exceed the Kubernetes API client-side apply size limit.
 
 - **automated** (optional): Enable automated sync
   - **prune** (bool): Delete resources no longer defined in Git
   - **selfHeal** (bool): Force resource state to match Git
 
-- **syncOptions** (optional): List of sync options
+- **syncOptions** (optional): List of sync options (merged with the `ServerSideApply=true` default)
   - `CreateNamespace=true`: Create destination namespace if missing
   - `PruneLast=true`: Prune resources after other operations
   - `RespectIgnoreDifferences=true`: Respect ignore differences
@@ -461,11 +463,12 @@ spec:
   destination:
     server: https://kubernetes.default.svc  # From generator.spec.destination.server
     namespace: web               # From NylRelease.metadata.namespace
-  syncPolicy:                    # From generator.spec.syncPolicy
+  syncPolicy:                    # ServerSideApply=true always included; rest from generator.spec.syncPolicy
     automated:
       prune: true
       selfHeal: true
     syncOptions:
+      - ServerSideApply=true
       - CreateNamespace=true
 ```
 
