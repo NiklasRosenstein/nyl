@@ -252,6 +252,20 @@ spec:
       - PruneLast=true
 ```
 
+Generated Application excerpt (note: `ServerSideApply=true` is automatically prepended as the default):
+
+```yaml
+spec:
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true
+      - PruneLast=true
+```
+
 ### With Release-Level `+syncOptions`
 
 Generator defaults can be extended from a discovered `NylRelease` instead of replaced.
