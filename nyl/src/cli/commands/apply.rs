@@ -1,6 +1,7 @@
 use chrono::Utc;
 use clap::Args;
 use kube::api::DynamicObject;
+use kube::discovery::Discovery;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -384,7 +385,7 @@ fn collect_crd_gvks_from_manifests(manifests: &[serde_json::Value]) -> Vec<Group
                 let is_served = version
                     .get("served")
                     .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 if !is_served {
                     continue;
                 }
@@ -425,22 +426,23 @@ fn collect_crd_gvks_from_manifests(manifests: &[serde_json::Value]) -> Vec<Group
 async fn wait_for_crd_api_discovery(raw_client: &kube::Client, crd_gvks: &[GroupVersionKind]) -> Result<()> {
     const CRD_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
     const RETRY_INTERVAL: Duration = Duration::from_millis(500);
-    const PROBE_RESOURCE_NAME: &str = "__nyl_crd_discovery_probe__";
 
     let deadline = Instant::now() + CRD_DISCOVERY_TIMEOUT;
     let mut unresolved = crd_gvks.to_vec();
 
     loop {
-        let refreshed_client = KubeRsClient::from_client(raw_client.clone()).await?;
-        let mut next_unresolved = Vec::new();
-        for gvk in &unresolved {
-            match refreshed_client.get_resource(gvk, None, PROBE_RESOURCE_NAME).await {
-                Ok(_) => {}
-                Err(err) if err.is_api_resource_not_found_error() => next_unresolved.push(gvk.clone()),
-                Err(err) => return Err(err),
-            }
-        }
-        unresolved = next_unresolved;
+        let discovery = Discovery::new(raw_client.clone()).run().await?;
+        let available: HashSet<GroupVersionKind> = discovery
+            .groups()
+            .flat_map(|group| group.recommended_resources().into_iter())
+            .map(|(ar, _)| GroupVersionKind {
+                group: ar.group.clone(),
+                version: ar.version.clone(),
+                kind: ar.kind.clone(),
+            })
+            .collect();
+
+        unresolved.retain(|gvk| !available.contains(gvk));
 
         if unresolved.is_empty() {
             return Ok(());
