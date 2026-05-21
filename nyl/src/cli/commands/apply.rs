@@ -1,7 +1,12 @@
 use chrono::Utc;
 use clap::Args;
 use kube::api::DynamicObject;
-use std::collections::HashMap;
+use kube::discovery::Discovery;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+use tokio::time::{sleep, Instant};
 
 use colored::Colorize;
 
@@ -11,8 +16,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
-        ResourceKey, ResourceOrdering,
+        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
+        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -95,8 +100,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let mut sorted_manifests = desired_manifests.clone();
     ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
 
-    // 4. Apply manifests
-    let apply_result = apply_sorted_manifests(&kube_client, &sorted_manifests).await?;
+    // 4. Apply manifests (Namespaces/CRDs first, then refresh discovery for remaining resources)
+    let apply_result = apply_manifests_with_bootstrap_phase(&kube_client, &client, &sorted_manifests).await?;
 
     if args.no_release {
         print_apply_summary(&apply_result.outcomes, None, &duplicates, apply_result.failed_count);
@@ -291,6 +296,172 @@ struct ApplyExecutionResult {
     outcomes: Vec<ApplyOutcome>,
     failed_count: usize,
     resource_keys: Vec<ResourceKey>,
+}
+
+async fn apply_manifests_with_bootstrap_phase(
+    kube_client: &KubeRsClient,
+    raw_client: &kube::Client,
+    manifests: &[serde_json::Value],
+) -> Result<ApplyExecutionResult> {
+    let (bootstrap_manifests, remaining_manifests) = partition_bootstrap_manifests(manifests);
+    let bootstrap_crd_gvks = collect_crd_gvks_from_manifests(&bootstrap_manifests);
+    let has_bootstrap_crds = !bootstrap_crd_gvks.is_empty();
+
+    let mut combined = ApplyExecutionResult {
+        outcomes: Vec::new(),
+        failed_count: 0,
+        resource_keys: Vec::new(),
+    };
+
+    if !bootstrap_manifests.is_empty() {
+        let phase_result = apply_sorted_manifests(kube_client, &bootstrap_manifests).await?;
+        if phase_result.failed_count == 0 && has_bootstrap_crds && !remaining_manifests.is_empty() {
+            wait_for_crd_api_discovery(raw_client, &bootstrap_crd_gvks).await?;
+        }
+        combined.outcomes.extend(phase_result.outcomes);
+        combined.failed_count += phase_result.failed_count;
+        combined.resource_keys.extend(phase_result.resource_keys);
+    }
+
+    if !remaining_manifests.is_empty() {
+        let phase_result = if bootstrap_manifests.is_empty() || !has_bootstrap_crds {
+            apply_sorted_manifests(kube_client, &remaining_manifests).await?
+        } else {
+            let refreshed_client = KubeRsClient::from_client(raw_client.clone()).await?;
+            apply_sorted_manifests(&refreshed_client, &remaining_manifests).await?
+        };
+        combined.outcomes.extend(phase_result.outcomes);
+        combined.failed_count += phase_result.failed_count;
+        combined.resource_keys.extend(phase_result.resource_keys);
+    }
+
+    Ok(combined)
+}
+
+fn partition_bootstrap_manifests(manifests: &[serde_json::Value]) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    manifests.iter().cloned().partition(|manifest| {
+        matches!(
+            manifest.get("kind").and_then(serde_json::Value::as_str),
+            Some("Namespace" | "CustomResourceDefinition")
+        )
+    })
+}
+
+fn collect_crd_gvks_from_manifests(manifests: &[serde_json::Value]) -> Vec<GroupVersionKind> {
+    let mut seen = HashSet::new();
+    let mut gvks = Vec::new();
+
+    for manifest in manifests {
+        let is_crd = manifest
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind == "CustomResourceDefinition");
+        if !is_crd {
+            continue;
+        }
+
+        let Some(group) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("group"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        let Some(kind) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("names"))
+            .and_then(|names| names.get("kind"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        if let Some(versions) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("versions"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for version in versions {
+                let is_served = version
+                    .get("served")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                if !is_served {
+                    continue;
+                }
+                let Some(version_name) = version.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let gvk = GroupVersionKind {
+                    group: group.to_string(),
+                    version: version_name.to_string(),
+                    kind: kind.to_string(),
+                };
+                if seen.insert(gvk.clone()) {
+                    gvks.push(gvk);
+                }
+            }
+            continue;
+        }
+
+        if let Some(version_name) = manifest
+            .get("spec")
+            .and_then(|spec| spec.get("version"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let gvk = GroupVersionKind {
+                group: group.to_string(),
+                version: version_name.to_string(),
+                kind: kind.to_string(),
+            };
+            if seen.insert(gvk.clone()) {
+                gvks.push(gvk);
+            }
+        }
+    }
+
+    gvks
+}
+
+async fn wait_for_crd_api_discovery(raw_client: &kube::Client, crd_gvks: &[GroupVersionKind]) -> Result<()> {
+    const CRD_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+    const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+    let deadline = Instant::now() + CRD_DISCOVERY_TIMEOUT;
+    let mut unresolved = crd_gvks.to_vec();
+
+    loop {
+        let discovery = Discovery::new(raw_client.clone()).run().await?;
+        let available: HashSet<GroupVersionKind> = discovery
+            .groups()
+            .flat_map(|group| group.recommended_resources().into_iter())
+            .map(|(ar, _)| GroupVersionKind {
+                group: ar.group.clone(),
+                version: ar.version.clone(),
+                kind: ar.kind.clone(),
+            })
+            .collect();
+
+        unresolved.retain(|gvk| !available.contains(gvk));
+
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            let pending = unresolved
+                .iter()
+                .map(GroupVersionKind::format)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(NylError::Other(format!(
+                "Timed out waiting for CRD API discovery for: {pending}"
+            )));
+        }
+
+        sleep(RETRY_INTERVAL).await;
+    }
 }
 
 async fn apply_sorted_manifests(
@@ -607,5 +778,107 @@ mod tests {
     #[test]
     fn test_format_namespace_name_without_namespace() {
         assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
+    }
+
+    #[test]
+    fn test_partition_bootstrap_manifests_extracts_namespace_and_crd() {
+        let manifests = vec![
+            json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "app"}}),
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "test"}}),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"}
+            }),
+            json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "svc"}}),
+        ];
+
+        let (bootstrap, remaining) = partition_bootstrap_manifests(&manifests);
+
+        assert_eq!(bootstrap.len(), 2);
+        assert_eq!(bootstrap[0]["kind"], "Namespace");
+        assert_eq!(bootstrap[1]["kind"], "CustomResourceDefinition");
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0]["kind"], "Deployment");
+        assert_eq!(remaining[1]["kind"], "Service");
+    }
+
+    #[test]
+    fn test_partition_bootstrap_manifests_keeps_non_bootstrap_resources() {
+        let manifests = vec![
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cfg"}}),
+            json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "role"}}),
+        ];
+
+        let (bootstrap, remaining) = partition_bootstrap_manifests(&manifests);
+
+        assert!(bootstrap.is_empty());
+        assert_eq!(remaining, manifests);
+    }
+
+    #[test]
+    fn test_collect_crd_gvks_from_manifests_collects_served_versions() {
+        let manifests = vec![
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [
+                        {"name": "v1", "served": true, "storage": true},
+                        {"name": "v2", "served": false, "storage": false}
+                    ]
+                }
+            }),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "gadgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Gadget"},
+                    "version": "v1beta1"
+                }
+            }),
+        ];
+
+        let gvks = collect_crd_gvks_from_manifests(&manifests);
+
+        assert_eq!(gvks.len(), 2);
+        assert_eq!(gvks[0].format(), "example.com/v1/Widget");
+        assert_eq!(gvks[1].format(), "example.com/v1beta1/Gadget");
+    }
+
+    #[test]
+    fn test_collect_crd_gvks_from_manifests_deduplicates_entries() {
+        let manifests = vec![
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true}]
+                }
+            }),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets2.example.com"},
+                "spec": {
+                    "group": "example.com",
+                    "names": {"kind": "Widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true}]
+                }
+            }),
+        ];
+
+        let gvks = collect_crd_gvks_from_manifests(&manifests);
+
+        assert_eq!(gvks.len(), 1);
+        assert_eq!(gvks[0].format(), "example.com/v1/Widget");
     }
 }

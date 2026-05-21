@@ -16,6 +16,9 @@ The `apply` command renders manifests, applies them with server-side apply, and 
 For shared rendering behavior and namespace resolution details, see
 [Rendering Pipeline](/nyl/commands/rendering-pipeline/).
 
+When `Namespace` or `CustomResourceDefinition` resources are present, `nyl apply` performs a bootstrap phase:
+it applies those resources first, waits for CRD API discovery to become available, then applies the remaining manifests.
+
 ## Arguments
 
 - `<FILE>` - Path to the manifest file to apply (required)
@@ -87,4 +90,5 @@ nyl apply --no-release manifest.yaml
 - A `NylRelease` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
+- Apply executes in two phases when bootstrap resources are present (`Namespace`/`CustomResourceDefinition` first, then all other resources).
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.

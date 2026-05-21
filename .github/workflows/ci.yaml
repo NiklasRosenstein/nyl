@@ -304,8 +304,8 @@ jobs:
 
   integration-minikube:
     name: Integration tests (Minikube)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: [package-image-and-chart, build-all-platform-binaries]
+    if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')) && needs.package-image-and-chart.outputs.can_push == 'true'
+    needs: [package-image-and-chart]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -348,6 +348,7 @@ jobs:
       - name: Run kind filtering and append-release test
         run: |
           cd integrationtests
+          ./test-single-pass-crd-namespace-apply.sh
           ./test-kind-filtering-append-release.sh
 
       - name: Run ArgoCD bootstrap test
