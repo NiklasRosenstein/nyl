@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     cli::{
         commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+        helm_hooks::{has_hook_delete_policy, is_helm_hook, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION},
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
@@ -297,6 +298,11 @@ async fn compute_diff_from_live(
     // Check desired vs live
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
+        if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
+            let note = helm_hook_added_note(&key, &crd_not_found_keys, &crd_set);
+            added.push((key, Some(note)));
+            continue;
+        }
         if let Some(live) = live_resources.get(&key) {
             match mode {
                 DiffMode::Normalized => {
@@ -525,6 +531,33 @@ fn format_added_note(note: Option<&AddedNote>) -> String {
     }
 }
 
+fn helm_hook_added_note(
+    key: &ResourceKey,
+    crd_not_found_keys: &HashSet<ResourceKey>,
+    crd_set: &HashSet<(String, String, String)>,
+) -> AddedNote {
+    if crd_not_found_keys.contains(key) {
+        if crd_in_manifests(&key.gvk, crd_set) {
+            AddedNote {
+                message: "Helm hook will be deleted if present, then recreated before apply (CRD will be installed)"
+                    .to_string(),
+                is_error: false,
+            }
+        } else {
+            AddedNote {
+                message: "Helm hook requires missing CRD/API resource in cluster (delete-if-present then recreate semantics still apply)"
+                    .to_string(),
+                is_error: true,
+            }
+        }
+    } else {
+        AddedNote {
+            message: "Helm hook will be deleted if present, then recreated before apply".to_string(),
+            is_error: false,
+        }
+    }
+}
+
 /// Get duplicate annotation for a ResourceKey if it's a duplicate
 fn get_duplicate_annotation_for_key(key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
     if let Some(count) = duplicates.get(key) {
@@ -657,7 +690,7 @@ async fn merge_with_previous_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kubernetes::ApplyOutcome;
+    use crate::kubernetes::{ApplyOutcome, MockKubeClient};
     use async_trait::async_trait;
     use kube::api::DynamicObject;
     use serde_json::json;
@@ -899,5 +932,91 @@ mod tests {
         let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
         assert!(note.is_error, "should be an error: CRD in manifests but wrong version");
         assert_eq!(result.total_error_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_diff_helm_hook_before_hook_creation_is_shown_as_added() {
+        let manifest = json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "db-migrate",
+                "namespace": "default",
+                "annotations": {
+                    "helm.sh/hook": "pre-install,pre-upgrade",
+                    "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded"
+                }
+            }
+        });
+
+        let key = ResourceKey::from_json_value(&manifest).unwrap();
+        let resource: DynamicObject = serde_json::from_value(manifest.clone()).unwrap();
+        let client = MockKubeClient::new();
+        client.add_resource(key.clone(), resource);
+
+        let result = compute_diff_from_live(&client, &[manifest], None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added.len(), 1);
+        assert_eq!(result.added[0].0, key);
+        assert!(result.added[0]
+            .1
+            .as_ref()
+            .is_some_and(|note| note.message.contains("deleted if present, then recreated before apply")));
+        assert!(result.modified.is_empty());
+        assert!(result.unchanged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_diff_helm_hook_before_hook_creation_with_missing_crd_counts_as_error() {
+        let manifest = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": {
+                "name": "hooked-policy",
+                "annotations": {
+                    "helm.sh/hook": "pre-install",
+                    "helm.sh/hook-delete-policy": "before-hook-creation"
+                }
+            }
+        });
+
+        let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
+        let result = compute_diff_from_live(&client, &[manifest], None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added.len(), 1);
+        let note = result.added[0].1.as_ref().expect("should have a note");
+        assert!(note.is_error, "missing CRD/API should still be counted as an error for hooks");
+        assert!(note.message.contains("missing CRD/API resource"));
+        assert_eq!(result.total_error_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_diff_helm_hook_without_before_hook_creation_is_compared_normally() {
+        let manifest = json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "db-migrate",
+                "namespace": "default",
+                "annotations": {
+                    "helm.sh/hook": "pre-install,pre-upgrade"
+                }
+            }
+        });
+
+        let key = ResourceKey::from_json_value(&manifest).unwrap();
+        let resource: DynamicObject = serde_json::from_value(manifest.clone()).unwrap();
+        let client = MockKubeClient::new();
+        client.add_resource(key.clone(), resource);
+
+        let result = compute_diff_from_live(&client, &[manifest], None, DiffMode::Raw).await.unwrap();
+
+        assert!(result.added.is_empty());
+        assert!(result.modified.is_empty());
+        assert_eq!(result.unchanged, vec![key]);
     }
 }

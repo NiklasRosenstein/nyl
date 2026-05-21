@@ -16,6 +16,15 @@ The `diff` command renders manifests, compares them with live cluster state, and
 For shared rendering behavior and namespace resolution details, see
 [Rendering Pipeline](/nyl/commands/rendering-pipeline/).
 
+## Semantics
+
+`nyl diff` compares:
+- **Desired state**: the rendered manifests from the current input file
+- **Live state**: matching resources currently in the cluster
+- **Previous release state** (if available): used to identify prune candidates (`to delete`)
+
+If no previous release state exists, diff still compares desired vs live for existing resources, but it cannot fully determine deletions from earlier revisions.
+
 ## Arguments
 
 - `<FILE>` - Path to the manifest file to diff (required)
@@ -47,6 +56,24 @@ For shared rendering behavior and namespace resolution details, see
   - `normalized`: Uses server-side apply to filter server defaults (like kubectl diff)
   - `raw`: Compares raw manifests without server normalization
 - `--append-release` - Preview diff as if current manifests were merged with the previous deployed release
+- `--exit-code` - Exit with code `1` when changes are found, `0` when no changes are found and no errors occurred
+
+## Helm Hook Behavior
+
+Resources with both:
+- `helm.sh/hook`
+- `helm.sh/hook-delete-policy` containing `before-hook-creation`
+
+are treated as resources that will be recreated on apply. In diff output they are shown as **additions** with the note:
+- `(Helm hook will be deleted if present, then recreated before apply)`
+
+Other Helm-hooked resources are diffed normally.
+
+## Append-Release Preview Semantics
+
+- With `--append-release`, desired resources are merged with the previous release's resources (set union; current manifests win on overlap).
+- If the previous release exists but is not in `Deployed` state, diff fails.
+- If no previous release exists, append-release preview behaves like an initial release diff.
 
 ## Examples
 
@@ -98,12 +125,21 @@ nyl diff --context production manifest.yaml
 The diff command shows:
 - **Green (+)**: Lines that will be added
 - **Red (-)**: Lines that will be removed
+- **Yellow (~)**: Resources that will be modified
+- **Grey (=)**: Resources that are unchanged
 - **Summary**: Count of resources to create, update, or delete
+
+## Exit Codes
+
+- `0`: Diff completed without errors, and either no changes were found or `--exit-code` was not set
+- `1`: `--exit-code` was set and changes were found
+- `2`: Diff encountered errors (for example, normalization failures)
 
 ## Notes
 
 - Nyl processes single files only. Directory paths are not supported.
 - A `NylRelease` resource in the manifest provides release metadata automatically.
 - Normalized mode is recommended for most use cases as it matches kubectl diff behavior.
+- In normalized mode, if server-side normalization fails for a resource, Nyl falls back to raw diff for that resource and reports the normalization error.
 - If no previous release state exists, diff still compares desired resources against live state but cannot determine prune candidates; a warning is shown and `to delete` remains incomplete.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
