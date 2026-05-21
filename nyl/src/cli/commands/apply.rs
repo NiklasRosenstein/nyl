@@ -95,8 +95,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     let mut sorted_manifests = desired_manifests.clone();
     ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
 
-    // 4. Apply manifests
-    let apply_result = apply_sorted_manifests(&kube_client, &sorted_manifests).await?;
+    // 4. Apply manifests (Namespaces/CRDs first, then refresh discovery for remaining resources)
+    let apply_result = apply_manifests_with_bootstrap_phase(&kube_client, &client, &sorted_manifests).await?;
 
     if args.no_release {
         print_apply_summary(&apply_result.outcomes, None, &duplicates, apply_result.failed_count);
@@ -291,6 +291,50 @@ struct ApplyExecutionResult {
     outcomes: Vec<ApplyOutcome>,
     failed_count: usize,
     resource_keys: Vec<ResourceKey>,
+}
+
+async fn apply_manifests_with_bootstrap_phase(
+    kube_client: &KubeRsClient,
+    raw_client: &kube::Client,
+    manifests: &[serde_json::Value],
+) -> Result<ApplyExecutionResult> {
+    let (bootstrap_manifests, remaining_manifests) = partition_bootstrap_manifests(manifests);
+
+    let mut combined = ApplyExecutionResult {
+        outcomes: Vec::new(),
+        failed_count: 0,
+        resource_keys: Vec::new(),
+    };
+
+    if !bootstrap_manifests.is_empty() {
+        let phase_result = apply_sorted_manifests(kube_client, &bootstrap_manifests).await?;
+        combined.outcomes.extend(phase_result.outcomes);
+        combined.failed_count += phase_result.failed_count;
+        combined.resource_keys.extend(phase_result.resource_keys);
+    }
+
+    if !remaining_manifests.is_empty() {
+        let phase_result = if bootstrap_manifests.is_empty() {
+            apply_sorted_manifests(kube_client, &remaining_manifests).await?
+        } else {
+            let refreshed_client = KubeRsClient::from_client(raw_client.clone()).await?;
+            apply_sorted_manifests(&refreshed_client, &remaining_manifests).await?
+        };
+        combined.outcomes.extend(phase_result.outcomes);
+        combined.failed_count += phase_result.failed_count;
+        combined.resource_keys.extend(phase_result.resource_keys);
+    }
+
+    Ok(combined)
+}
+
+fn partition_bootstrap_manifests(manifests: &[serde_json::Value]) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    manifests.iter().cloned().partition(|manifest| {
+        matches!(
+            manifest.get("kind").and_then(serde_json::Value::as_str),
+            Some("Namespace" | "CustomResourceDefinition")
+        )
+    })
 }
 
 async fn apply_sorted_manifests(
@@ -607,5 +651,41 @@ mod tests {
     #[test]
     fn test_format_namespace_name_without_namespace() {
         assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
+    }
+
+    #[test]
+    fn test_partition_bootstrap_manifests_extracts_namespace_and_crd() {
+        let manifests = vec![
+            json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "app"}}),
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "test"}}),
+            json!({
+                "apiVersion": "apiextensions.k8s.io/v1",
+                "kind": "CustomResourceDefinition",
+                "metadata": {"name": "widgets.example.com"}
+            }),
+            json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "svc"}}),
+        ];
+
+        let (bootstrap, remaining) = partition_bootstrap_manifests(&manifests);
+
+        assert_eq!(bootstrap.len(), 2);
+        assert_eq!(bootstrap[0]["kind"], "Namespace");
+        assert_eq!(bootstrap[1]["kind"], "CustomResourceDefinition");
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0]["kind"], "Deployment");
+        assert_eq!(remaining[1]["kind"], "Service");
+    }
+
+    #[test]
+    fn test_partition_bootstrap_manifests_keeps_non_bootstrap_resources() {
+        let manifests = vec![
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cfg"}}),
+            json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "role"}}),
+        ];
+
+        let (bootstrap, remaining) = partition_bootstrap_manifests(&manifests);
+
+        assert!(bootstrap.is_empty());
+        assert_eq!(remaining, manifests);
     }
 }
