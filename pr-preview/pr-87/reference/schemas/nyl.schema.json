@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "KubernetesTarget": {
+      "additionalProperties": false,
+      "description": "Kubernetes target metadata used for offline rendering.",
+      "properties": {
+        "api_versions": {
+          "default": [],
+          "description": "Kubernetes API versions to pass to Helm during offline rendering.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kube_version": {
+          "default": null,
+          "description": "Kubernetes server version to pass to Helm during offline rendering.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProfileSettings": {
+      "additionalProperties": false,
+      "description": "Profile configuration in `[profile.<name>]` section of `nyl.toml`.",
+      "properties": {
+        "kubernetes": {
+          "$ref": "#/$defs/KubernetesTarget",
+          "default": {
+            "api_versions": [],
+            "kube_version": null
+          },
+          "description": "Kubernetes target metadata for offline rendering with this profile."
+        },
+        "values": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Template values exposed as `values.*` for this profile.\n\nExample:\n`[profile.dev.values]`\n`replicas = 2`",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "description": "Project settings in `[project]` section of `nyl.toml`.",
+      "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`.\nValues are component kind targets (local component path or remote shortcut URL).",
+          "type": "object"
+        },
+        "components_search_paths": {
+          "default": [
+            "components"
+          ],
+          "description": "Search paths for local component charts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "helm_chart_search_paths": {
+          "default": [
+            "."
+          ],
+          "description": "Search paths for Helm chart names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kubernetes": {
+          "$ref": "#/$defs/KubernetesTarget",
+          "default": {
+            "api_versions": [],
+            "kube_version": null
+          },
+          "description": "Default Kubernetes target metadata for offline rendering."
+        },
+        "strip_empty_metadata_labels": {
+          "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
+          "default": "always",
+          "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
+        }
+      },
+      "type": "object"
+    },
+    "StripEmptyMetadataLabelsMode": {
+      "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "argocd",
+          "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Root structure of `nyl.toml`.",
+  "properties": {
+    "profile": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ProfileSettings"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSettings",
+      "default": {
+        "aliases": {},
+        "components_search_paths": [
+          "components"
+        ],
+        "helm_chart_search_paths": [
+          "."
+        ],
+        "kubernetes": {
+          "api_versions": [],
+          "kube_version": null
+        },
+        "strip_empty_metadata_labels": "always"
+      }
+    }
+  },
+  "title": "ProjectFile",
+  "type": "object"
+}
