@@ -2078,16 +2078,18 @@ fn create_argocd_application_from_generator(
 
     // Build sync policy, always including ServerSideApply=true as a default.
     {
-        let (automated, mut sync_options) = if let Some(ref sp) = generator.spec.sync_policy {
-            (sp.automated.clone(), sp.sync_options.clone())
-        } else {
-            (None, Vec::new())
-        };
+        let automated = generator.spec.sync_policy.as_ref().and_then(|sp| sp.automated.clone());
+        let mut sync_options = generator
+            .spec
+            .sync_policy
+            .as_ref()
+            .map(|sp| sp.sync_options.clone())
+            .unwrap_or_default();
         if !sync_options.contains(&"ServerSideApply=true".to_string()) {
             sync_options.insert(0, "ServerSideApply=true".to_string());
         }
-        let effective_sync_policy = crate::resources::SyncPolicy { automated, sync_options };
-        app["spec"]["syncPolicy"] = serde_json::to_value(&effective_sync_policy)?;
+        let sync_policy = crate::resources::SyncPolicy { automated, sync_options };
+        app["spec"]["syncPolicy"] = serde_json::to_value(&sync_policy)?;
     }
 
     apply_release_customization_overrides(&mut app, release, generator)?;
