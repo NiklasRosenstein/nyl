@@ -299,13 +299,28 @@ async fn compute_diff_from_live(
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
         if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
-            added.push((
-                key,
-                Some(AddedNote {
-                    message: "Helm hook will be recreated before apply".to_string(),
+            let note = if crd_not_found_keys.contains(&key) {
+                if crd_in_manifests(&key.gvk, &crd_set) {
+                    AddedNote {
+                        message: "Helm hook will be deleted if present, then recreated before apply (CRD will be installed)"
+                            .to_string(),
+                        is_error: false,
+                    }
+                } else {
+                    AddedNote {
+                        message:
+                            "Helm hook requires missing CRD/API resource in cluster (delete-if-present then recreate semantics still apply)"
+                                .to_string(),
+                        is_error: true,
+                    }
+                }
+            } else {
+                AddedNote {
+                    message: "Helm hook will be deleted if present, then recreated before apply".to_string(),
                     is_error: false,
-                }),
-            ));
+                }
+            };
+            added.push((key, Some(note)));
             continue;
         }
         if let Some(live) = live_resources.get(&key) {
@@ -941,9 +956,35 @@ mod tests {
         assert!(result.added[0]
             .1
             .as_ref()
-            .is_some_and(|note| note.message.contains("recreated before apply")));
+            .is_some_and(|note| note.message.contains("deleted if present, then recreated before apply")));
         assert!(result.modified.is_empty());
         assert!(result.unchanged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_diff_helm_hook_before_hook_creation_with_missing_crd_counts_as_error() {
+        let manifest = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": {
+                "name": "hooked-policy",
+                "annotations": {
+                    "helm.sh/hook": "pre-install",
+                    "helm.sh/hook-delete-policy": "before-hook-creation"
+                }
+            }
+        });
+
+        let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
+        let result = compute_diff_from_live(&client, &[manifest], None, DiffMode::Raw)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added.len(), 1);
+        let note = result.added[0].1.as_ref().expect("should have a note");
+        assert!(note.is_error, "missing CRD/API should still be counted as an error for hooks");
+        assert!(note.message.contains("missing CRD/API resource"));
+        assert_eq!(result.total_error_count(), 1);
     }
 
     #[tokio::test]
