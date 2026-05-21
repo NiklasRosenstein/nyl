@@ -16,6 +16,15 @@ The `apply` command renders manifests, applies them with server-side apply, and 
 For shared rendering behavior and namespace resolution details, see
 [Rendering Pipeline](/nyl/commands/rendering-pipeline/).
 
+## Semantics
+
+After rendering, `nyl apply`:
+1. Resolves namespaces for namespaced resources.
+2. Sorts resources by apply priority (for example: Namespace, CRD, RBAC, then workloads).
+3. Applies resources with server-side apply.
+4. Records release state (unless `--no-release` is used).
+5. Prunes resources removed from the desired state (default mode only).
+
 ## Arguments
 
 - `<FILE>` - Path to the manifest file to apply (required)
@@ -37,6 +46,25 @@ For shared rendering behavior and namespace resolution details, see
 - `--namespace <NAMESPACE>` - Release namespace (required if no NylRelease in file)
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
+
+## Helm Hook Behavior
+
+Resources with both:
+- `helm.sh/hook`
+- `helm.sh/hook-delete-policy` containing `before-hook-creation`
+
+are deleted first and then applied again, matching hook recreation semantics for that policy.
+
+Other Helm-hooked resources are applied normally.
+
+## Release and Pruning Semantics
+
+- In default mode, apply creates a new release revision and marks successful previous revisions as superseded.
+- In default mode, prune deletes resources that existed in the previous revision but are no longer present in the new desired state.
+- With `--append-release`, the new release is built from union(previous, current) where current resources win on overlap; pruning is skipped.
+- `--append-release` requires the previous release (if present) to be in `Deployed` state.
+- If no previous release exists, `--append-release` behaves like an initial apply.
+- With `--no-release`, no revisions are written and no pruning is performed.
 
 ### Cluster Options
 
@@ -87,4 +115,5 @@ nyl apply --no-release manifest.yaml
 - A `NylRelease` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
+- `--no-release` conflicts with `--append-release`, `--name`, and `--namespace`.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
