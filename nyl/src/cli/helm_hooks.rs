@@ -56,6 +56,18 @@ mod tests {
     }
 
     #[test]
+    fn test_is_helm_hook_false_when_empty() {
+        let manifest = json!({
+            "metadata": {
+                "annotations": {
+                    "helm.sh/hook": "   "
+                }
+            }
+        });
+        assert!(!is_helm_hook(&manifest));
+    }
+
+    #[test]
     fn test_has_hook_delete_policy_matches_comma_separated_values() {
         let manifest = json!({
             "metadata": {

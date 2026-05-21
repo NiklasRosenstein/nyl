@@ -945,4 +945,30 @@ mod tests {
         assert!(result.modified.is_empty());
         assert!(result.unchanged.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_diff_helm_hook_without_before_hook_creation_is_compared_normally() {
+        let manifest = json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "db-migrate",
+                "namespace": "default",
+                "annotations": {
+                    "helm.sh/hook": "pre-install,pre-upgrade"
+                }
+            }
+        });
+
+        let key = ResourceKey::from_json_value(&manifest).unwrap();
+        let resource: DynamicObject = serde_json::from_value(manifest.clone()).unwrap();
+        let client = MockKubeClient::new();
+        client.add_resource(key.clone(), resource);
+
+        let result = compute_diff_from_live(&client, &[manifest], None, DiffMode::Raw).await.unwrap();
+
+        assert!(result.added.is_empty());
+        assert!(result.modified.is_empty());
+        assert_eq!(result.unchanged, vec![key]);
+    }
 }

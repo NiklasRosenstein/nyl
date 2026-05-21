@@ -307,7 +307,13 @@ async fn apply_sorted_manifests(
         if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
             client
                 .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                .await?;
+                .await
+                .map_err(|err| {
+                    NylError::Other(format!(
+                        "Failed to delete Helm hook resource {} before creation: {}",
+                        key, err
+                    ))
+                })?;
         }
         match apply_manifest(client, manifest).await {
             Ok(outcome) => {
@@ -582,7 +588,79 @@ async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use kube::api::DynamicObject;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct RecordingKubeClient {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingKubeClient {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl KubeClient for RecordingKubeClient {
+        async fn get_resource(
+            &self,
+            _gvk: &crate::kubernetes::GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            Ok(None)
+        }
+
+        async fn apply_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+            _dry_run: bool,
+        ) -> Result<ApplyOutcome> {
+            self.events.lock().unwrap().push("apply".to_string());
+            let value = serde_json::to_value(resource)?;
+            let key = ResourceKey::from_json_value(&value)?;
+            Ok(ApplyOutcome::Created { resource_key: key })
+        }
+
+        async fn get_server_version(&self) -> Result<String> {
+            Ok("1.31.0".to_string())
+        }
+
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn is_namespaced(&self, _gvk: &crate::kubernetes::GroupVersionKind) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn default_namespace(&self) -> &str {
+            "default"
+        }
+
+        async fn delete_resource(
+            &self,
+            _gvk: &crate::kubernetes::GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<()> {
+            self.events.lock().unwrap().push("delete".to_string());
+            Ok(())
+        }
+
+        async fn get_normalized_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+        ) -> Result<DynamicObject> {
+            Ok(resource.clone())
+        }
+    }
 
     #[test]
     fn test_manifests_to_yaml() {
@@ -613,5 +691,28 @@ mod tests {
     #[test]
     fn test_format_namespace_name_without_namespace() {
         assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
+    }
+
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_deletes_hook_before_creation() {
+        let hook_manifest = json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "db-migrate",
+                "namespace": "default",
+                "annotations": {
+                    "helm.sh/hook": "pre-install,pre-upgrade",
+                    "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded"
+                }
+            }
+        });
+
+        let client = RecordingKubeClient::default();
+        let result = apply_sorted_manifests(&client, &[hook_manifest]).await.unwrap();
+
+        assert_eq!(client.events(), vec!["delete", "apply"]);
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(result.resource_keys.len(), 1);
     }
 }
