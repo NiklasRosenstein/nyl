@@ -8,6 +8,7 @@ use colored::Colorize;
 use crate::{
     cli::{
         commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+        helm_hooks::{has_hook_delete_policy, is_helm_hook, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION},
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
@@ -294,7 +295,7 @@ struct ApplyExecutionResult {
 }
 
 async fn apply_sorted_manifests(
-    client: &KubeRsClient,
+    client: &dyn KubeClient,
     manifests: &[serde_json::Value],
 ) -> Result<ApplyExecutionResult> {
     let mut outcomes = Vec::new();
@@ -303,6 +304,11 @@ async fn apply_sorted_manifests(
 
     for manifest in manifests {
         let key = ResourceKey::from_json_value(manifest)?;
+        if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
+            client
+                .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                .await?;
+        }
         match apply_manifest(client, manifest).await {
             Ok(outcome) => {
                 outcomes.push(outcome);
@@ -336,7 +342,7 @@ fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
 }
 
 /// Apply a single manifest
-async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value) -> Result<ApplyOutcome> {
+async fn apply_manifest(client: &dyn KubeClient, manifest: &serde_json::Value) -> Result<ApplyOutcome> {
     // Convert JSON to DynamicObject
     let resource: DynamicObject = serde_json::from_value(manifest.clone())?;
 
