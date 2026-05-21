@@ -299,27 +299,7 @@ async fn compute_diff_from_live(
     for manifest in desired_manifests {
         let key = ResourceKey::from_json_value(manifest)?;
         if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
-            let note = if crd_not_found_keys.contains(&key) {
-                if crd_in_manifests(&key.gvk, &crd_set) {
-                    AddedNote {
-                        message: "Helm hook will be deleted if present, then recreated before apply (CRD will be installed)"
-                            .to_string(),
-                        is_error: false,
-                    }
-                } else {
-                    AddedNote {
-                        message:
-                            "Helm hook requires missing CRD/API resource in cluster (delete-if-present then recreate semantics still apply)"
-                                .to_string(),
-                        is_error: true,
-                    }
-                }
-            } else {
-                AddedNote {
-                    message: "Helm hook will be deleted if present, then recreated before apply".to_string(),
-                    is_error: false,
-                }
-            };
+            let note = helm_hook_added_note(&key, &crd_not_found_keys, &crd_set);
             added.push((key, Some(note)));
             continue;
         }
@@ -548,6 +528,33 @@ fn format_added_note(note: Option<&AddedNote>) -> String {
         Some(n) if n.is_error => format!(" {}", format!("({})", n.message).red()),
         Some(n) => format!(" {}", format!("({})", n.message).yellow()),
         None => String::new(),
+    }
+}
+
+fn helm_hook_added_note(
+    key: &ResourceKey,
+    crd_not_found_keys: &HashSet<ResourceKey>,
+    crd_set: &HashSet<(String, String, String)>,
+) -> AddedNote {
+    if crd_not_found_keys.contains(key) {
+        if crd_in_manifests(&key.gvk, crd_set) {
+            AddedNote {
+                message: "Helm hook will be deleted if present, then recreated before apply (CRD will be installed)"
+                    .to_string(),
+                is_error: false,
+            }
+        } else {
+            AddedNote {
+                message: "Helm hook requires missing CRD/API resource in cluster (delete-if-present then recreate semantics still apply)"
+                    .to_string(),
+                is_error: true,
+            }
+        }
+    } else {
+        AddedNote {
+            message: "Helm hook will be deleted if present, then recreated before apply".to_string(),
+            is_error: false,
+        }
     }
 }
 

@@ -305,15 +305,18 @@ async fn apply_sorted_manifests(
     for manifest in manifests {
         let key = ResourceKey::from_json_value(manifest)?;
         if is_helm_hook(manifest) && has_hook_delete_policy(manifest, HOOK_DELETE_POLICY_BEFORE_HOOK_CREATION) {
-            client
-                .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                .await
-                .map_err(|err| {
-                    NylError::Other(format!(
+            if let Err(err) = client.delete_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+                if !is_resource_not_found_error(&err) {
+                    return Err(NylError::Other(format!(
                         "Failed to delete Helm hook resource {} before creation: {}",
                         key, err
-                    ))
-                })?;
+                    )));
+                }
+                tracing::debug!(
+                    "Helm hook resource {} not found during delete-before-create; continuing",
+                    key
+                );
+            }
         }
         match apply_manifest(client, manifest).await {
             Ok(outcome) => {
@@ -333,6 +336,13 @@ async fn apply_sorted_manifests(
         failed_count,
         resource_keys,
     })
+}
+
+fn is_resource_not_found_error(error: &NylError) -> bool {
+    match error {
+        NylError::Kubernetes(message) => message.to_lowercase().contains("not found"),
+        _ => false,
+    }
 }
 
 /// Convert manifests to YAML string
@@ -639,7 +649,7 @@ mod tests {
             Ok(true)
         }
 
-        fn default_namespace(&self) -> &str {
+        fn default_namespace(&self) -> &'static str {
             "default"
         }
 
@@ -709,6 +719,98 @@ mod tests {
         });
 
         let client = RecordingKubeClient::default();
+        let result = apply_sorted_manifests(&client, &[hook_manifest]).await.unwrap();
+
+        assert_eq!(client.events(), vec!["delete", "apply"]);
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(result.resource_keys.len(), 1);
+    }
+
+    #[derive(Clone, Default)]
+    struct NotFoundDeleteKubeClient {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl NotFoundDeleteKubeClient {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl KubeClient for NotFoundDeleteKubeClient {
+        async fn get_resource(
+            &self,
+            _gvk: &crate::kubernetes::GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<Option<DynamicObject>> {
+            Ok(None)
+        }
+
+        async fn apply_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+            _dry_run: bool,
+        ) -> Result<ApplyOutcome> {
+            self.events.lock().unwrap().push("apply".to_string());
+            let value = serde_json::to_value(resource)?;
+            let key = ResourceKey::from_json_value(&value)?;
+            Ok(ApplyOutcome::Created { resource_key: key })
+        }
+
+        async fn get_server_version(&self) -> Result<String> {
+            Ok("1.31.0".to_string())
+        }
+
+        async fn get_api_versions(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn is_namespaced(&self, _gvk: &crate::kubernetes::GroupVersionKind) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn default_namespace(&self) -> &'static str {
+            "default"
+        }
+
+        async fn delete_resource(
+            &self,
+            _gvk: &crate::kubernetes::GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+        ) -> Result<()> {
+            self.events.lock().unwrap().push("delete".to_string());
+            Err(NylError::Kubernetes("Resource not found: hook does not exist".to_string()))
+        }
+
+        async fn get_normalized_resource(
+            &self,
+            resource: &DynamicObject,
+            _field_manager: &str,
+        ) -> Result<DynamicObject> {
+            Ok(resource.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_sorted_manifests_ignores_not_found_on_hook_pre_delete() {
+        let hook_manifest = json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "db-migrate",
+                "namespace": "default",
+                "annotations": {
+                    "helm.sh/hook": "pre-install",
+                    "helm.sh/hook-delete-policy": "before-hook-creation"
+                }
+            }
+        });
+
+        let client = NotFoundDeleteKubeClient::default();
         let result = apply_sorted_manifests(&client, &[hook_manifest]).await.unwrap();
 
         assert_eq!(client.events(), vec!["delete", "apply"]);

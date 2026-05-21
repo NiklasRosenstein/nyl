@@ -65,7 +65,7 @@ Resources with both:
 - `helm.sh/hook-delete-policy` containing `before-hook-creation`
 
 are treated as resources that will be recreated on apply. In diff output they are shown as **additions** with the note:
-- `(Helm hook will be recreated before apply)`
+- `(Helm hook will be deleted if present, then recreated before apply)`
 
 Other Helm-hooked resources are diffed normally.
 
