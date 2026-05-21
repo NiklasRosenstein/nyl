@@ -305,6 +305,7 @@ async fn apply_manifests_with_bootstrap_phase(
 ) -> Result<ApplyExecutionResult> {
     let (bootstrap_manifests, remaining_manifests) = partition_bootstrap_manifests(manifests);
     let bootstrap_crd_gvks = collect_crd_gvks_from_manifests(&bootstrap_manifests);
+    let has_bootstrap_crds = !bootstrap_crd_gvks.is_empty();
 
     let mut combined = ApplyExecutionResult {
         outcomes: Vec::new(),
@@ -314,7 +315,7 @@ async fn apply_manifests_with_bootstrap_phase(
 
     if !bootstrap_manifests.is_empty() {
         let phase_result = apply_sorted_manifests(kube_client, &bootstrap_manifests).await?;
-        if phase_result.failed_count == 0 && !bootstrap_crd_gvks.is_empty() && !remaining_manifests.is_empty() {
+        if phase_result.failed_count == 0 && has_bootstrap_crds && !remaining_manifests.is_empty() {
             wait_for_crd_api_discovery(raw_client, &bootstrap_crd_gvks).await?;
         }
         combined.outcomes.extend(phase_result.outcomes);
@@ -323,7 +324,7 @@ async fn apply_manifests_with_bootstrap_phase(
     }
 
     if !remaining_manifests.is_empty() {
-        let phase_result = if bootstrap_manifests.is_empty() {
+        let phase_result = if bootstrap_manifests.is_empty() || !has_bootstrap_crds {
             apply_sorted_manifests(kube_client, &remaining_manifests).await?
         } else {
             let refreshed_client = KubeRsClient::from_client(raw_client.clone()).await?;
