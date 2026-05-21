@@ -27,6 +27,7 @@ Each test is a standalone bash script that:
 ### Run a specific test
 
 ```bash
+./test-single-pass-crd-namespace-apply.sh
 ./test-kind-filtering-append-release.sh
 ./test-argocd-bootstrap.sh
 ./test-argocd-credential-lookup-local.sh
@@ -116,6 +117,18 @@ minikube delete
 ```
 
 ## Available Tests
+
+### test-single-pass-crd-namespace-apply.sh
+
+Tests that one `nyl apply` invocation can apply a manifest containing:
+- Namespace
+- CustomResourceDefinition
+- A custom resource of that CRD in the created namespace
+
+Validates that all resources are created successfully from a single apply command.
+
+**Duration:** ~10-20 seconds
+**Resources:** 1 namespace, 1 CRD, 1 custom resource
 
 ### test-kind-filtering-append-release.sh
 

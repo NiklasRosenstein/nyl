@@ -348,6 +348,7 @@ jobs:
       - name: Run kind filtering and append-release test
         run: |
           cd integrationtests
+          ./test-single-pass-crd-namespace-apply.sh
           ./test-kind-filtering-append-release.sh
 
       - name: Run ArgoCD bootstrap test
