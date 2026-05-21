@@ -56,7 +56,7 @@ If no previous release state exists, diff still compares desired vs live for exi
   - `normalized`: Uses server-side apply to filter server defaults (like kubectl diff)
   - `raw`: Compares raw manifests without server normalization
 - `--append-release` - Preview diff as if current manifests were merged with the previous deployed release
-- `--exit-code` - Exit with code `1` when changes are found, `0` when no changes are found
+- `--exit-code` - Exit with code `1` when changes are found, `0` when no changes are found and no errors occurred
 
 ## Helm Hook Behavior
 
