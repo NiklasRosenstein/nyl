@@ -452,18 +452,27 @@ fn missing_offline_kubernetes_target_error(profile_name: &str, field_name: &str,
     ))
 }
 
-fn select_profile_from_project(project_config: &ProjectConfig, requested: Option<&str>) -> Result<(Profile, String)> {
+pub(crate) fn select_profile_from_project(
+    project_config: &ProjectConfig,
+    requested: Option<&str>,
+) -> Result<(Profile, String)> {
     let profile_name = requested.unwrap_or("default");
+
+    let context = project_config.resolve_context(profile_name);
 
     let selected = if let Some(values) = project_config.get_profile_values(profile_name) {
         Profile {
             values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            context,
             ..Default::default()
         }
     } else if requested.is_some() {
         return Err(NylError::Config(format!("Profile '{}' not found", profile_name)));
     } else if !project_config.has_profiles() {
-        Profile::default()
+        Profile {
+            context,
+            ..Default::default()
+        }
     } else {
         return Err(NylError::Config(format!(
             "Profile '{}' not found. Available profiles: {}",
@@ -609,7 +618,7 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
 
         // Skip nyl project configuration files — they are not manifests
         let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(stem, "nyl" | "nyl-project" | "nyl-profiles" | "nyl-secrets") {
+        if matches!(stem, "nyl" | "nyl-project" | "nyl-secrets") {
             continue;
         }
 
@@ -2486,6 +2495,7 @@ mod tests {
                     kubernetes: KubernetesTarget {
                         kube_version: Some("1.29.0".to_string()),
                         api_versions: vec!["v1".to_string(), "apps/v1".to_string()],
+                        ..Default::default()
                     },
                     ..ProjectSettings::default()
                 },
@@ -2495,6 +2505,7 @@ mod tests {
                         kubernetes: KubernetesTarget {
                             kube_version: Some("1.30.0".to_string()),
                             api_versions: vec!["v1".to_string(), "batch/v1".to_string()],
+                            ..Default::default()
                         },
                         ..ProfileSettings::default()
                     },

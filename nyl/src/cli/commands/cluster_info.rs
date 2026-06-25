@@ -4,7 +4,6 @@ use serde::Serialize;
 use crate::{
     config::ProjectConfig,
     kubernetes::{KubeClient, KubeRsClient},
-    profiles::Profile,
     NylError, Result,
 };
 
@@ -45,27 +44,9 @@ pub async fn execute(args: ClusterInfoArgs) -> Result<()> {
     // 1. Load profile configuration
     let project_config = ProjectConfig::load_with_warning(None)?;
 
-    // 2. Get profile
-    let env_name = args.profile.as_deref().unwrap_or("default");
-    let profile: Profile = if let Some(values) = project_config.get_profile_values(env_name) {
-        Profile {
-            values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            ..Default::default()
-        }
-    } else if args.profile.is_some() {
-        // User explicitly requested a profile that doesn't exist
-        return Err(NylError::Config(format!("Profile '{}' not found", env_name)));
-    } else if !project_config.has_profiles() {
-        // No profiles configured at all - use default (current kubecontext)
-        Profile::default()
-    } else {
-        // Profiles exist but "default" doesn't - user must specify which one
-        return Err(NylError::Config(format!(
-            "Profile '{}' not found. Available profiles: {}",
-            env_name,
-            project_config.profile_names().join(", ")
-        )));
-    };
+    // 2. Get profile (honors the configured target kube context)
+    let (profile, _profile_name) =
+        crate::cli::commands::render::select_profile_from_project(&project_config, args.profile.as_deref())?;
 
     // 3. Initialize Kubernetes client
     let client = KubeRsClient::from_profile(&profile, None).await?;

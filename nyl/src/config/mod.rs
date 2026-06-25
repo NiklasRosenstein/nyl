@@ -55,7 +55,10 @@ impl StripEmptyMetadataLabelsMode {
     }
 }
 
-/// Kubernetes target metadata used for offline rendering.
+/// Kubernetes target settings.
+///
+/// `kube_version` / `api_versions` are used for offline Helm rendering;
+/// `context` pins the kube context Nyl connects to for live operations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct KubernetesTarget {
@@ -64,6 +67,11 @@ pub struct KubernetesTarget {
 
     /// Kubernetes API versions to pass to Helm during offline rendering.
     pub api_versions: Vec<String>,
+
+    /// Target kube context to connect to. When set, Nyl uses this context
+    /// instead of the current kubeconfig context, guarding against accidentally
+    /// running against the wrong cluster. The `--context` CLI flag overrides it.
+    pub context: Option<String>,
 }
 
 /// Project settings in `[project]` section of `nyl.toml`.
@@ -325,6 +333,16 @@ impl ProjectConfig {
     /// Return profile-level Kubernetes target metadata for offline rendering.
     pub fn get_profile_kubernetes_target(&self, name: &str) -> Option<&KubernetesTarget> {
         self.get_profile(name).map(|profile| &profile.kubernetes)
+    }
+
+    /// Resolve the target kube context for a profile.
+    ///
+    /// The profile-level `kubernetes.context` overrides the project-level one.
+    /// Returns `None` when neither is configured.
+    pub fn resolve_context(&self, name: &str) -> Option<String> {
+        self.get_profile_kubernetes_target(name)
+            .and_then(|target| target.context.clone())
+            .or_else(|| self.get_project_kubernetes_target().context.clone())
     }
 
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
@@ -599,6 +617,44 @@ api_versions = ["v1", "apps/v1"]
                 .map(|target| target.api_versions.as_slice()),
             Some(["v1".to_string(), "apps/v1".to_string()].as_slice())
         );
+    }
+
+    #[test]
+    fn test_resolve_context_precedence() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project.kubernetes]
+context = "project-cluster"
+
+[profile.dev.values]
+replicas = 1
+
+[profile.prod.kubernetes]
+context = "prod-cluster"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+
+        // Profile-level context overrides the project-level one.
+        assert_eq!(config.resolve_context("prod").as_deref(), Some("prod-cluster"));
+        // Profile without its own context falls back to the project-level one.
+        assert_eq!(config.resolve_context("dev").as_deref(), Some("project-cluster"));
+        // Unknown profile name still resolves the project-level default.
+        assert_eq!(config.resolve_context("missing").as_deref(), Some("project-cluster"));
+    }
+
+    #[test]
+    fn test_resolve_context_none_when_unset() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[profile.dev.values]\nreplicas = 1\n").unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        assert_eq!(config.resolve_context("dev"), None);
+        assert_eq!(config.resolve_context("default"), None);
     }
 
     #[test]

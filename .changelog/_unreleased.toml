@@ -3,3 +3,15 @@ id = "4e41292f-c1fa-4c27-890f-af356476f0e5"
 type = "breaking change"
 description = "Remove daemon functionality as it was never recommended and added complexity to the codebase"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "de649901-52e5-4ca4-84bf-f4d11e85a21e"
+type = "feature"
+description = "Allow pinning the target kube context in `nyl.toml` via `[project.kubernetes].context`, overridable per profile via `[profile.<name>.kubernetes].context`, to guard against accidentally running against the wrong cluster. Precedence is `--context` > profile > project > current kubeconfig context."
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "f6751c05-94dd-4e42-b3a8-23c9dbe3fffd"
+type = "breaking change"
+description = "Remove the unused `nyl-profiles.yaml` profile system (including the unwired SSH kubeconfig and SSH tunnel stubs); profiles are configured through `nyl.toml`"
+author = "@NiklasRosenstein"
