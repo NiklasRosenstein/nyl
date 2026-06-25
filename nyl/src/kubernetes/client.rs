@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
-    profiles::{KubeconfigSource, Profile},
+    profiles::Profile,
     NylError, Result,
 };
 
@@ -118,20 +118,8 @@ impl KubeRsClient {
         profile: &Profile,
         context_override: Option<&str>,
     ) -> Result<kube::Config> {
-        let kubeconfig = &profile.kubeconfig;
-
-        if matches!(kubeconfig, KubeconfigSource::Ssh { .. }) {
-            return Err(NylError::Config(
-                "SSH kubeconfig is not yet supported. This feature is planned for Phase 5.".to_string(),
-            ));
-        }
-
-        let KubeconfigSource::Local { path, context } = kubeconfig else {
-            unreachable!()
-        };
-
-        let resolved_context = context_override.or(context.as_deref());
-        Self::load_kube_config(path.as_deref(), resolved_context).await
+        let resolved_context = context_override.or(profile.context.as_deref());
+        Self::load_kube_config(profile.kubeconfig_path.as_deref(), resolved_context).await
     }
 
     /// Create a new Kubernetes client from a profile

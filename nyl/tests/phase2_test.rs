@@ -9,7 +9,6 @@ use nyl::components::ComponentRegistry;
 use nyl::config::ProjectConfig;
 use nyl::generator::{instantiate_component, Generator};
 use nyl::helm::HelmChartResolver;
-use nyl::profiles::{KubeconfigSource, Profile, ProfileConfig};
 use nyl::resources::ChartRef;
 use nyl::secrets::SecretsConfig;
 use std::fs;
@@ -106,117 +105,6 @@ fn test_helm_chart_resolution_integration() {
 
     let resolved2 = resolver.resolve_chart(&chart_ref2).unwrap();
     assert!(resolved2.path.join("Chart.yaml").exists());
-}
-
-#[test]
-fn test_profile_loading_precedence() {
-    let temp = TempDir::new().unwrap();
-
-    // 1. Create project config
-    let project_config = temp.path().join("nyl.toml");
-    fs::write(
-        &project_config,
-        r#"
-[project]
-components_search_paths = ["components"]
-helm_chart_search_paths = ["."]
-"#,
-    )
-    .unwrap();
-
-    // 2. Create nyl-profiles.yaml
-    let profiles_file = temp.path().join("nyl-profiles.yaml");
-    fs::write(
-        &profiles_file,
-        r#"
-dev:
-  values:
-    source: "profiles-file"
-    fromProfiles: true
-prod:
-  values:
-    source: "profiles-file"
-    environment: "production"
-"#,
-    )
-    .unwrap();
-
-    // Change to temp directory to test file discovery
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(temp.path()).unwrap();
-
-    // Load profiles from nyl-profiles.yaml
-    let config = ProfileConfig::load(None).unwrap();
-
-    // Restore original directory
-    std::env::set_current_dir(original_dir).unwrap();
-
-    assert!(config.file.is_some());
-    assert_eq!(config.profiles.len(), 2);
-
-    let dev = config.get("dev").unwrap();
-    assert_eq!(dev.values.get("source").unwrap(), "profiles-file");
-    assert_eq!(dev.values.get("fromProfiles").unwrap(), true);
-
-    let prod = config.get("prod").unwrap();
-    assert_eq!(prod.values.get("environment").unwrap(), "production");
-}
-
-#[test]
-fn test_profile_with_kubeconfig_sources() {
-    let temp = TempDir::new().unwrap();
-    let profiles_path = temp.path().join("nyl-profiles.yaml");
-
-    let yaml = r#"
-dev:
-  values:
-    environment: development
-  kubeconfig:
-    type: local
-    context: minikube
-
-prod:
-  values:
-    environment: production
-  kubeconfig:
-    type: ssh
-    user: admin
-    host: k8s-master.prod.example.com
-    port: 22
-    path: /etc/kubernetes/admin.conf
-    context: production-cluster
-"#;
-
-    fs::write(&profiles_path, yaml).unwrap();
-
-    let config = ProfileConfig::load(Some(profiles_path)).unwrap();
-
-    // Verify dev profile
-    let dev = config.get("dev").unwrap();
-    match &dev.kubeconfig {
-        KubeconfigSource::Local { context, .. } => {
-            assert_eq!(context.as_deref(), Some("minikube"));
-        }
-        _ => panic!("Expected Local kubeconfig"),
-    }
-
-    // Verify prod profile
-    let prod = config.get("prod").unwrap();
-    match &prod.kubeconfig {
-        KubeconfigSource::Ssh {
-            user,
-            host,
-            path,
-            context,
-            ..
-        } => {
-            assert_eq!(user, "admin");
-            assert_eq!(host, "k8s-master.prod.example.com");
-            assert_eq!(path, "/etc/kubernetes/admin.conf");
-            assert_eq!(context.as_deref(), Some("production-cluster"));
-        }
-        _ => panic!("Expected SSH kubeconfig"),
-    }
 }
 
 #[test]
@@ -338,67 +226,6 @@ helm_chart_search_paths = []
     // List all components
     let all_components = generator.list_components().unwrap();
     assert_eq!(all_components.len(), 2);
-}
-
-#[test]
-fn test_profile_merge() {
-    let mut base_profile = Profile::default();
-    base_profile
-        .values
-        .insert("key1".to_string(), serde_json::json!("value1"));
-    base_profile.values.insert("key2".to_string(), serde_json::json!(42));
-
-    let mut override_profile = Profile::default();
-    override_profile
-        .values
-        .insert("key2".to_string(), serde_json::json!(99)); // Override
-    override_profile
-        .values
-        .insert("key3".to_string(), serde_json::json!(true)); // New
-
-    base_profile.merge(&override_profile);
-
-    assert_eq!(base_profile.values.len(), 3);
-    assert_eq!(base_profile.values["key1"], "value1"); // Preserved
-    assert_eq!(base_profile.values["key2"], 99); // Overridden
-    assert_eq!(base_profile.values["key3"], true); // Added
-}
-
-#[test]
-fn test_typed_profiles_in_profiles_file() {
-    let temp = TempDir::new().unwrap();
-    let config_path = temp.path().join("nyl-profiles.yaml");
-
-    let yaml = r#"
-dev:
-  values:
-    environment: development
-    debug: true
-  kubeconfig:
-    type: local
-    context: minikube
-prod:
-  values:
-    environment: production
-    debug: false
-  kubeconfig:
-    type: local
-    context: prod-cluster
-"#;
-
-    fs::write(&config_path, yaml).unwrap();
-
-    let config = ProfileConfig::load_from_dir(None, Some(temp.path())).unwrap();
-
-    assert_eq!(config.profiles.len(), 2);
-
-    let dev = config.profiles.get("dev").unwrap();
-    assert_eq!(dev.values["environment"], "development");
-    assert_eq!(dev.values["debug"], true);
-
-    let prod = config.profiles.get("prod").unwrap();
-    assert_eq!(prod.values["environment"], "production");
-    assert_eq!(prod.values["debug"], false);
 }
 
 #[test]

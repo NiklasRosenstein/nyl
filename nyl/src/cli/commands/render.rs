@@ -135,6 +135,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             options.kube_api_versions,
             options.common.max_depth,
             options.common.track_parent,
+            options.context_override,
         )
         .await?;
 
@@ -204,6 +205,7 @@ pub async fn render_manifests_complete(
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
+    context_override: Option<&str>,
 ) -> Result<(
     Vec<serde_json::Value>,
     Option<NylRelease>,
@@ -223,6 +225,7 @@ pub async fn render_manifests_complete(
             cli_api_versions,
             max_depth,
             track_parent,
+            context_override,
         )
         .await?;
 
@@ -298,6 +301,7 @@ pub(crate) async fn render_manifests(
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
+    context_override: Option<&str>,
 ) -> Result<(
     Vec<serde_json::Value>,
     StripEmptyMetadataLabelsMode,
@@ -336,8 +340,10 @@ pub(crate) async fn render_manifests(
     } else if offline {
         resolve_offline_kubernetes_target(&project_config, &profile_name, cli_kube_version, cli_api_versions)?
     } else {
-        // In non-offline mode, fetch from cluster unless CLI args override
-        let client = KubeRsClient::from_profile(&profile, None).await?;
+        // In non-offline mode, fetch from cluster unless CLI args override.
+        // Thread the CLI --context override so Helm capability discovery targets
+        // the same context that diff/apply will use (CLI > profile > project).
+        let client = KubeRsClient::from_profile(&profile, context_override).await?;
         let kube_version = if let Some(v) = cli_kube_version {
             v.to_string()
         } else {
@@ -452,18 +458,27 @@ fn missing_offline_kubernetes_target_error(profile_name: &str, field_name: &str,
     ))
 }
 
-fn select_profile_from_project(project_config: &ProjectConfig, requested: Option<&str>) -> Result<(Profile, String)> {
+pub(crate) fn select_profile_from_project(
+    project_config: &ProjectConfig,
+    requested: Option<&str>,
+) -> Result<(Profile, String)> {
     let profile_name = requested.unwrap_or("default");
+
+    let context = project_config.resolve_context(profile_name);
 
     let selected = if let Some(values) = project_config.get_profile_values(profile_name) {
         Profile {
             values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            context,
             ..Default::default()
         }
     } else if requested.is_some() {
         return Err(NylError::Config(format!("Profile '{}' not found", profile_name)));
     } else if !project_config.has_profiles() {
-        Profile::default()
+        Profile {
+            context,
+            ..Default::default()
+        }
     } else {
         return Err(NylError::Config(format!(
             "Profile '{}' not found. Available profiles: {}",
@@ -609,7 +624,7 @@ fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_jso
 
         // Skip nyl project configuration files — they are not manifests
         let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(stem, "nyl" | "nyl-project" | "nyl-profiles" | "nyl-secrets") {
+        if matches!(stem, "nyl" | "nyl-project" | "nyl-secrets") {
             continue;
         }
 
@@ -2486,6 +2501,7 @@ mod tests {
                     kubernetes: KubernetesTarget {
                         kube_version: Some("1.29.0".to_string()),
                         api_versions: vec!["v1".to_string(), "apps/v1".to_string()],
+                        ..Default::default()
                     },
                     ..ProjectSettings::default()
                 },
@@ -2495,6 +2511,7 @@ mod tests {
                         kubernetes: KubernetesTarget {
                             kube_version: Some("1.30.0".to_string()),
                             api_versions: vec!["v1".to_string(), "batch/v1".to_string()],
+                            ..Default::default()
                         },
                         ..ProfileSettings::default()
                     },

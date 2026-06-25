@@ -68,11 +68,24 @@ api_versions = ["v1", "apps/v1", "networking.k8s.io/v1"]
 
 - Type: object/table
 - Default: empty
-- Meaning: Default Kubernetes target metadata for `nyl render --offline`.
-- Typical use: Commit this when using [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) so CI can render deterministically without connecting to a cluster.
+- Meaning: Default Kubernetes target settings.
+- Typical use: Commit `kube_version` / `api_versions` when using [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) so CI can render deterministically without connecting to a cluster.
 - Fields:
-  - `kube_version`: Kubernetes version passed to Helm, for example `"1.30.0"`.
-  - `api_versions`: array of Kubernetes API versions passed to Helm, for example `["v1", "apps/v1"]`.
+  - `kube_version`: Kubernetes version passed to Helm during offline rendering, for example `"1.30.0"`.
+  - `api_versions`: array of Kubernetes API versions passed to Helm during offline rendering, for example `["v1", "apps/v1"]`.
+  - `context`: target kube context to connect to for live operations (`render`, `diff`, `apply`, `cluster-info`). When set, Nyl uses this context instead of the current kubeconfig context, guarding against accidentally running against the wrong cluster.
+
+#### Target context precedence
+
+The kube context is resolved as: `--context` CLI flag > `profile.<name>.kubernetes.context` > `project.kubernetes.context` > the current kubeconfig context.
+
+```toml
+[project.kubernetes]
+context = "dev-cluster"
+
+[profile.prod.kubernetes]
+context = "prod-cluster"
+```
 
 ### `profile.<name>.values`
 
@@ -97,7 +110,7 @@ replicas = 3
 
 - Type: object/table
 - Default: empty
-- Meaning: Profile-specific Kubernetes target metadata for `nyl render --offline`.
+- Meaning: Profile-specific Kubernetes target settings (same fields as `project.kubernetes`, including `context`).
 - Precedence: CLI flags override profile config, profile config overrides `project.kubernetes`.
 
 Example:
@@ -106,6 +119,7 @@ Example:
 [profile.prod.kubernetes]
 kube_version = "1.30.0"
 api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
+context = "prod-cluster"
 ```
 
 Template usage:
