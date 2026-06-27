@@ -355,4 +355,41 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("no previous revision"));
     }
+
+    /// When the latest revision Failed, pruning must reconcile against the last
+    /// Deployed revision's live resources (plus any partial resources the Failed
+    /// revision applied), not just the numerically previous secret.
+    #[tokio::test]
+    async fn test_collect_live_state_spans_failed_revision_to_last_deployed() {
+        use crate::cli::commands::apply::collect_live_state;
+        use crate::kubernetes::{GroupVersionKind, ResourceKey};
+
+        let key = |name: &str| ResourceKey {
+            gvk: GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ConfigMap".to_string(),
+            },
+            namespace: Some("ns".to_string()),
+            name: name.to_string(),
+        };
+
+        let storage = MockReleaseStorage::new();
+
+        // rev3 Deployed (live: a, x); rev4 Failed (partially applied: y).
+        let mut rev3 = make_release("app", "ns", 3, ReleaseStatus::Deployed);
+        rev3.resource_keys = vec![key("a"), key("x")];
+        storage.save_release(&rev3).await.unwrap();
+
+        let mut rev4 = make_release("app", "ns", 4, ReleaseStatus::Failed);
+        rev4.resource_keys = vec![key("y")];
+        storage.save_release(&rev4).await.unwrap();
+
+        // Recording rev5 (e.g. a rollback): live state is rev3 + rev4's partials,
+        // and the superseded revision is the last Deployed one (rev3).
+        let (superseded, live) = collect_live_state(&storage, "app", "ns", 5).await.unwrap();
+        assert_eq!(superseded, Some(3));
+        let names: std::collections::HashSet<&str> = live.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, ["a", "x", "y"].into_iter().collect());
+    }
 }

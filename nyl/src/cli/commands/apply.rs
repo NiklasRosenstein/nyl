@@ -163,17 +163,48 @@ pub(crate) struct ApplyExecutionResult {
     pub(crate) resource_keys: Vec<ResourceKey>,
 }
 
-/// Determine which resources from `previous` are no longer present in `current_keys`
+/// Determine which previously-live resources are no longer present in `current_keys`
 /// and should therefore be pruned from the cluster.
 pub(crate) fn keys_to_prune<'a>(
-    previous: &'a ReleaseState,
+    live_keys: &'a HashSet<ResourceKey>,
     current_keys: &HashSet<&ResourceKey>,
 ) -> Vec<&'a ResourceKey> {
-    previous
-        .resource_keys
-        .iter()
-        .filter(|k| !current_keys.contains(k))
-        .collect()
+    live_keys.iter().filter(|k| !current_keys.contains(k)).collect()
+}
+
+/// Determine the resources currently live on the cluster for a release, and which
+/// revision a new deployment supersedes.
+///
+/// The live state is the most recent `Deployed` revision's resources, plus any
+/// resources partially applied by `Failed` revisions after it (a Failed revision
+/// never prunes, so its applied resources remain on the cluster). Returns the
+/// revision to mark `Superseded` (the most recent Deployed one, if any) together
+/// with the union of live resource keys to reconcile against.
+pub(crate) async fn collect_live_state(
+    storage: &dyn ReleaseStorage,
+    release_name: &str,
+    release_namespace: &str,
+    next_revision: u32,
+) -> Result<(Option<u32>, HashSet<ResourceKey>)> {
+    let mut prev_revisions = storage.list_revisions(release_name, release_namespace).await?;
+    prev_revisions.retain(|r| *r < next_revision);
+    prev_revisions.sort_unstable();
+
+    let mut live_keys: HashSet<ResourceKey> = HashSet::new();
+    let mut superseded_revision = None;
+    // Walk newest to oldest, unioning keys until (and including) the most recent
+    // Deployed revision — that revision captures the full live state.
+    for &rev in prev_revisions.iter().rev() {
+        if let Some(prev) = storage.get_release(release_name, release_namespace, rev).await? {
+            live_keys.extend(prev.resource_keys.iter().cloned());
+            if prev.status == ReleaseStatus::Deployed {
+                superseded_revision = Some(rev);
+                break;
+            }
+        }
+    }
+
+    Ok((superseded_revision, live_keys))
 }
 
 /// Build the manifest to store for an `--append-release` revision.
@@ -318,30 +349,40 @@ pub(crate) async fn apply_and_record_release(
     ensure_namespace_exists(kube_client, release_namespace).await?;
     storage.save_release(&release).await?;
 
-    // Mark previous revision as superseded (if successful)
+    // Supersede the previous revision and prune resources no longer desired.
     if release.status == ReleaseStatus::Deployed && next_revision > 1 {
-        let prev_revision = next_revision - 1;
-        storage
-            .update_release_status(
-                release_name,
-                release_namespace,
-                prev_revision,
-                ReleaseStatus::Superseded,
-                None,
-            )
-            .await
-            .ok(); // Ignore errors if previous revision doesn't exist
-    }
+        if append_release {
+            // Append mode validated that the immediately previous revision is Deployed
+            // and does not prune; just mark it superseded.
+            storage
+                .update_release_status(
+                    release_name,
+                    release_namespace,
+                    next_revision - 1,
+                    ReleaseStatus::Superseded,
+                    None,
+                )
+                .await
+                .ok();
+        } else {
+            // Reconcile against the resources currently live on the cluster, not just
+            // the numerically previous secret. The live state is the most recent
+            // Deployed revision's resources plus anything partially applied by Failed
+            // revisions after it (Failed revisions never prune). Pruning against only
+            // `next_revision - 1` would orphan resources from an older Deployed revision
+            // when the immediately previous revision Failed.
+            let (superseded_revision, live_keys) =
+                collect_live_state(storage, release_name, release_namespace, next_revision).await?;
 
-    // Prune resources from previous release that are no longer desired
-    if !append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
-        if let Ok(Some(previous_release)) = storage
-            .get_release(release_name, release_namespace, next_revision - 1)
-            .await
-        {
-            let current_keys: HashSet<_> = release.resource_keys.iter().collect();
-            let to_prune = keys_to_prune(&previous_release, &current_keys);
+            if let Some(rev) = superseded_revision {
+                storage
+                    .update_release_status(release_name, release_namespace, rev, ReleaseStatus::Superseded, None)
+                    .await
+                    .ok();
+            }
 
+            let current_keys: HashSet<&ResourceKey> = release.resource_keys.iter().collect();
+            let to_prune = keys_to_prune(&live_keys, &current_keys);
             if !to_prune.is_empty() {
                 println!("\nPruning {} resources...", to_prune.len());
                 for key in to_prune {
@@ -716,27 +757,15 @@ mod tests {
         }
     }
 
-    fn release_with_keys(keys: Vec<ResourceKey>) -> ReleaseState {
-        ReleaseState {
-            release_name: "app".to_string(),
-            release_namespace: "default".to_string(),
-            revision: 1,
-            resource_keys: keys,
-            manifest: String::new(),
-            status: ReleaseStatus::Deployed,
-            rendered_at: Utc::now(),
-            applied_at: Some(Utc::now()),
-            error: None,
-        }
-    }
-
     #[test]
     fn test_keys_to_prune_removes_orphans() {
-        let previous = release_with_keys(vec![resource_key("a"), resource_key("b"), resource_key("c")]);
+        let live: HashSet<ResourceKey> = [resource_key("a"), resource_key("b"), resource_key("c")]
+            .into_iter()
+            .collect();
         let current = [resource_key("a"), resource_key("c")];
         let current_keys: HashSet<&ResourceKey> = current.iter().collect();
 
-        let to_prune = keys_to_prune(&previous, &current_keys);
+        let to_prune = keys_to_prune(&live, &current_keys);
         assert_eq!(to_prune.len(), 1);
         assert_eq!(to_prune[0].name, "b");
     }
@@ -773,10 +802,10 @@ mod tests {
 
     #[test]
     fn test_keys_to_prune_nothing_when_superset() {
-        let previous = release_with_keys(vec![resource_key("a"), resource_key("b")]);
+        let live: HashSet<ResourceKey> = [resource_key("a"), resource_key("b")].into_iter().collect();
         let current = [resource_key("a"), resource_key("b"), resource_key("c")];
         let current_keys: HashSet<&ResourceKey> = current.iter().collect();
 
-        assert!(keys_to_prune(&previous, &current_keys).is_empty());
+        assert!(keys_to_prune(&live, &current_keys).is_empty());
     }
 }
