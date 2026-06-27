@@ -7,6 +7,7 @@ use kube::{
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use crate::{
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
@@ -169,6 +170,41 @@ impl KubeRsClient {
         let discovery = Discovery::new(self.client.clone()).run().await?;
         let index = Self::build_api_resource_index(&discovery);
         *self.api_resources.write().unwrap() = index;
+        Ok(())
+    }
+
+    /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
+    /// index or the attempts are exhausted.
+    ///
+    /// A newly-applied CustomResourceDefinition is not served by the API server the
+    /// instant the apply returns — it must first become `Established`. A single
+    /// [`Self::refresh_discovery`] can therefore rebuild the index before the new
+    /// kind is published, so a custom resource applied right after would still fail
+    /// with `ApiResourceNotFound`. This retries with a short delay until the kinds
+    /// are discoverable. Best-effort: if some kinds never appear it returns `Ok` and
+    /// the subsequent apply surfaces a clear `ApiResourceNotFound`.
+    pub async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
+        const MAX_ATTEMPTS: u32 = 10;
+        const DELAY: Duration = Duration::from_millis(500);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            self.refresh_discovery().await?;
+
+            let all_known = {
+                let index = self.api_resources.read().unwrap();
+                required.iter().all(|gvk| index.contains_key(gvk))
+            };
+            if all_known || attempt == MAX_ATTEMPTS {
+                break;
+            }
+
+            tracing::debug!(
+                attempt,
+                "Waiting for newly-applied CRD kinds to become discoverable before applying their resources"
+            );
+            tokio::time::sleep(DELAY).await;
+        }
+
         Ok(())
     }
 

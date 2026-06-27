@@ -11,8 +11,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage,
-        ResourceKey, ResourceOrdering,
+        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
+        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -375,15 +375,23 @@ pub(crate) async fn apply_sorted_manifests(
     let mut crd_applied = false;
     let mut discovery_refreshed = false;
 
-    for manifest in manifests {
+    for (i, manifest) in manifests.iter().enumerate() {
         let key = ResourceKey::from_json_value(manifest)?;
         let is_crd = key.gvk.kind == "CustomResourceDefinition";
 
         // If a CRD was applied earlier in this batch, refresh the discovery cache
         // before applying the first resource of a CRD-defined kind, so the newly
         // registered kind is resolvable (otherwise apply fails with ApiResourceNotFound).
+        // Retry until the kinds of the remaining resources are served, since a freshly
+        // applied CRD may not be Established the instant its apply returns.
         if !is_crd && crd_applied && !discovery_refreshed {
-            client.refresh_discovery().await?;
+            let needed: Vec<GroupVersionKind> = manifests[i..]
+                .iter()
+                .filter_map(|m| ResourceKey::from_json_value(m).ok())
+                .map(|k| k.gvk)
+                .filter(|gvk| gvk.kind != "CustomResourceDefinition")
+                .collect();
+            client.refresh_discovery_until_available(&needed).await?;
             discovery_refreshed = true;
         }
 
