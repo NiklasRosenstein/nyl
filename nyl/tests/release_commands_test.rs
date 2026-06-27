@@ -472,6 +472,54 @@ async fn test_multiple_releases_different_namespaces() {
     }
 }
 
+/// Simulate the storage-level bookkeeping a rollback performs: rolling back to an
+/// older revision records a brand new revision carrying that revision's manifest,
+/// while the previous latest revision is marked Superseded. This validates the
+/// semantics of the shared apply+record path without needing a live cluster.
+#[tokio::test]
+async fn test_rollback_records_new_revision_and_supersedes_previous() {
+    let storage = MockReleaseStorage::new();
+
+    // Existing history: revisions 1..=4, with 4 currently deployed.
+    for rev in 1..=4 {
+        let status = if rev == 4 {
+            ReleaseStatus::Deployed
+        } else {
+            ReleaseStatus::Superseded
+        };
+        let mut release = create_test_release("myapp", "default", rev, status, 3);
+        release.manifest = format!("# manifest revision {rev}");
+        storage.save_release(&release).await.unwrap();
+    }
+
+    // Roll back to revision 2: the new revision is latest + 1 = 5 and carries
+    // revision 2's manifest.
+    let target = storage.get_release("myapp", "default", 2).await.unwrap().unwrap();
+    let revisions = storage.list_revisions("myapp", "default").await.unwrap();
+    let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
+    assert_eq!(next_revision, 5);
+
+    let mut rolled_back = create_test_release("myapp", "default", next_revision, ReleaseStatus::Deployed, 3);
+    rolled_back.manifest = target.manifest.clone();
+    storage.save_release(&rolled_back).await.unwrap();
+
+    // The previous latest (revision 4) is superseded by the rollback.
+    storage
+        .update_release_status("myapp", "default", 4, ReleaseStatus::Superseded, None)
+        .await
+        .unwrap();
+
+    // Revision 5 now exists, is deployed, and carries revision 2's manifest.
+    let new_rev = storage.get_latest_release("myapp", "default").await.unwrap().unwrap();
+    assert_eq!(new_rev.revision, 5);
+    assert_eq!(new_rev.status, ReleaseStatus::Deployed);
+    assert_eq!(new_rev.manifest, "# manifest revision 2");
+
+    // Revision 4 is now superseded.
+    let prev = storage.get_release("myapp", "default", 4).await.unwrap().unwrap();
+    assert_eq!(prev.status, ReleaseStatus::Superseded);
+}
+
 #[tokio::test]
 async fn test_delete_nonexistent_release_succeeds() {
     let storage = MockReleaseStorage::new();

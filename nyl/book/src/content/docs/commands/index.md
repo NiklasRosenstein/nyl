@@ -17,6 +17,7 @@ nyl provides several commands for managing Kubernetes manifests:
 - [`render`](/nyl/commands/render/) - Render Kubernetes manifests
 - [`diff`](/nyl/commands/diff/) - Show diff between rendered manifests and cluster state
 - [`apply`](/nyl/commands/apply/) - Apply rendered manifests to the cluster
+- [`release`](/nyl/commands/release/) - Inspect release history and roll back to a previous revision
 - [`cluster-info`](/nyl/commands/cluster-info/) - Print Kubernetes version and API versions for offline rendering
 
 ## Global Options

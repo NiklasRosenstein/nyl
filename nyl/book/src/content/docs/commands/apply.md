@@ -85,6 +85,6 @@ nyl apply --no-release manifest.yaml
 
 - Nyl processes single files only. Directory paths are not supported.
 - A `NylRelease` resource in the manifest provides release metadata automatically.
-- Release state is tracked in Kubernetes Secrets in the release namespace.
+- Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.

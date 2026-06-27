@@ -62,6 +62,19 @@ When ApplicationGenerator scans files:
 2. An ArgoCD Application is generated per NylRelease
 3. Application metadata comes from the NylRelease
 
+### Release Tracking and Rollback
+
+When `nyl apply` deploys a file containing a NylRelease, it records a release
+revision — including the full rendered manifest — in a Kubernetes Secret in the
+release namespace. Each apply creates a new revision and marks the previous one
+`Superseded`.
+
+Because every revision's manifest is stored, you can return to an earlier state
+with [`nyl release rollback`](/nyl/commands/release/#rollback). Rollback re-applies
+a stored revision's manifest as a **new** revision (preserving the audit trail),
+supersedes the current revision, and prunes resources that are no longer part of
+the rolled-back revision.
+
 ### Singleton Constraint
 
 Only **one** NylRelease is allowed per file. Multiple NylReleases in the same file will cause an error:
@@ -275,6 +288,7 @@ In these cases, just use regular Kubernetes resources directly.
 
 ## See Also
 
+- [release command](/nyl/commands/release/) - Inspect release history and roll back revisions
 - [ApplicationGenerator](/nyl/reference/resources/application-generator/)
 - [ArgoCD Bootstrapping](/nyl/argocd/bootstrapping/)
 - [HelmChart Resource](#) (future documentation)

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use clap::Args;
 use kube::api::DynamicObject;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use colored::Colorize;
 
@@ -126,28 +126,96 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 6. Initialize release storage
     let storage = KubernetesReleaseStorage::new(client);
 
-    // 7. Determine next revision number
-    let revisions = storage.list_revisions(&release_name, &release_namespace).await?;
+    // 7-12. Record the new revision, mark the previous one superseded, and prune.
+    let release = apply_and_record_release(
+        &storage,
+        &kube_client,
+        &desired_manifests,
+        &apply_result,
+        &release_name,
+        &release_namespace,
+        args.append_release,
+    )
+    .await?;
+
+    // 13. Print summary
+    print_apply_summary(
+        &apply_result.outcomes,
+        Some(&release),
+        &duplicates,
+        apply_result.failed_count,
+    );
+
+    if apply_result.failed_count > 0 {
+        return Err(NylError::Other(format!(
+            "Apply completed with {} error(s)",
+            apply_result.failed_count
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) struct ApplyExecutionResult {
+    pub(crate) outcomes: Vec<ApplyOutcome>,
+    pub(crate) failed_count: usize,
+    pub(crate) resource_keys: Vec<ResourceKey>,
+}
+
+/// Determine which resources from `previous` are no longer present in `current_keys`
+/// and should therefore be pruned from the cluster.
+pub(crate) fn keys_to_prune<'a>(
+    previous: &'a ReleaseState,
+    current_keys: &HashSet<&ResourceKey>,
+) -> Vec<&'a ResourceKey> {
+    previous
+        .resource_keys
+        .iter()
+        .filter(|k| !current_keys.contains(k))
+        .collect()
+}
+
+/// Record a freshly applied set of manifests as a new release revision.
+///
+/// This is the shared apply+record path used by both `apply` and `release rollback`:
+/// it computes the next revision number, builds and saves the [`ReleaseState`]
+/// (carrying the full rendered manifest), optionally merges with the previous
+/// revision when `append_release` is set, marks the previous revision
+/// [`ReleaseStatus::Superseded`], and prunes resources that existed in the previous
+/// revision but not the new one. Returns the recorded [`ReleaseState`] so callers
+/// can print a summary.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn apply_and_record_release(
+    storage: &KubernetesReleaseStorage,
+    kube_client: &KubeRsClient,
+    desired_manifests: &[serde_json::Value],
+    apply_result: &ApplyExecutionResult,
+    release_name: &str,
+    release_namespace: &str,
+    append_release: bool,
+) -> Result<ReleaseState> {
+    // Determine next revision number
+    let revisions = storage.list_revisions(release_name, release_namespace).await?;
     let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
 
-    // 8. Create initial release state
+    // Create initial release state
     let mut release = ReleaseState {
-        release_name: release_name.clone(),
-        release_namespace: release_namespace.clone(),
+        release_name: release_name.to_string(),
+        release_namespace: release_namespace.to_string(),
         revision: next_revision,
         resource_keys: apply_result.resource_keys.clone(),
-        manifest: manifests_to_yaml(&desired_manifests)?,
+        manifest: manifests_to_yaml(desired_manifests)?,
         status: ReleaseStatus::Rendered,
         rendered_at: Utc::now(),
         applied_at: None,
         error: None,
     };
 
-    // 9. Append-release mode: merge with previous release
-    if args.append_release && next_revision > 1 {
+    // Append-release mode: merge with previous release
+    if append_release && next_revision > 1 {
         // Fetch previous release
         if let Ok(Some(previous_release)) = storage
-            .get_release(&release_name, &release_namespace, next_revision - 1)
+            .get_release(release_name, release_namespace, next_revision - 1)
             .await
         {
             // Validate that previous release was successfully deployed
@@ -161,7 +229,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             }
 
             // Use HashSet for deduplication
-            let current_keys: std::collections::HashSet<_> = release.resource_keys.iter().cloned().collect();
+            let current_keys: HashSet<_> = release.resource_keys.iter().cloned().collect();
 
             // Add previous resources not in current set
             let mut merged_keys = Vec::new();
@@ -204,7 +272,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // 10. Update release status
+    // Update release status based on apply outcome
     if apply_result.failed_count == 0 {
         release.status = ReleaseStatus::Deployed;
         release.applied_at = Some(Utc::now());
@@ -213,10 +281,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         release.error = Some(format!("{} resource(s) failed to apply", apply_result.failed_count));
     }
 
-    // 11. Save release state
-    // Ensure the release namespace exists before saving the release state
-    ensure_namespace_exists(&kube_client, &release_namespace).await?;
-
+    // Save release state. Ensure the release namespace exists first.
+    ensure_namespace_exists(kube_client, release_namespace).await?;
     storage.save_release(&release).await?;
 
     // Mark previous revision as superseded (if successful)
@@ -224,8 +290,8 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         let prev_revision = next_revision - 1;
         storage
             .update_release_status(
-                &release_name,
-                &release_namespace,
+                release_name,
+                release_namespace,
                 prev_revision,
                 ReleaseStatus::Superseded,
                 None,
@@ -234,20 +300,14 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .ok(); // Ignore errors if previous revision doesn't exist
     }
 
-    // 12. Prune resources from previous release that are no longer desired
-    if !args.append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
-        // Get previous release's resource keys
+    // Prune resources from previous release that are no longer desired
+    if !append_release && release.status == ReleaseStatus::Deployed && next_revision > 1 {
         if let Ok(Some(previous_release)) = storage
-            .get_release(&release_name, &release_namespace, next_revision - 1)
+            .get_release(release_name, release_namespace, next_revision - 1)
             .await
         {
-            // Find resources to prune (in previous but not in current)
-            let current_keys: std::collections::HashSet<_> = release.resource_keys.iter().collect();
-            let to_prune: Vec<_> = previous_release
-                .resource_keys
-                .iter()
-                .filter(|k| !current_keys.contains(k))
-                .collect();
+            let current_keys: HashSet<_> = release.resource_keys.iter().collect();
+            let to_prune = keys_to_prune(&previous_release, &current_keys);
 
             if !to_prune.is_empty() {
                 println!("\nPruning {} resources...", to_prune.len());
@@ -269,31 +329,10 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         }
     }
 
-    // 13. Print summary
-    print_apply_summary(
-        &apply_result.outcomes,
-        Some(&release),
-        &duplicates,
-        apply_result.failed_count,
-    );
-
-    if apply_result.failed_count > 0 {
-        return Err(NylError::Other(format!(
-            "Apply completed with {} error(s)",
-            apply_result.failed_count
-        )));
-    }
-
-    Ok(())
+    Ok(release)
 }
 
-struct ApplyExecutionResult {
-    outcomes: Vec<ApplyOutcome>,
-    failed_count: usize,
-    resource_keys: Vec<ResourceKey>,
-}
-
-async fn apply_sorted_manifests(
+pub(crate) async fn apply_sorted_manifests(
     client: &KubeRsClient,
     manifests: &[serde_json::Value],
 ) -> Result<ApplyExecutionResult> {
@@ -324,7 +363,7 @@ async fn apply_sorted_manifests(
 }
 
 /// Convert manifests to YAML string
-fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
+pub(crate) fn manifests_to_yaml(manifests: &[serde_json::Value]) -> Result<String> {
     let mut yaml_parts = Vec::new();
 
     for manifest in manifests {
@@ -346,7 +385,7 @@ async fn apply_manifest(client: &KubeRsClient, manifest: &serde_json::Value) -> 
 
 /// Print apply summary
 #[allow(clippy::too_many_lines)]
-fn print_apply_summary(
+pub(crate) fn print_apply_summary(
     outcomes: &[ApplyOutcome],
     release: Option<&ReleaseState>,
     duplicates: &HashMap<ResourceKey, usize>,
@@ -607,5 +646,51 @@ mod tests {
     #[test]
     fn test_format_namespace_name_without_namespace() {
         assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
+    }
+
+    fn resource_key(name: &str) -> ResourceKey {
+        ResourceKey {
+            gvk: crate::kubernetes::GroupVersionKind {
+                group: String::new(),
+                version: "v1".to_string(),
+                kind: "ConfigMap".to_string(),
+            },
+            namespace: Some("default".to_string()),
+            name: name.to_string(),
+        }
+    }
+
+    fn release_with_keys(keys: Vec<ResourceKey>) -> ReleaseState {
+        ReleaseState {
+            release_name: "app".to_string(),
+            release_namespace: "default".to_string(),
+            revision: 1,
+            resource_keys: keys,
+            manifest: String::new(),
+            status: ReleaseStatus::Deployed,
+            rendered_at: Utc::now(),
+            applied_at: Some(Utc::now()),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_keys_to_prune_removes_orphans() {
+        let previous = release_with_keys(vec![resource_key("a"), resource_key("b"), resource_key("c")]);
+        let current = [resource_key("a"), resource_key("c")];
+        let current_keys: HashSet<&ResourceKey> = current.iter().collect();
+
+        let to_prune = keys_to_prune(&previous, &current_keys);
+        assert_eq!(to_prune.len(), 1);
+        assert_eq!(to_prune[0].name, "b");
+    }
+
+    #[test]
+    fn test_keys_to_prune_nothing_when_superset() {
+        let previous = release_with_keys(vec![resource_key("a"), resource_key("b")]);
+        let current = [resource_key("a"), resource_key("b"), resource_key("c")];
+        let current_keys: HashSet<&ResourceKey> = current.iter().collect();
+
+        assert!(keys_to_prune(&previous, &current_keys).is_empty());
     }
 }
