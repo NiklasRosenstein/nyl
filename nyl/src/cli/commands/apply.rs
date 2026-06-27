@@ -214,11 +214,16 @@ pub(crate) async fn collect_live_state(
 /// stored manifest matches the merged `resource_keys`. This keeps `release rollback`
 /// faithful: rolling back to an appended revision re-applies the complete desired
 /// state rather than only the newly-rendered resources.
-fn merge_append_manifest(
-    desired_manifests: &[serde_json::Value],
-    current_keys: &HashSet<ResourceKey>,
-    previous_manifest: &str,
-) -> Result<String> {
+fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manifest: &str) -> Result<String> {
+    // Dedup against the keys present in the current manifest (all rendered docs),
+    // not just successfully-applied ones — otherwise a current doc that failed to
+    // apply would be carried over again from the previous manifest, producing a
+    // duplicate document for the same resource.
+    let current_keys: HashSet<ResourceKey> = desired_manifests
+        .iter()
+        .map(ResourceKey::from_json_value)
+        .collect::<Result<_>>()?;
+
     let prev_docs = crate::yaml::parse_yaml_documents_k8s_compatible(previous_manifest)
         .map_err(|e| NylError::Config(format!("Failed to parse previous release manifest: {}", e)))?;
     let mut merged_docs: Vec<serde_json::Value> = desired_manifests.to_vec();
@@ -306,7 +311,7 @@ pub(crate) async fn apply_and_record_release(
             // newly-rendered resources while resource_keys tracks the union — which
             // breaks `release rollback` (it would re-apply only the new resources and
             // prune the carried-over ones).
-            release.manifest = merge_append_manifest(desired_manifests, &current_keys, &previous_release.manifest)?;
+            release.manifest = merge_append_manifest(desired_manifests, &previous_release.manifest)?;
 
             // Calculate overlap for better logging
             let overlap = previous_release.resource_keys.len() - added_from_previous;
@@ -418,7 +423,7 @@ pub(crate) async fn apply_sorted_manifests(
 
     for (i, manifest) in manifests.iter().enumerate() {
         let key = ResourceKey::from_json_value(manifest)?;
-        let is_crd = key.gvk.kind == "CustomResourceDefinition";
+        let is_crd = key.gvk.kind == "CustomResourceDefinition" && key.gvk.group == "apiextensions.k8s.io";
 
         // If a CRD was applied earlier in this batch, refresh the discovery cache
         // before applying the first resource of a CRD-defined kind, so the newly
@@ -782,15 +787,12 @@ mod tests {
         // Current append-release apply renders only B (an update).
         let current =
             vec![json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "b", "namespace": "default"}})];
-        let current_keys: HashSet<ResourceKey> = current
-            .iter()
-            .map(|m| ResourceKey::from_json_value(m).unwrap())
-            .collect();
 
-        let merged = merge_append_manifest(&current, &current_keys, &previous).unwrap();
+        let merged = merge_append_manifest(&current, &previous).unwrap();
         let docs = crate::yaml::parse_yaml_documents_k8s_compatible(&merged).unwrap();
 
-        // The stored manifest carries over A (not in the current set) plus B.
+        // The stored manifest carries over A (not in the current set) plus B, with no
+        // duplicate B (B is present in both current and previous).
         assert_eq!(docs.len(), 2);
         let names: Vec<&str> = docs
             .iter()
