@@ -91,12 +91,13 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         print_duplicate_warning(&duplicates);
     }
 
-    // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
-    let mut sorted_manifests = desired_manifests.clone();
-    ResourceOrdering::sort_by_priority(&mut sorted_manifests)?;
+    // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload).
+    // Sort in place so the recorded release manifest is stored in the same order it
+    // is applied (and consistent with `release rollback`, which also stores sorted).
+    ResourceOrdering::sort_by_priority(&mut desired_manifests)?;
 
     // 4. Apply manifests
-    let apply_result = apply_sorted_manifests(&kube_client, &sorted_manifests).await?;
+    let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests).await?;
 
     if args.no_release {
         print_apply_summary(&apply_result.outcomes, None, &duplicates, apply_result.failed_count);

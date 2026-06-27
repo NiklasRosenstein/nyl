@@ -51,19 +51,14 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         )));
     }
 
-    // The new revision will be one past the current latest.
-    let revisions = storage.list_revisions(&args.name, &args.namespace).await?;
-    let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
-
     // Confirm unless --yes.
     if !args.yes {
         let prompt = format!(
-            "{} Roll back release '{}' in namespace '{}' to revision {} (creates revision {})?",
+            "{} Roll back release '{}' in namespace '{}' to revision {} (creates a new revision)?",
             "⚠".yellow(),
             args.name,
             args.namespace,
             target.revision,
-            next_revision
         );
         let confirmed = Confirm::new()
             .with_prompt(prompt)
@@ -157,8 +152,9 @@ async fn resolve_rollback_target(
         .await?
         .ok_or_else(|| {
             NylError::Config(format!(
-                "Revision {} of release '{}' not found in namespace '{}'",
-                target_revision, name, namespace
+                "Cannot roll back release '{}' in namespace '{}': the previous revision ({}) no longer \
+                 exists (it may have been deleted). Use --revision to choose a specific revision to roll back to.",
+                name, namespace, target_revision
             ))
         })
 }
@@ -333,6 +329,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Revision 9"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_default_into_deleted_hole_errors() {
+        let storage = MockReleaseStorage::new();
+        // Revision 3 was deleted, leaving a hole immediately before the latest (4).
+        seed(&storage, "app", "default", &[1, 2, 4]).await;
+
+        let err = resolve_rollback_target(&storage, "app", "default", None)
+            .await
+            .unwrap_err();
+        // Default targets latest-1 (3), which is gone: surface a clear error rather
+        // than silently rolling back to a surprising revision.
+        assert!(err.to_string().contains("no longer"));
     }
 
     #[tokio::test]
