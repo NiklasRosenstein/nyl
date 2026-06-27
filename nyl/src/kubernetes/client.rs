@@ -6,7 +6,7 @@ use kube::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::{
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
@@ -61,7 +61,9 @@ pub trait KubeClient: Send + Sync {
 pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
-    api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
+    /// API resource index, rebuildable via [`Self::refresh_discovery`] after CRDs
+    /// are applied so newly registered custom resource kinds become resolvable.
+    api_resources: RwLock<HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>>,
     crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
 }
 
@@ -139,7 +141,7 @@ impl KubeRsClient {
         Ok(Self {
             client,
             discovery,
-            api_resources,
+            api_resources: RwLock::new(api_resources),
             crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -151,9 +153,23 @@ impl KubeRsClient {
         Ok(Self {
             client,
             discovery,
-            api_resources,
+            api_resources: RwLock::new(api_resources),
             crd_scope_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Re-run API discovery and rebuild the resource index.
+    ///
+    /// The index is captured once at construction. After applying a
+    /// CustomResourceDefinition, the kinds it introduces are not yet present in
+    /// the index, so applying their custom resources in the same batch would fail
+    /// with `ApiResourceNotFound`. Calling this after CRDs are applied refreshes
+    /// the index so those kinds become resolvable.
+    pub async fn refresh_discovery(&self) -> Result<()> {
+        let discovery = Discovery::new(self.client.clone()).run().await?;
+        let index = Self::build_api_resource_index(&discovery);
+        *self.api_resources.write().unwrap() = index;
+        Ok(())
     }
 
     fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
@@ -175,7 +191,8 @@ impl KubeRsClient {
 
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        if let Some((ar, caps)) = self.api_resources.get(gvk) {
+        let api_resources = self.api_resources.read().unwrap();
+        if let Some((ar, caps)) = api_resources.get(gvk) {
             return Ok((ar.clone(), caps.clone()));
         }
 
@@ -185,8 +202,7 @@ impl KubeRsClient {
             format!("{}/{}", gvk.group, gvk.version)
         };
 
-        let mut available_versions: Vec<String> = self
-            .api_resources
+        let mut available_versions: Vec<String> = api_resources
             .keys()
             .filter(|known| known.group == gvk.group && known.kind == gvk.kind)
             .map(|known| known.version.clone())
