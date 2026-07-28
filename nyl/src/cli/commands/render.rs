@@ -2091,12 +2091,33 @@ fn create_argocd_application_from_generator(
         app["metadata"]["annotations"] = serde_json::to_value(&generator.spec.annotations)?;
     }
 
-    // Add sync policy if present
-    if let Some(ref sync_policy) = generator.spec.sync_policy {
-        app["spec"]["syncPolicy"] = serde_json::to_value(sync_policy)?;
+    // Build sync policy from generator spec.
+    {
+        let automated = generator.spec.sync_policy.as_ref().and_then(|sp| sp.automated.clone());
+        let sync_options = generator
+            .spec
+            .sync_policy
+            .as_ref()
+            .map(|sp| sp.sync_options.clone())
+            .unwrap_or_default();
+        let sync_policy = crate::resources::SyncPolicy { automated, sync_options };
+        app["spec"]["syncPolicy"] = serde_json::to_value(&sync_policy)?;
     }
 
     apply_release_customization_overrides(&mut app, release, generator)?;
+
+    // Inject ServerSideApply=true into the final syncOptions unless the user already set any
+    // ServerSideApply=<value> explicitly (either in the generator spec or via release overrides).
+    if let Some(options) = app["spec"]["syncPolicy"]["syncOptions"].as_array_mut() {
+        let already_set = options
+            .iter()
+            .any(|v| v.as_str().map_or(false, |s| s.starts_with("ServerSideApply=")));
+        if !already_set {
+            options.insert(0, serde_json::json!("ServerSideApply=true"));
+        }
+    } else {
+        app["spec"]["syncPolicy"]["syncOptions"] = serde_json::json!(["ServerSideApply=true"]);
+    }
 
     Ok(app)
 }
@@ -3102,7 +3123,11 @@ metadata:
         let (_temp, source_root, file_path) = create_test_worktree_paths();
         let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
 
-        assert!(app["spec"]["syncPolicy"].is_null());
+        // syncPolicy always includes the ServerSideApply=true default; invalid override is ignored.
+        assert_eq!(
+            app["spec"]["syncPolicy"]["syncOptions"],
+            serde_json::json!(["ServerSideApply=true"])
+        );
         let warning = app["spec"]["info"]
             .as_array()
             .unwrap()
