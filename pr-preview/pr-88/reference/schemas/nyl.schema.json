@@ -2,7 +2,7 @@
   "$defs": {
     "KubernetesTarget": {
       "additionalProperties": false,
-      "description": "Kubernetes target metadata used for offline rendering.",
+      "description": "Kubernetes target settings.\n\n`kube_version` / `api_versions` are used for offline Helm rendering;\n`context` pins the kube context Nyl connects to for live operations.",
       "properties": {
         "api_versions": {
           "default": [],
@@ -11,6 +11,14 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "context": {
+          "default": null,
+          "description": "Target kube context to connect to. When set, Nyl uses this context\ninstead of the current kubeconfig context, guarding against accidentally\nrunning against the wrong cluster. The `--context` CLI flag overrides it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "kube_version": {
           "default": null,
@@ -31,6 +39,7 @@
           "$ref": "#/$defs/KubernetesTarget",
           "default": {
             "api_versions": [],
+            "context": null,
             "kube_version": null
           },
           "description": "Kubernetes target metadata for offline rendering with this profile."
@@ -80,6 +89,7 @@
           "$ref": "#/$defs/KubernetesTarget",
           "default": {
             "api_versions": [],
+            "context": null,
             "kube_version": null
           },
           "description": "Default Kubernetes target metadata for offline rendering."
@@ -136,6 +146,7 @@
         ],
         "kubernetes": {
           "api_versions": [],
+          "context": null,
           "kube_version": null
         },
         "strip_empty_metadata_labels": "always"
