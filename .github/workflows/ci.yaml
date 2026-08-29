@@ -304,8 +304,10 @@ jobs:
 
   integration-minikube:
     name: Integration tests (Minikube)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: [package-image-and-chart, build-all-platform-binaries]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    needs: [package-image-and-chart]
     runs-on: ubuntu-latest
     permissions:
       contents: read
