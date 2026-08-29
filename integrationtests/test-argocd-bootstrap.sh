@@ -239,20 +239,20 @@ kubectl get pod "${REPO_POD}" -n "${NAMESPACE}" \
 echo ""
 
 NYL_READY=$(kubectl get pod "${REPO_POD}" -n "${NAMESPACE}" \
-    -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v1")].ready}')
+    -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v2")].ready}')
 
 if [ "${NYL_READY}" != "true" ]; then
-    echo "ERROR: nyl-v1 sidecar not ready"
+    echo "ERROR: nyl-v2 sidecar not ready"
     echo ""
     echo "Pod details:"
     kubectl describe pod "${REPO_POD}" -n "${NAMESPACE}"
     echo ""
     echo "Nyl sidecar logs:"
-    kubectl logs "${REPO_POD}" -n "${NAMESPACE}" -c nyl-v1 --tail=50 || true
+    kubectl logs "${REPO_POD}" -n "${NAMESPACE}" -c nyl-v2 --tail=50 || true
     exit 1
 fi
 
-echo "✓ nyl-v1 sidecar is ready"
+echo "✓ nyl-v2 sidecar is ready"
 echo ""
 
 # Install ArgoCD CLI if not already installed
