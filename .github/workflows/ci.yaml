@@ -70,8 +70,13 @@ jobs:
         working-directory: nyl
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo binstall cargo-audit --no-confirm --disable-strategies compile --only-signed --disable-telemetry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Security audit
         run: cargo audit
