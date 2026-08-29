@@ -45,6 +45,8 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
 ---
 # Create the argocd namespace
 apiVersion: v1
