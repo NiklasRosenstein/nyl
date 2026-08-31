@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Main error type for nyl
 #[derive(Error, Debug)]
 pub enum NylError {
-    #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined in your profile.")]
+    #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined by the selected target.")]
     Template(#[from] minijinja::Error),
 
     #[error("Helm chart error: {0}\nHint: Verify the chart path exists and Helm is installed. Run 'helm version' to check Helm availability.")]

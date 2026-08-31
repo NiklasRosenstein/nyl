@@ -1,12 +1,4 @@
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
-
-[profile.dev.values]
-image_tag = "dev-latest"
-
-[profile.staging.values]
-image_tag = "staging-v1.0.0"
-
-[profile.prod.values]
-image_tag = "v1.0.0"
+gitops_scaffold_path = "config"

@@ -85,7 +85,7 @@ export default defineConfig({
                 "commands/apply",
                 "commands/release",
                 "commands/generate",
-                "commands/cluster-info",
+                "commands/cluster",
               ],
             },
           ],

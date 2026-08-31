@@ -60,6 +60,8 @@ cd platform
 This creates:
 - `nyl.toml` - Project configuration
 - `components/` - Directory for components
+- `applications/` - Application sources
+- `config/` - Cluster, target, repository, and Argo CD policy resources
 
 ### 2. Add a Component
 
@@ -102,10 +104,20 @@ Render a manifest file to stdout:
 nyl render apps.yaml
 ```
 
-For deterministic CI rendering without cluster discovery, use offline mode. If your `nyl.toml` defines `[project.kubernetes]` or `[profile.<name>.kubernetes]`, Nyl uses those values automatically:
+For a targetless deterministic render, provide Kubernetes capabilities explicitly:
 
 ```bash
-nyl render --offline -p dev apps.yaml
+nyl render --offline --kube-version 1.31.0 --kube-api-versions v1,apps/v1 apps.yaml
+```
+
+For target-aware rendering, scaffold a Cluster and target, update the Cluster's
+capabilities, then select the target:
+
+```bash
+nyl new gitops cluster local
+nyl new gitops target dev
+nyl cluster update local
+nyl render --target dev apps.yaml
 ```
 
 ## Project Structure
@@ -113,6 +125,13 @@ nyl render --offline -p dev apps.yaml
 ```
 platform/
 ├── nyl.toml                  # Project configuration
+├── applications/             # Application sources
+├── config/
+│   ├── clusters/             # Concrete clusters and render capabilities
+│   ├── targets/              # Cluster-to-publication bindings
+│   ├── repositories/         # Named Git coordinates
+│   ├── projects/             # Argo CD project policy
+│   └── application-groups/   # Application selection and lifecycle policy
 ├── components/               # Component definitions
 │   └── v1.example.io/
 │       └── MyApp/

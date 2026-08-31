@@ -19,6 +19,18 @@ fn resource_schema_cli_accepts_canonical_kind_and_alias() {
 }
 
 #[test]
+fn resource_schema_cli_supports_cluster() {
+    for kind in ["Cluster", "cluster"] {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+        command
+            .args(["generate", "schema", "resource", kind])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"const\": \"Cluster\""));
+    }
+}
+
+#[test]
 fn aggregate_schema_cli_uses_relative_refs() {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
@@ -26,6 +38,7 @@ fn aggregate_schema_cli_uses_relative_refs() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"$ref\": \"git-repository.schema.json\""))
+        .stdout(predicate::str::contains("\"$ref\": \"cluster.schema.json\""))
         .stdout(predicate::str::contains("\"$ref\": \"application-group.schema.json\""));
 }
 
@@ -42,6 +55,7 @@ fn all_schema_cli_writes_the_complete_set() {
     let expected = [
         "nyl.schema.json",
         "git-repository.schema.json",
+        "cluster.schema.json",
         "gitops-target.schema.json",
         "app-project-definition.schema.json",
         "application-group.schema.json",

@@ -2,14 +2,19 @@ use clap::Args;
 use comfy_table::Cell;
 
 use crate::{
+    cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat},
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStorage},
+    kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
 
 /// Show revision history for a release
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
+    /// GitOps target whose cluster stores the release
+    #[arg(long)]
+    pub target: String,
+
     /// Release name
     pub name: String,
 
@@ -32,7 +37,7 @@ pub struct HistoryArgs {
 
 pub async fn execute(args: HistoryArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);

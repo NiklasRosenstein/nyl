@@ -8,13 +8,10 @@ use tempfile::TempDir;
 fn fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     Repository::init(temp.path()).unwrap();
-    fs::write(
-        temp.path().join("nyl.toml"),
-        "[profile.production.values]\nenvironment = \"production\"\n",
-    )
-    .unwrap();
+    fs::write(temp.path().join("nyl.toml"), "").unwrap();
     for directory in [
         "config/repositories",
+        "config/clusters",
         "config/targets",
         "config/projects",
         "config/application-groups",
@@ -34,6 +31,23 @@ spec:
     )
     .unwrap();
     fs::write(
+        temp.path().join("config/clusters/kasoku.yaml"),
+        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: Cluster
+metadata:
+  name: kasoku
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions:
+      - v1
+      - apps/v1
+"#,
+    )
+    .unwrap();
+    fs::write(
         temp.path().join("config/targets/production.yaml"),
         r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
 kind: GitOpsTarget
@@ -42,8 +56,11 @@ metadata:
   labels:
     environment: production
 spec:
-  profile: production
-  destination:
+  clusterRef:
+    name: kasoku
+  values:
+    environment: production
+  publication:
     repositoryRef:
       name: deploy
     revision: deploy/production
@@ -85,10 +102,8 @@ spec:
     matchLabels:
       environment: production
   projectRef: workloads
-  applicationNamespace: 'argocd-{{ target.labels.environment }}'
-  destination:
-    server: https://kubernetes.default.svc
-{% if target.labels.environment == 'production' %}
+  applicationNamespace: 'argocd-{{ target.metadata.labels.environment }}'
+{% if target.metadata.labels.environment == 'production' %}
   annotations:
     environment: production
 {% endif %}
@@ -197,13 +212,27 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(!application.contains("plugin:"));
     assert!(application.contains("resources-finalizer.argocd.argoproj.io"));
     assert!(application.contains("environment: production"));
+    assert!(application.contains("server: https://kubernetes.default.svc"));
     assert!(fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
         .unwrap()
         .filter_map(std::result::Result::ok)
         .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-")));
 
     assert!(root.join("_nyl/catalog/projects/workloads.yaml").is_file());
-    assert!(root.join("_nyl/index.json").is_file());
+    let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
+    assert_eq!(index["version"], 2);
+    assert_eq!(index["target"], "production");
+    assert_eq!(index["cluster"], "kasoku");
+    assert_eq!(index["publication"]["repository"], "deploy");
+    assert!(index.get("profile").is_none());
+    assert!(index.get("destination").is_none());
+    for input in [
+        "config/targets/production.yaml",
+        "config/clusters/kasoku.yaml",
+        "config/repositories/deploy.yaml",
+    ] {
+        assert!(index["inputs"].get(input).is_some(), "missing provenance input {input}");
+    }
 
     // A byte-identical second render is accepted and keeps ownership stable.
     Command::cargo_bin("nyl")
@@ -219,6 +248,28 @@ fn renders_plain_directory_applications_and_owned_layout() {
         ])
         .assert()
         .success();
+
+    let index_before_live_context = fs::read(root.join("_nyl/index.json")).unwrap();
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster = fs::read_to_string(&cluster_path).unwrap();
+    fs::write(&cluster_path, format!("{cluster}  live:\n    context: kind-kasoku\n")).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            ".",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(root.join("_nyl/index.json")).unwrap(),
+        index_before_live_context
+    );
 }
 
 #[test]
@@ -231,7 +282,7 @@ fn lists_and_validates_targets() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "production\tproduction\tdeploy@deploy/production\tproduction",
+            "production\tkasoku\tdeploy@deploy/production\tproduction",
         ));
 
     Command::cargo_bin("nyl")
@@ -244,6 +295,56 @@ fn lists_and_validates_targets() {
 }
 
 #[test]
+fn target_rendering_requires_complete_cluster_capabilities() {
+    let fixture = fixture();
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster = fs::read_to_string(&cluster_path)
+        .unwrap()
+        .replace("    kubeVersion: 1.31.4\n", "")
+        .replace(
+            "    apiVersions:\n      - v1\n      - apps/v1\n",
+            "    apiVersions: []\n",
+        );
+    fs::write(&cluster_path, cluster).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires spec.kubernetes.kubeVersion"));
+
+    let cluster = fs::read_to_string(&cluster_path)
+        .unwrap()
+        .replace("  kubernetes:\n", "  kubernetes:\n    kubeVersion: 1.31.4\n");
+    fs::write(cluster_path, cluster).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires non-empty spec.kubernetes.apiVersions",
+        ));
+}
+
+#[test]
 fn validation_rejects_overlapping_target_prefixes_on_one_revision() {
     let fixture = fixture();
     fs::write(
@@ -253,8 +354,9 @@ kind: GitOpsTarget
 metadata:
   name: overlap
 spec:
-  profile: production
-  destination:
+  clusterRef:
+    name: kasoku
+  publication:
     repositoryRef:
       name: deploy
     revision: deploy/production
@@ -268,7 +370,7 @@ spec:
         .args(["validate", "gitops"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("overlapping path prefixes"));
+        .stderr(predicate::str::contains("overlapping publication path prefixes"));
 }
 
 #[test]
@@ -292,8 +394,9 @@ kind: GitOpsTarget
 metadata:
   name: overlap
 spec:
-  profile: production
-  destination:
+  clusterRef:
+    name: kasoku
+  publication:
     repositoryRef:
       name: deploy-alias
     revision: deploy/production
@@ -314,7 +417,7 @@ spec:
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("overlapping path prefixes"));
+        .stderr(predicate::str::contains("overlapping publication path prefixes"));
 }
 
 #[test]
@@ -339,8 +442,9 @@ kind: GitOpsTarget
 metadata:
   name: overlap
 spec:
-  profile: production
-  destination:
+  clusterRef:
+    name: kasoku
+  publication:
     repositoryRef:
       name: deploy-publisher
     revision: refs/heads/deploy/production
@@ -355,11 +459,11 @@ spec:
         .args(["validate", "gitops"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("overlapping path prefixes"));
+        .stderr(predicate::str::contains("overlapping publication path prefixes"));
 }
 
 #[test]
-fn target_rejects_mixed_cluster_identity_representations() {
+fn application_groups_cannot_override_the_target_cluster_destination() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/application-groups/named-cluster.yaml"),
@@ -389,9 +493,36 @@ spec:
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "mixes ApplicationGroup destination.server and destination.name",
-        ));
+        .stderr(predicate::str::contains("unknown field `destination`"));
+}
+
+#[test]
+fn applications_inherit_a_named_cluster_destination() {
+    let fixture = fixture();
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster = fs::read_to_string(&cluster_path)
+        .unwrap()
+        .replace("    server: https://kubernetes.default.svc", "    name: in-cluster");
+    fs::write(cluster_path, cluster).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let application =
+        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+    assert!(application.contains("name: in-cluster"));
+    assert!(!application.contains("server: https://kubernetes.default.svc"));
 }
 
 #[test]
@@ -399,8 +530,8 @@ fn one_dedicated_application_owns_a_shared_namespace() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
-        "    server: https://kubernetes.default.svc\n",
-        "    server: https://kubernetes.default.svc\n    namespace: shared\n",
+        "  applicationNamespace:",
+        "  destinationNamespace: shared\n  applicationNamespace:",
     );
     fs::write(group_path, group).unwrap();
     fs::write(
@@ -446,8 +577,8 @@ fn broad_release_policy_cannot_override_platform_owned_application_fields() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
-        "{% if target.labels.environment == 'production' %}",
-        "  releaseCustomization:\n    allowedPaths: ['spec.**']\n{% if target.labels.environment == 'production' %}",
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  releaseCustomization:\n    allowedPaths: ['spec.**']\n{% if target.metadata.labels.environment == 'production' %}",
     );
     fs::write(group_path, group).unwrap();
     let release_path = fixture.path().join("applications/workloads/api.yaml");
@@ -478,8 +609,8 @@ fn broad_release_policy_cannot_add_argocd_multi_sources() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
-        "{% if target.labels.environment == 'production' %}",
-        "  releaseCustomization:\n    allowedPaths: ['spec.**']\n{% if target.labels.environment == 'production' %}",
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  releaseCustomization:\n    allowedPaths: ['spec.**']\n{% if target.metadata.labels.environment == 'production' %}",
     );
     fs::write(group_path, group).unwrap();
     let release_path = fixture.path().join("applications/workloads/api.yaml");
@@ -535,7 +666,7 @@ metadata:
 }
 
 #[test]
-fn publishes_a_new_destination_branch_with_cas_workflow() {
+fn publishes_a_new_publication_branch_with_cas_workflow() {
     let fixture = fixture();
     let (destination, _seed) = seeded_bare_repository();
     fs::write(

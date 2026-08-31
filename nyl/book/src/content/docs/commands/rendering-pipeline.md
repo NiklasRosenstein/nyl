@@ -6,7 +6,7 @@ title: 'Rendering Pipeline'
 
 ## Shared Pipeline Steps
 
-1. Load project configuration and select the active profile.
+1. Load project configuration and, when requested, resolve the target and its Cluster.
 2. Load secrets and build the template context.
 3. Load the input manifest file and render Jinja templates.
 4. Apply `--only-source-kind` filtering on top-level input resources (before expansion).

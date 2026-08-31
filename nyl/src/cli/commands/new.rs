@@ -71,6 +71,7 @@ struct AliasScaffoldArgs {
 #[derive(Subcommand, Debug)]
 enum NewGitopsSubcommand {
     Repository(AliasScaffoldArgs),
+    Cluster(AliasScaffoldArgs),
     Target(AliasScaffoldArgs),
     Project(AliasScaffoldArgs),
     ApplicationGroup(AliasScaffoldArgs),
@@ -84,6 +85,7 @@ pub fn execute(args: NewArgs) -> Result<()> {
         NewSubcommand::Gitops { command } => {
             let (kind, args) = match command {
                 NewGitopsSubcommand::Repository(args) => (GitOpsResourceKind::GitRepository, args),
+                NewGitopsSubcommand::Cluster(args) => (GitOpsResourceKind::Cluster, args),
                 NewGitopsSubcommand::Target(args) => (GitOpsResourceKind::GitOpsTarget, args),
                 NewGitopsSubcommand::Project(args) => (GitOpsResourceKind::AppProjectDefinition, args),
                 NewGitopsSubcommand::ApplicationGroup(args) => (GitOpsResourceKind::ApplicationGroup, args),
@@ -120,6 +122,7 @@ fn scaffold_resource(args: ResourceScaffoldArgs, project_dir: Option<&Path>) -> 
     } else {
         let directory = match args.kind {
             GitOpsResourceKind::GitRepository => "repositories",
+            GitOpsResourceKind::Cluster => "clusters",
             GitOpsResourceKind::GitOpsTarget => "targets",
             GitOpsResourceKind::AppProjectDefinition => "projects",
             GitOpsResourceKind::ApplicationGroup => "application-groups",
@@ -158,8 +161,11 @@ fn render_resource_scaffold(kind: GitOpsResourceKind, name: &str, source: Option
         GitOpsResourceKind::GitRepository => format!(
             "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitRepository\nmetadata:\n  name: {name}\nspec:\n  repoURL: https://example.invalid/{name}.git\n"
         ),
+        GitOpsResourceKind::Cluster => format!(
+            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl cluster update {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {name}\n"
+        ),
         GitOpsResourceKind::GitOpsTarget => format!(
-            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitOpsTarget\nmetadata:\n  name: {name}\nspec:\n  profile: {name}\n  destination:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n    pathPrefix: {name}\n"
+            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitOpsTarget\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  values:\n    environment: {name}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n    pathPrefix: {name}\n"
         ),
         GitOpsResourceKind::AppProjectDefinition => format!(
             "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
@@ -167,7 +173,7 @@ fn render_resource_scaffold(kind: GitOpsResourceKind, name: &str, source: Option
         GitOpsResourceKind::ApplicationGroup => {
             let source = source.map_or_else(String::new, |source| format!("  source:\n    path: {source}\n"));
             format!(
-                "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {name}\n  applicationNamespace: argocd\n{source}  destination:\n    server: https://kubernetes.default.svc\n"
+                "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {name}\n  applicationNamespace: argocd\n{source}  destinationNamespace: default\n"
             )
         }
     };
@@ -215,6 +221,7 @@ fn create_project(project_path: &Path) -> Result<()> {
         project_path.join("components"),
         project_path.join("applications"),
         project_path.join("config/repositories"),
+        project_path.join("config/clusters"),
         project_path.join("config/targets"),
         project_path.join("config/projects"),
         project_path.join("config/application-groups"),
@@ -473,6 +480,7 @@ mod tests {
         assert!(project_dir.join("components").exists());
         assert!(project_dir.join("applications").exists());
         assert!(project_dir.join("config/repositories").exists());
+        assert!(project_dir.join("config/clusters").exists());
         assert!(project_dir.join("config/targets").exists());
         assert!(project_dir.join("config/projects").exists());
         assert!(project_dir.join("config/application-groups").exists());
@@ -555,6 +563,42 @@ mod tests {
         assert!(content.contains("git-repository.schema.json"));
         assert!(content.contains("kind: GitRepository"));
         assert!(scaffold_resource(args, Some(temp.path())).is_err());
+    }
+
+    #[test]
+    fn test_scaffold_cluster_and_target_use_cluster_model() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::Cluster,
+                name: "production".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+        )
+        .unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::GitOpsTarget,
+                name: "production".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let cluster = fs::read_to_string(temp.path().join("config/clusters/production.yaml")).unwrap();
+        assert!(cluster.contains("kind: Cluster"));
+        assert!(cluster.contains("context: production"));
+        let target = fs::read_to_string(temp.path().join("config/targets/production.yaml")).unwrap();
+        assert!(target.contains("clusterRef:\n    name: production"));
+        assert!(target.contains("publication:"));
+        assert!(!target.contains("profile:"));
     }
 
     #[test]

@@ -29,10 +29,6 @@ fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
-fn default_profile_values() -> BTreeMap<String, serde_json::Value> {
-    BTreeMap::new()
-}
-
 /// Controls when empty `metadata.labels` maps are stripped from emitted manifests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -59,25 +55,6 @@ impl StripEmptyMetadataLabelsMode {
     }
 }
 
-/// Kubernetes target settings.
-///
-/// `kube_version` / `api_versions` are used for offline Helm rendering;
-/// `context` pins the kube context Nyl connects to for live operations.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct KubernetesTarget {
-    /// Kubernetes server version to pass to Helm during offline rendering.
-    pub kube_version: Option<String>,
-
-    /// Kubernetes API versions to pass to Helm during offline rendering.
-    pub api_versions: Vec<String>,
-
-    /// Target kube context to connect to. When set, Nyl uses this context
-    /// instead of the current kubeconfig context, guarding against accidentally
-    /// running against the wrong cluster. The `--context` CLI flag overrides it.
-    pub context: Option<String>,
-}
-
 /// Project settings in `[project]` section of `nyl.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -97,9 +74,6 @@ pub struct ProjectSettings {
 
     /// Control when empty `metadata.labels` maps are stripped from emitted manifests.
     pub strip_empty_metadata_labels: StripEmptyMetadataLabelsMode,
-
-    /// Default Kubernetes target metadata for offline rendering.
-    pub kubernetes: KubernetesTarget,
 }
 
 impl Default for ProjectSettings {
@@ -110,31 +84,6 @@ impl Default for ProjectSettings {
             gitops_scaffold_path: default_gitops_scaffold_path(),
             aliases: default_aliases(),
             strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
-            kubernetes: KubernetesTarget::default(),
-        }
-    }
-}
-
-/// Profile configuration in `[profile.<name>]` section of `nyl.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProfileSettings {
-    /// Template values exposed as `values.*` for this profile.
-    ///
-    /// Example:
-    /// `[profile.dev.values]`
-    /// `replicas = 2`
-    pub values: BTreeMap<String, serde_json::Value>,
-
-    /// Kubernetes target metadata for offline rendering with this profile.
-    pub kubernetes: KubernetesTarget,
-}
-
-impl Default for ProfileSettings {
-    fn default() -> Self {
-        Self {
-            values: default_profile_values(),
-            kubernetes: KubernetesTarget::default(),
         }
     }
 }
@@ -144,7 +93,6 @@ impl Default for ProfileSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
-    pub profile: BTreeMap<String, ProfileSettings>,
 }
 
 /// Wrapper for project configuration file.
@@ -273,6 +221,7 @@ impl ProjectConfig {
         tracing::debug!("Reading configuration file: {}", path.display());
 
         let contents = std::fs::read_to_string(path)?;
+        reject_removed_configuration(&contents)?;
         let mut project: ProjectFile =
             toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
 
@@ -317,46 +266,6 @@ impl ProjectConfig {
     /// Return the configured empty-label stripping mode for emitted manifests.
     pub fn get_strip_empty_metadata_labels_mode(&self) -> StripEmptyMetadataLabelsMode {
         self.config.project.strip_empty_metadata_labels
-    }
-
-    /// Return whether any profile values are configured.
-    pub fn has_profiles(&self) -> bool {
-        !self.config.profile.is_empty()
-    }
-
-    /// Return configured profile names.
-    pub fn profile_names(&self) -> Vec<&str> {
-        self.config.profile.keys().map(String::as_str).collect()
-    }
-
-    /// Return profile settings for a profile name.
-    pub fn get_profile(&self, name: &str) -> Option<&ProfileSettings> {
-        self.config.profile.get(name)
-    }
-
-    /// Return template values for a profile name.
-    pub fn get_profile_values(&self, name: &str) -> Option<&BTreeMap<String, serde_json::Value>> {
-        self.get_profile(name).map(|profile| &profile.values)
-    }
-
-    /// Return project-level Kubernetes target metadata for offline rendering.
-    pub fn get_project_kubernetes_target(&self) -> &KubernetesTarget {
-        &self.config.project.kubernetes
-    }
-
-    /// Return profile-level Kubernetes target metadata for offline rendering.
-    pub fn get_profile_kubernetes_target(&self, name: &str) -> Option<&KubernetesTarget> {
-        self.get_profile(name).map(|profile| &profile.kubernetes)
-    }
-
-    /// Resolve the target kube context for a profile.
-    ///
-    /// The profile-level `kubernetes.context` overrides the project-level one.
-    /// Returns `None` when neither is configured.
-    pub fn resolve_context(&self, name: &str) -> Option<String> {
-        self.get_profile_kubernetes_target(name)
-            .and_then(|target| target.context.clone())
-            .or_else(|| self.get_project_kubernetes_target().context.clone())
     }
 
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
@@ -408,6 +317,26 @@ impl ProjectConfig {
     }
 }
 
+fn reject_removed_configuration(contents: &str) -> Result<()> {
+    let value: toml::Value =
+        toml::from_str(contents).map_err(|error| NylError::Config(format!("Failed to parse TOML config: {error}")))?;
+    if value.get("profile").is_some() {
+        return Err(NylError::config(
+            "[profile.*] is no longer supported. Define Cluster and GitOpsTarget resources under config/ and select a target with --target.",
+        ));
+    }
+    if value
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|project| project.contains_key("kubernetes"))
+    {
+        return Err(NylError::config(
+            "[project.kubernetes] is no longer supported. Store kubeVersion and apiVersions in a Cluster resource under spec.kubernetes.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_raw_string_hashes)]
 mod tests {
@@ -426,16 +355,6 @@ mod tests {
             settings.strip_empty_metadata_labels,
             StripEmptyMetadataLabelsMode::Always
         );
-        assert!(settings.kubernetes.kube_version.is_none());
-        assert!(settings.kubernetes.api_versions.is_empty());
-    }
-
-    #[test]
-    fn test_default_profile_settings() {
-        let settings = ProfileSettings::default();
-        assert!(settings.values.is_empty());
-        assert!(settings.kubernetes.kube_version.is_none());
-        assert!(settings.kubernetes.api_versions.is_empty());
     }
 
     #[test]
@@ -449,9 +368,6 @@ components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
 gitops_scaffold_path = "gitops-config"
 strip_empty_metadata_labels = "argocd"
-[project.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1"]
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
 "#;
@@ -469,14 +385,6 @@ api_versions = ["v1", "apps/v1"]
         assert_eq!(
             config.get_strip_empty_metadata_labels_mode(),
             StripEmptyMetadataLabelsMode::Argocd
-        );
-        assert_eq!(
-            config.get_project_kubernetes_target().kube_version.as_deref(),
-            Some("1.30.0")
-        );
-        assert_eq!(
-            config.get_project_kubernetes_target().api_versions,
-            vec!["v1".to_string(), "apps/v1".to_string()]
         );
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
@@ -498,7 +406,6 @@ api_versions = ["v1", "apps/v1"]
             config.get_strip_empty_metadata_labels_mode(),
             StripEmptyMetadataLabelsMode::Always
         );
-        assert!(!config.has_profiles());
     }
 
     #[test]
@@ -513,7 +420,6 @@ api_versions = ["v1", "apps/v1"]
                     ]),
                     ..ProjectSettings::default()
                 },
-                profile: BTreeMap::new(),
             },
         };
 
@@ -595,7 +501,7 @@ components_search_paths = ["comps1", "comps2"]
     }
 
     #[test]
-    fn test_load_profile_values_from_toml() {
+    fn test_removed_profile_configuration_has_migration_error() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
 
@@ -616,29 +522,13 @@ api_versions = ["v1", "apps/v1"]
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-        assert!(config.has_profiles());
-        assert_eq!(config.profile_names().len(), 2);
-        assert_eq!(
-            config.get_profile_values("dev").and_then(|v| v.get("replicas")),
-            Some(&serde_json::json!(1))
-        );
-        assert_eq!(
-            config
-                .get_profile_kubernetes_target("prod")
-                .and_then(|target| target.kube_version.as_deref()),
-            Some("1.30.0")
-        );
-        assert_eq!(
-            config
-                .get_profile_kubernetes_target("prod")
-                .map(|target| target.api_versions.as_slice()),
-            Some(["v1".to_string(), "apps/v1".to_string()].as_slice())
-        );
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[profile.*] is no longer supported"));
+        assert!(error.contains("--target"));
     }
 
     #[test]
-    fn test_resolve_context_precedence() {
+    fn test_removed_project_kubernetes_has_migration_error() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
 
@@ -646,37 +536,15 @@ api_versions = ["v1", "apps/v1"]
 [project.kubernetes]
 context = "project-cluster"
 
-[profile.dev.values]
-replicas = 1
-
-[profile.prod.kubernetes]
-context = "prod-cluster"
 "#;
         fs::write(&config_path, toml_content).unwrap();
-
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-
-        // Profile-level context overrides the project-level one.
-        assert_eq!(config.resolve_context("prod").as_deref(), Some("prod-cluster"));
-        // Profile without its own context falls back to the project-level one.
-        assert_eq!(config.resolve_context("dev").as_deref(), Some("project-cluster"));
-        // Unknown profile name still resolves the project-level default.
-        assert_eq!(config.resolve_context("missing").as_deref(), Some("project-cluster"));
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[project.kubernetes] is no longer supported"));
+        assert!(error.contains("Cluster resource"));
     }
 
     #[test]
-    fn test_resolve_context_none_when_unset() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl.toml");
-        fs::write(&config_path, "[profile.dev.values]\nreplicas = 1\n").unwrap();
-
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-        assert_eq!(config.resolve_context("dev"), None);
-        assert_eq!(config.resolve_context("default"), None);
-    }
-
-    #[test]
-    fn test_profile_invalid_shape_rejected() {
+    fn test_removed_profile_invalid_shape_still_has_migration_error() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
 
@@ -689,7 +557,7 @@ replicas = 1
         fs::write(&config_path, toml_content).unwrap();
 
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
-        assert!(err.contains("Failed to parse TOML config"));
+        assert!(err.contains("[profile.*] is no longer supported"));
     }
 
     #[test]

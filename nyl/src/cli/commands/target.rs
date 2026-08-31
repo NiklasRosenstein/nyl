@@ -36,28 +36,28 @@ fn list(path: &std::path::Path) -> Result<()> {
         let Some(GitOpsResource::GitOpsTarget(target)) = &discovered.resource else {
             continue;
         };
-        let destination = target
+        let publication = target
             .spec
-            .destination
+            .publication
             .repository_ref
             .as_ref()
             .map(|reference| reference.name.as_str())
             .or_else(|| {
                 target
                     .spec
-                    .destination
+                    .publication
                     .repository
                     .as_ref()
                     .map(|repository| repository.repo_url.as_str())
             })
-            .expect("validated target has a destination repository");
+            .expect("validated target has a publication repository");
         println!(
             "{}\t{}\t{}@{}\t{}",
             target.metadata.name,
-            target.spec.profile,
-            destination,
-            target.spec.destination.revision,
-            target.spec.destination.path_prefix
+            target.spec.cluster_ref.name,
+            publication,
+            target.spec.publication.revision,
+            target.spec.publication.path_prefix
         );
         count += 1;
     }

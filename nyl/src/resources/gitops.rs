@@ -15,6 +15,7 @@ use crate::constants::API_VERSION_GITOPS;
 use crate::{NylError, Result};
 
 pub const KIND_GIT_REPOSITORY: &str = "GitRepository";
+pub const KIND_CLUSTER: &str = "Cluster";
 pub const KIND_GITOPS_TARGET: &str = "GitOpsTarget";
 pub const KIND_APP_PROJECT_DEFINITION: &str = "AppProjectDefinition";
 pub const KIND_APPLICATION_GROUP: &str = "ApplicationGroup";
@@ -48,6 +49,55 @@ pub struct GitRepositorySpec {
     pub publish_url: Option<String>,
 }
 
+/// A concrete Kubernetes cluster and the deterministic facts used to render for it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Cluster {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: GitOpsResourceMetadata,
+    pub spec: ClusterSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterSpec {
+    pub destination: ClusterDestination,
+    pub kubernetes: ClusterKubernetesCapabilities,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<ClusterLiveConfiguration>,
+}
+
+/// Argo CD's identity for a concrete cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterDestination {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Kubernetes discovery information used for deterministic offline rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterKubernetesCapabilities {
+    #[serde(rename = "kubeVersion", skip_serializing_if = "Option::is_none")]
+    pub kube_version: Option<String>,
+    #[serde(default, rename = "apiVersions", skip_serializing_if = "Vec::is_empty")]
+    pub api_versions: Vec<String>,
+}
+
+/// Local-only connection settings for live operations against a cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterLiveConfiguration {
+    pub context: String,
+}
+
 /// A named, independently renderable and publishable deployment slice.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -62,10 +112,11 @@ pub struct GitOpsTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GitOpsTargetSpec {
-    pub profile: String,
+    #[serde(rename = "clusterRef")]
+    pub cluster_ref: LocalReference,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
-    pub destination: GitDestination,
+    pub publication: GitPublication,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
 }
@@ -73,7 +124,7 @@ pub struct GitOpsTargetSpec {
 /// Git coordinates used as a rendered output and Argo CD source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct GitDestination {
+pub struct GitPublication {
     #[serde(rename = "repositoryRef", skip_serializing_if = "Option::is_none")]
     pub repository_ref: Option<LocalReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,7 +197,8 @@ pub struct ApplicationGroupSpec {
     pub project_ref: String,
     #[serde(rename = "applicationNamespace")]
     pub application_namespace: String,
-    pub destination: KubernetesDestination,
+    #[serde(rename = "destinationNamespace", skip_serializing_if = "Option::is_none")]
+    pub destination_namespace: Option<String>,
     #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
     #[serde(rename = "applicationNameTemplate", skip_serializing_if = "Option::is_none")]
@@ -222,17 +274,6 @@ pub enum RendererConfigMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct KubernetesDestination {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct GitOpsSyncPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automated: Option<GitOpsAutomatedSyncPolicy>,
@@ -302,6 +343,8 @@ pub struct GitOpsReleaseCustomization {
 pub enum GitOpsResourceKind {
     #[value(name = "GitRepository", alias = "git-repository", alias = "repository")]
     GitRepository,
+    #[value(name = "Cluster", alias = "cluster")]
+    Cluster,
     #[value(name = "GitOpsTarget", alias = "gitops-target", alias = "target")]
     GitOpsTarget,
     #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
@@ -314,6 +357,7 @@ impl GitOpsResourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GitRepository => KIND_GIT_REPOSITORY,
+            Self::Cluster => KIND_CLUSTER,
             Self::GitOpsTarget => KIND_GITOPS_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
@@ -323,6 +367,7 @@ impl GitOpsResourceKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             KIND_GIT_REPOSITORY => Some(Self::GitRepository),
+            KIND_CLUSTER => Some(Self::Cluster),
             KIND_GITOPS_TARGET => Some(Self::GitOpsTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
@@ -333,15 +378,17 @@ impl GitOpsResourceKind {
     pub const fn schema_filename(self) -> &'static str {
         match self {
             Self::GitRepository => "git-repository.schema.json",
+            Self::Cluster => "cluster.schema.json",
             Self::GitOpsTarget => "gitops-target.schema.json",
             Self::AppProjectDefinition => "app-project-definition.schema.json",
             Self::ApplicationGroup => "application-group.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 4] {
+    pub const fn all() -> [Self; 5] {
         [
             Self::GitRepository,
+            Self::Cluster,
             Self::GitOpsTarget,
             Self::AppProjectDefinition,
             Self::ApplicationGroup,
@@ -357,6 +404,7 @@ impl GitOpsResourceKind {
 pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::Value {
     let schema = match kind {
         GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
+        GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
         GitOpsResourceKind::GitOpsTarget => serde_json::to_value(schema_for!(GitOpsTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
@@ -409,6 +457,7 @@ pub struct GitOpsResourceIdentity {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitOpsResource {
     GitRepository(GitRepository),
+    Cluster(Cluster),
     GitOpsTarget(GitOpsTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
@@ -456,6 +505,7 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     };
     let resource = match identity.kind {
         GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
+        GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
         GitOpsResourceKind::GitOpsTarget => GitOpsResource::GitOpsTarget(parse_as(value, KIND_GITOPS_TARGET)?),
         GitOpsResourceKind::AppProjectDefinition => {
             GitOpsResource::AppProjectDefinition(parse_as(value, KIND_APP_PROJECT_DEFINITION)?)
@@ -476,6 +526,7 @@ impl GitOpsResource {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::GitRepository(resource) => resource.validate(),
+            Self::Cluster(resource) => resource.validate(),
             Self::GitOpsTarget(resource) => resource.validate(),
             Self::AppProjectDefinition(resource) => resource.validate(),
             Self::ApplicationGroup(resource) => resource.validate(),
@@ -495,6 +546,47 @@ impl GitRepository {
     }
 }
 
+impl Cluster {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_CLUSTER,
+            &self.metadata,
+        )?;
+        self.spec.destination.validate()?;
+        self.spec.kubernetes.validate()?;
+        if let Some(live) = &self.spec.live {
+            validate_static_required("spec.live.context", &live.context)?;
+        }
+        Ok(())
+    }
+}
+
+impl ClusterDestination {
+    pub fn validate(&self) -> Result<()> {
+        match (&self.server, &self.name) {
+            (Some(server), None) => validate_static_required("spec.destination.server", server),
+            (None, Some(name)) => validate_static_required("spec.destination.name", name),
+            (Some(_), Some(_)) => Err(NylError::config(
+                "spec.destination.server and spec.destination.name are mutually exclusive",
+            )),
+            (None, None) => Err(NylError::config(
+                "Exactly one of spec.destination.server or spec.destination.name is required",
+            )),
+        }
+    }
+}
+
+impl ClusterKubernetesCapabilities {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(kube_version) = &self.kube_version {
+            validate_static_required("spec.kubernetes.kubeVersion", kube_version)?;
+        }
+        validate_unique_static_names("spec.kubernetes.apiVersions", &self.api_versions)
+    }
+}
+
 impl GitOpsTarget {
     pub fn validate(&self) -> Result<()> {
         validate_envelope(
@@ -503,21 +595,21 @@ impl GitOpsTarget {
             KIND_GITOPS_TARGET,
             &self.metadata,
         )?;
-        validate_static_required("spec.profile", &self.spec.profile)?;
-        self.spec.destination.validate()?;
+        validate_static_required("spec.clusterRef.name", &self.spec.cluster_ref.name)?;
+        self.spec.publication.validate()?;
         validate_unique_static_names("spec.projects", &self.spec.projects)
     }
 }
 
-impl GitDestination {
+impl GitPublication {
     pub fn validate(&self) -> Result<()> {
         validate_repository_choice(
             self.repository_ref.as_ref(),
             self.repository.as_ref(),
-            "spec.destination",
+            "spec.publication",
         )?;
-        validate_static_required("spec.destination.revision", &self.revision)?;
-        validate_relative_path("spec.destination.pathPrefix", &self.path_prefix, true, false)
+        validate_static_required("spec.publication.revision", &self.revision)?;
+        validate_relative_path("spec.publication.pathPrefix", &self.path_prefix, true, false)
     }
 }
 
@@ -565,7 +657,9 @@ impl ApplicationGroup {
         )?;
         validate_static_required("spec.projectRef", &self.spec.project_ref)?;
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
-        self.spec.destination.validate()?;
+        if let Some(namespace) = &self.spec.destination_namespace {
+            validate_required("spec.destinationNamespace", namespace)?;
+        }
         if let Some(path) = &self.spec.output_path {
             validate_relative_path("spec.outputPath", path, false, false)?;
         }
@@ -582,21 +676,6 @@ impl ApplicationGroup {
             crate::resources::validate_path_glob_pattern(pattern)?;
         }
         Ok(())
-    }
-}
-
-impl KubernetesDestination {
-    pub fn validate(&self) -> Result<()> {
-        match (&self.server, &self.name) {
-            (Some(server), None) => validate_required("spec.destination.server", server),
-            (None, Some(name)) => validate_required("spec.destination.name", name),
-            (Some(_), Some(_)) => Err(NylError::config(
-                "spec.destination.server and spec.destination.name are mutually exclusive",
-            )),
-            (None, None) => Err(NylError::config(
-                "Exactly one of spec.destination.server or spec.destination.name is required",
-            )),
-        }
     }
 }
 
@@ -717,8 +796,27 @@ fn validate_repository_choice(
 
 fn validate_repository_coordinates(repo_url: &str, publish_url: Option<&str>) -> Result<()> {
     validate_static_required("spec.repoURL", repo_url)?;
+    reject_http_userinfo("spec.repoURL", repo_url)?;
     if let Some(publish_url) = publish_url {
         validate_static_required("spec.publishURL", publish_url)?;
+        reject_http_userinfo("spec.publishURL", publish_url)?;
+    }
+    Ok(())
+}
+
+fn reject_http_userinfo(field: &str, value: &str) -> Result<()> {
+    let lower = value.to_ascii_lowercase();
+    let Some(authority_and_path) = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://")) else {
+        return Ok(());
+    };
+    let authority = authority_and_path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(authority_and_path);
+    if authority.contains('@') {
+        return Err(NylError::config(format!(
+            "{field} must not contain HTTP user information; configure Git credentials outside GitOps resources"
+        )));
     }
     Ok(())
 }
@@ -813,13 +911,30 @@ mod tests {
             "kind": KIND_GITOPS_TARGET,
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
-                "profile": "production",
+                "clusterRef": {"name": "kasoku"},
                 "values": {"replicas": 3},
-                "destination": {
+                "publication": {
                     "repositoryRef": {"name": "deploy"},
                     "revision": "deploy/production"
                 },
                 "projects": ["platform"]
+            }
+        })
+    }
+
+    fn cluster() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_GITOPS,
+            "kind": KIND_CLUSTER,
+            "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
+            "spec": {
+                "destination": {"server": "https://kubernetes.default.svc"},
+                "kubernetes": {
+                    "kubeVersion": "1.31.4",
+                    "apiVersions": ["apps/v1", "v1"]
+                },
+                "values": {"region": "fsn1", "nested": {"unrestricted": true}},
+                "live": {"context": "kasoku"}
             }
         })
     }
@@ -834,7 +949,7 @@ mod tests {
                 "projectRef": "applications",
                 "applicationNamespace": "argocd-applications",
                 "source": {"path": "applications/cloud"},
-                "destination": {"server": "https://kubernetes.default.svc"},
+                "destinationNamespace": "cloud",
                 "outputPath": "cloud",
                 "namespace": {"create": true, "prunePolicy": "Confirm", "deletePolicy": "Confirm"}
             }
@@ -848,8 +963,37 @@ mod tests {
             panic!("expected target");
         };
         assert_eq!(parsed.metadata.name, "production");
+        assert_eq!(parsed.spec.cluster_ref.name, "kasoku");
         assert_eq!(parsed.spec.values["replicas"], 3);
-        assert_eq!(parsed.spec.destination.path_prefix, "");
+        assert_eq!(parsed.spec.publication.path_prefix, "");
+    }
+
+    #[test]
+    fn parses_and_validates_cluster() {
+        let parsed = parse_gitops_resource(&cluster()).unwrap().unwrap();
+        let GitOpsResource::Cluster(parsed) = parsed else {
+            panic!("expected cluster");
+        };
+        assert_eq!(parsed.metadata.name, "kasoku");
+        assert_eq!(
+            parsed.spec.destination.server.as_deref(),
+            Some("https://kubernetes.default.svc")
+        );
+        assert_eq!(parsed.spec.kubernetes.kube_version.as_deref(), Some("1.31.4"));
+        assert_eq!(parsed.spec.kubernetes.api_versions, ["apps/v1", "v1"]);
+        assert_eq!(parsed.spec.values["nested"]["unrestricted"], true);
+        assert_eq!(parsed.spec.live.unwrap().context, "kasoku");
+    }
+
+    #[test]
+    fn parses_cluster_capability_defaults() {
+        let mut value = cluster();
+        value["spec"]["kubernetes"] = json!({});
+        let GitOpsResource::Cluster(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected cluster");
+        };
+        assert!(parsed.spec.kubernetes.kube_version.is_none());
+        assert!(parsed.spec.kubernetes.api_versions.is_empty());
     }
 
     #[test]
@@ -918,15 +1062,27 @@ mod tests {
     #[test]
     fn validates_repository_choice() {
         let mut value = target();
-        value["spec"]["destination"]["repository"] = json!({"repoURL": "ssh://example/deploy.git"});
+        value["spec"]["publication"]["repository"] = json!({"repoURL": "ssh://example/deploy.git"});
         let error = parse_gitops_resource(&value).unwrap_err().to_string();
         assert!(error.contains("mutually exclusive"));
 
-        value["spec"]["destination"]
+        value["spec"]["publication"]
             .as_object_mut()
             .unwrap()
             .remove("repositoryRef");
         assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    #[test]
+    fn rejects_credentials_in_http_repository_coordinates() {
+        let mut value = target();
+        value["spec"]["publication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repositoryRef");
+        value["spec"]["publication"]["repository"] = json!({"repoURL": "https://token@example.invalid/deploy.git"});
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("must not contain HTTP user information"));
     }
 
     #[test]
@@ -983,12 +1139,29 @@ mod tests {
     }
 
     #[test]
-    fn validates_destination_exclusivity() {
-        let mut value = application_group();
+    fn validates_cluster_destination_exclusivity() {
+        let mut value = cluster();
         value["spec"]["destination"]["name"] = json!("in-cluster");
         assert!(parse_gitops_resource(&value).is_err());
         value["spec"]["destination"].as_object_mut().unwrap().remove("server");
         assert!(parse_gitops_resource(&value).is_ok());
+    }
+
+    #[test]
+    fn rejects_cluster_unknown_fields_and_duplicate_capabilities() {
+        let mut value = cluster();
+        value["spec"]["destination"]["namespace"] = json!("default");
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
+
+        value = cluster();
+        value["spec"]["kubernetes"]["apiVersions"] = json!(["v1", "v1"]);
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate value"));
     }
 
     #[test]
@@ -1052,6 +1225,7 @@ mod tests {
             references,
             vec![
                 "git-repository.schema.json",
+                "cluster.schema.json",
                 "gitops-target.schema.json",
                 "app-project-definition.schema.json",
                 "application-group.schema.json"

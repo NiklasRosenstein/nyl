@@ -187,13 +187,12 @@ If the plugin fails with "nyl: command not found":
 kubectl exec -it deployment/argocd-repo-server -n argocd -- nyl --version
 ```
 
-### Profile Not Found
+### Target Not Found
 
-If Nyl reports "Profile 'default' not found":
-
-1. Ensure your repository defines `[profile.default.values]` in `nyl.toml`
-2. Check the profile name matches what you're referencing
-3. Verify `nyl.toml` is in the repository root or search path
+If Nyl reports that a target cannot be found, verify the GitOpsTarget and its
+referenced Cluster are Git-visible and have static `apiVersion`, `kind`, and
+`metadata.name` fields. Also verify `nyl.toml` is discoverable from the plugin
+working directory.
 
 ## Next Steps
 

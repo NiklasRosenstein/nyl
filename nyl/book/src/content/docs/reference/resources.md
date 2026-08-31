@@ -16,6 +16,7 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 ### ArgoCD Resources
 
 - **[ApplicationGenerator](/nyl/reference/resources/application-generator/)**: Automatically generates ArgoCD Applications from NylRelease files
+- **[Rendered GitOps control resources](/nyl/deployment-workflows/rendered-manifests/#control-resources)**: Define repositories, concrete Clusters, publication targets, projects, and application groups
 
 ### Policy Resources
 
@@ -40,6 +41,7 @@ spec:
 - `nyl.niklasrosenstein.github.com/v1`: Core Nyl resources (NylRelease, HelmChart)
   - Includes: `NylRelease`, `HelmChart`, `RemoteManifest`
 - `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
+- `gitops.nyl.niklasrosenstein.github.com/v1`: Rendered GitOps control resources (GitRepository, Cluster, GitOpsTarget, AppProjectDefinition, ApplicationGroup)
 - `components.nyl.niklasrosenstein.github.com/v1`: Component resources (dynamic `kind` path/shortcut)
 
 ## Processing Behavior

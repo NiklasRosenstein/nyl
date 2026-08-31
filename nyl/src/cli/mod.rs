@@ -70,8 +70,8 @@ enum Commands {
     /// Validate project configuration
     Validate(commands::validate::ValidateArgs),
 
-    /// Display Kubernetes cluster version information
-    ClusterInfo(commands::cluster_info::ClusterInfoArgs),
+    /// Inspect and update configured Kubernetes clusters
+    Cluster(commands::cluster::ClusterArgs),
 
     /// Manage releases
     Release(commands::release::ReleaseArgs),
@@ -100,7 +100,7 @@ impl Cli {
             Commands::Generate(args) => commands::generate::execute(args),
             Commands::New(args) => commands::new::execute(args),
             Commands::Validate(args) => commands::validate::execute(args).await,
-            Commands::ClusterInfo(args) => commands::cluster_info::execute(args).await,
+            Commands::Cluster(args) => commands::cluster::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
         }
     }

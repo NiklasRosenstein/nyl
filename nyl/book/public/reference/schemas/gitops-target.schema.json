@@ -1,6 +1,51 @@
 {
   "$defs": {
-    "GitDestination": {
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "GitOpsTargetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "clusterRef": {
+          "$ref": "#/$defs/LocalReference"
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "publication": {
+          "$ref": "#/$defs/GitPublication"
+        },
+        "values": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "clusterRef",
+        "publication"
+      ],
+      "type": "object"
+    },
+    "GitPublication": {
       "additionalProperties": false,
       "description": "Git coordinates used as a rendered output and Argo CD source.",
       "properties": {
@@ -33,51 +78,6 @@
       },
       "required": [
         "revision"
-      ],
-      "type": "object"
-    },
-    "GitOpsResourceMetadata": {
-      "additionalProperties": false,
-      "description": "Metadata shared by local GitOps compiler resources.",
-      "properties": {
-        "labels": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object"
-        },
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "type": "object"
-    },
-    "GitOpsTargetSpec": {
-      "additionalProperties": false,
-      "properties": {
-        "destination": {
-          "$ref": "#/$defs/GitDestination"
-        },
-        "profile": {
-          "type": "string"
-        },
-        "projects": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "values": {
-          "additionalProperties": true,
-          "type": "object"
-        }
-      },
-      "required": [
-        "profile",
-        "destination"
       ],
       "type": "object"
     },

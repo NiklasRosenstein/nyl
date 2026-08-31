@@ -56,6 +56,7 @@ schema:
 
 ```bash
 nyl generate schema resource GitOpsTarget
+nyl generate schema resource Cluster
 nyl generate schema gitops
 nyl generate schema all --output-dir book/public/reference/schemas
 ```

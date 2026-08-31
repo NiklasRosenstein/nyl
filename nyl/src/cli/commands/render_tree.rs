@@ -5,7 +5,7 @@ use clap::Args;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
-    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexDestination,
+    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexPublication,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -21,7 +21,7 @@ pub struct RenderTreeArgs {
     #[arg(long)]
     pub target: String,
 
-    /// Root of the destination Git worktree.
+    /// Root of the publication Git worktree.
     #[arg(long)]
     pub output_dir: PathBuf,
 
@@ -42,10 +42,10 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         unreachable!("inventory key and resource variant must agree");
     };
     let output_dir = absolute_path(&args.output_dir)?;
-    let output_root = if target.spec.destination.path_prefix.is_empty() {
+    let output_root = if target.spec.publication.path_prefix.is_empty() {
         output_dir.clone()
     } else {
-        output_dir.join(&target.spec.destination.path_prefix)
+        output_dir.join(&target.spec.publication.path_prefix)
     };
     if output_root == initial.project_root {
         return Err(NylError::config(
@@ -73,19 +73,19 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     }
 
     let (source_commit, dirty) = source_state(&inventory.project_root)?;
-    let inputs = hash_inputs(&inventory.project_root, &compiled.inputs)?;
+    let inputs = hash_inputs(&inventory, &compiled)?;
     let repository_identity = compiled
         .repository_name
         .clone()
         .unwrap_or_else(|| compiled.repository.repo_url.clone());
     let index = RenderIndex::new(
         args.target.clone(),
-        RenderIndexDestination {
+        compiled.cluster.metadata.name.clone(),
+        RenderIndexPublication {
             repository: repository_identity,
-            revision: compiled.target.spec.destination.revision.clone(),
-            path_prefix: compiled.target.spec.destination.path_prefix.clone(),
+            revision: compiled.target.spec.publication.revision.clone(),
+            path_prefix: compiled.target.spec.publication.path_prefix.clone(),
         },
-        compiled.target.spec.profile.clone(),
         source_commit,
         dirty,
         inputs,
@@ -142,17 +142,46 @@ fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
     Ok((commit, dirty))
 }
 
-fn hash_inputs(project_root: &Path, inputs: &std::collections::BTreeSet<PathBuf>) -> Result<BTreeMap<String, String>> {
+pub(super) fn hash_inputs(
+    inventory: &crate::gitops::GitOpsInventory,
+    compiled: &crate::gitops::CompiledTargetTree,
+) -> Result<BTreeMap<String, String>> {
+    let cluster_resource = inventory
+        .get(GitOpsResourceKind::Cluster, &compiled.cluster.metadata.name)
+        .ok_or_else(|| NylError::config("Compiled Cluster is missing from the GitOps inventory"))?;
+    let cluster_path = &cluster_resource.source_path;
+    let mut render_cluster = compiled.cluster.clone();
+    render_cluster.spec.live = None;
+    let cluster_bytes = serde_json::to_vec(&render_cluster)?;
     let mut hashes = BTreeMap::new();
-    for relative in inputs {
+    for relative in &compiled.inputs {
         if relative.starts_with("@remote") {
             continue;
         }
-        let path = project_root.join(relative);
+        let path = inventory.project_root.join(relative);
         if path.is_file() {
+            let bytes = if relative == cluster_path {
+                let contents = std::fs::read_to_string(&path)?;
+                if contents.matches(&cluster_resource.raw_document).count() != 1 {
+                    return Err(NylError::config(format!(
+                        "Cannot safely locate Cluster '{}' in {} for provenance hashing",
+                        compiled.cluster.metadata.name,
+                        path.display()
+                    )));
+                }
+                contents
+                    .replacen(
+                        &cluster_resource.raw_document,
+                        std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
+                        1,
+                    )
+                    .into_bytes()
+            } else {
+                std::fs::read(path)?
+            };
             hashes.insert(
                 relative.to_string_lossy().replace('\\', "/"),
-                crate::gitops::reconcile::sha256(&std::fs::read(path)?),
+                crate::gitops::reconcile::sha256(&bytes),
             );
         }
     }

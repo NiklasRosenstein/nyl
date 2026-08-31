@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{NylError, Result};
 
-pub const RENDER_INDEX_VERSION: u32 = 1;
+pub const RENDER_INDEX_VERSION: u32 = 2;
 pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
 const TRANSACTION_TEMP_PATH: &str = "_nyl/transaction.json.tmp";
@@ -23,7 +23,7 @@ struct RenderTransaction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RenderIndexDestination {
+pub struct RenderIndexPublication {
     pub repository: String,
     pub revision: String,
     #[serde(rename = "pathPrefix")]
@@ -36,8 +36,8 @@ pub struct RenderIndexDestination {
 pub struct RenderIndex {
     pub version: u32,
     pub target: String,
-    pub destination: RenderIndexDestination,
-    pub profile: String,
+    pub cluster: String,
+    pub publication: RenderIndexPublication,
     #[serde(rename = "sourceCommit", skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
     pub dirty: bool,
@@ -48,8 +48,8 @@ pub struct RenderIndex {
 impl RenderIndex {
     pub fn new(
         target: String,
-        destination: RenderIndexDestination,
-        profile: String,
+        cluster: String,
+        publication: RenderIndexPublication,
         source_commit: Option<String>,
         dirty: bool,
         inputs: BTreeMap<String, String>,
@@ -57,8 +57,8 @@ impl RenderIndex {
         Self {
             version: RENDER_INDEX_VERSION,
             target,
-            destination,
-            profile,
+            cluster,
+            publication,
             source_commit,
             dirty,
             inputs,
@@ -67,7 +67,10 @@ impl RenderIndex {
     }
 
     fn same_owner(&self, other: &Self) -> bool {
-        self.version == other.version && self.target == other.target && self.destination == other.destination
+        self.version == other.version
+            && self.target == other.target
+            && self.cluster == other.cluster
+            && self.publication == other.publication
     }
 }
 
@@ -100,6 +103,15 @@ pub fn reconcile_rendered_tree(
         .iter()
         .map(|(path, bytes)| Ok((path_text(path)?.to_string(), sha256(bytes))))
         .collect::<Result<_>>()?;
+    if let Some(previous) = &previous {
+        if previous.same_owner(&next_index)
+            && previous.inputs == next_index.inputs
+            && previous.files == next_index.files
+        {
+            next_index.source_commit.clone_from(&previous.source_commit);
+            next_index.dirty = previous.dirty;
+        }
+    }
     let resumes_transaction = transaction
         .as_ref()
         .is_some_and(|transaction| transaction.index == next_index);
@@ -107,7 +119,7 @@ pub fn reconcile_rendered_tree(
     if let Some(previous) = &previous {
         if !previous.same_owner(&next_index) {
             return Err(NylError::config(format!(
-                "Rendered ownership index {} belongs to a different target or destination",
+                "Rendered ownership index {} belongs to a different target, cluster, or publication",
                 index_path.display()
             )));
         }
@@ -316,12 +328,12 @@ mod tests {
     fn index() -> RenderIndex {
         RenderIndex::new(
             "production".to_string(),
-            RenderIndexDestination {
+            "kasoku".to_string(),
+            RenderIndexPublication {
                 repository: "deploy".to_string(),
                 revision: "deploy/production".to_string(),
                 path_prefix: "production".to_string(),
             },
-            "production".to_string(),
             None,
             true,
             BTreeMap::new(),
@@ -345,6 +357,24 @@ mod tests {
         assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"b\n");
         assert!(!root.join("apps/stale.yaml").exists());
         assert_eq!(fs::read_to_string(root.join("unowned.txt")).unwrap(), "keep\n");
+    }
+
+    #[test]
+    fn preserves_provenance_when_semantic_inputs_and_outputs_are_unchanged() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let mut first = index();
+        first.source_commit = Some("first".to_string());
+        first.dirty = false;
+        reconcile_rendered_tree(&root, &desired, first).unwrap();
+
+        let mut second = index();
+        second.source_commit = Some("second".to_string());
+        second.dirty = true;
+        let reconciled = reconcile_rendered_tree(&root, &desired, second).unwrap();
+        assert_eq!(reconciled.source_commit.as_deref(), Some("first"));
+        assert!(!reconciled.dirty);
     }
 
     #[test]

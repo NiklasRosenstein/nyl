@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::resources::{ApplicationDeletionPolicy, GitOpsSyncPolicy, KubernetesDestination};
+use crate::resources::{ApplicationDeletionPolicy, ClusterDestination, GitOpsSyncPolicy};
 use crate::{NylError, Result};
 
 const FOREGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io";
@@ -18,7 +18,7 @@ pub struct DirectoryApplicationInput {
     pub repo_url: String,
     pub revision: String,
     pub rendered_path: String,
-    pub destination: KubernetesDestination,
+    pub destination: ClusterDestination,
     pub destination_namespace: String,
     pub sync_policy: Option<GitOpsSyncPolicy>,
     pub deletion_policy: ApplicationDeletionPolicy,
@@ -111,10 +111,9 @@ mod tests {
             repo_url: "https://example.invalid/deploy.git".to_string(),
             revision: "deploy/production".to_string(),
             rendered_path: "production/workloads/api".to_string(),
-            destination: KubernetesDestination {
+            destination: ClusterDestination {
                 server: Some("https://kubernetes.default.svc".to_string()),
                 name: None,
-                namespace: None,
             },
             destination_namespace: "api".to_string(),
             sync_policy: None,

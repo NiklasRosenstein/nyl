@@ -10,8 +10,8 @@ use walkdir::WalkDir;
 use crate::git::GitManager;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
-    ApplicationGroup, ApplicationGroupSource, GitDestination, GitOpsResource, GitOpsResourceKind, GitOpsTarget,
-    InlineGitRepository, RendererConfig, RendererConfigMode,
+    ApplicationGroup, ApplicationGroupSource, Cluster, ClusterDestination, GitOpsResource, GitOpsResourceKind,
+    GitOpsTarget, GitPublication, InlineGitRepository, RendererConfig, RendererConfigMode,
 };
 use crate::template::TemplateEngine;
 use crate::util::SourceContext;
@@ -26,6 +26,7 @@ use super::{
 #[derive(Debug)]
 pub struct CompiledTargetTree {
     pub target: GitOpsTarget,
+    pub cluster: Cluster,
     pub repository_name: Option<String>,
     pub repository: InlineGitRepository,
     pub files: BTreeMap<PathBuf, Vec<u8>>,
@@ -37,7 +38,7 @@ struct ManagedNamespaceOwner {
     manifest: Value,
     application_namespace: String,
     project: String,
-    destination: crate::resources::KubernetesDestination,
+    destination: ClusterDestination,
     sync_policy: Option<crate::resources::GitOpsSyncPolicy>,
     deletion_policy: crate::resources::ApplicationDeletionPolicy,
     labels: BTreeMap<String, String>,
@@ -46,23 +47,24 @@ struct ManagedNamespaceOwner {
 
 /// Validate cross-resource references and target-prefix ownership without rendering releases.
 pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
-    let mut destinations = Vec::new();
+    let mut publications = Vec::new();
     for discovered in inventory.resources.values() {
         match discovered.resource.as_ref() {
             Some(GitOpsResource::GitOpsTarget(target)) => {
-                let (_, repository) = resolve_git_destination(inventory, &target.spec.destination)?;
+                resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+                let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
                 for project in &target.spec.projects {
                     resolve_project(inventory, project)?;
                 }
-                destinations.push((
+                publications.push((
                     target.metadata.name.as_str(),
                     crate::git::normalize_git_url_for_equality(&repository.repo_url),
                     crate::git::normalize_git_url_for_equality(
                         repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
                     ),
                     repository.repo_url,
-                    normalize_branch_revision(&target.spec.destination.revision),
-                    target.spec.destination.path_prefix.as_str(),
+                    normalize_branch_revision(&target.spec.publication.revision),
+                    target.spec.publication.path_prefix.as_str(),
                 ));
             }
             Some(GitOpsResource::ApplicationGroup(group)) => {
@@ -76,11 +78,11 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
             _ => {}
         }
     }
-    for (index, left) in destinations.iter().enumerate() {
-        for right in &destinations[index + 1..] {
+    for (index, left) in publications.iter().enumerate() {
+        for right in &publications[index + 1..] {
             if (left.1 == right.1 || left.2 == right.2) && left.4 == right.4 && paths_overlap(left.5, right.5) {
                 return Err(NylError::config(format!(
-                    "GitOpsTarget {:?} and {:?} have overlapping path prefixes {:?} and {:?} on {}@{}",
+                    "GitOpsTarget {:?} and {:?} have overlapping publication path prefixes {:?} and {:?} on {}@{}",
                     left.0, right.0, left.5, right.5, left.3, left.4
                 )));
             }
@@ -106,9 +108,10 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 #[allow(clippy::too_many_lines)]
 pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str) -> Result<CompiledTargetTree> {
     validate_gitops_inventory(inventory)?;
-    let target = match &inventory
+    let target_discovered = inventory
         .get(GitOpsResourceKind::GitOpsTarget, target_name)
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget {target_name:?} was not found")))?
+        .ok_or_else(|| NylError::config(format!("GitOpsTarget {target_name:?} was not found")))?;
+    let target = match &target_discovered
         .resource
         .as_ref()
         .ok_or_else(|| NylError::config(format!("GitOpsTarget {target_name:?} must be static")))?
@@ -116,10 +119,14 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         GitOpsResource::GitOpsTarget(target) => target.clone(),
         _ => unreachable!("inventory kind key and resource variant must agree"),
     };
-    let (repository_name, repository) = resolve_git_destination(inventory, &target.spec.destination)?;
-    let central_session = RenderSession::for_target(&inventory.project_root, &target)?;
+    let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+    let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
+    let central_session = RenderSession::for_target(&inventory.project_root, &target, &cluster)?;
     let mut files = BTreeMap::new();
-    let mut inputs = BTreeSet::new();
+    let mut inputs = BTreeSet::from([target_discovered.source_path.clone(), cluster_path]);
+    if let Some(repository_path) = repository_path {
+        inputs.insert(repository_path);
+    }
     let mut emitted_projects = BTreeSet::new();
     let mut git_manager = None;
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
@@ -140,14 +147,6 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     }
     groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
 
-    let uses_destination_server = groups.iter().any(|(_, group)| group.spec.destination.server.is_some());
-    let uses_destination_name = groups.iter().any(|(_, group)| group.spec.destination.name.is_some());
-    if uses_destination_server && uses_destination_name {
-        return Err(NylError::config(format!(
-            "GitOpsTarget {target_name:?} mixes ApplicationGroup destination.server and destination.name; use one cluster identity representation per target"
-        )));
-    }
-
     for (group_resource_path, group) in groups {
         inputs.insert(group_resource_path.clone());
         let (project_id, project_path, project) =
@@ -163,6 +162,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         }
 
         let source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
+        inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
             RendererConfigMode::Central if !source.remote => &central_session,
             _ => source
@@ -187,22 +187,18 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             };
             let destination_namespace = group
                 .spec
-                .destination
-                .namespace
+                .destination_namespace
                 .clone()
                 .unwrap_or_else(|| release.metadata.namespace.clone());
             if let Some(manifest) =
                 take_managed_namespace(&mut rendered.manifests, &destination_namespace, &group.spec.namespace)?
             {
-                let key = (
-                    destination_identity(&group.spec.destination),
-                    destination_namespace.clone(),
-                );
+                let key = (cluster.metadata.name.clone(), destination_namespace.clone());
                 let owner = ManagedNamespaceOwner {
                     manifest,
                     application_namespace: group.spec.application_namespace.clone(),
                     project: argocd_project_name.clone(),
-                    destination: group.spec.destination.clone(),
+                    destination: cluster.spec.destination.clone(),
                     sync_policy: group.spec.sync_policy.clone(),
                     deletion_policy: group.spec.application_deletion_policy,
                     labels: group.spec.labels.clone(),
@@ -228,7 +224,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                     .and_then(Value::as_str)
                     .unwrap_or("<unknown>");
                 return Err(NylError::config(format!(
-                    "NylRelease {:?} renders Namespace {name:?} outside its destination namespace {destination_namespace:?}; Namespace ownership must be assigned through the ApplicationGroup destination",
+                    "NylRelease {:?} renders Namespace {name:?} outside its destination namespace {destination_namespace:?}; Namespace ownership must be assigned through ApplicationGroup destinationNamespace and namespace policy",
                     release.metadata.name
                 )));
             }
@@ -242,12 +238,12 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);
-            let cluster = destination_identity(&group.spec.destination);
             for manifest in &rendered.manifests {
                 let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
-                if let Some(previous) =
-                    workload_owners.insert((cluster.clone(), key.clone()), application_name_hint(&group, &release))
-                {
+                if let Some(previous) = workload_owners.insert(
+                    (cluster.metadata.name.clone(), key.clone()),
+                    application_name_hint(&group, &release),
+                ) {
                     return Err(NylError::config(format!(
                         "Rendered resource {key} is owned by more than one workload Application ({previous:?} and {:?})",
                         release.metadata.name
@@ -260,15 +256,15 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
 
             let application_name = render_application_name(session, &group, &release)?;
             validate_path_segment("rendered Application name", &application_name)?;
-            let rendered_path = join_posix(target.spec.destination.path_prefix.as_str(), &release_directory)?;
+            let rendered_path = join_posix(target.spec.publication.path_prefix.as_str(), &release_directory)?;
             let mut application = build_directory_application(&DirectoryApplicationInput {
                 name: application_name.clone(),
                 application_namespace: group.spec.application_namespace.clone(),
                 project: argocd_project_name.clone(),
                 repo_url: repository.repo_url.clone(),
-                revision: target.spec.destination.revision.clone(),
+                revision: target.spec.publication.revision.clone(),
                 rendered_path,
-                destination: group.spec.destination.clone(),
+                destination: cluster.spec.destination.clone(),
                 destination_namespace,
                 sync_policy: group.spec.sync_policy.clone(),
                 deletion_policy: group.spec.application_deletion_policy,
@@ -294,13 +290,13 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         for (relative, bytes) in render_manifest_layout(&[owner.manifest])? {
             insert_file(&mut files, namespace_directory.join(relative), bytes)?;
         }
-        let rendered_path = join_posix(target.spec.destination.path_prefix.as_str(), &namespace_directory)?;
+        let rendered_path = join_posix(target.spec.publication.path_prefix.as_str(), &namespace_directory)?;
         let application = build_directory_application(&DirectoryApplicationInput {
             name: application_name.clone(),
             application_namespace: owner.application_namespace.clone(),
             project: owner.project,
             repo_url: repository.repo_url.clone(),
-            revision: target.spec.destination.revision.clone(),
+            revision: target.spec.publication.revision.clone(),
             rendered_path,
             destination: owner.destination,
             destination_namespace: namespace,
@@ -320,20 +316,12 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
 
     Ok(CompiledTargetTree {
         target,
+        cluster,
         repository_name,
         repository,
         files,
         inputs,
     })
-}
-
-fn destination_identity(destination: &crate::resources::KubernetesDestination) -> String {
-    destination
-        .server
-        .as_ref()
-        .map(|server| format!("server:{server}"))
-        .or_else(|| destination.name.as_ref().map(|name| format!("name:{name}")))
-        .expect("validated Kubernetes destination has server or name")
 }
 
 fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::NylRelease) -> String {
@@ -351,17 +339,17 @@ fn group_applies(group: &ApplicationGroup, target: &GitOpsTarget) -> bool {
         })
 }
 
-fn resolve_git_destination(
+fn resolve_git_publication(
     inventory: &GitOpsInventory,
-    destination: &GitDestination,
-) -> Result<(Option<String>, InlineGitRepository)> {
-    if let Some(repository) = &destination.repository {
-        return Ok((None, repository.clone()));
+    publication: &GitPublication,
+) -> Result<(Option<String>, InlineGitRepository, Option<PathBuf>)> {
+    if let Some(repository) = &publication.repository {
+        return Ok((None, repository.clone(), None));
     }
-    let reference = destination
+    let reference = publication
         .repository_ref
         .as_ref()
-        .expect("validated destination has a repository reference or inline repository");
+        .expect("validated publication has a repository reference or inline repository");
     let discovered = inventory
         .get(GitOpsResourceKind::GitRepository, &reference.name)
         .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
@@ -374,7 +362,18 @@ fn resolve_git_destination(
             repo_url: repository.spec.repo_url.clone(),
             publish_url: repository.spec.publish_url.clone(),
         },
+        Some(discovered.source_path.clone()),
     ))
+}
+
+fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
+    let discovered = inventory
+        .get(GitOpsResourceKind::Cluster, name)
+        .ok_or_else(|| NylError::config(format!("Cluster {name:?} was not found")))?;
+    let Some(GitOpsResource::Cluster(cluster)) = &discovered.resource else {
+        return Err(NylError::config(format!("Cluster {name:?} must be static")));
+    };
+    Ok((cluster.clone(), discovered.source_path.clone()))
 }
 
 fn resolve_project(inventory: &GitOpsInventory, project_ref: &str) -> Result<()> {
@@ -395,7 +394,7 @@ fn resolve_effective_project(
     let Some(GitOpsResource::AppProjectDefinition(project)) = render_effective_control(discovered, session)? else {
         return Err(NylError::config(format!(
             "AppProjectDefinition {project_ref:?} is omitted for target {}",
-            session.profile_name()
+            session.target_name()
         )));
     };
     Ok((project_ref.to_string(), discovered.source_path.clone(), project))
@@ -440,6 +439,7 @@ fn render_effective_control(
     })?;
     let effective_identity = match &effective {
         GitOpsResource::GitRepository(resource) => (GitOpsResourceKind::GitRepository, &resource.metadata.name),
+        GitOpsResource::Cluster(resource) => (GitOpsResourceKind::Cluster, &resource.metadata.name),
         GitOpsResource::GitOpsTarget(resource) => (GitOpsResourceKind::GitOpsTarget, &resource.metadata.name),
         GitOpsResource::AppProjectDefinition(resource) => {
             (GitOpsResourceKind::AppProjectDefinition, &resource.metadata.name)
@@ -464,6 +464,7 @@ struct ResolvedGroupSource {
     renderer_mode: RendererConfigMode,
     source_session: Option<RenderSession>,
     remote: bool,
+    provenance_inputs: Vec<PathBuf>,
 }
 
 fn resolve_group_source(
@@ -473,9 +474,13 @@ fn resolve_group_source(
     target: &GitOpsTarget,
     git_manager: &mut Option<GitManager>,
 ) -> Result<ResolvedGroupSource> {
+    let mut provenance_inputs = Vec::new();
     let (root, source, remote_root) = match &group.spec.source {
         Some(source) if source.is_remote() => {
-            let repository = resolve_source_repository(inventory, source)?;
+            let (repository, repository_path) = resolve_source_repository(inventory, source)?;
+            if let Some(repository_path) = repository_path {
+                provenance_inputs.push(repository_path);
+            }
             let manager = match git_manager {
                 Some(manager) => manager,
                 None => git_manager.insert(GitManager::new().map_err(NylError::Git)?),
@@ -547,10 +552,16 @@ fn resolve_group_source(
                 source.renderer_config.project_path.as_deref().unwrap_or("."),
                 "ApplicationGroup source.rendererConfig.projectPath",
             )?;
-            Some(RenderSession::for_remote_target(&project_root, target)?)
+            let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+            Some(RenderSession::for_remote_target(&project_root, target, &cluster)?)
         }
         (Some(_), RendererConfigMode::Central) => {
-            Some(RenderSession::for_untrusted_source(&inventory.project_root, target)?)
+            let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+            Some(RenderSession::for_untrusted_source(
+                &inventory.project_root,
+                target,
+                &cluster,
+            )?)
         }
         (None, _) => None,
     };
@@ -561,6 +572,7 @@ fn resolve_group_source(
         renderer_mode: source.renderer_config.mode,
         source_session,
         remote: remote_root.is_some(),
+        provenance_inputs,
     })
 }
 
@@ -606,9 +618,9 @@ fn checked_checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Res
 fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
-) -> Result<InlineGitRepository> {
+) -> Result<(InlineGitRepository, Option<PathBuf>)> {
     if let Some(repository) = &source.repository {
-        return Ok(repository.clone());
+        return Ok((repository.clone(), None));
     }
     let reference = source
         .repository_ref
@@ -620,10 +632,13 @@ fn resolve_source_repository(
     let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
         unreachable!("inventory kind key and resource variant must agree");
     };
-    Ok(InlineGitRepository {
-        repo_url: repository.spec.repo_url.clone(),
-        publish_url: repository.spec.publish_url.clone(),
-    })
+    Ok((
+        InlineGitRepository {
+            repo_url: repository.spec.repo_url.clone(),
+            publish_url: repository.spec.publish_url.clone(),
+        },
+        Some(discovered.source_path.clone()),
+    ))
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
@@ -746,7 +761,7 @@ fn apply_release_application_override(
             )));
         }
     }
-    *application = crate::profiles::deep_merge_value(Some(application.clone()), Value::Object(override_value.clone()));
+    *application = crate::util::deep_merge_value(Some(application.clone()), Value::Object(override_value.clone()));
     Ok(())
 }
 

@@ -341,7 +341,7 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // Command should parse flags, then fail when cluster connectivity cannot be established.
+    // Command should parse flags, then enforce explicit target selection for live operations.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
@@ -354,7 +354,7 @@ helm_chart_search_paths = ["."]
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("failed to infer config"));
+        .stderr(predicate::str::contains("nyl apply requires --target"));
 }
 
 #[test]
@@ -423,7 +423,7 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // Command should parse flags, then fail when cluster connectivity cannot be established.
+    // Command should parse flags, then enforce explicit target selection for live operations.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
@@ -435,5 +435,5 @@ helm_chart_search_paths = ["."]
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("failed to infer config"));
+        .stderr(predicate::str::contains("nyl diff requires --target"));
 }

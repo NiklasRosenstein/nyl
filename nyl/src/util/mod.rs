@@ -12,6 +12,20 @@ pub mod source_context;
 pub use fs::{find_config_file, resolve_path, resolve_paths};
 pub use source_context::SourceContext;
 
+/// Recursively merge JSON objects, replacing arrays and scalar values.
+pub fn deep_merge_value(base: Option<serde_json::Value>, overlay: serde_json::Value) -> serde_json::Value {
+    match (base, overlay) {
+        (Some(serde_json::Value::Object(mut base)), serde_json::Value::Object(overlay)) => {
+            for (key, overlay_value) in overlay {
+                let base_value = base.remove(&key);
+                base.insert(key, deep_merge_value(base_value, overlay_value));
+            }
+            serde_json::Value::Object(base)
+        }
+        (_, overlay) => overlay,
+    }
+}
+
 /// Compute SHA256 hash of a string
 pub fn compute_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
@@ -53,6 +67,25 @@ pub fn sanitize_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_merge_recurses_through_objects_and_replaces_other_values() {
+        let base = serde_json::json!({
+            "nested": {"cluster": true, "shared": "cluster"},
+            "array": ["cluster"]
+        });
+        let overlay = serde_json::json!({
+            "nested": {"target": true, "shared": "target"},
+            "array": ["target"]
+        });
+        assert_eq!(
+            deep_merge_value(Some(base), overlay),
+            serde_json::json!({
+                "nested": {"cluster": true, "target": true, "shared": "target"},
+                "array": ["target"]
+            })
+        );
+    }
 
     #[test]
     fn test_sanitize_url_with_credentials() {

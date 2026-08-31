@@ -3,6 +3,51 @@ use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
+fn create_gitops_target_fixture(temp: &TempDir) {
+    git2::Repository::init(temp.path()).unwrap();
+    fs::create_dir_all(temp.path().join("config/clusters")).unwrap();
+    fs::create_dir_all(temp.path().join("config/targets")).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
+    fs::write(
+        temp.path().join("config/clusters/kasoku.yaml"),
+        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: Cluster
+metadata:
+  name: kasoku
+spec:
+  destination:
+    name: kasoku
+  kubernetes:
+    kubeVersion: 1.31.0
+    apiVersions: [v1, apps/v1]
+  values:
+    region: fsn1
+    environment: cluster-default
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("config/targets/production.yaml"),
+        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: GitOpsTarget
+metadata:
+  name: production
+spec:
+  clusterRef:
+    name: kasoku
+  values:
+    environment: production
+  publication:
+    repository:
+      repoURL: https://example.com/deploy.git
+    revision: deploy/production
+    pathPrefix: production
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_cli_help() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
@@ -84,20 +129,61 @@ data:
 }
 
 #[test]
-fn test_diff_command_requires_default_profile_when_profiles_exist() {
+fn test_cluster_list_is_static_and_target_render_merges_values() {
     let temp = TempDir::new().unwrap();
-
-    // Create config with a profile that is NOT named "default"
+    create_gitops_target_fixture(&temp);
     fs::write(
-        temp.path().join("nyl.toml"),
-        r#"
-[project]
-
-[profile.staging.values]
-environment = "staging"
+        temp.path().join("application.yaml"),
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rendered
+data:
+  environment: "{{ values.environment }}"
+  region: "{{ values.region }}"
+  cluster: "{{ cluster.metadata.name }}"
+  target: "{{ target.metadata.name }}"
 "#,
     )
     .unwrap();
+
+    let mut list = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    list.current_dir(temp.path()).args(["cluster", "list"]);
+    list.assert().success().stdout(predicate::eq("kasoku\n"));
+
+    let mut render = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    render
+        .current_dir(temp.path())
+        .args(["render", "--offline", "--target", "production", "application.yaml"]);
+    render
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("environment: production"))
+        .stdout(predicate::str::contains("region: fsn1"))
+        .stdout(predicate::str::contains("cluster: kasoku"))
+        .stdout(predicate::str::contains("target: production"));
+
+    let mut conflicting = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    conflicting.current_dir(temp.path()).args([
+        "render",
+        "--offline",
+        "--target",
+        "production",
+        "--kube-version",
+        "1.32.0",
+        "application.yaml",
+    ]);
+    conflicting
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Cluster resource is authoritative"));
+}
+
+#[test]
+fn test_diff_command_requires_target() {
+    let temp = TempDir::new().unwrap();
+
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -116,25 +202,14 @@ metadata:
     cmd.arg("diff").arg("test-resource.yaml");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Profile 'default' not found"))
-        .stderr(predicate::str::contains("Available profiles: staging"));
+        .stderr(predicate::str::contains("nyl diff requires --target"));
 }
 
 #[test]
-fn test_apply_command_requires_default_profile_when_profiles_exist() {
+fn test_apply_command_requires_target() {
     let temp = TempDir::new().unwrap();
 
-    // Create config with a profile that is NOT named "default"
-    fs::write(
-        temp.path().join("nyl.toml"),
-        r#"
-[project]
-
-[profile.production.values]
-environment = "production"
-"#,
-    )
-    .unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
     fs::write(
@@ -153,8 +228,7 @@ metadata:
     cmd.arg("apply").arg("test-resource.yaml");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Profile 'default' not found"))
-        .stderr(predicate::str::contains("Available profiles: production"));
+        .stderr(predicate::str::contains("nyl apply requires --target"));
 }
 
 #[test]
@@ -320,10 +394,10 @@ fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
 }
 
 #[test]
-fn test_render_non_file_not_found_error_in_argocd_does_not_print_diagnostics() {
+fn test_render_rejects_removed_profile_flag_without_argocd_diagnostics() {
     let temp = TempDir::new().unwrap();
 
-    fs::write(temp.path().join("nyl.toml"), "[project]\n[profile.default.values]\n").unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
         temp.path().join("test-resource.yaml"),
@@ -346,6 +420,6 @@ metadata:
     cmd.env("ARGOCD_APP_NAMESPACE", "argocd");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Profile 'missing' not found"))
+        .stderr(predicate::str::contains("unexpected argument '--profile'"))
         .stderr(predicate::str::contains("[nyl-debug] ---- begin argocd file-not-found diagnostics ----").not());
 }

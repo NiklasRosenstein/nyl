@@ -1,5 +1,5 @@
 pub mod apply;
-pub mod cluster_info;
+pub mod cluster;
 pub mod diff;
 pub mod diff_tree;
 pub mod generate;

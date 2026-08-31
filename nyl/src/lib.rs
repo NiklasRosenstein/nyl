@@ -31,7 +31,6 @@ pub mod gitops;
 pub mod helm;
 pub mod kubernetes;
 pub mod postprocess;
-pub mod profiles;
 pub mod resources;
 pub mod secrets;
 pub mod template;

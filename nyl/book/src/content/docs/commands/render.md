@@ -27,15 +27,15 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `-p, --profile <PROFILE>` - Profile to use for rendering. If omitted, Nyl tries `default`; if profiles exist but `default` is missing, rendering fails with an error.
+- `--target <TARGET>` - GitOpsTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 
 ### Offline Mode Options
 
-- `--offline` - Skip Kubernetes discovery and use CLI/config-provided API information (useful for CI/CD)
-- `--kube-version <KUBE_VERSION>` - Kubernetes version for Helm templating. Overrides `nyl.toml`.
-- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for Helm, comma-separated or repeated. Overrides `nyl.toml`.
+- `--offline` - Skip Kubernetes discovery and use the target Cluster or explicit API information.
+- `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless offline render.
+- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless offline render, comma-separated or repeated.
 
 ## Examples
 
@@ -45,8 +45,8 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 # Render a manifest file
 nyl render manifest.yaml
 
-# Render with specific profile
-nyl render -p production manifest.yaml
+# Render with a configured target
+nyl render --target production manifest.yaml
 
 # Filter top-level input resources
 nyl render --only-source-kind ConfigMap manifest.yaml
@@ -61,11 +61,11 @@ nyl render --only-kind Deployment,Service manifest.yaml
 ### Offline Mode
 
 ```bash
-# Render in offline mode using CLI-provided Kubernetes target metadata
+# Targetless offline render with explicit Kubernetes capabilities
 nyl render --offline --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
 
-# Render in offline mode using [project.kubernetes] or [profile.<name>.kubernetes]
-nyl render --offline -p production manifest.yaml
+# Target-aware offline render using the Cluster's committed capabilities
+nyl render --target production --offline manifest.yaml
 ```
 
 ### Advanced Options
@@ -78,7 +78,7 @@ nyl render --max-depth 5 manifest.yaml
 nyl render --track-parent manifest.yaml
 
 # Combine options
-nyl render -p staging --max-depth 3 --track-parent manifest.yaml
+nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 ```
 
 ## Notes

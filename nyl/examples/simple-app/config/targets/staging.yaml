@@ -1,0 +1,23 @@
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: GitOpsTarget
+metadata:
+  name: staging
+spec:
+  clusterRef:
+    name: local
+  values:
+    environment: staging
+    namespace: staging
+    imageTag: staging-v1.0.0
+    replicas: 2
+    debug: false
+    tracing: false
+    logLevel: info
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: 1000m, memory: 512Mi}
+  publication:
+    repository:
+      repoURL: https://example.invalid/simple-app-deploy.git
+    revision: deploy/main
+    pathPrefix: staging

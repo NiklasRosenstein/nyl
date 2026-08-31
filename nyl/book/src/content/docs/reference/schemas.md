@@ -19,6 +19,7 @@ Committed schema used in published docs:
 Each scaffolded resource points at its kind-specific schema:
 
 - [`git-repository.schema.json`](./git-repository.schema.json)
+- [`cluster.schema.json`](./cluster.schema.json)
 - [`gitops-target.schema.json`](./gitops-target.schema.json)
 - [`app-project-definition.schema.json`](./app-project-definition.schema.json)
 - [`application-group.schema.json`](./application-group.schema.json)

@@ -6,15 +6,13 @@ use serde_json::Value;
 
 use crate::cli::commands::render::{
     deduplicate_manifests, generate_resource, is_renderable_resource, load_resources, needs_helm_rendering,
-    prepare_manifests_for_output, resolve_offline_kubernetes_target, resolve_strip_empty_metadata_labels_mode,
-    select_profile_from_project,
+    prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode,
 };
 use crate::config::ProjectConfig;
 use crate::postprocess::apply_kyverno_policies;
-use crate::profiles::{deep_merge_value, Profile};
 use crate::resources::{
-    extract_all_kyverno_policies, extract_application_generators, extract_nyl_release, GitOpsTarget, KyvernoScope,
-    NylRelease,
+    extract_all_kyverno_policies, extract_application_generators, extract_nyl_release, Cluster, GitOpsTarget,
+    KyvernoScope, NylRelease,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -24,8 +22,9 @@ use crate::{NylError, Result};
 pub struct RenderSession {
     project_root: PathBuf,
     project_config: ProjectConfig,
-    profile: Profile,
-    profile_name: String,
+    target_name: String,
+    kube_version: String,
+    api_versions: Vec<String>,
     template_context: TemplateContext,
 }
 
@@ -40,24 +39,32 @@ pub struct RenderedRelease {
 
 impl RenderSession {
     /// Build an offline rendering session from a project root and effective target.
-    pub fn for_target(project_root: &Path, target: &GitOpsTarget) -> Result<Self> {
-        Self::build(project_root, target, true, false)
+    pub fn for_target(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
+        Self::build(project_root, target, cluster, true, false)
     }
 
     /// Build with the central project configuration but without secrets or
     /// process environment for independently controlled source manifests.
-    pub fn for_untrusted_source(project_root: &Path, target: &GitOpsTarget) -> Result<Self> {
-        Self::build(project_root, target, false, false)
+    pub fn for_untrusted_source(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
+        Self::build(project_root, target, cluster, false, false)
     }
 
     /// Build a restricted remote-source session. Remote projects cannot load a
     /// secrets provider from their checkout.
-    pub fn for_remote_target(project_root: &Path, target: &GitOpsTarget) -> Result<Self> {
-        Self::build(project_root, target, false, true)
+    pub fn for_remote_target(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
+        Self::build(project_root, target, cluster, false, true)
     }
 
-    fn build(project_root: &Path, target: &GitOpsTarget, load_secrets: bool, restrict_checkout: bool) -> Result<Self> {
+    fn build(
+        project_root: &Path,
+        target: &GitOpsTarget,
+        cluster: &Cluster,
+        load_secrets: bool,
+        restrict_checkout: bool,
+    ) -> Result<Self> {
         target.validate()?;
+        cluster.validate()?;
+        let (kube_version, api_versions) = required_cluster_capabilities(cluster)?;
         let project_root = project_root
             .canonicalize()
             .map_err(|error| NylError::config(format!("Failed to resolve project root: {error}")))?;
@@ -121,39 +128,37 @@ impl RenderSession {
                 }
             }
         }
-        let (mut profile, profile_name) = select_profile_from_project(&project_config, Some(&target.spec.profile))?;
-
-        let profile_values = serde_json::to_value(&profile.values)?;
+        let cluster_values = serde_json::to_value(&cluster.spec.values)?;
         let target_values = serde_json::to_value(&target.spec.values)?;
-        let effective_values = deep_merge_value(Some(profile_values), target_values);
-        profile.values = serde_json::from_value(effective_values)
-            .map_err(|error| NylError::config(format!("Failed to build effective target values: {error}")))?;
+        let effective_values = crate::util::deep_merge_value(Some(cluster_values), target_values);
 
-        let target_context = serde_json::json!({
-            "name": target.metadata.name,
-            "labels": target.metadata.labels,
-            "profile": target.spec.profile,
-            "destination": target.spec.destination,
-        });
+        let mut cluster_context = serde_json::to_value(cluster)?;
+        cluster_context
+            .get_mut("spec")
+            .and_then(Value::as_object_mut)
+            .expect("serialized Cluster spec is an object")
+            .remove("live");
+        let target_context = target_template_context(target, load_secrets)?;
         let template_context = if load_secrets {
             let secrets = SecretsConfig::load_from_dir(None, Some(&project_root))?;
-            TemplateContext::build(&profile, &secrets, &profile_name)?
+            TemplateContext::build(effective_values.clone(), &secrets)?
         } else {
             TemplateContext {
-                values: serde_json::to_value(&profile.values)?,
+                values: effective_values,
                 secrets: serde_json::json!({}),
-                profile: profile_name.clone(),
                 env: serde_json::Map::new(),
+                cluster: None,
                 target: None,
             }
         }
-        .with_target(target_context);
+        .with_gitops_context(cluster_context, target_context);
 
         Ok(Self {
             project_root,
             project_config,
-            profile,
-            profile_name,
+            target_name: target.metadata.name.clone(),
+            kube_version,
+            api_versions,
             template_context,
         })
     }
@@ -162,12 +167,8 @@ impl RenderSession {
         &self.project_root
     }
 
-    pub fn profile(&self) -> &Profile {
-        &self.profile
-    }
-
-    pub fn profile_name(&self) -> &str {
-        &self.profile_name
+    pub fn target_name(&self) -> &str {
+        &self.target_name
     }
 
     pub fn template_context(&self) -> &TemplateContext {
@@ -187,7 +188,7 @@ impl RenderSession {
 
         let resources = load_resources(path_text, &self.template_context)?;
         let (kube_version, api_versions) = if needs_helm_rendering(&resources, &self.project_config) {
-            resolve_offline_kubernetes_target(&self.project_config, &self.profile_name, None, &[])?
+            (self.kube_version.clone(), self.api_versions.clone())
         } else {
             (String::new(), Vec::new())
         };
@@ -250,6 +251,36 @@ impl RenderSession {
     }
 }
 
+fn target_template_context(target: &GitOpsTarget, trusted_source: bool) -> Result<Value> {
+    let mut context = serde_json::to_value(target)?;
+    if !trusted_source {
+        let publication = context
+            .get_mut("spec")
+            .and_then(Value::as_object_mut)
+            .and_then(|spec| spec.get_mut("publication"))
+            .and_then(Value::as_object_mut)
+            .expect("serialized GitOpsTarget publication is an object");
+        publication.remove("repository");
+    }
+    Ok(context)
+}
+
+fn required_cluster_capabilities(cluster: &Cluster) -> Result<(String, Vec<String>)> {
+    let kube_version = cluster.spec.kubernetes.kube_version.clone().ok_or_else(|| {
+        NylError::config(format!(
+            "Cluster {:?} requires spec.kubernetes.kubeVersion for target rendering",
+            cluster.metadata.name
+        ))
+    })?;
+    if cluster.spec.kubernetes.api_versions.is_empty() {
+        return Err(NylError::config(format!(
+            "Cluster {:?} requires non-empty spec.kubernetes.apiVersions for target rendering",
+            cluster.metadata.name
+        )));
+    }
+    Ok((kube_version, cluster.spec.kubernetes.api_versions.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -265,9 +296,9 @@ mod tests {
             "kind": "GitOpsTarget",
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
-                "profile": "production",
+                "clusterRef": {"name": "kasoku"},
                 "values": {"nested": {"target": true}},
-                "destination": {
+                "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
                     "revision": "deploy/production"
                 }
@@ -276,23 +307,31 @@ mod tests {
         .unwrap()
     }
 
+    fn cluster() -> Cluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": API_VERSION_GITOPS,
+            "kind": "Cluster",
+            "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
+            "spec": {
+                "destination": {"server": "https://kubernetes.default.svc"},
+                "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1", "apps/v1"]},
+                "values": {"nested": {"cluster": true}},
+                "live": {"context": "kasoku-admin"}
+            }
+        }))
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn target_values_and_context_are_visible() {
         let temp = TempDir::new().unwrap();
-        fs::write(
-            temp.path().join("nyl.toml"),
-            r"[profile.production.values]
-[profile.production.values.nested]
-profile = true
-",
-        )
-        .unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
             r#"apiVersion: nyl.niklasrosenstein.github.com/v1
 kind: NylRelease
 metadata:
-  name: {{ target.name }}
+  name: {{ target.metadata.name }}
   namespace: production
 ---
 apiVersion: v1
@@ -300,25 +339,32 @@ kind: ConfigMap
 metadata:
   name: context
 data:
-  profile: "{{ values.nested.profile }}"
+  cluster: "{{ values.nested.cluster }}"
   target: "{{ values.nested.target }}"
-  environment: "{{ target.labels.environment }}"
+  environment: "{{ target.metadata.labels.environment }}"
+  region: "{{ cluster.metadata.labels.region }}"
+  clusterName: "{{ cluster.metadata.name }}"
 "#,
         )
         .unwrap();
 
-        let session = RenderSession::for_target(temp.path(), &target()).unwrap();
+        let session = RenderSession::for_target(temp.path(), &target(), &cluster()).unwrap();
         let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
         assert_eq!(rendered.release.unwrap().metadata.name, "production");
-        assert_eq!(rendered.manifests[0]["data"]["profile"], "true");
+        assert_eq!(rendered.manifests[0]["data"]["cluster"], "true");
         assert_eq!(rendered.manifests[0]["data"]["target"], "true");
         assert_eq!(rendered.manifests[0]["data"]["environment"], "production");
+        assert_eq!(rendered.manifests[0]["data"]["region"], "fsn1");
+        assert_eq!(rendered.manifests[0]["data"]["clusterName"], "kasoku");
+        let context = session.template_context().to_json();
+        assert!(context.get("profile").is_none());
+        assert!(context["cluster"]["spec"].get("live").is_none());
     }
 
     #[tokio::test]
     async fn rejects_cmp_application_generator() {
         let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("nyl.toml"), "[profile.production]\n").unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
             r"apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
@@ -330,7 +376,7 @@ spec: {}
         )
         .unwrap();
 
-        let session = RenderSession::for_target(temp.path(), &target()).unwrap();
+        let session = RenderSession::for_target(temp.path(), &target(), &cluster()).unwrap();
         let error = session.render_release_file(Path::new("app.yaml")).await.unwrap_err();
         assert!(error.to_string().contains("ApplicationGenerator"));
     }
@@ -338,17 +384,19 @@ spec: {}
     #[test]
     fn remote_renderer_context_exposes_neither_secrets_nor_process_environment() {
         let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("nyl.toml"), "[profile.production]\n").unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
 
-        let session = RenderSession::for_remote_target(temp.path(), &target()).unwrap();
+        let session = RenderSession::for_remote_target(temp.path(), &target(), &cluster()).unwrap();
         let context = session.template_context().to_json();
         assert_eq!(context["secrets"], serde_json::json!({}));
         assert_eq!(context["env"], serde_json::json!({}));
+        assert!(context["target"]["spec"]["publication"].get("repository").is_none());
 
-        let session = RenderSession::for_untrusted_source(temp.path(), &target()).unwrap();
+        let session = RenderSession::for_untrusted_source(temp.path(), &target(), &cluster()).unwrap();
         let context = session.template_context().to_json();
         assert_eq!(context["secrets"], serde_json::json!({}));
         assert_eq!(context["env"], serde_json::json!({}));
+        assert!(context["target"]["spec"]["publication"].get("repository").is_none());
     }
 
     #[cfg(unix)]
@@ -357,10 +405,12 @@ spec: {}
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("nyl.toml"), "[profile.production]\n").unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
         symlink("/tmp", temp.path().join("components")).unwrap();
 
-        let error = RenderSession::for_remote_target(temp.path(), &target()).err().unwrap();
+        let error = RenderSession::for_remote_target(temp.path(), &target(), &cluster())
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("symbolic links"));
     }
 }

@@ -79,6 +79,7 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
     };
     let config_file =
         ProjectConfig::find(Some(start_dir))?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".to_owned()))?;
+    ProjectConfig::load(Some(config_file.clone()))?;
     let project_root = config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -458,8 +459,9 @@ kind: GitOpsTarget
 metadata:
   name: production
 spec:
-  profile: production
-  destination:
+  clusterRef:
+    name: kasoku
+  publication:
     repository:
       repoURL: ssh://git@example/deploy.git
     revision: deploy/production
@@ -542,8 +544,7 @@ spec:
   enabled: {{ values.enabled }}
   projectRef: workloads
   applicationNamespace: argocd
-  destination:
-    server: https://kubernetes.default.svc
+  destinationNamespace: workloads
 {% endif %}
 ",
         )
@@ -608,7 +609,10 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("invalid.yaml"),
-            TARGET.replace("  profile: production", "  profile: production\n  unknown: true"),
+            TARGET.replace(
+                "  clusterRef:\n    name: kasoku",
+                "  clusterRef:\n    name: kasoku\n  unknown: true",
+            ),
         )
         .unwrap();
 
@@ -617,6 +621,54 @@ spec:
             .to_string();
         assert!(error.contains("unknown field"));
         assert!(error.contains("GitOpsTarget"));
+    }
+
+    #[test]
+    fn discovers_cluster_as_a_strict_static_resource() {
+        let (temporary, _repository) = project();
+        fs::write(
+            temporary.path().join("cluster.yaml"),
+            r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: Cluster
+metadata:
+  name: kasoku
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1]
+",
+        )
+        .unwrap();
+
+        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        let cluster = inventory.get(GitOpsResourceKind::Cluster, "kasoku").unwrap();
+        assert!(matches!(cluster.resource, Some(GitOpsResource::Cluster(_))));
+    }
+
+    #[test]
+    fn rejects_structurally_templated_cluster() {
+        let (temporary, _repository) = project();
+        fs::write(
+            temporary.path().join("cluster.yaml"),
+            r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: Cluster
+metadata:
+  name: kasoku
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    apiVersions:
+{% for api_version in values.apiVersions %}
+      - {{ api_version }}
+{% endfor %}
+",
+        )
+        .unwrap();
+
+        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
     }
 
     #[test]

@@ -11,13 +11,13 @@ use crate::{NylError, Result};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DiffTreeBase {
-    /// Compare with the currently published destination revision.
+    /// Compare with the currently published revision.
     Published,
     /// Render and compare with the source repository at --source-ref.
     Source,
 }
 
-/// Diff a target without modifying its destination tree.
+/// Diff a target without modifying its publication tree.
 #[derive(Args, Debug)]
 pub struct DiffTreeArgs {
     /// Project directory or a path beneath it.
@@ -66,9 +66,9 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     };
     let mut desired_files = desired.files.clone();
     if let Some(baseline) = source_baseline {
-        let marker = PathBuf::from("_nyl/destination.json");
-        base.insert(marker.clone(), destination_marker(&baseline)?);
-        desired_files.insert(marker, destination_marker(&desired)?);
+        let marker = PathBuf::from("_nyl/publication.json");
+        base.insert(marker.clone(), publication_marker(&baseline)?);
+        desired_files.insert(marker, publication_marker(&desired)?);
     }
     let diff = format_tree_diff(&base, &desired_files);
     if diff.is_empty() {
@@ -91,11 +91,11 @@ fn published_tree(compiled: &crate::gitops::CompiledTargetTree) -> Result<BTreeM
     let checkout = manager
         .resolve_ref_fresh(
             &compiled.repository.repo_url,
-            Some(&compiled.target.spec.destination.revision),
+            Some(&compiled.target.spec.publication.revision),
             None,
         )
         .map_err(NylError::Git)?;
-    let root = checked_published_root(&checkout, &compiled.target.spec.destination.path_prefix)?;
+    let root = checked_published_root(&checkout, &compiled.target.spec.publication.path_prefix)?;
     let published = read_rendered_tree(&root)?;
     if let Some(index) = published.index {
         let repository = compiled
@@ -103,12 +103,13 @@ fn published_tree(compiled: &crate::gitops::CompiledTargetTree) -> Result<BTreeM
             .as_deref()
             .unwrap_or(&compiled.repository.repo_url);
         if index.target != compiled.target.metadata.name
-            || index.destination.repository != repository
-            || index.destination.revision != compiled.target.spec.destination.revision
-            || index.destination.path_prefix != compiled.target.spec.destination.path_prefix
+            || index.cluster != compiled.cluster.metadata.name
+            || index.publication.repository != repository
+            || index.publication.revision != compiled.target.spec.publication.revision
+            || index.publication.path_prefix != compiled.target.spec.publication.path_prefix
         {
             return Err(NylError::config(format!(
-                "Published ownership index at {} belongs to a different target or destination",
+                "Published ownership index at {} belongs to a different target, cluster, or publication",
                 root.display()
             )));
         }
@@ -117,7 +118,7 @@ fn published_tree(compiled: &crate::gitops::CompiledTargetTree) -> Result<BTreeM
 }
 
 fn checked_published_root(checkout: &Path, path_prefix: &str) -> Result<PathBuf> {
-    crate::resources::validate_relative_path("GitOpsTarget destination.pathPrefix", path_prefix, true, false)?;
+    crate::resources::validate_relative_path("GitOpsTarget publication.pathPrefix", path_prefix, true, false)?;
     let canonical_checkout = checkout.canonicalize().map_err(|error| {
         NylError::config(format!(
             "Failed to resolve published checkout {}: {error}",
@@ -177,12 +178,13 @@ async fn source_derived_tree(
     compile_target_tree(&inventory, target).await
 }
 
-fn destination_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Vec<u8>> {
+fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "cluster": compiled.cluster.metadata.name,
         "repoURL": compiled.repository.repo_url,
         "publishURL": compiled.repository.publish_url,
-        "revision": compiled.target.spec.destination.revision,
-        "pathPrefix": compiled.target.spec.destination.path_prefix,
+        "revision": compiled.target.spec.publication.revision,
+        "pathPrefix": compiled.target.spec.publication.path_prefix,
     }))?;
     bytes.push(b'\n');
     Ok(bytes)
@@ -287,7 +289,7 @@ fn format_tree_diff(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::{GitOpsTarget, InlineGitRepository};
+    use crate::resources::{Cluster, GitOpsTarget, InlineGitRepository};
 
     #[test]
     fn formats_added_modified_and_removed_files() {
@@ -309,14 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn destination_marker_changes_when_only_publication_coordinates_change() {
+    fn publication_marker_changes_when_ownership_coordinates_change() {
         let target: GitOpsTarget = serde_json::from_value(serde_json::json!({
             "apiVersion": crate::constants::API_VERSION_GITOPS,
             "kind": "GitOpsTarget",
             "metadata": {"name": "production"},
             "spec": {
-                "profile": "production",
-                "destination": {
+                "clusterRef": {"name": "kasoku"},
+                "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
                     "revision": "deploy/production",
                     "pathPrefix": "production"
@@ -324,8 +326,19 @@ mod tests {
             }
         }))
         .unwrap();
+        let cluster: Cluster = serde_json::from_value(serde_json::json!({
+            "apiVersion": crate::constants::API_VERSION_GITOPS,
+            "kind": "Cluster",
+            "metadata": {"name": "kasoku"},
+            "spec": {
+                "destination": {"server": "https://kubernetes.default.svc"},
+                "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1"]}
+            }
+        }))
+        .unwrap();
         let baseline = crate::gitops::CompiledTargetTree {
             target: target.clone(),
+            cluster,
             repository_name: None,
             repository: InlineGitRepository {
                 repo_url: "https://example.invalid/deploy.git".to_string(),
@@ -334,10 +347,14 @@ mod tests {
             files: BTreeMap::new(),
             inputs: BTreeSet::new(),
         };
-        let baseline_marker = destination_marker(&baseline).unwrap();
+        let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;
-        desired.target.spec.destination.path_prefix = "new-prefix".to_string();
-        assert_ne!(baseline_marker, destination_marker(&desired).unwrap());
+        desired.target.spec.publication.path_prefix = "new-prefix".to_string();
+        assert_ne!(baseline_marker, publication_marker(&desired).unwrap());
+
+        let changed_publication_marker = publication_marker(&desired).unwrap();
+        desired.cluster.metadata.name = "magnolia".to_string();
+        assert_ne!(changed_publication_marker, publication_marker(&desired).unwrap());
     }
 
     #[test]

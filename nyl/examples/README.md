@@ -1,58 +1,29 @@
 # Nyl Examples
 
-This directory contains practical examples demonstrating how to use Nyl for various Kubernetes deployment scenarios.
+This directory contains practical examples for Kubernetes rendering and
+deployment workflows.
 
-## Examples Overview
+## Simple app
 
-### 1. [simple-app](./simple-app/)
-Basic example showing:
-- Simple Kubernetes manifests (Deployment, Service, ConfigMap)
-- Template variables with profiles
-- Multi-environment rendering with `--profile`
-
-More examples are planned and will be added here as they are published.
-
-## Running Examples
-
-Each example includes its own README with specific instructions. Generally:
+[`simple-app`](./simple-app/) demonstrates plain Kubernetes manifests,
+target-specific values, a concrete Cluster, and multiple GitOpsTargets that
+share the Cluster while publishing to disjoint prefixes.
 
 ```bash
-# Navigate to example directory
 cd examples/simple-app
-
-# Validate the project
 nyl validate
-
-# Render manifests for development
-nyl render --profile dev
-
-# Render for production
-nyl render --profile prod
-
-# See diff against cluster
-nyl diff --profile dev
-
-# Apply to cluster
-nyl apply --profile dev
+nyl render --target dev manifests/deployment.yaml
+nyl render --target prod manifests/deployment.yaml
+nyl diff --target dev manifests/deployment.yaml
+nyl apply --target dev manifests/deployment.yaml
 ```
 
-## Prerequisites
+`diff` and `apply` require a reachable cluster. The example Cluster uses the
+`kind-kind` kube context; update `config/clusters/local.yaml` for your cluster.
 
-- Nyl installed (`cargo install --path .` from repository root)
-- kubectl configured (for diff/apply commands)
-- Helm installed (for Helm chart examples)
+## Learning path
 
-## Learning Path
-
-1. Start with **simple-app** to understand basic concepts
-2. Extend it by adding a HelmChart resource
-3. Refactor repeated manifests into reusable components
-4. Add more profiles and profile values in `nyl.toml`
-
-## Contributing
-
-Feel free to contribute additional examples! Useful examples include:
-- ArgoCD ApplicationSet integration
-- GitOps workflows
-- Custom post-processors
-- Advanced templating patterns
+1. Render the simple app for each target and compare the output.
+2. Move a value between the Cluster and a target to observe merge precedence.
+3. Add a HelmChart resource.
+4. Extract repeated manifests into reusable components.

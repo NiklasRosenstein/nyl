@@ -9,14 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
+    cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster, ResolvedTargetCluster},
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
-    config::{KubernetesTarget, ProjectConfig, StripEmptyMetadataLabelsMode},
+    config::{ProjectConfig, StripEmptyMetadataLabelsMode},
     constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS},
     git::is_argocd_env,
     helm::{HelmChartResolver, HelmTemplateExecutor},
-    kubernetes::{KubeClient, KubeRsClient, ResourceKey},
+    kubernetes::{KubeRsClient, ResourceKey},
     postprocess::apply_kyverno_policies,
-    profiles::{deep_merge_value, Profile},
     resources::{
         component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
         is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_array_field_path,
@@ -25,6 +25,7 @@ use crate::{
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
+    util::deep_merge_value,
     NylError, Result,
 };
 
@@ -52,9 +53,9 @@ pub struct RenderOptions {
     #[arg(long, value_delimiter = ',', conflicts_with = "only_kind")]
     pub exclude_kind: Vec<String>,
 
-    /// Profile to use for rendering
-    #[arg(short, long)]
-    pub profile: Option<String>,
+    /// GitOps target whose values and cluster capabilities are used
+    #[arg(long)]
+    pub target: Option<String>,
 
     /// Maximum evaluation depth for recursive resource expansion (default: 10)
     #[arg(long, default_value = "10")]
@@ -71,17 +72,21 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Offline mode: skip Kubernetes discovery and use CLI-provided API information
+    /// Offline mode: never connect to Kubernetes
     #[arg(long)]
     pub offline: bool,
 
-    /// Kubernetes version for Helm templating (used with --offline; overrides nyl.toml)
+    /// Kubernetes version for targetless offline Helm rendering
     #[arg(long)]
     pub kube_version: Option<String>,
 
-    /// Kubernetes API versions for Helm (used with --offline; overrides nyl.toml, comma-separated or repeated)
+    /// Kubernetes API versions for targetless offline Helm rendering (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     pub kube_api_versions: Vec<String>,
+
+    /// Kubernetes context override for live rendering
+    #[arg(long)]
+    pub context: Option<String>,
 }
 
 /// Output format for rendered manifests
@@ -116,8 +121,7 @@ pub struct RenderPreflightResult {
     pub manifests: Vec<serde_json::Value>,
     pub nyl_release: Option<NylRelease>,
     pub strip_empty_metadata_labels: bool,
-    pub profile: Profile,
-    pub env_name: String,
+    pub resolved_target: Option<ResolvedTargetCluster>,
     pub duplicates: HashMap<ResourceKey, usize>,
     pub kube_client: Option<KubeRsClient>,
     pub raw_client: Option<Client>,
@@ -125,11 +129,11 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
-    let (mut manifests, nyl_release, strip_empty_metadata_labels_mode, profile, env_name, mut duplicates) =
+    let (mut manifests, nyl_release, strip_empty_metadata_labels_mode, resolved_target, mut duplicates) =
         render_manifests_complete(
             &options.common.path,
             options.common.only_source_kind.as_deref(),
-            options.common.profile.as_deref(),
+            options.common.target.as_deref(),
             options.offline,
             options.kube_version,
             options.kube_api_versions,
@@ -154,7 +158,10 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     );
 
     let (kube_client, raw_client) = if should_initialize_clients {
-        let config = KubeRsClient::load_kube_config_from_profile(&profile, options.context_override).await?;
+        let resolved = resolved_target
+            .as_ref()
+            .ok_or_else(|| NylError::config("This operation requires --target so Nyl can select a trusted cluster"))?;
+        let config = load_cluster_kube_config(&resolved.cluster, options.context_override).await?;
         let client = Client::try_from(config)?;
         (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
     } else {
@@ -183,8 +190,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         manifests,
         nyl_release,
         strip_empty_metadata_labels: strip_empty_metadata_labels_mode.should_strip(is_argocd_env()),
-        profile,
-        env_name,
+        resolved_target,
         duplicates,
         kube_client,
         raw_client,
@@ -194,12 +200,12 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 /// Complete manifest rendering pipeline used by render, diff, and apply.
 /// Returns final manifests ready for output/apply/diff, with all Nyl resources processed.
 /// Also returns the extracted NylRelease metadata (if present) for diff/apply commands.
-/// Returns: (manifests, nyl_release, strip_empty_metadata_labels_mode, profile, env_name, duplicate_resources)
+/// Returns manifests, release metadata, output policy, the resolved target, and duplicate resources.
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests_complete(
     path: &str,
     only_source_kind: Option<&str>,
-    environment: Option<&str>,
+    target_name: Option<&str>,
     offline: bool,
     cli_kube_version: Option<&str>,
     cli_api_versions: &[String],
@@ -210,16 +216,15 @@ pub async fn render_manifests_complete(
     Vec<serde_json::Value>,
     Option<NylRelease>,
     StripEmptyMetadataLabelsMode,
-    Profile,
-    String,
+    Option<ResolvedTargetCluster>,
     std::collections::HashMap<ResourceKey, usize>,
 )> {
     // 1. Render manifests (base pipeline)
-    let (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context) =
+    let (manifests, strip_empty_metadata_labels_mode, resolved_target, credential_provider, template_context) =
         render_manifests(
             path,
             only_source_kind,
-            environment,
+            target_name,
             offline,
             cli_kube_version,
             cli_api_versions,
@@ -283,44 +288,67 @@ pub async fn render_manifests_complete(
         final_manifests,
         nyl_release,
         strip_empty_metadata_labels_mode,
-        profile,
-        env_name,
+        resolved_target,
         duplicates,
     ))
 }
 
 /// Shared manifest rendering logic used by render, diff, and apply
-/// Returns: (manifests, strip_empty_metadata_labels_mode, profile, env_name, credential_provider, template_context)
+/// Returns manifests, output policy, the resolved target, credentials, and template context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn render_manifests(
     path: &str,
     only_source_kind: Option<&str>,
-    environment: Option<&str>,
+    target_name: Option<&str>,
     offline: bool,
     cli_kube_version: Option<&str>,
     cli_api_versions: &[String],
     max_depth: usize,
     track_parent: bool,
-    context_override: Option<&str>,
+    _context_override: Option<&str>,
 ) -> Result<(
     Vec<serde_json::Value>,
     StripEmptyMetadataLabelsMode,
-    Profile,
-    String,
+    Option<ResolvedTargetCluster>,
     Option<Arc<crate::git::CredentialProvider>>,
     TemplateContext,
 )> {
     // 1. Load project configuration (with warning if not found)
     let project_config = ProjectConfig::load_with_warning(None)?;
 
-    // 2. Select profile from nyl.toml
-    let (profile, profile_name) = select_profile_from_project(&project_config, environment)?;
+    // 2. Resolve the optional target and its concrete cluster.
+    let resolved_target = target_name
+        .map(|name| resolve_target_cluster(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), name))
+        .transpose()?;
+
+    if resolved_target.is_some() && (cli_kube_version.is_some() || !cli_api_versions.is_empty()) {
+        return Err(NylError::config(
+            "--kube-version and --kube-api-versions cannot be used with --target; the Cluster resource is authoritative",
+        ));
+    }
 
     // 3. Load secrets
     let secrets_config = SecretsConfig::load(None)?;
 
     // 4. Build template context
-    let context = TemplateContext::build(&profile, &secrets_config, &profile_name)?;
+    let values = if let Some(resolved) = &resolved_target {
+        deep_merge_value(
+            Some(serde_json::to_value(&resolved.cluster.spec.values)?),
+            serde_json::to_value(&resolved.target.spec.values)?,
+        )
+    } else {
+        serde_json::json!({})
+    };
+    let mut context = TemplateContext::build(values, &secrets_config)?;
+    if let Some(resolved) = &resolved_target {
+        let mut cluster = serde_json::to_value(&resolved.cluster)?;
+        cluster
+            .get_mut("spec")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized Cluster spec is an object")
+            .remove("live");
+        context = context.with_gitops_context(cluster, serde_json::to_value(&resolved.target)?);
+    }
 
     let credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
 
@@ -337,24 +365,14 @@ pub(crate) async fn render_manifests(
     let (kube_version, api_versions) = if !needs_helm_rendering {
         // No HelmCharts, version info not needed
         (String::new(), Vec::new())
+    } else if let Some(resolved) = &resolved_target {
+        resolve_cluster_kubernetes_capabilities(resolved)?
     } else if offline {
-        resolve_offline_kubernetes_target(&project_config, &profile_name, cli_kube_version, cli_api_versions)?
+        resolve_explicit_kubernetes_capabilities(cli_kube_version, cli_api_versions)?
     } else {
-        // In non-offline mode, fetch from cluster unless CLI args override.
-        // Thread the CLI --context override so Helm capability discovery targets
-        // the same context that diff/apply will use (CLI > profile > project).
-        let client = KubeRsClient::from_profile(&profile, context_override).await?;
-        let kube_version = if let Some(v) = cli_kube_version {
-            v.to_string()
-        } else {
-            client.get_server_version().await?
-        };
-        let api_versions = if cli_api_versions.is_empty() {
-            client.get_api_versions().await?
-        } else {
-            cli_api_versions.to_vec()
-        };
-        (kube_version, api_versions)
+        return Err(NylError::config(
+            "Rendering Helm resources online requires --target; alternatively use --offline with --kube-version and --kube-api-versions",
+        ));
     };
 
     // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
@@ -394,109 +412,58 @@ pub(crate) async fn render_manifests(
     Ok((
         all_manifests,
         project_config.get_strip_empty_metadata_labels_mode(),
-        profile,
-        profile_name,
+        resolved_target,
         credential_provider,
         context,
     ))
 }
 
-pub(crate) fn resolve_offline_kubernetes_target(
-    project_config: &ProjectConfig,
-    profile_name: &str,
+fn resolve_explicit_kubernetes_capabilities(
     cli_kube_version: Option<&str>,
     cli_api_versions: &[String],
 ) -> Result<(String, Vec<String>)> {
-    let project_target = project_config.get_project_kubernetes_target();
-    let profile_target = project_config.get_profile_kubernetes_target(profile_name);
-
-    let kube_version = cli_kube_version
-        .map(ToOwned::to_owned)
-        .or_else(|| profile_target.and_then(|target| target.kube_version.clone()))
-        .or_else(|| project_target.kube_version.clone());
-
-    let api_versions = if !cli_api_versions.is_empty() {
-        cli_api_versions.to_vec()
-    } else if let Some(versions) = profile_target.and_then(non_empty_api_versions) {
-        versions.to_vec()
-    } else {
-        project_target.api_versions.clone()
-    };
-
-    let Some(kube_version) = kube_version.filter(|version| !version.trim().is_empty()) else {
-        return Err(missing_offline_kubernetes_target_error(
-            profile_name,
-            "kube_version",
-            "--kube-version",
+    let Some(kube_version) = cli_kube_version.filter(|version| !version.trim().is_empty()) else {
+        return Err(NylError::config(
+            "Offline targetless Helm rendering requires --kube-version",
         ));
     };
-
-    if api_versions.is_empty() {
-        return Err(missing_offline_kubernetes_target_error(
-            profile_name,
-            "api_versions",
-            "--kube-api-versions",
+    if cli_api_versions.is_empty() {
+        return Err(NylError::config(
+            "Offline targetless Helm rendering requires --kube-api-versions",
         ));
     }
-
-    Ok((kube_version, api_versions))
+    Ok((kube_version.to_owned(), cli_api_versions.to_vec()))
 }
 
-fn non_empty_api_versions(target: &KubernetesTarget) -> Option<&[String]> {
-    if target.api_versions.is_empty() {
-        None
-    } else {
-        Some(&target.api_versions)
-    }
-}
-
-fn missing_offline_kubernetes_target_error(profile_name: &str, field_name: &str, cli_flag: &str) -> NylError {
-    NylError::Config(format!(
-        "Offline rendering is missing Kubernetes target metadata field '{}' for profile '{}'. \
-         Pass {}, or configure {} in [project.kubernetes] / [profile.{}.kubernetes] in nyl.toml.",
-        field_name, profile_name, cli_flag, field_name, profile_name
-    ))
-}
-
-pub(crate) fn select_profile_from_project(
-    project_config: &ProjectConfig,
-    requested: Option<&str>,
-) -> Result<(Profile, String)> {
-    let profile_name = requested.unwrap_or("default");
-
-    let context = project_config.resolve_context(profile_name);
-
-    let selected = if let Some(values) = project_config.get_profile_values(profile_name) {
-        Profile {
-            values: values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            context,
-            ..Default::default()
-        }
-    } else if requested.is_some() {
-        return Err(NylError::Config(format!("Profile '{}' not found", profile_name)));
-    } else if !project_config.has_profiles() {
-        Profile {
-            context,
-            ..Default::default()
-        }
-    } else {
-        return Err(NylError::Config(format!(
-            "Profile '{}' not found. Available profiles: {}",
-            profile_name,
-            project_config.profile_names().join(", ")
+fn resolve_cluster_kubernetes_capabilities(resolved: &ResolvedTargetCluster) -> Result<(String, Vec<String>)> {
+    let capabilities = &resolved.cluster.spec.kubernetes;
+    let kube_version = capabilities.kube_version.clone().ok_or_else(|| {
+        NylError::config(format!(
+            "Cluster '{}' is missing spec.kubernetes.kubeVersion",
+            resolved.cluster.metadata.name
+        ))
+    })?;
+    if capabilities.api_versions.is_empty() {
+        return Err(NylError::config(format!(
+            "Cluster '{}' is missing spec.kubernetes.apiVersions",
+            resolved.cluster.metadata.name
         )));
-    };
-
-    Ok((selected, profile_name.to_string()))
+    }
+    Ok((kube_version, capabilities.api_versions.clone()))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
+    if !args.offline && (args.kube_version.is_some() || !args.kube_api_versions.is_empty()) {
+        return Err(NylError::config(
+            "--kube-version and --kube-api-versions require --offline",
+        ));
+    }
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: args.offline,
         kube_version: args.kube_version.as_deref(),
         kube_api_versions: &args.kube_api_versions,
-        context_override: None,
+        context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::OnDemand,
         resolve_namespaces: true,
         release_namespace_hint: None,
@@ -2485,9 +2452,14 @@ mod tests {
     use tempfile::TempDir;
 
     static APPGEN_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static PWD_CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_appgen_override_env() -> MutexGuard<'static, ()> {
         APPGEN_OVERRIDE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_pwd_cwd() -> MutexGuard<'static, ()> {
+        PWD_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn test_project_config() -> ProjectConfig {
@@ -2497,92 +2469,32 @@ mod tests {
         }
     }
 
-    fn test_project_config_with_kubernetes_targets() -> ProjectConfig {
-        use crate::config::{KubernetesTarget, ProfileSettings, ProjectSettings};
-        use std::collections::BTreeMap;
-
-        ProjectConfig {
-            file: None,
-            config: crate::config::ProjectFile {
-                project: ProjectSettings {
-                    kubernetes: KubernetesTarget {
-                        kube_version: Some("1.29.0".to_string()),
-                        api_versions: vec!["v1".to_string(), "apps/v1".to_string()],
-                        ..Default::default()
-                    },
-                    ..ProjectSettings::default()
-                },
-                profile: BTreeMap::from([(
-                    "prod".to_string(),
-                    ProfileSettings {
-                        kubernetes: KubernetesTarget {
-                            kube_version: Some("1.30.0".to_string()),
-                            api_versions: vec!["v1".to_string(), "batch/v1".to_string()],
-                            ..Default::default()
-                        },
-                        ..ProfileSettings::default()
-                    },
-                )]),
-            },
-        }
-    }
-
     #[test]
-    fn test_resolve_offline_kubernetes_target_uses_project_config() {
-        let config = test_project_config_with_kubernetes_targets();
-        let (kube_version, api_versions) = resolve_offline_kubernetes_target(&config, "default", None, &[]).unwrap();
-
-        assert_eq!(kube_version, "1.29.0");
-        assert_eq!(api_versions, vec!["v1".to_string(), "apps/v1".to_string()]);
-    }
-
-    #[test]
-    fn test_resolve_offline_kubernetes_target_uses_profile_config() {
-        let config = test_project_config_with_kubernetes_targets();
-        let (kube_version, api_versions) = resolve_offline_kubernetes_target(&config, "prod", None, &[]).unwrap();
-
-        assert_eq!(kube_version, "1.30.0");
-        assert_eq!(api_versions, vec!["v1".to_string(), "batch/v1".to_string()]);
-    }
-
-    #[test]
-    fn test_resolve_offline_kubernetes_target_cli_overrides_config_independently() {
-        let config = test_project_config_with_kubernetes_targets();
+    fn test_resolve_explicit_kubernetes_capabilities() {
         let cli_api_versions = vec!["v1".to_string(), "networking.k8s.io/v1".to_string()];
-
         let (kube_version, api_versions) =
-            resolve_offline_kubernetes_target(&config, "prod", Some("1.31.0"), &cli_api_versions).unwrap();
+            resolve_explicit_kubernetes_capabilities(Some("1.31.0"), &cli_api_versions).unwrap();
 
         assert_eq!(kube_version, "1.31.0");
         assert_eq!(api_versions, cli_api_versions);
     }
 
     #[test]
-    fn test_resolve_offline_kubernetes_target_errors_when_missing() {
-        let config = test_project_config();
-        let err = resolve_offline_kubernetes_target(&config, "default", None, &[])
+    fn test_explicit_kubernetes_capabilities_require_version() {
+        let err = resolve_explicit_kubernetes_capabilities(None, &["v1".to_string()])
             .unwrap_err()
             .to_string();
-
-        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'kube_version'"));
+        assert!(err.contains("targetless Helm rendering"));
         assert!(err.contains("--kube-version"));
-        assert!(err.contains("[project.kubernetes]"));
-        assert!(err.contains("[profile.default.kubernetes]"));
     }
 
     #[test]
-    fn test_resolve_offline_kubernetes_target_errors_when_api_versions_missing() {
-        let mut config = test_project_config();
-        config.config.project.kubernetes.kube_version = Some("1.30.0".to_string());
-
-        let err = resolve_offline_kubernetes_target(&config, "default", None, &[])
+    fn test_explicit_kubernetes_capabilities_require_api_versions() {
+        let err = resolve_explicit_kubernetes_capabilities(Some("1.30.0"), &[])
             .unwrap_err()
             .to_string();
-
-        assert!(err.contains("Offline rendering is missing Kubernetes target metadata field 'api_versions'"));
+        assert!(err.contains("targetless Helm rendering"));
         assert!(err.contains("--kube-api-versions"));
-        assert!(err.contains("[project.kubernetes]"));
-        assert!(err.contains("[profile.default.kubernetes]"));
     }
 
     fn create_test_worktree_paths() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -3362,10 +3274,11 @@ metadata:
     #[test]
     fn test_resolve_application_generator_source_path_reuses_local_git_repo_for_head() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
 
         let (repo_dir, _repo) = create_local_git_repo("main", "git@gitlab.com:NiklasRosenstein/config.git");
+        let _pwd_guard = PwdCwdGuard::new();
         std::env::set_current_dir(repo_dir.path()).unwrap();
         std::env::set_var("PWD", repo_dir.path());
 
@@ -3381,10 +3294,11 @@ metadata:
     #[test]
     fn test_resolve_application_generator_source_path_reuses_local_git_repo_for_current_branch() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
 
         let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        let _pwd_guard = PwdCwdGuard::new();
         std::env::set_current_dir(repo_dir.path()).unwrap();
         std::env::set_var("PWD", repo_dir.path());
 
@@ -3412,9 +3326,10 @@ metadata:
     #[test]
     fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_repo_mismatch() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
 
         let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        let _pwd_guard = PwdCwdGuard::new();
         std::env::set_current_dir(repo_dir.path()).unwrap();
         std::env::set_var("PWD", repo_dir.path());
 
@@ -3427,9 +3342,10 @@ metadata:
     #[test]
     fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_target_revision_mismatch() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
 
         let (repo_dir, _repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        let _pwd_guard = PwdCwdGuard::new();
         std::env::set_current_dir(repo_dir.path()).unwrap();
         std::env::set_var("PWD", repo_dir.path());
 
@@ -3442,9 +3358,10 @@ metadata:
     #[test]
     fn test_try_resolve_application_generator_source_from_local_git_repo_skips_on_detached_head() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
 
         let (repo_dir, repo) = create_local_git_repo("main", "git@github.com:example/repo.git");
+        let _pwd_guard = PwdCwdGuard::new();
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
         repo.set_head_detached(head_commit.id()).unwrap();
         std::env::set_current_dir(repo_dir.path()).unwrap();
@@ -3459,9 +3376,10 @@ metadata:
     #[test]
     fn test_try_resolve_application_generator_source_from_local_git_repo_skips_outside_git_repo() {
         let _guard = lock_appgen_override_env();
-        let _pwd_guard = PwdCwdGuard::new();
+        let _cwd_lock = lock_pwd_cwd();
 
         let temp = TempDir::new().unwrap();
+        let _pwd_guard = PwdCwdGuard::new();
         std::env::set_current_dir(temp.path()).unwrap();
         std::env::set_var("PWD", temp.path());
 
@@ -4179,8 +4097,8 @@ metadata:
         let context = TemplateContext {
             values: serde_json::json!({}),
             secrets: serde_json::json!({}),
-            profile: "default".to_string(),
             env: serde_json::Map::new(),
+            cluster: None,
             target: None,
         };
         let resource = serde_json::json!({

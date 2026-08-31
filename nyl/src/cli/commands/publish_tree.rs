@@ -6,7 +6,7 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, Sta
 
 use crate::git::CredentialProvider;
 use crate::gitops::{
-    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexDestination,
+    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexPublication,
 };
 use crate::{NylError, Result};
 
@@ -35,38 +35,23 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         ));
     }
     let compiled = compile_target_tree(&inventory, &args.target).await?;
-    let destination_url = compiled
+    let publication_url = compiled
         .repository
         .publish_url
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
-    let branch = writable_branch_name(&compiled.target.spec.destination.revision)?;
+    let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = CredentialProvider::new();
     let temp = tempfile::TempDir::new()?;
-    let repository = clone_branch(destination_url, branch, temp.path(), &credentials)?;
+    let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
 
-    let output_root = if compiled.target.spec.destination.path_prefix.is_empty() {
+    let output_root = if compiled.target.spec.publication.path_prefix.is_empty() {
         temp.path().to_path_buf()
     } else {
-        temp.path().join(&compiled.target.spec.destination.path_prefix)
+        temp.path().join(&compiled.target.spec.publication.path_prefix)
     };
-    let inputs = compiled
-        .inputs
-        .iter()
-        .filter(|path| !path.starts_with("@remote"))
-        .filter_map(|path| {
-            let absolute = inventory.project_root.join(path);
-            absolute.is_file().then(|| {
-                std::fs::read(absolute).map(|bytes| {
-                    (
-                        path.to_string_lossy().replace('\\', "/"),
-                        crate::gitops::reconcile::sha256(&bytes),
-                    )
-                })
-            })
-        })
-        .collect::<std::io::Result<_>>()?;
+    let inputs = super::render_tree::hash_inputs(&inventory, &compiled)?;
     let repository_identity = compiled
         .repository_name
         .clone()
@@ -76,12 +61,12 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         &compiled.files,
         RenderIndex::new(
             args.target.clone(),
-            RenderIndexDestination {
+            compiled.cluster.metadata.name.clone(),
+            RenderIndexPublication {
                 repository: repository_identity,
-                revision: compiled.target.spec.destination.revision.clone(),
-                path_prefix: compiled.target.spec.destination.path_prefix.clone(),
+                revision: compiled.target.spec.publication.revision.clone(),
+                path_prefix: compiled.target.spec.publication.path_prefix.clone(),
             },
-            compiled.target.spec.profile.clone(),
             source_commit,
             false,
             inputs,
@@ -96,11 +81,11 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             .unwrap_or(&format!("Render GitOps target {}", args.target)),
     )?;
     if !args.dry_run {
-        fetch_branch(&repository, destination_url, branch, &credentials)?;
+        fetch_branch(&repository, publication_url, branch, &credentials)?;
         let actual = remote_branch_oid(&repository, branch);
         if actual != expected {
             return Err(NylError::config(format!(
-                "Destination {destination_url}@{branch} advanced from {expected:?} to {actual:?}; refusing stale publish"
+                "Publication {publication_url}@{branch} advanced from {expected:?} to {actual:?}; refusing stale publish"
             )));
         }
     }
@@ -113,7 +98,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         return Ok(());
     }
 
-    push_branch(&repository, destination_url, branch, expected, &credentials)?;
+    push_branch(&repository, publication_url, branch, expected, &credentials)?;
     println!("✓ Published GitOps target {} as commit {commit}", args.target);
     Ok(())
 }
@@ -122,7 +107,7 @@ fn writable_branch_name(revision: &str) -> Result<&str> {
     let branch = revision.strip_prefix("refs/heads/").unwrap_or(revision);
     if branch.is_empty() || revision.starts_with("refs/") && !revision.starts_with("refs/heads/") {
         Err(NylError::config(format!(
-            "publish-tree destination revision {revision:?} must name a branch"
+            "publish-tree publication revision {revision:?} must name a branch"
         )))
     } else {
         Ok(branch)
@@ -207,7 +192,7 @@ fn fetch_branch(repository: &Repository, url: &str, branch: &str, credentials: &
     options.remote_callbacks(credentials.build_callbacks(url));
     remote
         .fetch(&[branch], Some(&mut options), None)
-        .map_err(|error| NylError::config(format!("Failed to refresh destination branch: {error}")))
+        .map_err(|error| NylError::config(format!("Failed to refresh publication branch: {error}")))
 }
 
 fn push_branch(
@@ -219,19 +204,19 @@ fn push_branch(
 ) -> Result<()> {
     let mut remote = repository.find_remote("origin").map_err(crate::git::GitError::from)?;
     let mut options = PushOptions::new();
-    let destination_ref = format!("refs/heads/{branch}");
+    let publication_ref = format!("refs/heads/{branch}");
     let mut callbacks = credentials.build_callbacks(url);
     callbacks.push_negotiation({
-        let destination_ref = destination_ref.clone();
+        let publication_ref = publication_ref.clone();
         move |updates| {
             let update = updates
                 .iter()
-                .find(|update| update.dst_refname() == Some(destination_ref.as_str()))
-                .ok_or_else(|| git2::Error::from_str("destination branch was absent from push negotiation"))?;
+                .find(|update| update.dst_refname() == Some(publication_ref.as_str()))
+                .ok_or_else(|| git2::Error::from_str("publication branch was absent from push negotiation"))?;
             let advertised = (!update.src().is_zero()).then_some(update.src());
             if advertised != expected {
                 return Err(git2::Error::from_str(
-                    "destination branch changed during compare-and-swap publication",
+                    "publication branch changed during compare-and-swap publication",
                 ));
             }
             Ok(())
@@ -239,8 +224,8 @@ fn push_branch(
     });
     options.remote_callbacks(callbacks);
     remote
-        .push(&[format!("refs/heads/{branch}:{destination_ref}")], Some(&mut options))
-        .map_err(|error| NylError::config(format!("Failed to publish destination branch: {error}")))
+        .push(&[format!("refs/heads/{branch}:{publication_ref}")], Some(&mut options))
+        .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
 }
 
 fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {

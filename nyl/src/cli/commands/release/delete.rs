@@ -3,13 +3,18 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::{
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
+    cli::commands::cluster::load_target_kube_config,
+    kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     NylError, Result,
 };
 
 /// Delete release(s)
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
+    /// GitOps target whose cluster stores the release
+    #[arg(long)]
+    pub target: String,
+
     /// Release name(s) to delete
     pub names: Vec<String>,
 
@@ -44,7 +49,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
     }
 
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client.clone());

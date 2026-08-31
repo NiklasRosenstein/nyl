@@ -6,7 +6,7 @@
 /// - Template context management
 use minijinja::Environment;
 
-use crate::{profiles::Profile, secrets::SecretsConfig, Result};
+use crate::{secrets::SecretsConfig, Result};
 
 pub struct TemplateEngine {
     env: Environment<'static>,
@@ -48,19 +48,17 @@ impl Default for TemplateEngine {
 pub struct TemplateContext {
     pub values: serde_json::Value,
     pub secrets: serde_json::Value,
-    pub profile: String,
     /// Environment values explicitly admitted to templates.
     pub env: serde_json::Map<String, serde_json::Value>,
-    /// Effective GitOps target exposed as `target.*` during tree rendering.
-    /// Ordinary single-file rendering leaves this unset.
+    /// Sanitized Cluster exposed as `cluster.*` during target rendering.
+    pub cluster: Option<serde_json::Value>,
+    /// Sanitized GitOpsTarget exposed as `target.*` during target rendering.
     pub target: Option<serde_json::Value>,
 }
 
 impl TemplateContext {
-    /// Build a template context from profile values, secrets, and selected profile name
-    pub fn build(profile: &Profile, secrets: &SecretsConfig, profile_name: &str) -> Result<Self> {
-        let values = serde_json::to_value(&profile.values)?;
-
+    /// Build a targetless template context from effective values and secrets.
+    pub fn build(values: serde_json::Value, secrets: &SecretsConfig) -> Result<Self> {
         let secret_keys = secrets.keys()?;
         let mut secrets_map = serde_json::Map::new();
         for key in secret_keys {
@@ -71,15 +69,16 @@ impl TemplateContext {
         Ok(Self {
             values,
             secrets: serde_json::Value::Object(secrets_map),
-            profile: profile_name.to_string(),
             env: Self::filter_env_vars(std::env::vars()),
+            cluster: None,
             target: None,
         })
     }
 
-    /// Attach the effective GitOps target to this rendering context.
+    /// Attach sanitized Cluster and GitOpsTarget resources to this context.
     #[must_use]
-    pub fn with_target(mut self, target: serde_json::Value) -> Self {
+    pub fn with_gitops_context(mut self, cluster: serde_json::Value, target: serde_json::Value) -> Self {
+        self.cluster = Some(cluster);
         self.target = Some(target);
         self
     }
@@ -89,9 +88,11 @@ impl TemplateContext {
         let mut context = serde_json::Map::from_iter([
             ("values".to_string(), self.values.clone()),
             ("secrets".to_string(), self.secrets.clone()),
-            ("profile".to_string(), self.profile.clone().into()),
             ("env".to_string(), self.env.clone().into()),
         ]);
+        if let Some(cluster) = &self.cluster {
+            context.insert("cluster".to_string(), cluster.clone());
+        }
         if let Some(target) = &self.target {
             context.insert("target".to_string(), target.clone());
         }

@@ -2,7 +2,7 @@
 title: 'Nyl'
 ---
 
-Nyl is a fast Kubernetes manifest generator for teams that want Helm integration, reusable components, profile-aware configuration, and plain Kubernetes YAML as an output.
+Nyl is a fast Kubernetes manifest generator for teams that want Helm integration, reusable components, cluster-aware configuration, and plain Kubernetes YAML as output.
 
 ## Choose a Workflow
 

@@ -7,7 +7,7 @@ This file provides guidelines for AI assistants (Claude, GitHub Copilot) working
 Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Jinja2-compatible templating with MiniJinja
 - Helm chart integration
-- Multi-environment configurations (profiles)
+- Cluster- and target-aware rendered GitOps configuration
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
 - ArgoCD Application generation
@@ -179,7 +179,7 @@ fn test_operation() -> Result<()> {
 - **Functions and methods:** `snake_case` (e.g., `render_manifest`, `get_config`)
 - **Types and structs:** `PascalCase` (e.g., `HelmChart`, `GitManager`)
 - **Constants:** `SCREAMING_SNAKE_CASE` (e.g., `DEFAULT_CACHE_DIR`, `MAX_RETRIES`)
-- **Test functions:** `test_<function>_<scenario>` (e.g., `test_render_with_profile`, `test_git_clone_fails`)
+- **Test functions:** `test_<function>_<scenario>` (e.g., `test_render_with_target`, `test_git_clone_fails`)
 - **Modules:** `snake_case` (e.g., `helm_resolver`, `template_engine`)
 - **Trait names:** Descriptive nouns or adjectives in `PascalCase` (e.g., `Resolver`, `Renderable`)
 
@@ -236,7 +236,6 @@ src/
 ├── gitops/       # Rendered GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
 ├── components/   # Component discovery and registry
-├── profiles/     # Profile management
 ├── secrets/      # Secrets provider framework
 └── util/         # Shared utilities
 ```
@@ -245,11 +244,16 @@ src/
 
 - Control resources use `gitops.nyl.niklasrosenstein.github.com/v1` with a
   static `apiVersion`, `kind`, and `metadata.name` envelope.
+- A Cluster describes one concrete Argo CD destination, its deterministic
+  Kubernetes capabilities, cluster-fact values, and an optional local context.
+  A GitOpsTarget binds exactly one Cluster to one publication destination.
+- Cluster values are merged recursively with target values; target values win.
+  ApplicationGroups inherit the target Cluster destination.
 - ApplicationGroup and AppProjectDefinition specs are rendered after target
   selection, so structural templating is valid beneath the static envelope.
 - Discovery follows Git visibility across the whole project. The `config/` and
   `applications/` paths are scaffold conventions, not lookup restrictions.
-- One target owns one repository/revision/path-prefix tuple. Targets sharing a
+- One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
   repository revision must have disjoint prefixes.
 - Rendered reconciliation removes only files recorded in `_nyl/index.json` and
   fails when owned files were modified outside Nyl. It accepts bytes from an

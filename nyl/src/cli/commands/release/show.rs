@@ -1,14 +1,19 @@
 use clap::Args;
 
 use crate::{
+    cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat},
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStorage},
+    kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
 
 /// Show details of a specific release
 #[derive(Args, Debug)]
 pub struct ShowArgs {
+    /// GitOps target whose cluster stores the release
+    #[arg(long)]
+    pub target: String,
+
     /// Release name
     pub name: String,
 
@@ -36,7 +41,7 @@ pub struct ShowArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ShowArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);

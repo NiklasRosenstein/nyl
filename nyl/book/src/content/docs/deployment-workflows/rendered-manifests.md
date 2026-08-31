@@ -36,6 +36,8 @@ config/
   repositories/
     deploy.yaml
     workloads.yaml
+  clusters/
+    kasoku.yaml
   targets/
     production.yaml
   projects/
@@ -58,6 +60,7 @@ Create the layout or individual resources with:
 ```bash
 nyl new project platform
 nyl new gitops repository deploy
+nyl new gitops cluster kasoku
 nyl new gitops target production
 nyl new gitops project workloads
 nyl new gitops application-group workloads
@@ -92,9 +95,44 @@ spec:
   publishURL: git@git.example.com:platform/deploy.git
 ```
 
+`Cluster` describes one concrete Kubernetes cluster: its Argo CD destination,
+the Kubernetes capabilities used for deterministic rendering, unrestricted
+cluster-fact values, and an optional local kube context. Good values include
+region, architecture, storage class, and ingress implementation. Deployment
+intent such as `environment` belongs on the target.
+
+```yaml
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: Cluster
+metadata:
+  name: kasoku
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions:
+      - v1
+      - apps/v1
+  values:
+    region: fsn1
+    storageClass: local-path
+  live:
+    context: kasoku
+```
+
+Exactly one of `destination.server` and `destination.name` is required.
+`live.context` is a local kubeconfig handle. It does not participate in render
+hashes and is never exposed to templates or generated manifests. Live commands
+resolve the context as `--context`, then `spec.live.context`, then the current
+kubeconfig context. Nyl verifies the selected context's API server against a
+server-based destination when possible. The in-cluster
+`https://kubernetes.default.svc` alias cannot be compared with a local
+kubeconfig endpoint.
+
 `GitOpsTarget` is one independently rendered and published deployment slice. A
-target selects a Nyl profile, adds target values and labels, and owns one
-repository, revision, and path prefix.
+target binds exactly one Cluster to one publication repository, revision, and
+path prefix. It also supplies deployment-specific values and labels.
 
 ```yaml
 apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
@@ -104,10 +142,11 @@ metadata:
   labels:
     environment: production
 spec:
-  profile: production
+  clusterRef:
+    name: kasoku
   values:
-    region: eu-central-1
-  destination:
+    environment: production
+  publication:
     repositoryRef:
       name: deploy
     revision: deploy/production
@@ -118,6 +157,11 @@ spec:
 The model supports one target, several targets with disjoint prefixes on one
 revision, a revision per target, and repositories that differ per target.
 Prefixes may overlap only when repository or revision differs.
+Multiple targets can reference one Cluster when they have different publication
+cadences or deployment intent. A deployment slice that targets another cluster
+is represented by another GitOpsTarget. There is no ClusterClass abstraction;
+shared classes can be introduced when independently drifting clusters establish
+a concrete reuse requirement.
 
 `AppProjectDefinition` assigns a stable local project identity. A `Rendered`
 project is written into the generated catalog; an `External` project is
@@ -160,8 +204,7 @@ spec:
   applicationNamespace: argocd
   source:
     path: applications/workloads
-  destination:
-    server: https://kubernetes.default.svc
+  destinationNamespace: workloads
   namespace:
     create: true
     prunePolicy: Confirm
@@ -180,7 +223,9 @@ Application deletion uses Argo CD's foreground resources finalizer by default,
 so deleting a generated Application cascades to its resources. `Background`
 uses the background finalizer and `Orphan` omits the resources finalizer.
 
-Missing destination Namespaces are created by default. The generated Namespace
+The group inherits the referenced target Cluster's Argo CD destination.
+`destinationNamespace` selects the workload namespace when the releases do not
+provide one. Missing destination Namespaces are created by default. The generated Namespace
 requires explicit Argo CD confirmation for prune and delete. `Automatic` omits
 the corresponding sync option; `Retain` writes `Prune=false` or `Delete=false`.
 Each Namespace is owned by one dedicated generated Application, even when many
@@ -191,13 +236,15 @@ Namespace is rejected so its lifecycle cannot overlap another Application.
 
 ## Multiple clusters and conditional applications
 
-Templates receive the selected profile values plus target overlays. Target
-values win recursively, and the effective target is available as `target`:
+Templates merge Cluster values with target values recursively. Target values
+win at every conflicting leaf. The effective target and sanitized Cluster are
+available as `target` and `cluster`; the Cluster's `live` block is omitted:
 
 ```yaml
 data:
   environment: '{{ target.labels.environment }}'
   region: '{{ values.region }}'
+  clusterName: '{{ cluster.metadata.name }}'
 ```
 
 ApplicationGroup `targetSelector.matchLabels` can omit a whole group. Source
@@ -206,10 +253,18 @@ a target. ApplicationGroup and AppProjectDefinition specs may also use
 target-dependent structural templating; their API version, kind, and local name
 remain static for discovery. Each target renders with its stored Kubernetes
 version and API versions, so CI does not need cluster access.
-Within one target, all ApplicationGroups identify clusters consistently with
-either `destination.server` or `destination.name`. Mixing both representations
-is rejected because Nyl cannot prove that two Argo CD cluster aliases are
-distinct.
+
+Maintain committed capabilities from the live cluster with:
+
+```bash
+nyl cluster list
+nyl cluster info kasoku
+nyl cluster update kasoku
+nyl cluster update kasoku --check
+```
+
+`cluster update` changes only `spec.kubernetes`, sorting and deduplicating API
+versions. `--check` reports drift without writing.
 
 Remote ApplicationGroup sources have a human-readable mutable `revision` and an
 authoritative full `commit` lock. Central renderer mode uses the platform

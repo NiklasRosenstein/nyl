@@ -4,7 +4,7 @@ title: 'Rendered GitOps commands'
 
 ## `nyl target list`
 
-List every discovered target with its profile, destination repository, revision,
+List every discovered target with its Cluster, publication repository, revision,
 and path prefix.
 
 ```bash
@@ -45,8 +45,8 @@ nyl diff-tree \
 ```
 
 The command writes a multi-file unified diff to stdout. Source-derived diffs
-also compare the repository, revision, and path prefix through a synthetic
-`_nyl/destination.json` diff entry. `--fail-on-diff` gives CI a non-zero result
+also compare the cluster, repository, revision, and path prefix through a synthetic
+`_nyl/publication.json` diff entry. `--fail-on-diff` gives CI a non-zero result
 while retaining the diff output. Mutable comparison refs must refresh
 successfully; cached refs are not accepted as current state.
 

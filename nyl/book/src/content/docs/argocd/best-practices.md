@@ -449,7 +449,7 @@ jobs:
           # Create preview namespace
           kubectl create namespace pr-${{ github.event.pull_request.number }}
 
-          # Render manifests with preview profile
+          # Render manifests for the preview target
           nyl render -e preview apps.yaml | kubectl apply -n pr-${{ github.event.pull_request.number }} -f -
 ```
 

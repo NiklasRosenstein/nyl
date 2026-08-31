@@ -10,7 +10,7 @@ Create projects, components, and rendered GitOps control resources.
 nyl new project <dir>
 nyl new component <api-version> <kind>
 nyl new resource <KIND> <name>
-nyl new gitops <repository|target|project|application-group> <name>
+nyl new gitops <repository|cluster|target|project|application-group> <name>
 ```
 
 ## `nyl new project`
@@ -24,6 +24,7 @@ Creates:
 ├── components/
 └── config/
     ├── repositories/
+    ├── clusters/
     ├── targets/
     ├── projects/
     └── application-groups/
@@ -57,6 +58,8 @@ The generic and kind-specific forms use the same scaffold registry:
 ```bash
 nyl new resource GitRepository deploy
 nyl new gitops repository deploy
+nyl new resource Cluster kasoku
+nyl new gitops cluster kasoku
 ```
 
 Every file includes its published YAML language server schema URL. Use
