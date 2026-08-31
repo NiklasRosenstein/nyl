@@ -63,7 +63,6 @@ Inspect and refresh committed capabilities from a live cluster with:
 
 ```bash
 nyl cluster list
-nyl cluster info primary
 nyl cluster update primary
 nyl cluster update primary --check
 ```

@@ -59,10 +59,20 @@ The generic and kind-specific forms use the same scaffold registry:
 nyl new resource GitRepository deploy
 nyl new gitops repository deploy
 nyl new resource Cluster primary
-nyl new gitops cluster primary
+nyl new gitops cluster primary --context admin@primary
 ```
 
 Every file includes its published YAML language server schema URL. Use
 `--output` for an exact path, `--source` to set an ApplicationGroup source, or
 `--source ... --colocate` to create `_application-group.yaml` inside the source
 directory. Existing files are never overwritten.
+
+`nyl new gitops cluster` writes `--context` to `spec.live.context`. Without the
+option, the Cluster name is the implied context. Nyl warns when the selected
+context is absent from the local kubeconfig. When it exists and stdin is a
+terminal, Nyl offers to run `nyl cluster update` immediately; piped and CI
+invocations never prompt or contact the cluster.
+
+Created paths are printed relative to the current directory when that requires
+at most two leading `..` segments. More distant paths are printed as absolute
+paths.

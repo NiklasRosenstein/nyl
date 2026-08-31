@@ -65,6 +65,87 @@ fn test_cli_version() {
 }
 
 #[test]
+fn test_cluster_help_exposes_only_list_and_update() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.arg("cluster").arg("--help");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("Fetch live capabilities").not());
+}
+
+#[test]
+fn test_new_gitops_cluster_uses_explicit_context_without_prompting_on_a_pipe() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    let kubeconfig = temp.path().join("kubeconfig.yaml");
+    fs::write(
+        &kubeconfig,
+        r#"apiVersion: v1
+kind: Config
+contexts:
+  - name: admin@primary
+    context:
+      cluster: primary
+clusters: []
+users: []
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig).args([
+        "new",
+        "gitops",
+        "cluster",
+        "primary",
+        "--context",
+        "admin@primary",
+    ]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("config/clusters/primary.yaml"));
+
+    let cluster = fs::read_to_string(temp.path().join("config/clusters/primary.yaml")).unwrap();
+    assert!(cluster.contains("context: admin@primary"));
+    assert!(cluster.contains("apiVersions: []"));
+}
+
+#[test]
+fn test_new_gitops_cluster_warns_when_implied_context_is_missing() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    let kubeconfig = temp.path().join("kubeconfig.yaml");
+    fs::write(
+        &kubeconfig,
+        "apiVersion: v1\nkind: Config\ncontexts: []\nclusters: []\nusers: []\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.current_dir(temp.path())
+        .env("KUBECONFIG", &kubeconfig)
+        .args(["new", "gitops", "cluster", "primary"]);
+    cmd.assert().success().stderr(predicate::str::contains(
+        "Kubernetes context \"primary\" implied by the Cluster name was not found",
+    ));
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig).args([
+        "new",
+        "gitops",
+        "cluster",
+        "secondary",
+        "--context",
+        "missing",
+    ]);
+    cmd.assert().success().stderr(predicate::str::contains(
+        "Kubernetes context \"missing\" specified by --context was not found",
+    ));
+}
+
+#[test]
 fn test_generate_schema_config_command() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("generate").arg("schema").arg("config");

@@ -690,11 +690,7 @@ spec:
         let (temporary, _repository) = project();
         let content = format!(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: unrelated\n---\n{}",
-            TARGET.replacen(
-                "apiVersion: gitops.nyl/v1",
-                "apiVersion: \"gitops.nyl/v1\" # static",
-                1
-            )
+            TARGET.replacen("apiVersion: gitops.nyl/v1", "apiVersion: \"gitops.nyl/v1\" # static", 1)
         );
         fs::write(temporary.path().join("resources.yaml"), content).unwrap();
 

@@ -26,7 +26,7 @@ version_prefix = "v"
 mise install
 nyl new project platform
 cd platform
-nyl new gitops cluster local
+nyl new gitops cluster local --context kind-kind
 nyl new gitops target dev
 nyl render --target dev apps.yaml
 ```

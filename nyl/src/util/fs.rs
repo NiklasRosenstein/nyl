@@ -1,6 +1,81 @@
 use crate::Result;
 /// File system utilities for config file discovery and path resolution
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+/// Format a path relative to the current directory when it needs at most two
+/// leading parent segments. More distant paths remain absolute.
+pub fn path_for_display(path: &Path) -> PathBuf {
+    let Ok(current_dir) = std::env::current_dir() else {
+        return path.to_path_buf();
+    };
+    path_for_display_from(path, &current_dir)
+}
+
+fn path_for_display_from(path: &Path, current_dir: &Path) -> PathBuf {
+    let current_dir = normalize_path(current_dir);
+    let absolute = normalize_path(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    });
+    let Some(relative) = relative_path(&current_dir, &absolute) else {
+        return absolute;
+    };
+    let parent_count = relative
+        .components()
+        .take_while(|component| matches!(component, Component::ParentDir))
+        .count();
+    if parent_count > 2 {
+        absolute
+    } else if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
+    }
+}
+
+fn normalize_path(path: impl Into<PathBuf>) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.into().components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn relative_path(base: &Path, target: &Path) -> Option<PathBuf> {
+    let base = base.components().collect::<Vec<_>>();
+    let target = target.components().collect::<Vec<_>>();
+    if base.first() != target.first() {
+        return None;
+    }
+    let shared = base
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if base[shared..]
+        .iter()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for _ in &base[shared..] {
+        relative.push("..");
+    }
+    for component in &target[shared..] {
+        relative.push(component.as_os_str());
+    }
+    Some(relative)
+}
 
 /// Find a configuration file by searching upward through parent directories
 ///
@@ -189,5 +264,20 @@ mod tests {
         assert_eq!(results[0], PathBuf::from("/base/dir/rel1"));
         assert_eq!(results[1], PathBuf::from("/abs1"));
         assert_eq!(results[2], PathBuf::from("/base/dir/rel2"));
+    }
+
+    #[test]
+    fn display_paths_use_at_most_two_parent_segments() {
+        let root = std::env::temp_dir().join("nyl-display-path-test");
+        let current = root.join("one/two/three");
+        assert_eq!(
+            path_for_display_from(&root.join("one/peer"), &current),
+            PathBuf::from("../../peer")
+        );
+        assert_eq!(path_for_display_from(&root.join("peer"), &current), root.join("peer"));
+        assert_eq!(
+            path_for_display_from(Path::new("config/clusters/primary.yaml"), &current),
+            PathBuf::from("config/clusters/primary.yaml")
+        );
     }
 }

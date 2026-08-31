@@ -98,7 +98,7 @@ impl Cli {
             Commands::DiffTree(args) => commands::diff_tree::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::Generate(args) => commands::generate::execute(args),
-            Commands::New(args) => commands::new::execute(args),
+            Commands::New(args) => commands::new::execute(args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Cluster(args) => commands::cluster::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 pub mod fs;
 pub mod source_context;
 
-pub use fs::{find_config_file, resolve_path, resolve_paths};
+pub use fs::{find_config_file, path_for_display, resolve_path, resolve_paths};
 pub use source_context::SourceContext;
 
 /// Recursively merge JSON objects, replacing arrays and scalar values.

@@ -114,11 +114,14 @@ For target-aware rendering, scaffold a Cluster and target, update the Cluster's
 capabilities, then select the target:
 
 ```bash
-nyl new gitops cluster local
+nyl new gitops cluster local --context kind-kind
 nyl new gitops target dev
-nyl cluster update local
 nyl render --target dev apps.yaml
 ```
+
+When `kind-kind` exists and the command runs in a terminal, cluster creation
+offers to populate its Kubernetes capabilities immediately. Run
+`nyl cluster update local` if you decline the prompt.
 
 ## Project Structure
 

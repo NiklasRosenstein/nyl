@@ -3,8 +3,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use clap::{Args, Subcommand};
 
 use crate::gitops::discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::kubernetes::{KubeClient, KubeRsClient};
@@ -21,19 +20,8 @@ pub struct ClusterArgs {
 pub enum ClusterSubcommand {
     /// List configured clusters without connecting to Kubernetes
     List,
-    /// Fetch live capabilities from a configured cluster
-    Info(ClusterInfoArgs),
     /// Refresh the stored capabilities of a configured cluster
     Update(ClusterUpdateArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct ClusterInfoArgs {
-    pub name: String,
-    #[arg(long)]
-    pub context: Option<String>,
-    #[arg(long, default_value = "text", value_enum)]
-    pub output: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -46,16 +34,7 @@ pub struct ClusterUpdateArgs {
     pub check: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum OutputFormat {
-    Text,
-    Json,
-    Yaml,
-    Csv,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, Eq)]
 struct ClusterInfo {
     kube_version: String,
     api_versions: Vec<String>,
@@ -70,7 +49,6 @@ pub struct ResolvedTargetCluster {
 pub async fn execute(args: ClusterArgs) -> Result<()> {
     match args.command {
         ClusterSubcommand::List => list_clusters(),
-        ClusterSubcommand::Info(args) => info(args).await,
         ClusterSubcommand::Update(args) => update(args).await,
     }
 }
@@ -146,14 +124,7 @@ fn list_clusters() -> Result<()> {
     Ok(())
 }
 
-async fn info(args: ClusterInfoArgs) -> Result<()> {
-    let inventory = inventory(&std::env::current_dir()?)?;
-    let cluster = get_cluster(&inventory, &args.name)?;
-    let info = fetch_cluster_info(cluster, args.context.as_deref()).await?;
-    output_info(&info, args.output)
-}
-
-async fn update(args: ClusterUpdateArgs) -> Result<()> {
+pub(crate) async fn update(args: ClusterUpdateArgs) -> Result<()> {
     let inventory = inventory(&std::env::current_dir()?)?;
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, &args.name)
@@ -179,7 +150,7 @@ async fn update(args: ClusterUpdateArgs) -> Result<()> {
 
     let path = inventory.project_root.join(&discovered.source_path);
     update_cluster_document(&inventory.project_root, &path, discovered, &info)?;
-    println!("Updated {}", path.display());
+    println!("Updated {}", crate::util::path_for_display(&path).display());
     Ok(())
 }
 
@@ -375,25 +346,6 @@ fn replace_kubernetes_block(document: &str, info: &ClusterInfo) -> Result<String
     result.push_str(&block);
     result.push_str(&lines[end..].concat());
     Ok(result)
-}
-
-fn output_info(info: &ClusterInfo, output: OutputFormat) -> Result<()> {
-    match output {
-        OutputFormat::Text => {
-            println!("Kubernetes Version: {}", info.kube_version);
-            println!("API Versions:");
-            for version in &info.api_versions {
-                println!("  - {version}");
-            }
-        }
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(info)?),
-        OutputFormat::Yaml => print!("{}", serde_norway::to_string(info)?),
-        OutputFormat::Csv => {
-            println!("{}", info.kube_version);
-            println!("{}", info.api_versions.join(","));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

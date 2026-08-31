@@ -37,7 +37,7 @@ Create resources individually with:
 
 ```bash
 nyl new gitops repository deploy
-nyl new gitops cluster primary
+nyl new gitops cluster primary --context admin@primary
 nyl new gitops target production
 nyl new gitops project workloads
 nyl new gitops application-group workloads
