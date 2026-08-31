@@ -217,6 +217,7 @@ fn install_transaction(output_root: &Path, index: &RenderIndex) -> Result<()> {
     std::io::Write::write_all(&mut file, &bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, &path)?;
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         fs::File::open(parent)?.sync_all()?;
     }
