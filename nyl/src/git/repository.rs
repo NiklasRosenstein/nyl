@@ -53,6 +53,13 @@ impl BareRepository {
             Self::clone_bare(url, path, credential_provider.as_deref())?
         };
 
+        // Cached checkouts preserve repository bytes so ownership hashes and
+        // rendered diffs are identical on every host platform.
+        let mut config = repo.config()?;
+        config.set_bool("core.autocrlf", false)?;
+        config.set_str("core.eol", "lf")?;
+        drop(config);
+
         Ok(Self {
             repo,
             url: url.to_string(),
@@ -255,9 +262,17 @@ mod tests {
             .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
             .unwrap();
 
-        // This test would require a real Git repository to clone from
-        // For now, just test that the structure is correct
-        assert!(!repo_path.exists());
+        let url = source_dir.path().to_string_lossy();
+        BareRepository::get_or_create(&url, &repo_path, None).unwrap();
+
+        let config = Repository::open_bare(&repo_path)
+            .unwrap()
+            .config()
+            .unwrap()
+            .snapshot()
+            .unwrap();
+        assert!(!config.get_bool("core.autocrlf").unwrap());
+        assert_eq!(config.get_str("core.eol").unwrap(), "lf");
     }
 
     #[test]
