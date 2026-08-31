@@ -9,7 +9,7 @@ coordinates.
 ## Example
 
 ```yaml
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: production

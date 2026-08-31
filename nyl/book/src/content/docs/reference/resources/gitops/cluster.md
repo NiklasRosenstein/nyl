@@ -9,7 +9,7 @@ values, and an optional local kubeconfig context.
 ## Example
 
 ```yaml
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: Cluster
 metadata:
   name: primary

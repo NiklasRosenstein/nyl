@@ -46,7 +46,7 @@
   "description": "A stable local identity wrapping an Argo CD AppProject manifest or contract.",
   "properties": {
     "apiVersion": {
-      "const": "gitops.nyl.niklasrosenstein.github.com/v1",
+      "const": "gitops.nyl/v1",
       "type": "string"
     },
     "kind": {

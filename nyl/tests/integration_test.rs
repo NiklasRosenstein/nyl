@@ -11,7 +11,7 @@ fn create_gitops_target_fixture(temp: &TempDir) {
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
         temp.path().join("config/clusters/kasoku.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -29,7 +29,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/targets/production.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: production

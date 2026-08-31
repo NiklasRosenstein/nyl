@@ -454,7 +454,7 @@ mod tests {
     use super::*;
     use crate::resources::{GitOpsResource, GitOpsResourceKind};
 
-    const TARGET: &str = r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+    const TARGET: &str = r"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: production
@@ -534,7 +534,7 @@ spec:
         fs::write(
             temporary.path().join("group.yaml"),
             r"{% if values.enabled %}
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: optional
@@ -628,7 +628,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+            r"apiVersion: gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -652,7 +652,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+            r"apiVersion: gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -691,8 +691,8 @@ spec:
         let content = format!(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: unrelated\n---\n{}",
             TARGET.replacen(
-                "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1",
-                "apiVersion: \"gitops.nyl.niklasrosenstein.github.com/v1\" # static",
+                "apiVersion: gitops.nyl/v1",
+                "apiVersion: \"gitops.nyl/v1\" # static",
                 1
             )
         );

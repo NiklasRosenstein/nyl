@@ -21,7 +21,7 @@ fn fixture() -> TempDir {
     }
     fs::write(
         temp.path().join("config/repositories/deploy.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: GitRepository
 metadata:
   name: deploy
@@ -32,7 +32,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/clusters/kasoku.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -49,7 +49,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/targets/production.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: production
@@ -70,7 +70,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/projects/workloads.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: AppProjectDefinition
 metadata:
   name: workloads
@@ -93,7 +93,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/application-groups/workloads.yaml"),
-        r#"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r#"apiVersion: gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: workloads
@@ -349,7 +349,7 @@ fn validation_rejects_overlapping_target_prefixes_on_one_revision() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: overlap
@@ -378,7 +378,7 @@ fn operational_commands_reject_overlaps_through_repository_aliases() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/repositories/deploy-alias.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: GitRepository
 metadata:
   name: deploy-alias
@@ -389,7 +389,7 @@ spec:
     .unwrap();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: overlap
@@ -425,7 +425,7 @@ fn validation_rejects_overlaps_through_publish_urls_and_branch_ref_aliases() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/repositories/deploy-publisher.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: GitRepository
 metadata:
   name: deploy-publisher
@@ -437,7 +437,7 @@ spec:
     .unwrap();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: overlap
@@ -467,7 +467,7 @@ fn application_groups_cannot_override_the_target_cluster_destination() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/application-groups/named-cluster.yaml"),
-        r"apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+        r"apiVersion: gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: named-cluster
@@ -672,7 +672,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     fs::write(
         fixture.path().join("config/repositories/deploy.yaml"),
         format!(
-            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: {}\n  publishURL: {}\n",
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: {}\n  publishURL: {}\n",
             destination.path().display(),
             destination.path().display()
         ),

@@ -242,7 +242,7 @@ src/
 
 ### Rendered GitOps invariants
 
-- Control resources use `gitops.nyl.niklasrosenstein.github.com/v1` with a
+- Control resources use `gitops.nyl/v1` with a
   static `apiVersion`, `kind`, and `metadata.name` envelope.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.

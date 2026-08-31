@@ -12,7 +12,7 @@ fn resource_schema_cli_accepts_canonical_kind_and_alias() {
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "\"const\": \"gitops.nyl.niklasrosenstein.github.com/v1\"",
+                "\"const\": \"gitops.nyl/v1\"",
             ))
             .stdout(predicate::str::contains("\"const\": \"GitOpsTarget\""));
     }

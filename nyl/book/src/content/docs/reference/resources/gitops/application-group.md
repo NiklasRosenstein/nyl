@@ -8,7 +8,7 @@ project, and defines platform-owned Application and Namespace policy.
 ## Example
 
 ```yaml
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: workloads

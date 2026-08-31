@@ -3,7 +3,7 @@ title: 'Rendered GitOps Resources'
 ---
 
 Rendered GitOps resources are Kubernetes-shaped compiler inputs with API
-version `gitops.nyl.niklasrosenstein.github.com/v1`. They describe repositories,
+version `gitops.nyl/v1`. They describe repositories,
 cluster capabilities, publication targets, Argo CD projects, and application
 policy. Nyl discovers them from project YAML files; they are not installed in a
 cluster.
@@ -26,7 +26,7 @@ cluster.
 ## Common envelope
 
 ```yaml
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: <resource-kind>
 metadata:
   name: <local-name>

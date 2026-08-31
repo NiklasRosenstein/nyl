@@ -9,7 +9,7 @@ Applications use `spec.manifest.metadata.name` as their Argo CD project.
 ## Rendered project example
 
 ```yaml
-apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+apiVersion: gitops.nyl/v1
 kind: AppProjectDefinition
 metadata:
   name: workloads
