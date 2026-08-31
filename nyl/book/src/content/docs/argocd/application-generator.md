@@ -25,6 +25,8 @@ spec:
     paths: [string]         # Multiple selectors to scan (mutually exclusive with path)
     include: [string]       # Include patterns (default: ["*.yaml", "*.yml"])
     exclude: [string]       # Exclude patterns (default: [".*", "_*", ".nyl/**"])
+    pluginEnv:              # Environment variables for generated CMP Applications
+      NAME: value
   project: string           # ArgoCD project (default: "default")
   syncPolicy:               # Optional sync policy for generated Applications
     automated:
@@ -92,6 +94,12 @@ Configures the Git repository and directory scanning behavior.
   - Takes precedence over include patterns
   - Default excludes hidden files (`.`), underscore-prefixed files (`_`), and Nyl cache directories
   - Example: `["test_*", ".*", "backup*"]`
+
+- **pluginEnv** (optional): Environment variables passed to the Nyl CMP plugin in every generated Application
+  - Values are strings and keys are emitted in sorted order
+  - ArgoCD's `ARGOCD_ENV_` prefix is normalized, so a `NYL_REGION` entry is available to templates as `env.NYL_REGION`
+  - `NYL_RELEASE_NAME`, `NYL_RELEASE_NAMESPACE`, and `NYL_CMP_TEMPLATE_INPUT` are reserved
+  - Project-level configuration can use this field to provide inputs required while ArgoCD renders an Application
 
 ### spec.project
 

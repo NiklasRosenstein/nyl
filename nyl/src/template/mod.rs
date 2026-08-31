@@ -82,16 +82,33 @@ impl TemplateContext {
         })
     }
 
-    /// Filter environment variables to only include NYL_ prefixed ones.
+    /// Filter environment variables to only include Nyl inputs.
     ///
     /// This prevents accidental leakage of sensitive CI/runtime secrets into manifests.
+    /// ArgoCD prefixes plugin parameters with `ARGOCD_ENV_`; Nyl exposes their
+    /// `NYL_` names so the same template works locally and in the CMP sidecar.
     fn filter_env_vars<I>(vars: I) -> serde_json::Map<String, serde_json::Value>
     where
         I: Iterator<Item = (String, String)>,
     {
-        vars.filter(|(k, _)| k.starts_with("NYL_"))
-            .map(|(k, v)| (k, serde_json::Value::String(v)))
-            .collect()
+        let mut env = serde_json::Map::new();
+        let mut argocd_env = Vec::new();
+
+        for (key, value) in vars {
+            if key.starts_with("NYL_") {
+                env.insert(key, serde_json::Value::String(value));
+            } else if let Some(key) = key.strip_prefix("ARGOCD_ENV_") {
+                if key.starts_with("NYL_") {
+                    argocd_env.push((key.to_string(), value));
+                }
+            }
+        }
+
+        for (key, value) in argocd_env {
+            env.insert(key, serde_json::Value::String(value));
+        }
+
+        env
     }
 }
 
@@ -199,21 +216,38 @@ mod tests {
             ("NYL_ANOTHER".to_string(), "also_visible".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("NYL_CONFIG".to_string(), "test_config".to_string()),
+            ("ARGOCD_ENV_NYL_REGION".to_string(), "eu-central-1".to_string()),
+            ("ARGOCD_ENV_SECRET_KEY".to_string(), "still-hidden".to_string()),
         ];
 
         let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
 
         // Check that only NYL_ prefixed vars are included
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.len(), 4);
         assert!(filtered.contains_key("NYL_TEST_VAR"));
         assert_eq!(filtered.get("NYL_TEST_VAR").unwrap().as_str().unwrap(), "visible");
         assert!(filtered.contains_key("NYL_ANOTHER"));
         assert_eq!(filtered.get("NYL_ANOTHER").unwrap().as_str().unwrap(), "also_visible");
         assert!(filtered.contains_key("NYL_CONFIG"));
         assert_eq!(filtered.get("NYL_CONFIG").unwrap().as_str().unwrap(), "test_config");
+        assert_eq!(filtered.get("NYL_REGION").unwrap().as_str().unwrap(), "eu-central-1");
 
         // Verify non-NYL_ prefixed vars are excluded
         assert!(!filtered.contains_key("SECRET_KEY"));
         assert!(!filtered.contains_key("PATH"));
+        assert!(!filtered.contains_key("ARGOCD_ENV_NYL_REGION"));
+        assert!(!filtered.contains_key("ARGOCD_ENV_SECRET_KEY"));
+    }
+
+    #[test]
+    fn test_filter_env_vars_prefers_argocd_plugin_value() {
+        let mock_vars = vec![
+            ("ARGOCD_ENV_NYL_IMAGE_TAG".to_string(), "pr-build".to_string()),
+            ("NYL_IMAGE_TAG".to_string(), "inherited".to_string()),
+        ];
+
+        let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
+
+        assert_eq!(filtered.get("NYL_IMAGE_TAG").unwrap().as_str().unwrap(), "pr-build");
     }
 }

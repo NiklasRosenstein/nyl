@@ -34,11 +34,19 @@ spec:
     repoURL: "{{ env.NYL_REPO_URL }}"
     targetRevision: "{{ env.NYL_TARGET_REVISION | default('HEAD') }}"
     path: examples/argocd-bootstrap
+    pluginEnv:
+      NYL_CHART_OWNER: "{{ env.NYL_CHART_OWNER | default('niklasrosenstein') }}"
+      NYL_CHART_VERSION: "{{ env.NYL_CHART_VERSION | default('0.1.0') }}"
+      NYL_IMAGE_TAG: "{{ env.NYL_IMAGE_TAG | default('develop') }}"
+      NYL_REPO_URL: "{{ env.NYL_REPO_URL }}"
+      NYL_TARGET_REVISION: "{{ env.NYL_TARGET_REVISION | default('HEAD') }}"
   project: default
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
 ---
 # Create the argocd namespace
 apiVersion: v1
