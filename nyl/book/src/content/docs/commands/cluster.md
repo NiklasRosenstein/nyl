@@ -19,9 +19,9 @@ nyl cluster list
 Read the live Kubernetes version and API versions for a configured Cluster:
 
 ```bash
-nyl cluster info kasoku
-nyl cluster info kasoku --output yaml
-nyl cluster info kasoku --context admin@kasoku
+nyl cluster info primary
+nyl cluster info primary --output yaml
+nyl cluster info primary --context admin@primary
 ```
 
 The explicit `--context` wins over `Cluster.spec.live.context`. Without either,
@@ -35,9 +35,9 @@ alias and cannot be compared with a local kubeconfig endpoint.
 Refresh `spec.kubernetes` from the live cluster:
 
 ```bash
-nyl cluster update kasoku
-nyl cluster update kasoku --context admin@kasoku
-nyl cluster update kasoku --check
+nyl cluster update primary
+nyl cluster update primary --context admin@primary
+nyl cluster update primary --check
 ```
 
 The update sorts and deduplicates `apiVersions`, changes only

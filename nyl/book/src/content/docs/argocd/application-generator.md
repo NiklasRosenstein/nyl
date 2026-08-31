@@ -269,7 +269,7 @@ spec:
   source:
     repoURL: git@gitlab.com:NiklasRosenstein/config.git
     targetRevision: HEAD
-    path: kasoku.netbird.selfhosted/gitops/home-lab
+    path: clusters/home-lab/gitops
   project: home-lab
   syncPolicy:
     syncOptions:

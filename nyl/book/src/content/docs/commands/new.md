@@ -58,8 +58,8 @@ The generic and kind-specific forms use the same scaffold registry:
 ```bash
 nyl new resource GitRepository deploy
 nyl new gitops repository deploy
-nyl new resource Cluster kasoku
-nyl new gitops cluster kasoku
+nyl new resource Cluster primary
+nyl new gitops cluster primary
 ```
 
 Every file includes its published YAML language server schema URL. Use

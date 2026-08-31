@@ -37,7 +37,7 @@ config/
     deploy.yaml
     workloads.yaml
   clusters/
-    kasoku.yaml
+    primary.yaml
   targets/
     production.yaml
   projects/
@@ -60,7 +60,7 @@ Create the layout or individual resources with:
 ```bash
 nyl new project platform
 nyl new gitops repository deploy
-nyl new gitops cluster kasoku
+nyl new gitops cluster primary
 nyl new gitops target production
 nyl new gitops project workloads
 nyl new gitops application-group workloads
@@ -105,7 +105,7 @@ intent such as `environment` belongs on the target.
 apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: primary
 spec:
   destination:
     server: https://kubernetes.default.svc
@@ -118,7 +118,7 @@ spec:
     region: fsn1
     storageClass: local-path
   live:
-    context: kasoku
+    context: admin@primary
 ```
 
 Exactly one of `destination.server` and `destination.name` is required.
@@ -143,7 +143,7 @@ metadata:
     environment: production
 spec:
   clusterRef:
-    name: kasoku
+    name: primary
   values:
     environment: production
   publication:
@@ -258,9 +258,9 @@ Maintain committed capabilities from the live cluster with:
 
 ```bash
 nyl cluster list
-nyl cluster info kasoku
-nyl cluster update kasoku
-nyl cluster update kasoku --check
+nyl cluster info primary
+nyl cluster update primary
+nyl cluster update primary --check
 ```
 
 `cluster update` changes only `spec.kubernetes`, sorting and deduplicating API
