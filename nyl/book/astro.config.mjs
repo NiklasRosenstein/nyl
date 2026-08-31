@@ -62,15 +62,6 @@ export default defineConfig({
           items: [
             "configuration",
             {
-              label: "GitOps",
-              items: [
-                "deployment-workflows/rendered-manifests/project-structure",
-                "deployment-workflows/rendered-manifests/targets-and-clusters",
-                "deployment-workflows/rendered-manifests/rendering-and-publishing",
-                "deployment-workflows/rendered-manifests/security",
-              ],
-            },
-            {
               label: "Component System",
               items: [
                 "components/overview",
@@ -100,6 +91,26 @@ export default defineConfig({
           ],
         },
         {
+          label: "Rendered Manifest Pattern",
+          items: [
+            "deployment-workflows/rendered-manifests/project-structure",
+            "deployment-workflows/rendered-manifests/targets-and-clusters",
+            "deployment-workflows/rendered-manifests/rendering-and-publishing",
+            "deployment-workflows/rendered-manifests/security",
+            {
+              label: "Reference",
+              items: [
+                "reference/resources/gitops",
+                "reference/resources/gitops/git-repository",
+                "reference/resources/gitops/cluster",
+                "reference/resources/gitops/gitops-target",
+                "reference/resources/gitops/app-project-definition",
+                "reference/resources/gitops/application-group",
+              ],
+            },
+          ],
+        },
+        {
           label: "ArgoCD Integration",
           items: [
             "argocd/overview",
@@ -119,17 +130,6 @@ export default defineConfig({
             "reference/resources/remote-manifest",
             "reference/resources/nyl-release",
             "reference/resources/application-generator",
-            {
-              label: "Rendered GitOps Resources",
-              items: [
-                "reference/resources/gitops",
-                "reference/resources/gitops/git-repository",
-                "reference/resources/gitops/cluster",
-                "reference/resources/gitops/gitops-target",
-                "reference/resources/gitops/app-project-definition",
-                "reference/resources/gitops/application-group",
-              ],
-            },
             "reference/kyverno-policies",
             "reference/schemas",
           ],
