@@ -349,7 +349,7 @@
   "description": "Policy and source declaration for a set of NylRelease resources.",
   "properties": {
     "apiVersion": {
-      "const": "gitops.nyl.niklasrosenstein.github.com/v1",
+      "const": "gitops.nyl/v1",
       "type": "string"
     },
     "kind": {
