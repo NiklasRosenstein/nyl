@@ -128,7 +128,7 @@ export default defineConfig({
             "reference/resources/component",
             "reference/resources/helmchart",
             "reference/resources/remote-manifest",
-            "reference/resources/nyl-release",
+            "reference/resources/release",
             "reference/resources/application-generator",
             "reference/kyverno-policies",
             "reference/schemas",

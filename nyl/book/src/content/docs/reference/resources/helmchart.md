@@ -231,8 +231,8 @@ spec:
 ## Complete Example
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: myapp
   namespace: production
@@ -314,4 +314,4 @@ nyl render --target production app.yaml
 
 - [Git Integration](/nyl/git-integration/) - Git repository management
 - [Configuration](/nyl/configuration/) - Search paths and settings
-- [NylRelease](/nyl/reference/resources/nyl-release/) - Release metadata
+- [Release](/nyl/reference/resources/release/) - Release metadata

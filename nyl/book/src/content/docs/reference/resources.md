@@ -8,14 +8,14 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 
 ### Core Resources
 
-- **[NylRelease](/nyl/reference/resources/nyl-release/)**: Defines release metadata (name, namespace) for deployments
+- **[Release](/nyl/reference/resources/release/)**: Defines release metadata (name, namespace) for deployments
 - **[Component](/nyl/reference/resources/component/)**: Compact chart-backed resource using dynamic `kind` lookup
 - **[HelmChart](/nyl/reference/resources/helmchart/)**: Declarative Helm chart deployment with templating support
 - **[RemoteManifest](/nyl/reference/resources/remote-manifest/)**: Fetch and include manifests from a remote HTTPS URL
 
 ### ArgoCD Resources
 
-- **[ApplicationGenerator](/nyl/reference/resources/application-generator/)**: Automatically generates ArgoCD Applications from NylRelease files
+- **[ApplicationGenerator](/nyl/reference/resources/application-generator/)**: Automatically generates ArgoCD Applications from Release files
 
 ### Rendered GitOps Resources
 
@@ -45,10 +45,9 @@ spec:
 
 ## API Versions
 
-- `nyl.niklasrosenstein.github.com/v1`: Core Nyl resources (NylRelease, HelmChart)
-  - Includes: `NylRelease`, `HelmChart`, `RemoteManifest`
+- `nyl.niklasrosenstein.github.com/v1`: Core rendering resources (`HelmChart`, `RemoteManifest`)
 - `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
-- `gitops.nyl/v1`: Rendered GitOps control resources (GitRepository, Cluster, GitOpsTarget, AppProjectDefinition, ApplicationGroup)
+- `gitops.nyl/v1`: Release metadata and rendered GitOps control resources (`Release`, `GitRepository`, `Cluster`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`)
 - `components.nyl.niklasrosenstein.github.com/v1`: Component resources (dynamic `kind` path/shortcut)
 
 ## Processing Behavior
@@ -61,7 +60,7 @@ Regular Kubernetes resources (ConfigMap, Deployment, etc.) are passed through un
 
 Nyl resources are processed based on their kind:
 
-- **NylRelease**: Extracted and removed from output (provides metadata only)
+- **Release**: Extracted and removed from output (provides metadata only)
 - **Component**: Resolved to a chart reference and rendered via Helm, replaced with rendered manifests
 - **HelmChart**: Rendered using Helm templating, replaced with rendered manifests
 - **RemoteManifest**: Fetched via HTTPS and parsed into documents, then processed recursively
@@ -73,8 +72,8 @@ Nyl resources are processed based on their kind:
 Nyl supports YAML multi-document files with `---` separators:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: myapp
   namespace: default
@@ -96,7 +95,7 @@ spec:
 ```
 
 Processing:
-1. NylRelease is extracted (provides name and namespace)
+1. Release is extracted (provides name and namespace)
 2. ConfigMap and Service are output as-is
 
 ## See Also

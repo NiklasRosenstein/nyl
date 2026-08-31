@@ -2,7 +2,7 @@
 title: 'ApplicationGroup'
 ---
 
-`ApplicationGroup` selects targets and `NylRelease` sources, assigns an Argo CD
+`ApplicationGroup` selects targets and `Release` sources, assigns an Argo CD
 project, and defines platform-owned Application and Namespace policy.
 
 ## Example
@@ -77,6 +77,11 @@ containing directory.
 source remote and requires both `revision` and `commit`. `Remote` renderer mode
 requires a remote source. Run `nyl source update` to refresh commit locks.
 
+Source selectors identify candidate entry files. Nyl renders only candidates
+containing a literal, parseable `gitops.nyl/v1` Release document; other files
+are ignored. Use `Release.spec.include` to attach additional relative files or
+glob matches to that release.
+
 ## Sync and lifecycle policy
 
 | Field | Required | Default | Description |
@@ -97,13 +102,15 @@ adds no restriction.
 
 Each managed Namespace is owned by one dedicated generated Application. Nyl
 rejects conflicting project, destination, lifecycle, or metadata policy for the
-same cluster/namespace identity. A workload release may declare only its
-destination Namespace; other rendered Namespaces are rejected.
+same cluster/namespace identity. A Release may target its effective destination
+namespace plus `Release.spec.additionalNamespaces`. An approved additional
+Namespace uses the same dedicated Application and lifecycle policy when the
+Release renders it, but is never synthesized from the allow-list alone.
 
 ## Per-release Application customization
 
 `spec.releaseCustomization.allowedPaths` and `deniedPaths` are dotted glob
-lists applied to `NylRelease.spec.argocd.applicationOverride`. `*` matches one
+lists applied to `Release.spec.argocd.applicationOverride`. `*` matches one
 path segment and `**` matches multiple segments. Deny wins.
 
 Core identity, finalizers, project, sources, destination, and sync policy are

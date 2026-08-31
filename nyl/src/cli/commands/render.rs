@@ -1,8 +1,7 @@
 use clap::Args;
 use glob::{glob, Pattern};
 use kube::Client;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,10 +17,10 @@ use crate::{
     kubernetes::{KubeRsClient, ResourceKey},
     postprocess::apply_kyverno_policies,
     resources::{
-        component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_nyl_release,
+        component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_release,
         is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_array_field_path,
         is_supported_application_field_path, join_field_path_segments, parse_component_kind, path_matches_glob,
-        ChartRef, HelmChart, KyvernoScope, NylComponent, NylRelease, RemoteManifest,
+        ChartRef, HelmChart, KyvernoScope, NylComponent, Release, RemoteManifest,
     },
     secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
@@ -119,7 +118,7 @@ pub struct RenderPreflightOptions<'a> {
 /// Shared render preflight output for render/diff/apply commands.
 pub struct RenderPreflightResult {
     pub manifests: Vec<serde_json::Value>,
-    pub nyl_release: Option<NylRelease>,
+    pub release: Option<Release>,
     pub strip_empty_metadata_labels: bool,
     pub resolved_target: Option<ResolvedTargetCluster>,
     pub duplicates: HashMap<ResourceKey, usize>,
@@ -129,7 +128,7 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
-    let (mut manifests, nyl_release, strip_empty_metadata_labels_mode, resolved_target, mut duplicates) =
+    let (mut manifests, release, strip_empty_metadata_labels_mode, resolved_target, mut duplicates) =
         render_manifests_complete(
             &options.common.path,
             options.common.only_source_kind.as_deref(),
@@ -170,7 +169,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 
     let release_namespace_hint = options
         .release_namespace_hint
-        .or_else(|| nyl_release.as_ref().map(|release| release.metadata.namespace.as_str()));
+        .or_else(|| release.as_ref().map(|release| release.metadata.namespace.as_str()));
 
     if options.resolve_namespaces && should_resolve_namespaces(&manifests, options.offline) {
         let client = kube_client
@@ -188,7 +187,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 
     Ok(RenderPreflightResult {
         manifests,
-        nyl_release,
+        release,
         strip_empty_metadata_labels: strip_empty_metadata_labels_mode.should_strip(is_argocd_env()),
         resolved_target,
         duplicates,
@@ -199,7 +198,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 
 /// Complete manifest rendering pipeline used by render, diff, and apply.
 /// Returns final manifests ready for output/apply/diff, with all Nyl resources processed.
-/// Also returns the extracted NylRelease metadata (if present) for diff/apply commands.
+/// Also returns the extracted Release metadata (if present) for diff/apply commands.
 /// Returns manifests, release metadata, output policy, the resolved target, and duplicate resources.
 #[allow(clippy::too_many_arguments)]
 pub async fn render_manifests_complete(
@@ -214,7 +213,7 @@ pub async fn render_manifests_complete(
     context_override: Option<&str>,
 ) -> Result<(
     Vec<serde_json::Value>,
-    Option<NylRelease>,
+    Option<Release>,
     StripEmptyMetadataLabelsMode,
     Option<ResolvedTargetCluster>,
     std::collections::HashMap<ResourceKey, usize>,
@@ -234,10 +233,10 @@ pub async fn render_manifests_complete(
         )
         .await?;
 
-    // 2. Extract NylRelease metadata (before filtering it out)
-    let (nyl_release, manifests) = extract_nyl_release(&manifests)?;
+    // 2. Extract Release metadata (before filtering it out)
+    let (release, manifests) = extract_release(&manifests)?;
     let strip_empty_metadata_labels_mode =
-        resolve_strip_empty_metadata_labels_mode(strip_empty_metadata_labels_mode, nyl_release.as_ref());
+        resolve_strip_empty_metadata_labels_mode(strip_empty_metadata_labels_mode, release.as_ref());
 
     // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
     let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
@@ -286,7 +285,7 @@ pub async fn render_manifests_complete(
 
     Ok((
         final_manifests,
-        nyl_release,
+        release,
         strip_empty_metadata_labels_mode,
         resolved_target,
         duplicates,
@@ -515,7 +514,7 @@ fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
 
 pub(crate) fn resolve_strip_empty_metadata_labels_mode(
     project_mode: StripEmptyMetadataLabelsMode,
-    release: Option<&NylRelease>,
+    release: Option<&Release>,
 ) -> StripEmptyMetadataLabelsMode {
     release
         .and_then(|release| release.spec.strip_empty_metadata_labels)
@@ -561,10 +560,132 @@ fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool 
 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
 ///
-/// Only single file paths are supported. Directory paths will return an error.
+/// The path is a single entry file; a Release may select additional files.
 pub(crate) fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
-    let path = Path::new(path);
+    Ok(load_release_bundle(Path::new(path), context)?.resources)
+}
 
+#[derive(Debug)]
+pub(crate) struct LoadedReleaseBundle {
+    pub resources: Vec<serde_json::Value>,
+    pub inputs: Vec<PathBuf>,
+}
+
+/// Load one manifest entrypoint and any files selected by its Release.
+pub(crate) fn load_release_bundle(path: &Path, context: &TemplateContext) -> Result<LoadedReleaseBundle> {
+    let mut resources = load_resource_file(path, context)?;
+    let (release, _) = extract_release(&resources)?;
+    let mut inputs = vec![path.to_path_buf()];
+    let Some(release) = release else {
+        return Ok(LoadedReleaseBundle { resources, inputs });
+    };
+
+    let include_paths = resolve_release_includes(path, &release)?;
+    for include_path in &include_paths {
+        let included = load_resource_file(include_path, context)?;
+        let (nested_release, _) = extract_release(&included)?;
+        if nested_release.is_some() {
+            return Err(NylError::config(format!(
+                "Release {:?} includes {}, which contains another Release resource",
+                release.metadata.name,
+                include_path.display()
+            )));
+        }
+        resources.extend(included);
+    }
+    inputs.extend(include_paths);
+    Ok(LoadedReleaseBundle { resources, inputs })
+}
+
+/// Check for a literal Release envelope without rendering the candidate file.
+pub(crate) fn has_static_release(path: &Path) -> Result<bool> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
+    Ok(best_effort_parse_yaml_documents(&raw).iter().any(Release::is_release))
+}
+
+fn resolve_release_includes(path: &Path, release: &Release) -> Result<Vec<PathBuf>> {
+    let directory = path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let entry_path = path
+        .canonicalize()
+        .map_err(|error| NylError::config(format!("Failed to resolve Release file {}: {error}", path.display())))?;
+    let mut selected = BTreeSet::new();
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
+    };
+
+    for pattern_text in &release.spec.include {
+        let pattern = Pattern::new(pattern_text).map_err(|error| {
+            NylError::config(format!(
+                "Invalid Release {:?} include pattern {pattern_text:?}: {error}",
+                release.metadata.name
+            ))
+        })?;
+        let mut pattern_matches = 0usize;
+        for entry in walkdir::WalkDir::new(directory).follow_links(false) {
+            let entry = entry.map_err(|error| {
+                NylError::config(format!(
+                    "Failed to inspect Release {:?} include directory {}: {error}",
+                    release.metadata.name,
+                    directory.display()
+                ))
+            })?;
+            let relative = entry.path().strip_prefix(directory).map_err(|error| {
+                NylError::config(format!(
+                    "Failed to resolve Release {:?} include candidate {}: {error}",
+                    release.metadata.name,
+                    entry.path().display()
+                ))
+            })?;
+            if relative.as_os_str().is_empty() || !pattern.matches_path_with(relative, options) {
+                continue;
+            }
+            if entry.file_type().is_symlink() {
+                return Err(NylError::config(format!(
+                    "Release {:?} include pattern {pattern_text:?} matches symbolic link {}",
+                    release.metadata.name,
+                    entry.path().display()
+                )));
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let extension = entry.path().extension().and_then(|extension| extension.to_str());
+            if !matches!(extension, Some("yaml" | "yml" | "json")) {
+                return Err(NylError::config(format!(
+                    "Release {:?} include pattern {pattern_text:?} matches unsupported manifest file {}",
+                    release.metadata.name,
+                    entry.path().display()
+                )));
+            }
+            let candidate = entry.path().canonicalize().map_err(|error| {
+                NylError::config(format!(
+                    "Failed to resolve included file {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
+            if candidate == entry_path {
+                continue;
+            }
+            pattern_matches += 1;
+            selected.insert(candidate);
+        }
+        if pattern_matches == 0 {
+            return Err(NylError::config(format!(
+                "Release {:?} include pattern {pattern_text:?} matched no additional manifest files",
+                release.metadata.name
+            )));
+        }
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn load_resource_file(path: &Path, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
         return Err(NylError::Config(format!("File not found: {}", path.display())));
@@ -572,7 +693,7 @@ pub(crate) fn load_resources(path: &str, context: &TemplateContext) -> Result<Ve
     if !path.is_file() {
         return Err(NylError::Config(format!(
             "Path must be a file, not a directory: {}. \
-            Nyl processes single files only. Please specify a YAML/JSON file path.",
+            Please specify a YAML/JSON entry file path.",
             path.display()
         )));
     }
@@ -581,32 +702,22 @@ pub(crate) fn load_resources(path: &str, context: &TemplateContext) -> Result<Ve
     let ctx_json = context.to_json();
     let mut resources = Vec::new();
 
-    let files: Vec<std::path::PathBuf> = vec![path.to_path_buf()];
-
-    for file_path in &files {
-        let ext = file_path.extension().and_then(|s| s.to_str());
-        if !matches!(ext, Some("yaml" | "yml" | "json")) {
-            continue;
-        }
-
-        // Skip nyl project configuration files — they are not manifests
-        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(stem, "nyl" | "nyl-project" | "nyl-secrets") {
-            continue;
-        }
-
-        tracing::debug!("Reading manifest file: {}", file_path.display());
-
-        let raw =
-            std::fs::read_to_string(file_path).map_err(|e| NylError::Config(format!("Failed to read file: {}", e)))?;
-
-        let rendered = engine.render_named(&file_path.display().to_string(), &raw, &ctx_json)?;
-
-        // Use SourceContext for better error messages with file path
-        let source_ctx = crate::util::SourceContext::new(file_path.clone());
-        let docs = source_ctx.parse_yaml_documents(&rendered)?;
-        resources.extend(docs);
+    let ext = path.extension().and_then(|s| s.to_str());
+    if !matches!(ext, Some("yaml" | "yml" | "json")) {
+        return Ok(resources);
     }
+
+    // Skip nyl project configuration files — they are not manifests
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if matches!(stem, "nyl" | "nyl-project" | "nyl-secrets") {
+        return Ok(resources);
+    }
+
+    tracing::debug!("Reading manifest file: {}", path.display());
+    let raw = std::fs::read_to_string(path).map_err(|e| NylError::Config(format!("Failed to read file: {e}")))?;
+    let rendered = engine.render_named(&path.display().to_string(), &raw, &ctx_json)?;
+    let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
+    resources.extend(source_ctx.parse_yaml_documents(&rendered)?);
 
     Ok(resources)
 }
@@ -785,8 +896,8 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
         return true;
     }
 
-    // Check for NylRelease
-    if NylRelease::is_nyl_release(resource) {
+    // Check for Release
+    if Release::is_release(resource) {
         return true;
     }
 
@@ -973,7 +1084,7 @@ pub(crate) async fn generate_resource(
                     "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
                      It will be treated as a regular Kubernetes manifest. \
                      Known Nyl apiVersions: {}. \
-                     Known kinds: HelmChart, RemoteManifest, NylRelease, ApplicationGenerator, and any Component kind.",
+                     Known kinds: HelmChart, RemoteManifest, Release, ApplicationGenerator, and any Component kind.",
                     api_ver,
                     kind_str,
                     api_versions_str
@@ -1330,10 +1441,10 @@ fn process_application_generator(
 
         let (docs, render_error) = render_yaml_file_with_jinja(&file_path, &source_root, &engine, &ctx_json)?;
 
-        // Extract NylRelease
-        let (nyl_release, _) = extract_nyl_release(&docs)?;
+        // Extract Release
+        let (release, _) = extract_release(&docs)?;
 
-        if let Some(release) = nyl_release {
+        if let Some(release) = release {
             // Generate ArgoCD Application
             let mut app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
 
@@ -1347,21 +1458,21 @@ fn process_application_generator(
                 disable_automated_sync(&mut app);
                 append_render_error_info(&mut app, &rel_path, error_msg)?;
                 tracing::warn!(
-                    "Generated husk ArgoCD Application {} from NylRelease in {} (rendering or parsing failed: {})",
+                    "Generated husk ArgoCD Application {} from Release in {} (rendering or parsing failed: {})",
                     release.metadata.name,
                     file_path.display(),
                     error_msg
                 );
             } else {
                 tracing::debug!(
-                    "Generated ArgoCD Application {} from NylRelease in {}",
+                    "Generated ArgoCD Application {} from Release in {}",
                     release.metadata.name,
                     file_path.display()
                 );
             }
             applications.push(app);
         } else {
-            tracing::trace!("No NylRelease found in {}, skipping", file_path.display());
+            tracing::trace!("No Release found in {}, skipping", file_path.display());
             missing_release_count += 1;
             let display_path = file_path
                 .strip_prefix(&source_root)
@@ -1373,7 +1484,7 @@ fn process_application_generator(
     if missing_release_count > 0 {
         tracing::warn!(
             "{}",
-            missing_nyl_release_warning_message(
+            missing_release_warning_message(
                 generator,
                 missing_release_count,
                 scanned_file_count,
@@ -1395,7 +1506,7 @@ fn process_application_generator(
 /// Splits the input on YAML document separators (`---`) and tries to parse each
 /// document individually. Documents that fail to parse (e.g., because they contain
 /// unrendered Jinja syntax) are silently skipped. This allows extracting parseable
-/// documents (like NylRelease) even when other documents in the file are unparseable.
+/// documents (like Release) even when other documents in the file are unparseable.
 pub(super) fn best_effort_parse_yaml_documents(raw: &str) -> Vec<serde_json::Value> {
     let mut docs = Vec::new();
     for doc_str in split_yaml_documents(raw) {
@@ -1469,7 +1580,7 @@ fn append_render_error_info(app: &mut serde_json::Value, file_path: &str, error_
     Ok(())
 }
 
-fn missing_nyl_release_warning_message(
+fn missing_release_warning_message(
     generator: &crate::resources::ApplicationGenerator,
     missing_release_count: usize,
     scanned_file_count: usize,
@@ -1482,7 +1593,7 @@ fn missing_nyl_release_warning_message(
         selectors.join(", ")
     };
     let base = format!(
-        "ApplicationGenerator {} (repoURL={}, targetRevision={}, source paths={}): skipped {}/{} file(s) because no NylRelease was found.",
+        "ApplicationGenerator {} (repoURL={}, targetRevision={}, source paths={}): skipped {}/{} file(s) because no Release was found.",
         generator.metadata.name,
         generator.spec.source.repo_url,
         generator.spec.source.target_revision,
@@ -1930,7 +2041,7 @@ fn matches_glob_patterns(relative_path: &Path, patterns: &[String]) -> Result<bo
     Ok(false)
 }
 
-const NYL_CUSTOMIZATION_WARNING_NAME: &str = "nyl-release-customization-warning";
+const NYL_CUSTOMIZATION_WARNING_NAME: &str = "release-customization-warning";
 const IMMUTABLE_APPLICATION_PATH_PATTERNS: &[&str] = &[
     "apiVersion",
     "kind",
@@ -1999,7 +2110,7 @@ impl OverrideLeaf {
 
 /// Create ArgoCD Application from generator config
 fn create_argocd_application_from_generator(
-    release: &NylRelease,
+    release: &Release,
     file_path: &Path,
     source_root: &Path,
     generator: &crate::resources::ApplicationGenerator,
@@ -2018,7 +2129,7 @@ fn create_argocd_application_from_generator(
         .and_then(|n| n.to_str())
         .ok_or_else(|| NylError::Config(format!("Invalid file name: {}", file_path.display())))?;
 
-    // Application path is the directory containing the NylRelease, relative to repository root.
+    // Application path is the directory containing the Release, relative to repository root.
     let path_str = if rel_dir_normalized.is_empty() {
         ".".to_string()
     } else {
@@ -2077,7 +2188,7 @@ fn create_argocd_application_from_generator(
 
 fn apply_release_customization_overrides(
     app: &mut serde_json::Value,
-    release: &NylRelease,
+    release: &Release,
     generator: &crate::resources::ApplicationGenerator,
 ) -> Result<()> {
     let Some(application_override) = release
@@ -2332,7 +2443,7 @@ fn append_customization_warning(app: &mut serde_json::Value, ignored: &[IgnoredO
         .map(|(reason, paths)| format!("{}={} ({})", reason, paths.len(), summarize_paths(paths)))
         .collect::<Vec<_>>()
         .join("; ");
-    let warning_value = format!("Ignored NylRelease applicationOverride fields: {}", summary);
+    let warning_value = format!("Ignored Release applicationOverride fields: {}", summary);
 
     let spec = app
         .get_mut("spec")
@@ -2443,9 +2554,10 @@ fn add_parent_annotations(
 mod tests {
     use super::*;
     use crate::config::StripEmptyMetadataLabelsMode;
+    use crate::constants::API_VERSION_GITOPS;
     use crate::resources::{
         ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
-        ApplicationSource, NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec, ReleaseCustomizationPolicy,
+        ApplicationSource, ReleaseArgoCdSpec, ReleaseCustomizationPolicy, ReleaseMetadata, ReleaseSpec,
     };
     use git2::{Repository, RepositoryInitOptions, Signature};
     use std::sync::{Arc, Mutex, MutexGuard};
@@ -2506,21 +2618,22 @@ mod tests {
         (temp, source_root, file_path)
     }
 
-    fn test_release_with_override(override_value: serde_json::Value) -> NylRelease {
-        use crate::resources::{NylReleaseArgoCdSpec, NylReleaseMetadata, NylReleaseSpec};
+    fn test_release_with_override(override_value: serde_json::Value) -> Release {
+        use crate::resources::{ReleaseArgoCdSpec, ReleaseMetadata, ReleaseSpec};
 
-        NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
+        Release {
+            api_version: API_VERSION_GITOPS.to_string(),
+            kind: "Release".to_string(),
+            metadata: ReleaseMetadata {
                 name: "nginx".to_string(),
                 namespace: "web".to_string(),
             },
-            spec: NylReleaseSpec {
+            spec: ReleaseSpec {
                 strip_empty_metadata_labels: None,
-                argocd: Some(NylReleaseArgoCdSpec {
+                argocd: Some(ReleaseArgoCdSpec {
                     application_override: Some(serde_json::from_value(override_value).unwrap()),
                 }),
+                ..Default::default()
             },
         }
     }
@@ -2689,9 +2802,9 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_nyl_release_warning_message_includes_counts_and_generator_name() {
+    fn test_missing_release_warning_message_includes_counts_and_generator_name() {
         let generator = test_application_generator_for_warning();
-        let msg = missing_nyl_release_warning_message(
+        let msg = missing_release_warning_message(
             &generator,
             2,
             5,
@@ -2705,16 +2818,16 @@ mod tests {
         assert!(msg.contains("targetRevision=main"));
         assert!(msg.contains("source paths=clusters/default"));
         assert!(msg.contains("skipped 2/5 file(s)"));
-        assert!(msg.contains("no NylRelease was found"));
+        assert!(msg.contains("no Release was found"));
         assert!(msg.contains("clusters/default/a.yaml"));
         assert!(msg.contains("clusters/default/b.yaml"));
         assert!(msg.contains("Skipped files:"));
     }
 
     #[test]
-    fn test_missing_nyl_release_warning_message_lists_all_skipped_files() {
+    fn test_missing_release_warning_message_lists_all_skipped_files() {
         let generator = test_application_generator_for_warning();
-        let msg = missing_nyl_release_warning_message(
+        let msg = missing_release_warning_message(
             &generator,
             4,
             4,
@@ -2733,9 +2846,9 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_nyl_release_warning_message_without_examples() {
+    fn test_missing_release_warning_message_without_examples() {
         let generator = test_application_generator_for_warning();
-        let msg = missing_nyl_release_warning_message(&generator, 1, 1, &[]);
+        let msg = missing_release_warning_message(&generator, 1, 1, &[]);
         assert!(msg.contains("ApplicationGenerator apps"));
         assert!(msg.contains("skipped 1/1 file(s)"));
         assert!(!msg.contains("Skipped files:"));
@@ -2832,18 +2945,18 @@ metadata:
     fn test_create_argocd_application_from_generator_sets_template_input() {
         use crate::resources::{
             ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
-            ApplicationSource, NylReleaseMetadata, NylReleaseSpec,
+            ApplicationSource, ReleaseMetadata, ReleaseSpec,
         };
         use std::collections::HashMap;
 
-        let release = NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
+        let release = Release {
+            api_version: API_VERSION_GITOPS.to_string(),
+            kind: "Release".to_string(),
+            metadata: ReleaseMetadata {
                 name: "nginx".to_string(),
                 namespace: "web".to_string(),
             },
-            spec: NylReleaseSpec::default(),
+            spec: ReleaseSpec::default(),
         };
 
         let generator = ApplicationGenerator {
@@ -2890,19 +3003,20 @@ metadata:
         assert_eq!(template_input, "nginx.yaml");
     }
 
-    fn make_test_release(override_map: serde_json::Value) -> NylRelease {
-        NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
+    fn make_test_release(override_map: serde_json::Value) -> Release {
+        Release {
+            api_version: API_VERSION_GITOPS.to_string(),
+            kind: "Release".to_string(),
+            metadata: ReleaseMetadata {
                 name: "nginx".to_string(),
                 namespace: "web".to_string(),
             },
-            spec: NylReleaseSpec {
+            spec: ReleaseSpec {
                 strip_empty_metadata_labels: None,
-                argocd: Some(NylReleaseArgoCdSpec {
+                argocd: Some(ReleaseArgoCdSpec {
                     application_override: Some(serde_json::from_value(override_map).unwrap()),
                 }),
+                ..Default::default()
             },
         }
     }
@@ -3819,10 +3933,10 @@ metadata:
     }
 
     #[test]
-    fn test_is_known_nyl_resource_nyl_release() {
+    fn test_is_known_nyl_resource_release() {
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
-            "kind": "NylRelease",
+            "apiVersion": "gitops.nyl/v1",
+            "kind": "Release",
             "metadata": {"name": "test", "namespace": "default"}
         });
         assert!(is_known_nyl_resource(&resource));
@@ -4422,18 +4536,19 @@ metadata:
 
     #[test]
     fn test_resolve_strip_empty_metadata_labels_mode_release_override_takes_precedence() {
-        let release = NylRelease {
-            api_version: API_VERSION.to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
+        let release = Release {
+            api_version: API_VERSION_GITOPS.to_string(),
+            kind: "Release".to_string(),
+            metadata: ReleaseMetadata {
                 name: "nginx".to_string(),
                 namespace: "web".to_string(),
             },
-            spec: NylReleaseSpec {
+            spec: ReleaseSpec {
                 strip_empty_metadata_labels: Some(StripEmptyMetadataLabelsMode::Never),
-                argocd: Some(NylReleaseArgoCdSpec {
+                argocd: Some(ReleaseArgoCdSpec {
                     application_override: None,
                 }),
+                ..Default::default()
             },
         };
 
@@ -4610,8 +4725,8 @@ metadata:
 
     #[test]
     fn test_best_effort_parse_yaml_documents_skips_jinja() {
-        let raw = r"apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+        let raw = r"apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: my-app
   namespace: default
@@ -4624,9 +4739,9 @@ data:
   key: {{ values.some_value }}
 ";
         let docs = best_effort_parse_yaml_documents(raw);
-        // The NylRelease should parse, the ConfigMap with Jinja should be skipped
+        // The Release should parse, the ConfigMap with Jinja should be skipped
         assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0]["kind"], "NylRelease");
+        assert_eq!(docs[0]["kind"], "Release");
         assert_eq!(docs[0]["metadata"]["name"], "my-app");
     }
 
@@ -4635,6 +4750,107 @@ data:
         let raw = "key: {{ values.foo }}\n---\nother: {{ values.bar }}\n";
         let docs = best_effort_parse_yaml_documents(raw);
         assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn release_bundle_expands_sorted_deduplicated_includes() {
+        let temporary = TempDir::new().unwrap();
+        std::fs::create_dir(temporary.path().join("manifests")).unwrap();
+        let entry = temporary.path().join("release.yaml");
+        std::fs::write(
+            &entry,
+            r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: example
+  namespace: example
+spec:
+  include:
+    - manifests/*.yaml
+    - manifests/config-*.yaml
+",
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("manifests/config-one.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: one\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("manifests/config-two.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: two\n",
+        )
+        .unwrap();
+        let context = TemplateContext {
+            values: serde_json::json!({}),
+            secrets: serde_json::json!({}),
+            env: serde_json::Map::new(),
+            cluster: None,
+            target: None,
+        };
+
+        let bundle = load_release_bundle(&entry, &context).unwrap();
+        assert_eq!(bundle.resources.len(), 3);
+        assert_eq!(bundle.inputs.len(), 3);
+        assert_eq!(bundle.resources[1]["metadata"]["name"], "one");
+        assert_eq!(bundle.resources[2]["metadata"]["name"], "two");
+    }
+
+    #[test]
+    fn release_bundle_rejects_unmatched_and_nested_includes() {
+        let temporary = TempDir::new().unwrap();
+        let entry = temporary.path().join("release.yaml");
+        std::fs::write(
+            &entry,
+            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['missing/*.yaml']\n",
+        )
+        .unwrap();
+        let context = TemplateContext {
+            values: serde_json::json!({}),
+            secrets: serde_json::json!({}),
+            env: serde_json::Map::new(),
+            cluster: None,
+            target: None,
+        };
+        assert!(load_release_bundle(&entry, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("matched no additional"));
+
+        std::fs::write(
+            &entry,
+            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['nested.yaml']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("nested.yaml"),
+            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: nested\n  namespace: nested\n",
+        )
+        .unwrap();
+        assert!(load_release_bundle(&entry, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("another Release"));
+    }
+
+    #[test]
+    fn static_release_discovery_requires_a_literal_document() {
+        let temporary = TempDir::new().unwrap();
+        let structural = temporary.path().join("structural.yaml");
+        std::fs::write(
+            &structural,
+            "{% if values.enabled %}\napiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
+        )
+        .unwrap();
+        assert!(!has_static_release(&structural).unwrap());
+
+        let value_templated = temporary.path().join("value.yaml");
+        std::fs::write(
+            &value_templated,
+            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
+        )
+        .unwrap();
+        assert!(has_static_release(&value_templated).unwrap());
     }
 
     #[test]

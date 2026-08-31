@@ -183,7 +183,7 @@ impl HelmTemplateExecutor {
         // Parse YAML output
         let stdout = String::from_utf8_lossy(&output.stdout);
         if preserve_source_comments {
-            parse_yaml_documents_with_source_comments(&stdout)
+            parse_yaml_documents_with_source_comments(&stdout, resolved, release_name)
         } else {
             parse_yaml_documents(&stdout)
         }
@@ -254,7 +254,11 @@ fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
     crate::yaml::parse_yaml_documents_k8s_compatible(yaml_str).map_err(Into::into)
 }
 
-fn parse_yaml_documents_with_source_comments(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
+fn parse_yaml_documents_with_source_comments(
+    yaml_str: &str,
+    resolved: &ResolvedChart,
+    release_name: &str,
+) -> Result<Vec<serde_json::Value>> {
     let mut manifests = Vec::new();
     for document in split_helm_documents(yaml_str) {
         let source = document
@@ -263,20 +267,26 @@ fn parse_yaml_documents_with_source_comments(yaml_str: &str) -> Result<Vec<serde
         let mut parsed = parse_yaml_documents(document)?;
         if let Some(source) = source {
             for manifest in &mut parsed {
-                let metadata = manifest
-                    .as_object_mut()
-                    .and_then(|object| {
-                        object
-                            .entry("metadata")
-                            .or_insert_with(|| serde_json::json!({}))
-                            .as_object_mut()
-                    })
-                    .ok_or_else(|| NylError::config("Helm manifest metadata must be an object"))?;
-                let annotations = metadata
-                    .entry("annotations")
-                    .or_insert_with(|| serde_json::json!({}))
-                    .as_object_mut()
-                    .ok_or_else(|| NylError::config("Helm manifest metadata.annotations must be an object"))?;
+                let context = helm_output_context(source, resolved, release_name, manifest);
+                let manifest_type = value_type(manifest);
+                let object = manifest.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!("{context}: manifest is {manifest_type}; expected an object"))
+                })?;
+                let metadata_value = object.entry("metadata").or_insert_with(|| serde_json::json!({}));
+                let metadata_type = value_type(metadata_value);
+                let metadata = metadata_value.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!("{context}: metadata is {metadata_type}; expected an object"))
+                })?;
+                let annotations_value = metadata.entry("annotations").or_insert_with(|| serde_json::json!({}));
+                if annotations_value.is_null() {
+                    *annotations_value = serde_json::json!({});
+                }
+                let annotations_type = value_type(annotations_value);
+                let annotations = annotations_value.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!(
+                        "{context}: metadata.annotations is {annotations_type}; expected an object"
+                    ))
+                })?;
                 if annotations
                     .insert(
                         HELM_SOURCE_ANNOTATION.to_string(),
@@ -284,8 +294,8 @@ fn parse_yaml_documents_with_source_comments(yaml_str: &str) -> Result<Vec<serde
                     )
                     .is_some()
                 {
-                    return Err(NylError::config(format!(
-                        "Helm manifest uses reserved annotation {HELM_SOURCE_ANNOTATION}"
+                    return Err(NylError::HelmOutput(format!(
+                        "{context}: manifest uses reserved annotation {HELM_SOURCE_ANNOTATION}"
                     )));
                 }
             }
@@ -293,6 +303,44 @@ fn parse_yaml_documents_with_source_comments(yaml_str: &str) -> Result<Vec<serde
         manifests.extend(parsed);
     }
     Ok(manifests)
+}
+
+fn helm_output_context(
+    source: &str,
+    resolved: &ResolvedChart,
+    release_name: &str,
+    manifest: &serde_json::Value,
+) -> String {
+    let kind = manifest
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown kind>");
+    let name = manifest
+        .pointer("/metadata/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown name>");
+    let namespace = manifest
+        .pointer("/metadata/namespace")
+        .and_then(serde_json::Value::as_str);
+    let identity = namespace.map_or_else(
+        || format!("{kind} {name}"),
+        |namespace| format!("{kind} {namespace}/{name}"),
+    );
+    format!(
+        "Helm output from {source} (chart {}, release {release_name}, {identity})",
+        resolved.path.display()
+    )
+}
+
+fn value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 fn split_helm_documents(input: &str) -> Vec<&str> {
@@ -568,8 +616,14 @@ metadata:
 
     #[test]
     fn test_parse_yaml_documents_carries_helm_source_when_requested() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/chart"),
+            chart_ref: ChartRef::default(),
+        };
         let manifests = parse_yaml_documents_with_source_comments(
             "---\n# Source: chart/crds/widgets.yaml\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.example.com\n",
+            &resolved,
+            "widgets",
         )
         .unwrap();
         assert_eq!(
@@ -580,8 +634,14 @@ metadata:
 
     #[test]
     fn source_parser_does_not_treat_indented_content_as_helm_markers() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/chart"),
+            chart_ref: ChartRef::default(),
+        };
         let manifests = parse_yaml_documents_with_source_comments(
             "# Source: chart/templates/config.yaml\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: script\ndata:\n  script: |\n    ---\n    # Source: not-a-template\n",
+            &resolved,
+            "script",
         )
         .unwrap();
         assert_eq!(manifests.len(), 1);
@@ -590,6 +650,45 @@ metadata:
             manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
             Some(&serde_json::Value::String("chart/templates/config.yaml".to_string()))
         );
+    }
+
+    #[test]
+    fn source_parser_treats_null_annotations_as_omitted() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/immich"),
+            chart_ref: ChartRef::default(),
+        };
+        let manifests = parse_yaml_documents_with_source_comments(
+            "# Source: immich/templates/server.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: immich-server\n  namespace: immich\n  annotations:\n",
+            &resolved,
+            "immich",
+        )
+        .unwrap();
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("immich/templates/server.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_parser_reports_template_chart_release_and_resource_for_invalid_annotations() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/immich"),
+            chart_ref: ChartRef::default(),
+        };
+        let error = parse_yaml_documents_with_source_comments(
+            "# Source: immich/templates/server.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: immich-server\n  namespace: immich\n  annotations: []\n",
+            &resolved,
+            "immich",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("immich/templates/server.yaml"));
+        assert!(error.contains("chart /charts/immich"));
+        assert!(error.contains("release immich"));
+        assert!(error.contains("Deployment immich/immich-server"));
+        assert!(error.contains("metadata.annotations is an array; expected an object"));
+        assert!(!error.contains("nyl.toml"));
     }
 
     #[test]

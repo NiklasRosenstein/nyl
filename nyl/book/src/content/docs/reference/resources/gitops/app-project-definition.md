@@ -6,6 +6,13 @@ title: 'AppProjectDefinition'
 contract. ApplicationGroups refer to the local identity while generated
 Applications use `spec.manifest.metadata.name` as their Argo CD project.
 
+The wrapper records Nyl-side ownership and policy that an ordinary AppProject
+does not carry: `Rendered` versus `External` management, a stable local
+`projectRef`, target-specific structural templating, and
+`GitOpsTarget.spec.projects` allow-listing. Argo CD still enforces the contained
+AppProject policy. A raw AppProject manifest does not satisfy an
+ApplicationGroup `projectRef`.
+
 ## Rendered project example
 
 ```yaml

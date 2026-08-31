@@ -10,7 +10,7 @@ Create projects, components, and rendered GitOps control resources.
 nyl new project <dir>
 nyl new component <api-version> <kind>
 nyl new resource <KIND> <name>
-nyl new gitops <repository|cluster|target|project|application-group> <name>
+nyl new gitops <repository|cluster|target|project|application-group> <name> [options]
 ```
 
 ## `nyl new project`
@@ -57,7 +57,7 @@ The generic and kind-specific forms use the same scaffold registry:
 
 ```bash
 nyl new resource GitRepository deploy
-nyl new gitops repository deploy
+nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
 nyl new resource Cluster primary
 nyl new gitops cluster primary --context admin@primary
 ```
@@ -66,6 +66,16 @@ Every file includes its published YAML language server schema URL. Use
 `--output` for an exact path, `--source` to set an ApplicationGroup source, or
 `--source ... --colocate` to create `_application-group.yaml` inside the source
 directory. Existing files are never overwritten.
+
+`nyl new gitops repository` requires `--repo-url`. Use `--publish-url` when
+publication writes use different Git coordinates, such as an SSH URL while
+generated Argo CD Applications read through HTTPS:
+
+```bash
+nyl new gitops repository deploy \
+  --repo-url https://git.example.com/platform/deploy.git \
+  --publish-url git@git.example.com:platform/deploy.git
+```
 
 `nyl new gitops cluster` writes `--context` to `spec.live.context`. Without the
 option, the Cluster name is the implied context. Nyl warns when the selected

@@ -223,8 +223,8 @@ For very critical services (databases, auth), consider manual sync:
 Use Bitnami Sealed Secrets for encrypted secrets in Git:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: app
   namespace: default

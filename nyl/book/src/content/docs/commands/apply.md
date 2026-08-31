@@ -33,8 +33,8 @@ For shared rendering behavior and namespace resolution details, see
 
 ### Release Options
 
-- `--name <NAME>` - Release name (required if no NylRelease in file)
-- `--namespace <NAMESPACE>` - Release namespace (required if no NylRelease in file)
+- `--name <NAME>` - Release name (required if no Release in file)
+- `--namespace <NAMESPACE>` - Release namespace (required if no Release in file)
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
 
@@ -63,7 +63,7 @@ nyl apply --target production --only-kind Deployment manifest.yaml
 ### Release Management
 
 ```bash
-# Apply with explicit release name (overrides NylRelease if present)
+# Apply with explicit release name (overrides Release if present)
 nyl apply --target production --name my-release --namespace default manifest.yaml
 
 # Use different Kubernetes context
@@ -83,8 +83,8 @@ nyl apply --target production --no-release manifest.yaml
 
 ## Notes
 
-- Nyl processes single files only. Directory paths are not supported.
-- A `NylRelease` resource in the manifest provides release metadata automatically.
+- Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
+- A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.

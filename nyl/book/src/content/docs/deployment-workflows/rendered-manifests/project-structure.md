@@ -36,7 +36,7 @@ scaffold destinations; it does not restrict discovery.
 Create resources individually with:
 
 ```bash
-nyl new gitops repository deploy
+nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
 nyl new gitops cluster primary --context admin@primary
 nyl new gitops target production
 nyl new gitops project workloads

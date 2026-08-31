@@ -9,6 +9,9 @@ pub enum NylError {
     #[error("Helm chart error: {0}\nHint: Verify the chart path exists and Helm is installed. Run 'helm version' to check Helm availability.")]
     HelmChart(String),
 
+    #[error("Helm output error: {0}")]
+    HelmOutput(String),
+
     #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
 

@@ -17,7 +17,7 @@ Nyl can fit into several deployment workflows:
 - **Jinja2-compatible templating** via MiniJinja.
 - **Clusters and targets** for deterministic capabilities, deployment values, and publication coordinates.
 - **Remote manifests** for including HTTPS-hosted YAML and JSON.
-- **Release metadata and revision tracking** through `NylRelease`.
+- **Release metadata and revision tracking** through `Release`.
 - **Render, diff, and apply commands** for local and CI workflows.
 - **ArgoCD helpers** including a CMP image, Helm chart, repository secret discovery, and `ApplicationGenerator`.
 

@@ -22,7 +22,7 @@ In online mode, Nyl connects to Kubernetes and resolves missing `metadata.namesp
 
 Fallback order:
 1. Existing `metadata.namespace`
-2. Release namespace hint (`NylRelease.metadata.namespace` or `--namespace` for release commands)
+2. Release namespace hint (`Release.metadata.namespace` or `--namespace` for release commands)
 3. Kube context default namespace
 4. Error if no namespace can be determined
 

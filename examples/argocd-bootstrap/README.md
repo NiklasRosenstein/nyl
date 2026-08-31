@@ -27,7 +27,7 @@ nyl apply examples/argocd-bootstrap/bootstrap.yaml
 
 ## What Gets Deployed
 
-1. **NylRelease** – declares the `argocd` release in the `argocd` namespace.
+1. **Release** – declares the `argocd` release in the `argocd` namespace.
 2. **HelmChart** – pulls the Nyl chart from the OCI registry and renders it.
 3. **ApplicationGenerator** – creates an ArgoCD `Application` that syncs this
    directory, enabling self-management.

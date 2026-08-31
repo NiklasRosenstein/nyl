@@ -2,7 +2,7 @@
 ///
 /// This resource enables ArgoCD to automatically generate Application manifests
 /// from Nyl YAML files by scanning directories and creating Applications for
-/// each discovered NylRelease.
+/// each discovered Release.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -60,7 +60,7 @@ pub struct ApplicationGeneratorSpec {
     pub release_customization: Option<ReleaseCustomizationPolicy>,
 }
 
-/// Policy for project-controlled Application customization via NylRelease.
+/// Policy for project-controlled Application customization via Release.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseCustomizationPolicy {

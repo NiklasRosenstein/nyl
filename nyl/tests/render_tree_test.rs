@@ -112,8 +112,8 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("applications/workloads/api.yaml"),
-        r#"apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+        r#"apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: api
   namespace: api
@@ -534,10 +534,15 @@ fn one_dedicated_application_owns_a_shared_namespace() {
         "  destinationNamespace: shared\n  applicationNamespace:",
     );
     fs::write(group_path, group).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path)
+        .unwrap()
+        .replace("  namespace: api\ndata:", "  namespace: shared\ndata:");
+    fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+        r"apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: worker
   namespace: worker
@@ -662,7 +667,123 @@ metadata:
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("outside its destination namespace"));
+        .stderr(predicate::str::contains("outside its allowed namespaces"));
+}
+
+#[test]
+fn additional_namespace_is_owned_only_when_rendered() {
+    let fixture = fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  additionalNamespaces: [monitoring]\n---",
+    ) + r"---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics
+  namespace: monitoring
+";
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let root = output.join("production");
+    let namespace_manifests = fs::read_dir(root.join("_nyl/namespaces"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path().join("resources.yaml")).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(namespace_manifests.len(), 2);
+    let monitoring = namespace_manifests
+        .iter()
+        .find(|manifest| manifest.contains("name: monitoring"))
+        .unwrap();
+    assert!(monitoring.contains("Prune=confirm"));
+    assert!(monitoring.contains("Delete=confirm"));
+    let workload = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
+    assert!(workload.contains("namespace: monitoring"));
+    assert!(!workload.contains("kind: Namespace"));
+}
+
+#[test]
+fn additional_namespace_is_not_synthesized() {
+    let fixture = fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  additionalNamespaces: [monitoring]\n---",
+    );
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_dir(output.join("production/_nyl/namespaces")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn release_include_adds_plain_manifest_to_rendered_tree() {
+    let fixture = fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  include: [fragments/*.yaml]\n---",
+    );
+    fs::write(&release_path, release).unwrap();
+    fs::create_dir(fixture.path().join("applications/workloads/fragments")).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/fragments/secret.yaml"),
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: included\n  namespace: api\n",
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let resources = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    assert!(resources.contains("name: included"));
 }
 
 #[test]

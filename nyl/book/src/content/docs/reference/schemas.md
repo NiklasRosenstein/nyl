@@ -23,6 +23,7 @@ Each scaffolded resource points at its kind-specific schema:
 - [`gitops-target.schema.json`](./gitops-target.schema.json)
 - [`app-project-definition.schema.json`](./app-project-definition.schema.json)
 - [`application-group.schema.json`](./application-group.schema.json)
+- [`release.schema.json`](./release.schema.json)
 - [`gitops-resource.schema.json`](./gitops-resource.schema.json) (aggregate)
 
 Regenerate all published artifacts with:

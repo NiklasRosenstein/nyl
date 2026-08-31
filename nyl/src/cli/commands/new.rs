@@ -82,9 +82,22 @@ struct ClusterScaffoldArgs {
     context: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct RepositoryScaffoldArgs {
+    name: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Credential-free URL used for reads and generated Argo CD Applications.
+    #[arg(long)]
+    repo_url: String,
+    /// Optional distinct URL used for publication writes.
+    #[arg(long)]
+    publish_url: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 enum NewGitopsSubcommand {
-    Repository(AliasScaffoldArgs),
+    Repository(RepositoryScaffoldArgs),
     Cluster(ClusterScaffoldArgs),
     Target(AliasScaffoldArgs),
     Project(AliasScaffoldArgs),
@@ -95,10 +108,10 @@ pub async fn execute(args: NewArgs) -> Result<()> {
     match args.command {
         NewSubcommand::Project { dir } => create_project(&dir),
         NewSubcommand::Component { api_version, kind } => create_component(&api_version, &kind),
-        NewSubcommand::Resource(args) => scaffold_resource(args, None, None).map(|_| ()),
+        NewSubcommand::Resource(args) => scaffold_resource(args, None, None, None).map(|_| ()),
         NewSubcommand::Gitops { command } => match command {
             NewGitopsSubcommand::Cluster(args) => scaffold_cluster(args).await,
-            NewGitopsSubcommand::Repository(args) => scaffold_alias_resource(GitOpsResourceKind::GitRepository, args),
+            NewGitopsSubcommand::Repository(args) => scaffold_repository(args),
             NewGitopsSubcommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::GitOpsTarget, args),
             NewGitopsSubcommand::Project(args) => {
                 scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args)
@@ -121,6 +134,25 @@ fn scaffold_alias_resource(kind: GitOpsResourceKind, args: AliasScaffoldArgs) ->
         },
         None,
         None,
+        None,
+    )
+    .map(|_| ())
+}
+
+fn scaffold_repository(args: RepositoryScaffoldArgs) -> Result<()> {
+    crate::resources::validate_repository_coordinates(&args.repo_url, args.publish_url.as_deref())?;
+    let repository_urls = (args.repo_url.as_str(), args.publish_url.as_deref());
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::GitRepository,
+            name: args.name,
+            output: args.output,
+            source: None,
+            colocate: false,
+        },
+        None,
+        None,
+        Some(repository_urls),
     )
     .map(|_| ())
 }
@@ -142,6 +174,7 @@ async fn scaffold_cluster(args: ClusterScaffoldArgs) -> Result<()> {
         },
         None,
         Some(&context),
+        None,
     )?;
 
     let kubeconfig = match kube::config::Kubeconfig::read() {
@@ -191,6 +224,7 @@ fn scaffold_resource(
     args: ResourceScaffoldArgs,
     project_dir: Option<&Path>,
     cluster_context: Option<&str>,
+    repository_urls: Option<(&str, Option<&str>)>,
 ) -> Result<PathBuf> {
     validate_resource_name(&args.name)?;
     if args.kind != GitOpsResourceKind::ApplicationGroup && (args.source.is_some() || args.colocate) {
@@ -233,7 +267,13 @@ fn scaffold_resource(
     } else {
         args.source.as_deref().map(|path| path.to_string_lossy())
     };
-    let yaml = render_resource_scaffold(args.kind, &args.name, source.as_deref(), cluster_context);
+    let yaml = render_resource_scaffold(
+        args.kind,
+        &args.name,
+        source.as_deref(),
+        cluster_context,
+        repository_urls,
+    );
     fs::write(&output, yaml)?;
     println!(
         "✓ Created {}: {}",
@@ -248,15 +288,29 @@ fn render_resource_scaffold(
     name: &str,
     source: Option<&str>,
     cluster_context: Option<&str>,
+    repository_urls: Option<(&str, Option<&str>)>,
 ) -> String {
     let schema = format!(
         "https://niklasrosenstein.github.io/nyl/reference/schemas/{}",
         kind.schema_filename()
     );
     let body = match kind {
-        GitOpsResourceKind::GitRepository => format!(
-            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: {name}\nspec:\n  repoURL: https://example.invalid/{name}.git\n"
-        ),
+        GitOpsResourceKind::GitRepository => {
+            let (repo_url, publish_url) = repository_urls.map_or_else(
+                || (format!("https://example.invalid/{name}.git"), None),
+                |(repo_url, publish_url)| (repo_url.to_owned(), publish_url.map(ToOwned::to_owned)),
+            );
+            let repo_url = serde_json::to_string(&repo_url).expect("string serialization cannot fail");
+            let publish_url = publish_url.map_or_else(String::new, |publish_url| {
+                format!(
+                    "  publishURL: {}\n",
+                    serde_json::to_string(&publish_url).expect("string serialization cannot fail")
+                )
+            });
+            format!(
+                "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: {name}\nspec:\n  repoURL: {repo_url}\n{publish_url}"
+            )
+        }
         GitOpsResourceKind::Cluster => {
             let context = cluster_context.unwrap_or(name);
             format!(
@@ -672,12 +726,12 @@ mod tests {
             source: None,
             colocate: false,
         };
-        scaffold_resource(args.clone(), Some(temp.path()), None).unwrap();
+        scaffold_resource(args.clone(), Some(temp.path()), None, None).unwrap();
         let path = temp.path().join("config/repositories/deploy.yaml");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("git-repository.schema.json"));
         assert!(content.contains("kind: GitRepository"));
-        assert!(scaffold_resource(args, Some(temp.path()), None).is_err());
+        assert!(scaffold_resource(args, Some(temp.path()), None, None).is_err());
     }
 
     #[test]
@@ -694,6 +748,7 @@ mod tests {
             },
             Some(temp.path()),
             Some("admin@production"),
+            None,
         )
         .unwrap();
         scaffold_resource(
@@ -705,6 +760,7 @@ mod tests {
                 colocate: false,
             },
             Some(temp.path()),
+            None,
             None,
         )
         .unwrap();
@@ -732,6 +788,7 @@ mod tests {
                 colocate: true,
             },
             Some(temp.path()),
+            None,
             None,
         )
         .unwrap();

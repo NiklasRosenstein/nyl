@@ -212,6 +212,9 @@ fn discover_file_resources(
         if !advertises_gitops_api(document) {
             continue;
         }
+        if advertises_release_kind(document) {
+            continue;
+        }
 
         let contextual_path = PathBuf::from(format!("{}#document-{}", relative_path.display(), document_index + 1));
         let identity = scan_static_identity(document)?.ok_or_else(|| {
@@ -373,6 +376,18 @@ fn advertises_gitops_api(document: &str) -> bool {
             return false;
         };
         key.trim() == "apiVersion" && parse_static_scalar(value) == API_VERSION_GITOPS
+    })
+}
+
+fn advertises_release_kind(document: &str) -> bool {
+    document.lines().any(|line| {
+        if line.starts_with([' ', '\t']) {
+            return false;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return false;
+        };
+        key.trim() == "kind" && parse_static_scalar(value) == crate::resources::KIND_RELEASE
     })
 }
 

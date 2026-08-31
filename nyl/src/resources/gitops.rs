@@ -173,7 +173,7 @@ pub enum AppProjectManagement {
     External,
 }
 
-/// Policy and source declaration for a set of NylRelease resources.
+/// Policy and source declaration for a set of Release resources.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationGroup {
@@ -437,14 +437,16 @@ fn tighten_resource_envelope(mut schema: serde_json::Value, kind: GitOpsResource
 
 /// Generate a portable aggregate schema with relative references to all kinds.
 pub fn generate_gitops_aggregate_schema() -> serde_json::Value {
+    let mut references = GitOpsResourceKind::all()
+        .iter()
+        .map(|kind| serde_json::json!({"$ref": kind.schema_filename()}))
+        .collect::<Vec<_>>();
+    references.push(serde_json::json!({"$ref": super::RELEASE_SCHEMA_FILENAME}));
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Nyl GitOps resource",
         "description": "A local Nyl rendered-GitOps compiler resource.",
-        "oneOf": GitOpsResourceKind::all()
-            .iter()
-            .map(|kind| serde_json::json!({"$ref": kind.schema_filename()}))
-            .collect::<Vec<_>>()
+        "oneOf": references
     })
 }
 
@@ -794,7 +796,7 @@ fn validate_repository_choice(
     }
 }
 
-fn validate_repository_coordinates(repo_url: &str, publish_url: Option<&str>) -> Result<()> {
+pub(crate) fn validate_repository_coordinates(repo_url: &str, publish_url: Option<&str>) -> Result<()> {
     validate_static_required("spec.repoURL", repo_url)?;
     reject_http_userinfo("spec.repoURL", repo_url)?;
     if let Some(publish_url) = publish_url {
@@ -1258,7 +1260,8 @@ mod tests {
                 "cluster.schema.json",
                 "gitops-target.schema.json",
                 "app-project-definition.schema.json",
-                "application-group.schema.json"
+                "application-group.schema.json",
+                "release.schema.json"
             ]
         );
     }
@@ -1280,6 +1283,9 @@ mod tests {
                 kind.schema_filename()
             );
         }
+        let published = fs::read_to_string(schema_directory.join(crate::resources::RELEASE_SCHEMA_FILENAME)).unwrap();
+        let published: serde_json::Value = serde_json::from_str(&published).unwrap();
+        assert_eq!(published, crate::resources::generate_release_schema());
         let published = fs::read_to_string(schema_directory.join("gitops-resource.schema.json")).unwrap();
         let published: serde_json::Value = serde_json::from_str(&published).unwrap();
         assert_eq!(published, generate_gitops_aggregate_schema());

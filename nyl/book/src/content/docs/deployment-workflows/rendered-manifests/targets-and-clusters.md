@@ -48,8 +48,9 @@ data:
 ## Conditional applications and resources
 
 `ApplicationGroup.spec.targetSelector.matchLabels` can omit a whole group for
-a target. Nyl templating in source files can omit a `NylRelease` or individual
-resources. Target-dependent structural templating in ApplicationGroup and
+a target. Nyl templating can omit individual workload resources, while the
+Release document remains structurally present for source discovery.
+Target-dependent structural templating in ApplicationGroup and
 AppProjectDefinition specs can vary policy and project content while their
 discovery envelopes remain static.
 

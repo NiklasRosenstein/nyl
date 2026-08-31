@@ -31,11 +31,11 @@ pub struct DiffArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Release name (required if no NylRelease in file)
+    /// Release name (required if no Release in file)
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Release namespace (required if no NylRelease in file)
+    /// Release namespace (required if no Release in file)
     #[arg(long)]
     pub namespace: Option<String>,
 
@@ -81,7 +81,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     .await?;
 
     let mut desired_manifests = preflight.manifests;
-    let nyl_release = preflight.nyl_release;
+    let release = preflight.release;
     let mut duplicates = preflight.duplicates;
     let kube_client = preflight
         .kube_client
@@ -96,16 +96,16 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     }
 
     // 2. Determine release name and namespace
-    let (release_name, release_namespace) = if let Some(ref release) = nyl_release {
+    let (release_name, release_namespace) = if let Some(ref release) = release {
         (release.metadata.name.clone(), release.metadata.namespace.clone())
     } else {
-        // Require CLI flags if no NylRelease
-        let name = args.name.ok_or_else(|| {
-            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-        })?;
-        let namespace = args.namespace.ok_or_else(|| {
-            NylError::Config("No NylRelease resource found. Specify --name and --namespace".to_string())
-        })?;
+        // Require CLI flags if no Release
+        let name = args
+            .name
+            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
+        let namespace = args
+            .namespace
+            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
         (name, namespace)
     };
 

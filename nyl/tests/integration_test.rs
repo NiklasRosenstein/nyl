@@ -146,6 +146,38 @@ fn test_new_gitops_cluster_warns_when_implied_context_is_missing() {
 }
 
 #[test]
+fn test_new_gitops_repository_requires_and_writes_repository_urls() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+
+    let mut missing = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    missing
+        .current_dir(temp.path())
+        .args(["new", "gitops", "repository", "deploy"]);
+    missing
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--repo-url"));
+
+    let mut create = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    create.current_dir(temp.path()).args([
+        "new",
+        "gitops",
+        "repository",
+        "deploy",
+        "--repo-url",
+        "https://git.example.com/platform/deploy.git",
+        "--publish-url",
+        "git@git.example.com:platform/deploy.git",
+    ]);
+    create.assert().success();
+
+    let repository = fs::read_to_string(temp.path().join("config/repositories/deploy.yaml")).unwrap();
+    assert!(repository.contains("repoURL: \"https://git.example.com/platform/deploy.git\""));
+    assert!(repository.contains("publishURL: \"git@git.example.com:platform/deploy.git\""));
+}
+
+#[test]
 fn test_generate_schema_config_command() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("generate").arg("schema").arg("config");
@@ -207,6 +239,34 @@ data:
         .success()
         .stdout(predicate::str::contains("apiVersion: v1"))
         .stdout(predicate::str::contains("kind: ConfigMap"));
+}
+
+#[test]
+fn test_render_command_expands_release_includes() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
+    fs::create_dir(temp.path().join("manifests")).unwrap();
+    fs::write(
+        temp.path().join("release.yaml"),
+        "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: [manifests/*.yaml]\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("manifests/config.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: included\n  namespace: example\n",
+    )
+    .unwrap();
+
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    command
+        .current_dir(temp.path())
+        .args(["render", "--offline", "release.yaml"]);
+    command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name: included"))
+        .stdout(predicate::str::contains("kind: Release").not());
 }
 
 #[test]

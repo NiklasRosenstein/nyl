@@ -29,6 +29,19 @@ fn resource_schema_cli_supports_cluster() {
 }
 
 #[test]
+fn resource_schema_cli_supports_release() {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    command
+        .args(["generate", "schema", "resource", "Release"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
+        .stdout(predicate::str::contains("\"const\": \"Release\""))
+        .stdout(predicate::str::contains("\"additionalNamespaces\""))
+        .stdout(predicate::str::contains("\"include\""));
+}
+
+#[test]
 fn aggregate_schema_cli_uses_relative_refs() {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
@@ -37,7 +50,8 @@ fn aggregate_schema_cli_uses_relative_refs() {
         .success()
         .stdout(predicate::str::contains("\"$ref\": \"git-repository.schema.json\""))
         .stdout(predicate::str::contains("\"$ref\": \"cluster.schema.json\""))
-        .stdout(predicate::str::contains("\"$ref\": \"application-group.schema.json\""));
+        .stdout(predicate::str::contains("\"$ref\": \"application-group.schema.json\""))
+        .stdout(predicate::str::contains("\"$ref\": \"release.schema.json\""));
 }
 
 #[test]
@@ -57,6 +71,7 @@ fn all_schema_cli_writes_the_complete_set() {
         "gitops-target.schema.json",
         "app-project-definition.schema.json",
         "application-group.schema.json",
+        "release.schema.json",
         "gitops-resource.schema.json",
     ];
     for filename in expected {

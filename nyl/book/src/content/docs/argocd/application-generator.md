@@ -2,7 +2,7 @@
 title: 'ApplicationGenerator Reference'
 ---
 
-The ApplicationGenerator resource enables automatic discovery and generation of ArgoCD Applications from NylRelease files in a Git repository directory.
+The ApplicationGenerator resource enables automatic discovery and generation of ArgoCD Applications from Release files in a Git repository directory.
 
 > **Note**: Repository sources are resolved automatically by Nyl. Depending on context, Nyl may reuse an existing local checkout or clone into its Git cache. See the [Git Integration](/nyl/git-integration/) guide for cache management and resolution details.
 
@@ -34,7 +34,7 @@ spec:
   applicationNameTemplate: string  # Naming template (default: "{{ .release.name }}")
   labels: {string: string}         # Labels for generated Applications
   annotations: {string: string}    # Annotations for generated Applications
-  releaseCustomization:            # Optional NylRelease override policy
+  releaseCustomization:            # Optional Release override policy
     allowedPaths: [string]
     deniedPaths: [string]
 ```
@@ -144,9 +144,9 @@ annotations:
 
 ### spec.releaseCustomization
 
-Controls project-level `NylRelease.spec.argocd.applicationOverride` customization of generated Applications.
+Controls project-level `Release.spec.argocd.applicationOverride` customization of generated Applications.
 
-- `NylRelease` overrides are always evaluated against effective `allowedPaths`/`deniedPaths`.
+- `Release` overrides are always evaluated against effective `allowedPaths`/`deniedPaths`.
 - `+<field>` append overrides are matched against the canonical field path without the `+` prefix.
   - Example: `spec.syncPolicy.+syncOptions` is checked as `spec.syncPolicy.syncOptions`.
 - If `releaseCustomization` is omitted, defaults are used.
@@ -185,8 +185,8 @@ Patterns use standard glob syntax:
 1. Expand selectors from `path`/`paths` into candidate files
 2. File must match at least one `include` pattern
 3. File must NOT match any `exclude` pattern
-4. Nyl parses the file and looks for a NylRelease resource
-5. If NylRelease found, an Application is generated
+4. Nyl parses the file and looks for a Release resource
+5. If Release found, an Application is generated
 
 ### Default Patterns
 
@@ -220,7 +220,7 @@ spec:
     path: apps
 ```
 
-This scans `apps/` for `*.yaml` and `*.yml` files, generates an Application for each NylRelease found.
+This scans `apps/` for `*.yaml` and `*.yml` files, generates an Application for each Release found.
 
 ### With Automated Sync
 
@@ -252,7 +252,7 @@ spec:
 
 ### With Release-Level `+syncOptions`
 
-Generator defaults can be extended from a discovered `NylRelease` instead of replaced.
+Generator defaults can be extended from a discovered `Release` instead of replaced.
 
 ApplicationGenerator:
 
@@ -277,11 +277,11 @@ spec:
       - ApplyOutOfSyncOnly=true
 ```
 
-NylRelease:
+Release:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: service-proxies
   namespace: home-proxy
@@ -418,12 +418,12 @@ spec:
 
 ## Generated Application Structure
 
-For a NylRelease file like this:
+For a Release file like this:
 
 ```yaml
 # clusters/default/nginx.yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: nginx
   namespace: web
@@ -437,7 +437,7 @@ The ApplicationGenerator produces:
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: nginx                    # From NylRelease.metadata.name
+  name: nginx                    # From Release.metadata.name
   namespace: argocd              # From generator.spec.destination.namespace
   labels:                        # From generator.spec.labels
     managed-by: nyl
@@ -460,7 +460,7 @@ spec:
           value: web
   destination:
     server: https://kubernetes.default.svc  # From generator.spec.destination.server
-    namespace: web               # From NylRelease.metadata.namespace
+    namespace: web               # From Release.metadata.namespace
   syncPolicy:                    # From generator.spec.syncPolicy
     automated:
       prune: true
@@ -478,8 +478,8 @@ spec:
    - The source path is resolved (from Git by default, or from local override path if configured)
    - The resolved source path is scanned for YAML files
    - Files are filtered by include/exclude patterns
-   - Each file is parsed for a NylRelease resource
-   - An ArgoCD Application is generated for each NylRelease
+   - Each file is parsed for a Release resource
+   - An ArgoCD Application is generated for each Release
    - Generated Applications are added to the output
 
 2. The ApplicationGenerator acts as an "offline controller" pattern:
@@ -545,7 +545,7 @@ When this env var is set, selectors from `source.path`/`source.paths` are resolv
 If the override path is missing/invalid, `@git` is used outside a Git repository, or the resulting source path does not exist, `nyl render` fails with a configuration error.
 
 For generated Applications:
-- The `path` field points to the directory containing the NylRelease file
+- The `path` field points to the directory containing the Release file
 - Relative to the repository root
 
 ### Validation

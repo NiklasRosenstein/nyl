@@ -60,8 +60,8 @@ echo ""
 # Create test manifest
 echo "Creating test manifest..."
 cat > "${SCRIPT_DIR}/${TEST_NAME}.yaml" <<'EOF'
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: test-filter
   namespace: test-kind-filtering-append-release

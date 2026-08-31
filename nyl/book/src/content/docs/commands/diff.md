@@ -33,8 +33,8 @@ For shared rendering behavior and namespace resolution details, see
 
 ### Release Options
 
-- `--name <NAME>` - Release name (required if no NylRelease in file)
-- `--namespace <NAMESPACE>` - Release namespace (required if no NylRelease in file)
+- `--name <NAME>` - Release name (required if no Release in file)
+- `--namespace <NAMESPACE>` - Release namespace (required if no Release in file)
 
 ### Cluster Options
 
@@ -102,8 +102,8 @@ The diff command shows:
 
 ## Notes
 
-- Nyl processes single files only. Directory paths are not supported.
-- A `NylRelease` resource in the manifest provides release metadata automatically.
+- Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
+- A `Release` resource in the manifest provides release metadata automatically.
 - Normalized mode is recommended for most use cases as it matches kubectl diff behavior.
 - If no previous release state exists, diff still compares desired resources against live state but cannot determine prune candidates; a warning is shown and `to delete` remains incomplete.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.

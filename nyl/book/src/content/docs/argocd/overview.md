@@ -36,7 +36,7 @@ Nyl provides an ArgoCD configuration management plugin that acts as a bridge bet
 
 1. ArgoCD clones the Git repository
 2. The Nyl plugin is invoked to render manifests
-3. Nyl processes the YAML files (HelmCharts, NylRelease, etc.)
+3. Nyl processes the YAML files (HelmCharts, Release, etc.)
 4. Rendered Kubernetes manifests are returned to ArgoCD
 5. ArgoCD applies the manifests to the cluster
 
@@ -45,8 +45,8 @@ Nyl provides an ArgoCD configuration management plugin that acts as a bridge bet
 The ApplicationGenerator resource enables automatic discovery and generation of ArgoCD Applications. When you use `nyl render` on a file containing an ApplicationGenerator:
 
 1. Nyl scans the configured directory for YAML files
-2. Each file with a NylRelease is discovered
-3. An ArgoCD Application is generated for each NylRelease
+2. Each file with a Release is discovered
+3. An ArgoCD Application is generated for each Release
 4. The ApplicationGenerator is replaced with the generated Applications
 
 This pattern is particularly useful for:

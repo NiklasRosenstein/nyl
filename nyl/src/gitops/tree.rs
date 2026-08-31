@@ -182,6 +182,17 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             };
             inputs.insert(input_path);
             let mut rendered = session.render_release_file(source_file).await?;
+            for bundle_input in &rendered.inputs {
+                let input_path = if source.remote {
+                    PathBuf::from("@remote").join(bundle_input.strip_prefix(&source.root).unwrap_or(bundle_input))
+                } else {
+                    bundle_input
+                        .strip_prefix(&inventory.project_root)
+                        .unwrap_or(bundle_input)
+                        .to_path_buf()
+                };
+                inputs.insert(input_path);
+            }
             let Some(release) = rendered.release.take() else {
                 continue;
             };
@@ -190,51 +201,44 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 .destination_namespace
                 .clone()
                 .unwrap_or_else(|| release.metadata.namespace.clone());
+            validate_release_namespace_scope(&rendered.manifests, &release, &destination_namespace)?;
             if let Some(manifest) =
                 take_managed_namespace(&mut rendered.manifests, &destination_namespace, &group.spec.namespace)?
             {
-                let key = (cluster.metadata.name.clone(), destination_namespace.clone());
-                let owner = ManagedNamespaceOwner {
+                register_namespace_owner(
+                    &mut namespace_owners,
+                    &cluster,
+                    &group,
+                    &argocd_project_name,
+                    &destination_namespace,
                     manifest,
-                    application_namespace: group.spec.application_namespace.clone(),
-                    project: argocd_project_name.clone(),
-                    destination: cluster.spec.destination.clone(),
-                    sync_policy: group.spec.sync_policy.clone(),
-                    deletion_policy: group.spec.application_deletion_policy,
-                    labels: group.spec.labels.clone(),
-                    annotations: group.spec.annotations.clone(),
-                };
-                if let Some(existing) = namespace_owners.get(&key) {
-                    if existing != &owner {
-                        return Err(NylError::config(format!(
-                            "Namespace {:?} has conflicting ownership policy across ApplicationGroups",
-                            destination_namespace
-                        )));
-                    }
-                } else {
-                    namespace_owners.insert(key, owner);
-                }
+                )?;
             }
-            if let Some(namespace) = rendered.manifests.iter().find(|manifest| {
-                manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
-                    && manifest.get("kind").and_then(Value::as_str) == Some("Namespace")
-            }) {
-                let name = namespace
-                    .pointer("/metadata/name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<unknown>");
-                return Err(NylError::config(format!(
-                    "NylRelease {:?} renders Namespace {name:?} outside its destination namespace {destination_namespace:?}; Namespace ownership must be assigned through ApplicationGroup destinationNamespace and namespace policy",
-                    release.metadata.name
-                )));
+            let mut additional_policy = group.spec.namespace.clone();
+            additional_policy.create = false;
+            for namespace in &release.spec.additional_namespaces {
+                if namespace == &destination_namespace {
+                    continue;
+                }
+                if let Some(manifest) = take_managed_namespace(&mut rendered.manifests, namespace, &additional_policy)?
+                {
+                    register_namespace_owner(
+                        &mut namespace_owners,
+                        &cluster,
+                        &group,
+                        &argocd_project_name,
+                        namespace,
+                        manifest,
+                    )?;
+                }
             }
 
             let group_output = group.spec.output_path.as_deref().unwrap_or(&group.metadata.name);
             crate::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
-            validate_path_segment("NylRelease metadata.name", &release.metadata.name)?;
+            validate_path_segment("Release metadata.name", &release.metadata.name)?;
             if release.metadata.name == "_namespaces" {
                 return Err(NylError::config(
-                    "NylRelease metadata.name \"_namespaces\" is reserved by the rendered GitOps layout",
+                    "Release metadata.name \"_namespaces\" is reserved by the rendered GitOps layout",
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);
@@ -324,8 +328,90 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     })
 }
 
-fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::NylRelease) -> String {
+fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::Release) -> String {
     format!("{}/{}", group.metadata.name, release.metadata.name)
+}
+
+fn validate_release_namespace_scope(
+    manifests: &[Value],
+    release: &crate::resources::Release,
+    destination_namespace: &str,
+) -> Result<()> {
+    let mut allowed = BTreeSet::from([destination_namespace]);
+    allowed.extend(release.spec.additional_namespaces.iter().map(String::as_str));
+    for manifest in manifests {
+        if let Some(namespace) = manifest.pointer("/metadata/namespace") {
+            match namespace {
+                Value::Null => {}
+                Value::String(namespace) if namespace.is_empty() => {}
+                Value::String(namespace) if allowed.contains(namespace.as_str()) => {}
+                Value::String(namespace) => {
+                    return Err(NylError::config(format!(
+                        "Release {:?} renders resource with metadata.namespace {namespace:?}, outside its allowed namespaces [{}]",
+                        release.metadata.name,
+                        allowed.iter().map(|value| format!("{value:?}")).collect::<Vec<_>>().join(", ")
+                    )))
+                }
+                _ => {
+                    return Err(NylError::config(format!(
+                        "Release {:?} renders a resource whose metadata.namespace is not a string",
+                        release.metadata.name
+                    )))
+                }
+            }
+        }
+        if manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
+            && manifest.get("kind").and_then(Value::as_str) == Some("Namespace")
+        {
+            let name = manifest
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| NylError::config("Namespace metadata.name must be a string"))?;
+            if !allowed.contains(name) {
+                return Err(NylError::config(format!(
+                    "Release {:?} renders Namespace {name:?}, outside its allowed namespaces [{}]",
+                    release.metadata.name,
+                    allowed
+                        .iter()
+                        .map(|value| format!("{value:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn register_namespace_owner(
+    namespace_owners: &mut BTreeMap<(String, String), ManagedNamespaceOwner>,
+    cluster: &Cluster,
+    group: &ApplicationGroup,
+    argocd_project_name: &str,
+    namespace: &str,
+    manifest: Value,
+) -> Result<()> {
+    let key = (cluster.metadata.name.clone(), namespace.to_owned());
+    let owner = ManagedNamespaceOwner {
+        manifest,
+        application_namespace: group.spec.application_namespace.clone(),
+        project: argocd_project_name.to_owned(),
+        destination: cluster.spec.destination.clone(),
+        sync_policy: group.spec.sync_policy.clone(),
+        deletion_policy: group.spec.application_deletion_policy,
+        labels: group.spec.labels.clone(),
+        annotations: group.spec.annotations.clone(),
+    };
+    if let Some(existing) = namespace_owners.get(&key) {
+        if existing != &owner {
+            return Err(NylError::config(format!(
+                "Namespace {namespace:?} has conflicting ownership policy across ApplicationGroups"
+            )));
+        }
+    } else {
+        namespace_owners.insert(key, owner);
+    }
+    Ok(())
 }
 
 fn group_applies(group: &ApplicationGroup, target: &GitOpsTarget) -> bool {
@@ -543,7 +629,7 @@ fn resolve_group_source(
         .map(|resource| inventory.project_root.join(&resource.source_path))
         .collect::<BTreeSet<_>>();
     files.retain(|path| !control_files.contains(path) && source_matches(&root, path, &source));
-    files.sort();
+    let files = static_release_files(files)?;
 
     let source_session = match (&remote_root, source.renderer_config.mode) {
         (Some(remote_root), RendererConfigMode::Remote) => {
@@ -574,6 +660,17 @@ fn resolve_group_source(
         remote: remote_root.is_some(),
         provenance_inputs,
     })
+}
+
+fn static_release_files(files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut release_files = Vec::new();
+    for path in files {
+        if crate::cli::commands::render::has_static_release(&path)? {
+            release_files.push(path);
+        }
+    }
+    release_files.sort();
+    Ok(release_files)
 }
 
 fn checked_checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Result<PathBuf> {
@@ -684,7 +781,7 @@ fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource) -> 
 fn render_application_name(
     session: &RenderSession,
     group: &ApplicationGroup,
-    release: &crate::resources::NylRelease,
+    release: &crate::resources::Release,
 ) -> Result<String> {
     let Some(template) = &group.spec.application_name_template else {
         return Ok(release.metadata.name.clone());
@@ -701,7 +798,7 @@ fn render_application_name(
 
 fn apply_release_application_override(
     application: &mut Value,
-    release: &crate::resources::NylRelease,
+    release: &crate::resources::Release,
     group: &ApplicationGroup,
 ) -> Result<()> {
     let Some(override_value) = release
@@ -729,7 +826,7 @@ fn apply_release_application_override(
         ];
         if !is_supported_application_field_path(path) {
             return Err(NylError::config(format!(
-                "NylRelease {:?} attempts to customize unsupported Argo CD Application field {path:?}",
+                "Release {:?} attempts to customize unsupported Argo CD Application field {path:?}",
                 release.metadata.name
             )));
         }
@@ -738,7 +835,7 @@ fn apply_release_application_override(
             .any(|pattern| path_matches_glob(path, pattern).unwrap_or(false))
         {
             return Err(NylError::config(format!(
-                "NylRelease {:?} cannot customize platform-owned Argo CD Application field {path:?}",
+                "Release {:?} cannot customize platform-owned Argo CD Application field {path:?}",
                 release.metadata.name
             )));
         }
@@ -756,7 +853,7 @@ fn apply_release_application_override(
                 .any(|pattern| path_matches_glob(path, pattern).unwrap_or(false))
         {
             return Err(NylError::config(format!(
-                "NylRelease {:?} is not allowed to customize Argo CD Application field {path:?}",
+                "Release {:?} is not allowed to customize Argo CD Application field {path:?}",
                 release.metadata.name
             )));
         }

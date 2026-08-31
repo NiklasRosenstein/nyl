@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::cli::commands::render::{
-    deduplicate_manifests, generate_resource, is_renderable_resource, load_resources, needs_helm_rendering,
+    deduplicate_manifests, generate_resource, is_renderable_resource, load_release_bundle, needs_helm_rendering,
     prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode,
 };
 use crate::config::ProjectConfig;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
-    extract_all_kyverno_policies, extract_application_generators, extract_nyl_release, Cluster, GitOpsTarget,
-    KyvernoScope, NylRelease,
+    extract_all_kyverno_policies, extract_application_generators, extract_release, Cluster, GitOpsTarget, KyvernoScope,
+    Release,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -32,9 +32,11 @@ pub struct RenderSession {
 #[derive(Debug)]
 pub struct RenderedRelease {
     /// The release declaration. `None` means target templating omitted it.
-    pub release: Option<NylRelease>,
+    pub release: Option<Release>,
     /// Fully expanded, policy-processed and deduplicated Kubernetes manifests.
     pub manifests: Vec<Value>,
+    /// Entry and included files that contributed to this release.
+    pub inputs: Vec<PathBuf>,
 }
 
 impl RenderSession {
@@ -186,7 +188,8 @@ impl RenderSession {
             .to_str()
             .ok_or_else(|| NylError::config(format!("Release path is not valid UTF-8: {}", path.display())))?;
 
-        let resources = load_resources(path_text, &self.template_context)?;
+        let bundle = load_release_bundle(Path::new(path_text), &self.template_context)?;
+        let resources = bundle.resources;
         let (kube_version, api_versions) = if needs_helm_rendering(&resources, &self.project_config) {
             (self.kube_version.clone(), self.api_versions.clone())
         } else {
@@ -223,7 +226,7 @@ impl RenderSession {
         }
         manifests.extend(pending);
 
-        let (release, manifests) = extract_nyl_release(&manifests)?;
+        let (release, manifests) = extract_release(&manifests)?;
         let strip_mode = resolve_strip_empty_metadata_labels_mode(
             self.project_config.get_strip_empty_metadata_labels_mode(),
             release.as_ref(),
@@ -247,7 +250,11 @@ impl RenderSession {
         let (manifests, _) = deduplicate_manifests(manifests)?;
         let manifests = prepare_manifests_for_output(&manifests, strip_mode.should_strip(false));
 
-        Ok(RenderedRelease { release, manifests })
+        Ok(RenderedRelease {
+            release,
+            manifests,
+            inputs: bundle.inputs,
+        })
     }
 }
 
@@ -328,8 +335,8 @@ mod tests {
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
-            r#"apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+            r#"apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: {{ target.metadata.name }}
   namespace: production

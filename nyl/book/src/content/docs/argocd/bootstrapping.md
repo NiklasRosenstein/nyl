@@ -11,8 +11,8 @@ The bootstrap pattern works as follows:
 1. Manually apply a bootstrap manifest to install ArgoCD
 2. The bootstrap includes an ArgoCD Application pointing to `apps.yaml`
 3. ArgoCD syncs the "apps" Application, running `nyl render apps.yaml`
-4. Nyl sees ApplicationGenerator in `apps.yaml` and scans for NylRelease files
-5. Nyl generates ArgoCD Applications for each found NylRelease
+4. Nyl sees ApplicationGenerator in `apps.yaml` and scans for Release files
+5. Nyl generates ArgoCD Applications for each found Release
 6. ArgoCD receives and creates all child Applications
 7. ArgoCD now manages all applications (including itself) declaratively
 
@@ -34,9 +34,9 @@ gitops-repo/
 │   └── argocd.yaml            # HelmChart for ArgoCD
 ├── clusters/
 │   └── default/               # Applications for default cluster
-│       ├── app1.yaml          # Application 1 with NylRelease
-│       ├── app2.yaml          # Application 2 with NylRelease
-│       └── app3.yaml          # Application 3 with NylRelease
+│       ├── app1.yaml          # Application 1 with Release
+│       ├── app2.yaml          # Application 2 with Release
+│       └── app3.yaml          # Application 3 with Release
 ├── nyl.toml                   # Nyl project configuration
 └── nyl-secrets.yaml           # Secrets configuration
 ```
@@ -62,8 +62,8 @@ type: null
 Create `argocd/argocd.yaml`:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: argocd
   namespace: argocd
@@ -187,8 +187,8 @@ spec:
 Create `clusters/default/nginx.yaml`:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: nginx
   namespace: default
@@ -212,8 +212,8 @@ spec:
 Create `clusters/default/redis.yaml`:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: redis
   namespace: default
@@ -356,7 +356,7 @@ When you apply `bootstrap.yaml`:
 3. **Apps Application Syncs**: The "apps" Application runs `nyl render "$NYL_CMP_TEMPLATE_INPUT"` (for example `apps.yaml`)
 4. **ApplicationGenerator Processes**: Nyl finds `apps.yaml`, sees ApplicationGenerator
 5. **Directory Scanned**: Nyl scans `clusters/default/` for YAML files
-6. **Applications Generated**: For each NylRelease found (nginx, redis), Nyl generates an ArgoCD Application
+6. **Applications Generated**: For each Release found (nginx, redis), Nyl generates an ArgoCD Application
 7. **Applications Created**: ArgoCD receives the generated Applications and creates them
 8. **Child Applications Sync**: Each generated Application syncs its resources to the cluster
 
@@ -405,8 +405,8 @@ To add a new application to be managed by ArgoCD:
 
 ```yaml
 # clusters/default/postgres.yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: postgres
   namespace: database
