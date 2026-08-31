@@ -85,7 +85,7 @@ It provides:
 | One-time bootstrap | `nyl generate argocd` | Manual control |
 | CI/CD generation | `nyl generate argocd` | Explicit generation step |
 
-See [Rendered Manifest GitOps](/nyl/deployment-workflows/rendered-manifests/)
+See the [Rendered Manifest Pattern](/nyl/deployment-workflows/rendered-manifests/)
 for the recommended workflow. ApplicationGenerator remains available for CMP
 installations.
 

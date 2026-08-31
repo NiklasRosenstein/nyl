@@ -7,7 +7,7 @@ Nyl works with ArgoCD in two main ways:
 - **Rendered manifest GitOps**: CI runs `nyl render` and ArgoCD syncs the rendered YAML with its standard directory support.
 - **Config Management Plugin (CMP)**: ArgoCD runs Nyl during sync and receives rendered manifests directly.
 
-Start with [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) if you want the simplest ArgoCD runtime. Use the CMP integration when ArgoCD should render Nyl inputs itself, reuse ArgoCD repository credentials, or generate Applications with `ApplicationGenerator`.
+Start with the [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) if you want the simplest ArgoCD runtime. Use the CMP integration when ArgoCD should render Nyl inputs itself, reuse ArgoCD repository credentials, or generate Applications with `ApplicationGenerator`.
 
 ## Key Features
 
@@ -57,7 +57,7 @@ This pattern is particularly useful for:
 
 ## Getting Started
 
-1. Choose [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) for a standard ArgoCD directory Application.
+1. Choose the [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) for a standard ArgoCD directory Application.
 2. Choose [Plugin Installation](/nyl/argocd/plugin/) when ArgoCD should render Nyl inputs directly.
 3. Follow the [Bootstrapping Guide](/nyl/argocd/bootstrapping/) to set up a self-hosting ArgoCD pattern.
 4. Use [ApplicationGenerator](/nyl/argocd/application-generator/) to manage Applications at scale.

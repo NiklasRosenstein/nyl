@@ -1,11 +1,11 @@
 ---
-title: 'Rendered Manifest GitOps'
+title: 'Rendered Manifest Pattern'
 ---
 
-Rendered manifest GitOps is the recommended Nyl deployment model. Nyl compiles
-trusted source configuration into ordinary Kubernetes YAML in a deployment Git
-revision. Argo CD reads plain recursive directories and does not need the Nyl
-CMP.
+The rendered manifest pattern is the recommended Nyl deployment model. Nyl
+compiles trusted source configuration into ordinary Kubernetes YAML in a
+deployment Git revision. Argo CD reads plain recursive directories and does not
+need the Nyl CMP.
 
 ## How the model fits together
 

@@ -4,7 +4,7 @@ title: 'Plugin Installation'
 
 The Nyl ArgoCD plugin enables ArgoCD to render Nyl manifests directly from Git repositories. This guide covers plugin installation and configuration.
 
-If you do not need ArgoCD to render Nyl inputs at sync time, consider the simpler [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) workflow first. It lets ArgoCD sync ordinary YAML without installing a CMP sidecar.
+If you do not need ArgoCD to render Nyl inputs at sync time, consider the simpler [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) first. It lets ArgoCD sync ordinary YAML without installing a CMP sidecar.
 
 ## Prerequisites
 

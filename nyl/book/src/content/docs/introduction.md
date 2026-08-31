@@ -23,7 +23,7 @@ Nyl can fit into several deployment workflows:
 
 ## Choosing a Workflow
 
-Start with [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) if you want the cluster-side reconciler to consume ordinary Kubernetes manifests and keep Nyl out of the runtime path.
+Start with the [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) if you want the cluster-side reconciler to consume ordinary Kubernetes manifests and keep Nyl out of the runtime path.
 
 Use [CLI-first workflows](/nyl/deployment-workflows/cli-workflows/) when you need fast local feedback, bootstrap a cluster before GitOps is available, or test a change before committing rendered output.
 

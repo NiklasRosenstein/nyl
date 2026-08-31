@@ -55,5 +55,5 @@ Kind-specific JSON schemas are available from the
 [schema reference](/nyl/reference/schemas/). Scaffolded resources include the
 appropriate YAML language-server schema URL.
 
-See [Rendered Manifest GitOps](/nyl/deployment-workflows/rendered-manifests/)
+See the [Rendered Manifest Pattern](/nyl/deployment-workflows/rendered-manifests/)
 for the operational workflow.

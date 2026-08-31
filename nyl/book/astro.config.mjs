@@ -53,16 +53,7 @@ export default defineConfig({
           items: [
             "index",
             "getting-started",
-            {
-              label: "Rendered Manifest GitOps",
-              items: [
-                "deployment-workflows/rendered-manifests",
-                "deployment-workflows/rendered-manifests/project-structure",
-                "deployment-workflows/rendered-manifests/targets-and-clusters",
-                "deployment-workflows/rendered-manifests/rendering-and-publishing",
-                "deployment-workflows/rendered-manifests/security",
-              ],
-            },
+            "deployment-workflows/rendered-manifests",
             "deployment-workflows/cli-workflows",
           ],
         },
@@ -70,6 +61,15 @@ export default defineConfig({
           label: "User Guide",
           items: [
             "configuration",
+            {
+              label: "GitOps",
+              items: [
+                "deployment-workflows/rendered-manifests/project-structure",
+                "deployment-workflows/rendered-manifests/targets-and-clusters",
+                "deployment-workflows/rendered-manifests/rendering-and-publishing",
+                "deployment-workflows/rendered-manifests/security",
+              ],
+            },
             {
               label: "Component System",
               items: [
