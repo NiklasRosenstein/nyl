@@ -29,7 +29,7 @@ gitops_scaffold_path = "config"
   component path.
 
 Deployment values, Kubernetes capabilities, and kube contexts live in
-Kubernetes-shaped [Cluster and GitOpsTarget resources](/nyl/deployment-workflows/rendered-manifests/),
+Kubernetes-shaped [Cluster and GitOpsTarget resources](/nyl/reference/resources/gitops/),
 not in `nyl.toml`.
 
 ## Render inputs

@@ -53,7 +53,16 @@ export default defineConfig({
           items: [
             "index",
             "getting-started",
-            "deployment-workflows/rendered-manifests",
+            {
+              label: "Rendered Manifest GitOps",
+              items: [
+                "deployment-workflows/rendered-manifests",
+                "deployment-workflows/rendered-manifests/project-structure",
+                "deployment-workflows/rendered-manifests/targets-and-clusters",
+                "deployment-workflows/rendered-manifests/rendering-and-publishing",
+                "deployment-workflows/rendered-manifests/security",
+              ],
+            },
             "deployment-workflows/cli-workflows",
           ],
         },
@@ -110,6 +119,17 @@ export default defineConfig({
             "reference/resources/remote-manifest",
             "reference/resources/nyl-release",
             "reference/resources/application-generator",
+            {
+              label: "Rendered GitOps Resources",
+              items: [
+                "reference/resources/gitops",
+                "reference/resources/gitops/git-repository",
+                "reference/resources/gitops/cluster",
+                "reference/resources/gitops/gitops-target",
+                "reference/resources/gitops/app-project-definition",
+                "reference/resources/gitops/application-group",
+              ],
+            },
             "reference/kyverno-policies",
             "reference/schemas",
           ],

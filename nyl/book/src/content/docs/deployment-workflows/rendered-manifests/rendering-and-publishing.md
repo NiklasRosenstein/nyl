@@ -1,0 +1,88 @@
+---
+title: 'Rendering, Diffing, and Publishing'
+---
+
+Nyl renders one [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/)
+at a time into its configured publication prefix.
+
+## Rendered layout
+
+For each release, Nyl writes:
+
+```text
+<target-prefix>/<group-output>/<release>/resources.yaml
+<target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml
+<target-prefix>/_nyl/namespaces/<identity>/resources.yaml
+<target-prefix>/_nyl/catalog/projects/<project-id>.yaml
+<target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml
+<target-prefix>/_nyl/index.json
+```
+
+CRDs are split one per file and retain Helm `# Source:` comments. Other
+resources are ordered deterministically in `resources.yaml`. Generated Argo CD
+Applications use `source.directory.recurse: true`, so nested CRD directories
+are included.
+
+Managed Namespaces live outside workload directories. One dedicated generated
+Application owns each cluster/namespace identity, even when several workload
+Applications use it. Nyl rejects overlapping resource ownership.
+
+The versioned index records target identity, source provenance, owned files,
+and SHA-256 hashes. Nyl preserves unowned files and rejects changes to indexed
+files that were made outside Nyl.
+
+## Validate and render
+
+```bash
+nyl validate gitops
+nyl target list
+nyl render-tree --target production --output-dir deploy-worktree
+```
+
+`--output-dir` names the checked-out destination repository root; Nyl appends
+the target's `pathPrefix`. Use `nyl render-tree --check` to render and validate
+without writing.
+
+## Diff in pull-request CI
+
+Compare the desired tree with the currently published deployment revision:
+
+```bash
+nyl diff-tree --target production --against published > rendered.diff
+```
+
+Compare instead with the tree generated from the source default branch:
+
+```bash
+nyl diff-tree \
+  --target production \
+  --against source \
+  --source-ref main > rendered.diff
+```
+
+The source-derived form remains accurate when a publication job has not yet
+updated the deployment revision. `--fail-on-diff` returns a non-zero status
+while preserving the unified diff on stdout.
+
+Forge-specific CI can post the diff to a pull or merge request and update a
+marker comment on later pipelines. Comment ownership and forge API calls remain
+outside Nyl.
+
+## Publish from the protected branch
+
+```bash
+nyl publish-tree --target production
+```
+
+The source worktree must be clean and committed. Nyl clones the destination
+revision, reconciles only indexed files, creates one commit, refreshes the
+remote revision, and performs a compare-and-swap push. It refuses to push when
+the remote tip changes concurrently.
+
+An interrupted local reconciliation can resume when installed files match the
+intended generation. Unrelated modifications and symbolic-link ancestors fail
+closed. Git credentials and protected-branch rules remain forge configuration.
+
+See the [Rendered GitOps command reference](/nyl/commands/gitops/) for all flags
+and the [security guide](/nyl/deployment-workflows/rendered-manifests/security/)
+for ownership and publication boundaries.

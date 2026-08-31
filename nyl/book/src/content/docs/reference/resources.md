@@ -16,7 +16,14 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 ### ArgoCD Resources
 
 - **[ApplicationGenerator](/nyl/reference/resources/application-generator/)**: Automatically generates ArgoCD Applications from NylRelease files
-- **[Rendered GitOps control resources](/nyl/deployment-workflows/rendered-manifests/#control-resources)**: Define repositories, concrete Clusters, publication targets, projects, and application groups
+
+### Rendered GitOps Resources
+
+- **[GitRepository](/nyl/reference/resources/gitops/git-repository/)**: Names credential-free Git read and publication coordinates
+- **[Cluster](/nyl/reference/resources/gitops/cluster/)**: Defines a concrete destination and deterministic Kubernetes capabilities
+- **[GitOpsTarget](/nyl/reference/resources/gitops/gitops-target/)**: Binds a Cluster to values and publication coordinates
+- **[AppProjectDefinition](/nyl/reference/resources/gitops/app-project-definition/)**: Defines a rendered or external Argo CD AppProject contract
+- **[ApplicationGroup](/nyl/reference/resources/gitops/application-group/)**: Selects releases and owns generated Application and Namespace policy
 
 ### Policy Resources
 
@@ -59,6 +66,7 @@ Nyl resources are processed based on their kind:
 - **HelmChart**: Rendered using Helm templating, replaced with rendered manifests
 - **RemoteManifest**: Fetched via HTTPS and parsed into documents, then processed recursively
 - **ApplicationGenerator**: Processed to generate ArgoCD Applications, removed from output
+- **Rendered GitOps resources**: Discovered as compiler configuration for `render-tree`, `diff-tree`, and `publish-tree`; not emitted as workload manifests
 
 ## Multi-Document Files
 

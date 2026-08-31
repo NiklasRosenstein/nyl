@@ -76,5 +76,7 @@ The source worktree must be clean and committed. Nyl clones the destination
 branch, reconciles indexed files, commits the result, fetches the branch again,
 and refuses to push when its remote tip changed.
 
-See [Rendered Manifest GitOps](/nyl/deployment-workflows/rendered-manifests/)
-for resource definitions, layout, trust boundaries, and CI patterns.
+See [Rendering, diffing, and publishing](/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/)
+for CI patterns and rendered layout. The
+[Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
+documents the configuration model.
