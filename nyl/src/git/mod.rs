@@ -344,9 +344,29 @@ impl GitManager {
     /// ).unwrap();
     /// ```
     pub fn resolve_ref(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
+        self.resolve_ref_with_freshness(url, git_ref, subpath, false)
+    }
+
+    /// Resolve a ref only after a successful remote refresh.
+    ///
+    /// Use this for freshness-sensitive comparisons and lock updates. Immutable
+    /// commit rendering can continue to use [`Self::resolve_ref`] offline.
+    pub fn resolve_ref_fresh(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
+        self.resolve_ref_with_freshness(url, git_ref, subpath, true)
+    }
+
+    fn resolve_ref_with_freshness(
+        &mut self,
+        url: &str,
+        git_ref: Option<&str>,
+        subpath: Option<&str>,
+        require_fresh: bool,
+    ) -> Result<PathBuf> {
         let git_ref = git_ref.unwrap_or("HEAD");
-        if let Some(path) = try_resolve_ref_from_argocd_env(url, git_ref, subpath) {
-            return Ok(path);
+        if !require_fresh {
+            if let Some(path) = try_resolve_ref_from_argocd_env(url, git_ref, subpath) {
+                return Ok(path);
+            }
         }
 
         // Get or create bare repository
@@ -357,6 +377,9 @@ impl GitManager {
         let fetch_error = {
             let repo = bare_repo.lock().unwrap();
             if let Err(e) = repo.fetch_refs() {
+                if require_fresh {
+                    return Err(e);
+                }
                 tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
                 Some(e)
             } else {
@@ -534,6 +557,7 @@ mod tests {
 
         let second_path = manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
         assert!(second_path.exists());
+        assert!(manager.resolve_ref_fresh(&url, Some("HEAD"), None).is_err());
     }
 
     #[test]

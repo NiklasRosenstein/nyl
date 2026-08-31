@@ -11,11 +11,12 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
 - ArgoCD Application generation
+- Target-aware rendered GitOps trees, diffs, and publication
 
 **Primary Language:** Rust 1.93.0+  
 **Build System:** Cargo  
 **Task Runner:** mise  
-**Documentation:** mdbook  
+**Documentation:** Astro/Starlight
 
 ## Repository Structure
 
@@ -25,7 +26,7 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 │   ├── src/          # Source code
 │   ├── tests/        # Integration tests
 │   ├── benches/      # Benchmarks
-│   ├── book/         # mdbook documentation
+│   ├── book/         # Astro/Starlight documentation
 │   └── examples/     # Example projects
 ├── docker/           # Docker image for ArgoCD CMP
 ├── chart/            # Helm chart for ArgoCD
@@ -232,12 +233,34 @@ src/
 ├── kubernetes/   # Kubernetes client (kube-rs)
 ├── resources/    # HelmChart, Component resources
 ├── git/          # Git repository management
+├── gitops/       # Rendered GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
 ├── components/   # Component discovery and registry
 ├── profiles/     # Profile management
 ├── secrets/      # Secrets provider framework
 └── util/         # Shared utilities
 ```
+
+### Rendered GitOps invariants
+
+- Control resources use `gitops.nyl.niklasrosenstein.github.com/v1` with a
+  static `apiVersion`, `kind`, and `metadata.name` envelope.
+- ApplicationGroup and AppProjectDefinition specs are rendered after target
+  selection, so structural templating is valid beneath the static envelope.
+- Discovery follows Git visibility across the whole project. The `config/` and
+  `applications/` paths are scaffold conventions, not lookup restrictions.
+- One target owns one repository/revision/path-prefix tuple. Targets sharing a
+  repository revision must have disjoint prefixes.
+- Rendered reconciliation removes only files recorded in `_nyl/index.json` and
+  fails when owned files were modified outside Nyl. It accepts bytes from an
+  interrupted intended generation so the next run can converge, and rejects
+  symlink traversal inside the output tree.
+- Managed Namespaces have dedicated generated Applications. Workload resources
+  may have only one Application owner per destination cluster.
+- Remote source sessions expose neither secrets nor process environment and
+  reject checkout symlinks and search paths outside the remote project root.
+- Generated Argo CD Applications use ordinary recursive directory sources. CMP
+  ApplicationGenerator behavior remains a separate compatibility path.
 
 ## Common Tasks
 

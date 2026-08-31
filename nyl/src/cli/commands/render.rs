@@ -401,7 +401,7 @@ pub(crate) async fn render_manifests(
     ))
 }
 
-fn resolve_offline_kubernetes_target(
+pub(crate) fn resolve_offline_kubernetes_target(
     project_config: &ProjectConfig,
     profile_name: &str,
     cli_kube_version: Option<&str>,
@@ -546,7 +546,7 @@ fn normalize_emitted_manifests(manifests: &mut [serde_json::Value]) {
     }
 }
 
-fn resolve_strip_empty_metadata_labels_mode(
+pub(crate) fn resolve_strip_empty_metadata_labels_mode(
     project_mode: StripEmptyMetadataLabelsMode,
     release: Option<&NylRelease>,
 ) -> StripEmptyMetadataLabelsMode {
@@ -555,7 +555,7 @@ fn resolve_strip_empty_metadata_labels_mode(
         .unwrap_or(project_mode)
 }
 
-fn prepare_manifests_for_output(
+pub(crate) fn prepare_manifests_for_output(
     manifests: &[serde_json::Value],
     strip_empty_metadata_labels: bool,
 ) -> Vec<serde_json::Value> {
@@ -595,7 +595,7 @@ fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool 
 /// Load YAML/JSON resources from a file path, rendering Jinja templates.
 ///
 /// Only single file paths are supported. Directory paths will return an error.
-fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
     let path = Path::new(path);
 
     // Validate that path is a file, not a directory
@@ -672,7 +672,7 @@ fn filter_resources(
 /// keep only the last occurrence and warn about the duplicate.
 /// Returns (deduplicated_manifests, map_of_duplicate_keys_to_counts)
 /// The HashMap contains each duplicate ResourceKey mapped to its total occurrence count.
-fn deduplicate_manifests(
+pub(crate) fn deduplicate_manifests(
     manifests: Vec<serde_json::Value>,
 ) -> Result<(Vec<serde_json::Value>, std::collections::HashMap<ResourceKey, usize>)> {
     use crate::kubernetes::ResourceKey;
@@ -707,7 +707,7 @@ fn deduplicate_manifests(
 
 /// Check whether a resource will be expanded by generate_resource
 /// (i.e. it is a HelmChart or Component, not a plain k8s manifest)
-fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
+pub(crate) fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
     (kind == Some("HelmChart") && api_version == Some(API_VERSION))
@@ -719,7 +719,7 @@ fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) 
             .is_some()
 }
 
-fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig) -> bool {
+pub(crate) fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig) -> bool {
     resources.iter().any(|resource| {
         let kind = resource.get("kind").and_then(|k| k.as_str());
         let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
@@ -840,7 +840,7 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
 
 /// Generate manifests from a resource
 #[allow(clippy::too_many_lines)]
-async fn generate_resource(
+pub(crate) async fn generate_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
@@ -1213,8 +1213,11 @@ fn render_helm_chart(
     api_versions: &[String],
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
 ) -> Result<Vec<serde_json::Value>> {
-    let working_dir =
-        std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?;
+    let working_dir = if let Some(config_file) = &config.file {
+        config_file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    } else {
+        std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?
+    };
 
     let resolver = HelmChartResolver::with_cache_dir_and_provider(
         config.get_helm_chart_search_paths().to_vec(),
@@ -1235,7 +1238,11 @@ fn render_helm_chart(
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));
 
-    executor.template(&resolved, chart.release_name(), namespace, &merged_values)
+    if context.target.is_some() {
+        executor.template_with_source_comments(&resolved, chart.release_name(), namespace, &merged_values)
+    } else {
+        executor.template(&resolved, chart.release_name(), namespace, &merged_values)
+    }
 }
 
 /// Output manifests in the specified format
@@ -4173,6 +4180,8 @@ metadata:
             values: serde_json::json!({}),
             secrets: serde_json::json!({}),
             profile: "default".to_string(),
+            env: serde_json::Map::new(),
+            target: None,
         };
         let resource = serde_json::json!({
             "apiVersion": "nyl.niklasrosenstein.github.com/v1",

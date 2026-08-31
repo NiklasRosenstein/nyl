@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::config::ProjectConfig;
+use crate::resources::GitOpsResourceKind;
 use crate::{NylError, Result};
 
 /// Create a new nyl project or component
@@ -29,12 +30,164 @@ enum NewSubcommand {
         /// Component kind (e.g., MyApp)
         kind: String,
     },
+    /// Create a Kubernetes-shaped rendered GitOps configuration resource.
+    Resource(ResourceScaffoldArgs),
+    /// Create rendered GitOps configuration resources using kind-specific aliases.
+    Gitops {
+        #[command(subcommand)]
+        command: NewGitopsSubcommand,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+struct ResourceScaffoldArgs {
+    /// Resource kind.
+    #[arg(value_enum)]
+    kind: GitOpsResourceKind,
+    /// Local resource name.
+    name: String,
+    /// Exact output file path.
+    #[arg(long, conflicts_with = "colocate")]
+    output: Option<PathBuf>,
+    /// ApplicationGroup source directory.
+    #[arg(long)]
+    source: Option<PathBuf>,
+    /// Place an ApplicationGroup in SOURCE/_application-group.yaml.
+    #[arg(long, requires = "source", conflicts_with = "output")]
+    colocate: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct AliasScaffoldArgs {
+    name: String,
+    #[arg(long, conflicts_with = "colocate")]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    source: Option<PathBuf>,
+    #[arg(long, requires = "source", conflicts_with = "output")]
+    colocate: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum NewGitopsSubcommand {
+    Repository(AliasScaffoldArgs),
+    Target(AliasScaffoldArgs),
+    Project(AliasScaffoldArgs),
+    ApplicationGroup(AliasScaffoldArgs),
 }
 
 pub fn execute(args: NewArgs) -> Result<()> {
     match args.command {
         NewSubcommand::Project { dir } => create_project(&dir),
         NewSubcommand::Component { api_version, kind } => create_component(&api_version, &kind),
+        NewSubcommand::Resource(args) => scaffold_resource(args, None),
+        NewSubcommand::Gitops { command } => {
+            let (kind, args) = match command {
+                NewGitopsSubcommand::Repository(args) => (GitOpsResourceKind::GitRepository, args),
+                NewGitopsSubcommand::Target(args) => (GitOpsResourceKind::GitOpsTarget, args),
+                NewGitopsSubcommand::Project(args) => (GitOpsResourceKind::AppProjectDefinition, args),
+                NewGitopsSubcommand::ApplicationGroup(args) => (GitOpsResourceKind::ApplicationGroup, args),
+            };
+            scaffold_resource(
+                ResourceScaffoldArgs {
+                    kind,
+                    name: args.name,
+                    output: args.output,
+                    source: args.source,
+                    colocate: args.colocate,
+                },
+                None,
+            )
+        }
+    }
+}
+
+fn scaffold_resource(args: ResourceScaffoldArgs, project_dir: Option<&Path>) -> Result<()> {
+    validate_resource_name(&args.name)?;
+    if args.kind != GitOpsResourceKind::ApplicationGroup && (args.source.is_some() || args.colocate) {
+        return Err(NylError::config(
+            "--source and --colocate are only valid for ApplicationGroup",
+        ));
+    }
+    let config = ProjectConfig::load_from_dir(None, project_dir)?;
+    let output = if let Some(output) = args.output {
+        output
+    } else if args.colocate {
+        args.source
+            .as_ref()
+            .expect("clap requires --source with --colocate")
+            .join("_application-group.yaml")
+    } else {
+        let directory = match args.kind {
+            GitOpsResourceKind::GitRepository => "repositories",
+            GitOpsResourceKind::GitOpsTarget => "targets",
+            GitOpsResourceKind::AppProjectDefinition => "projects",
+            GitOpsResourceKind::ApplicationGroup => "application-groups",
+        };
+        config
+            .get_gitops_scaffold_path()
+            .join(directory)
+            .join(format!("{}.yaml", args.name))
+    };
+    if output.exists() {
+        return Err(NylError::config(format!(
+            "Refusing to overwrite existing resource: {}",
+            output.display()
+        )));
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let source = if args.colocate {
+        None
+    } else {
+        args.source.as_deref().map(|path| path.to_string_lossy())
+    };
+    let yaml = render_resource_scaffold(args.kind, &args.name, source.as_deref());
+    fs::write(&output, yaml)?;
+    println!("✓ Created {}: {}", args.kind.as_str(), output.display());
+    Ok(())
+}
+
+fn render_resource_scaffold(kind: GitOpsResourceKind, name: &str, source: Option<&str>) -> String {
+    let schema = format!(
+        "https://niklasrosenstein.github.io/nyl/reference/schemas/{}",
+        kind.schema_filename()
+    );
+    let body = match kind {
+        GitOpsResourceKind::GitRepository => format!(
+            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitRepository\nmetadata:\n  name: {name}\nspec:\n  repoURL: https://example.invalid/{name}.git\n"
+        ),
+        GitOpsResourceKind::GitOpsTarget => format!(
+            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: GitOpsTarget\nmetadata:\n  name: {name}\nspec:\n  profile: {name}\n  destination:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n    pathPrefix: {name}\n"
+        ),
+        GitOpsResourceKind::AppProjectDefinition => format!(
+            "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
+        ),
+        GitOpsResourceKind::ApplicationGroup => {
+            let source = source.map_or_else(String::new, |source| format!("  source:\n    path: {source}\n"));
+            format!(
+                "apiVersion: gitops.nyl.niklasrosenstein.github.com/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {name}\n  applicationNamespace: argocd\n{source}  destination:\n    server: https://kubernetes.default.svc\n"
+            )
+        }
+    };
+    format!("# yaml-language-server: $schema={schema}\n{body}")
+}
+
+fn validate_resource_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && name.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(())
+    } else {
+        Err(NylError::config(format!(
+            "Resource name {name:?} must be a Kubernetes DNS subdomain"
+        )))
     }
 }
 
@@ -58,16 +211,25 @@ fn create_project(project_path: &Path) -> Result<()> {
         println!("✓ Created project directory: {}", project_path.display());
     }
 
-    // Create components directory
-    let components_dir = project_path.join("components");
-    fs::create_dir(&components_dir)?;
-    println!("✓ Created components directory: {}", components_dir.display());
+    let project_directories = [
+        project_path.join("components"),
+        project_path.join("applications"),
+        project_path.join("config/repositories"),
+        project_path.join("config/targets"),
+        project_path.join("config/projects"),
+        project_path.join("config/application-groups"),
+    ];
+    for directory in project_directories {
+        fs::create_dir_all(&directory)?;
+        println!("✓ Created directory: {}", directory.display());
+    }
 
     let config_content = r#"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
 
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
+gitops_scaffold_path = "config"
 "#;
     let config_path = project_path.join("nyl.toml");
     fs::write(&config_path, config_content)?;
@@ -309,6 +471,11 @@ mod tests {
 
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
+        assert!(project_dir.join("applications").exists());
+        assert!(project_dir.join("config/repositories").exists());
+        assert!(project_dir.join("config/targets").exists());
+        assert!(project_dir.join("config/projects").exists());
+        assert!(project_dir.join("config/application-groups").exists());
         assert!(project_dir.join("nyl.toml").exists());
 
         let config_content = fs::read_to_string(project_dir.join("nyl.toml")).unwrap();
@@ -316,6 +483,7 @@ mod tests {
             .contains("#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json"));
         assert!(config_content.contains(r#"components_search_paths = ["components"]"#));
         assert!(config_content.contains(r#"helm_chart_search_paths = ["."]"#));
+        assert!(config_content.contains(r#"gitops_scaffold_path = "config""#));
     }
 
     #[test]
@@ -368,5 +536,50 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_scaffold_gitops_resources_and_refuse_overwrite() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        let args = ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::GitRepository,
+            name: "deploy".to_string(),
+            output: None,
+            source: None,
+            colocate: false,
+        };
+        scaffold_resource(args.clone(), Some(temp.path())).unwrap();
+        let path = temp.path().join("config/repositories/deploy.yaml");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("git-repository.schema.json"));
+        assert!(content.contains("kind: GitRepository"));
+        assert!(scaffold_resource(args, Some(temp.path())).is_err());
+    }
+
+    #[test]
+    fn test_scaffold_colocated_application_group() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        let source = temp.path().join("applications/platform");
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::ApplicationGroup,
+                name: "platform".to_string(),
+                output: None,
+                source: Some(source.clone()),
+                colocate: true,
+            },
+            Some(temp.path()),
+        )
+        .unwrap();
+        assert!(source.join("_application-group.yaml").is_file());
+    }
+
+    #[test]
+    fn test_resource_name_rejects_path_traversal() {
+        assert!(validate_resource_name("../deploy").is_err());
+        assert!(validate_resource_name("Production").is_err());
+        assert!(validate_resource_name("production").is_ok());
     }
 }

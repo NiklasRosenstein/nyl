@@ -6,19 +6,15 @@ nyl provides several commands for managing Kubernetes manifests:
 
 ## Available Commands
 
-### Phase 1 (Current)
-
 - [`new`](/nyl/commands/new/) - Create new projects and components
 - [`validate`](/nyl/commands/validate/) - Validate project configuration
-
-### Phase 2+ (Coming Soon)
-
 - [`rendering-pipeline`](/nyl/commands/rendering-pipeline/) - Shared rendering pipeline used by render/diff/apply
 - [`render`](/nyl/commands/render/) - Render Kubernetes manifests
 - [`diff`](/nyl/commands/diff/) - Show diff between rendered manifests and cluster state
 - [`apply`](/nyl/commands/apply/) - Apply rendered manifests to the cluster
 - [`release`](/nyl/commands/release/) - Inspect release history and roll back to a previous revision
 - [`cluster-info`](/nyl/commands/cluster-info/) - Print Kubernetes version and API versions for offline rendering
+- [`Rendered GitOps commands`](/nyl/commands/gitops/) - Render, diff, lock, and publish target trees
 
 ## Global Options
 

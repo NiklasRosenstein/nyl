@@ -75,6 +75,11 @@
           },
           "type": "array"
         },
+        "gitops_scaffold_path": {
+          "default": "config",
+          "description": "Directory where GitOps configuration resources are scaffolded.",
+          "type": "string"
+        },
         "helm_chart_search_paths": {
           "default": [
             "."
@@ -141,6 +146,7 @@
         "components_search_paths": [
           "components"
         ],
+        "gitops_scaffold_path": "config",
         "helm_chart_search_paths": [
           "."
         ],

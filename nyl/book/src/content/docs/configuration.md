@@ -20,6 +20,7 @@ nyl searches for `nyl.toml` starting in the current directory and walking up par
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
+gitops_scaffold_path = "config"
 
 [project.kubernetes]
 kube_version = "1.30.0"
@@ -55,6 +56,14 @@ api_versions = ["v1", "apps/v1", "networking.k8s.io/v1"]
 - Type: array of path strings
 - Default: `["."]`
 - Meaning: Search paths used for Helm chart name resolution.
+
+### `project.gitops_scaffold_path`
+
+- Type: path string
+- Default: `"config"`
+- Meaning: Destination root used by `nyl new resource` and `nyl new gitops`.
+  GitOps resource discovery remains project-wide and is not restricted to this
+  directory.
 
 ### `project.aliases`
 

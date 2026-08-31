@@ -8,6 +8,7 @@ Validate project configuration and search paths.
 
 ```bash
 nyl validate [path] [--strict]
+nyl validate gitops [path]
 ```
 
 ## Checks
@@ -24,3 +25,7 @@ nyl validate
 nyl validate --strict
 nyl validate /path/to/project
 ```
+
+`nyl validate gitops` discovers all Git-visible control resources, applies
+strict per-kind validation, resolves repository and project references, and
+rejects overlapping target prefixes on the same repository revision.

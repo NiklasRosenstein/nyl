@@ -6,7 +6,7 @@
 /// - JSON schema generation for `nyl.toml`
 pub mod schema;
 
-use crate::util::fs::{find_config_file, resolve_paths};
+use crate::util::fs::{find_config_file, resolve_path, resolve_paths};
 use crate::{NylError, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,10 @@ fn default_components_search_paths() -> Vec<PathBuf> {
 
 fn default_helm_chart_search_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(".")]
+}
+
+fn default_gitops_scaffold_path() -> PathBuf {
+    PathBuf::from("config")
 }
 
 fn default_aliases() -> BTreeMap<String, String> {
@@ -84,6 +88,9 @@ pub struct ProjectSettings {
     /// Search paths for Helm chart names.
     pub helm_chart_search_paths: Vec<PathBuf>,
 
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub gitops_scaffold_path: PathBuf,
+
     /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
     /// Values are component kind targets (local component path or remote shortcut URL).
     pub aliases: BTreeMap<String, String>,
@@ -100,6 +107,7 @@ impl Default for ProjectSettings {
         Self {
             components_search_paths: default_components_search_paths(),
             helm_chart_search_paths: default_helm_chart_search_paths(),
+            gitops_scaffold_path: default_gitops_scaffold_path(),
             aliases: default_aliases(),
             strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
             kubernetes: KubernetesTarget::default(),
@@ -272,6 +280,7 @@ impl ProjectConfig {
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
         project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
+        project.project.gitops_scaffold_path = resolve_path(&project.project.gitops_scaffold_path, base_dir);
 
         Ok(Self {
             file: Some(path.to_path_buf()),
@@ -287,6 +296,11 @@ impl ProjectConfig {
     /// Helm chart search paths from configuration.
     pub fn get_helm_chart_search_paths(&self) -> &[PathBuf] {
         &self.config.project.helm_chart_search_paths
+    }
+
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub fn get_gitops_scaffold_path(&self) -> &Path {
+        &self.config.project.gitops_scaffold_path
     }
 
     /// Return alias target for a fully qualified key (`<apiVersion>/<kind>`).
@@ -406,6 +420,7 @@ mod tests {
         let settings = ProjectSettings::default();
         assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
         assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
+        assert_eq!(settings.gitops_scaffold_path, PathBuf::from("config"));
         assert!(settings.aliases.is_empty());
         assert_eq!(
             settings.strip_empty_metadata_labels,
@@ -432,6 +447,7 @@ mod tests {
 [project]
 components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
+gitops_scaffold_path = "gitops-config"
 strip_empty_metadata_labels = "argocd"
 [project.kubernetes]
 kube_version = "1.30.0"
@@ -465,6 +481,7 @@ api_versions = ["v1", "apps/v1"]
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[1].is_absolute());
+        assert_eq!(config.get_gitops_scaffold_path(), temp.path().join("gitops-config"));
     }
 
     #[test]
@@ -475,6 +492,7 @@ api_versions = ["v1", "apps/v1"]
         assert!(config.file.is_none());
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
+        assert_eq!(config.get_gitops_scaffold_path(), Path::new("config"));
         assert!(config.config.project.aliases.is_empty());
         assert_eq!(
             config.get_strip_empty_metadata_labels_mode(),

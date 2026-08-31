@@ -27,6 +27,7 @@ pub mod constants;
 pub mod error;
 pub mod generator;
 pub mod git;
+pub mod gitops;
 pub mod helm;
 pub mod kubernetes;
 pub mod postprocess;

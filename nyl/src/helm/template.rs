@@ -3,6 +3,8 @@ use super::ResolvedChart;
 use crate::{NylError, Result};
 use std::process::Command;
 
+pub(crate) const HELM_SOURCE_ANNOTATION: &str = "gitops.nyl.niklasrosenstein.github.com/helm-source";
+
 /// Parameters for building a Helm template command
 pub struct HelmTemplateParams<'a> {
     /// Resolved chart reference
@@ -119,6 +121,29 @@ impl HelmTemplateExecutor {
         release_namespace: Option<&str>,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
+        self.template_impl(resolved, release_name, release_namespace, values, false)
+    }
+
+    /// Execute Helm while carrying its `# Source:` markers through the JSON
+    /// rendering pipeline as a reserved, temporary annotation.
+    pub(crate) fn template_with_source_comments(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.template_impl(resolved, release_name, release_namespace, values, true)
+    }
+
+    fn template_impl(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+        preserve_source_comments: bool,
+    ) -> Result<Vec<serde_json::Value>> {
         tracing::debug!(
             "Rendering Helm chart: {} (release: {})",
             resolved.path.display(),
@@ -157,7 +182,11 @@ impl HelmTemplateExecutor {
 
         // Parse YAML output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_yaml_documents(&stdout)
+        if preserve_source_comments {
+            parse_yaml_documents_with_source_comments(&stdout)
+        } else {
+            parse_yaml_documents(&stdout)
+        }
     }
 
     /// Check if helm is installed and available
@@ -223,6 +252,66 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
 /// Handles Helm's output with Kubernetes-compatible scalar semantics.
 fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
     crate::yaml::parse_yaml_documents_k8s_compatible(yaml_str).map_err(Into::into)
+}
+
+fn parse_yaml_documents_with_source_comments(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
+    let mut manifests = Vec::new();
+    for document in split_helm_documents(yaml_str) {
+        let source = document
+            .lines()
+            .find_map(|line| line.trim_end().strip_prefix("# Source: "));
+        let mut parsed = parse_yaml_documents(document)?;
+        if let Some(source) = source {
+            for manifest in &mut parsed {
+                let metadata = manifest
+                    .as_object_mut()
+                    .and_then(|object| {
+                        object
+                            .entry("metadata")
+                            .or_insert_with(|| serde_json::json!({}))
+                            .as_object_mut()
+                    })
+                    .ok_or_else(|| NylError::config("Helm manifest metadata must be an object"))?;
+                let annotations = metadata
+                    .entry("annotations")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| NylError::config("Helm manifest metadata.annotations must be an object"))?;
+                if annotations
+                    .insert(
+                        HELM_SOURCE_ANNOTATION.to_string(),
+                        serde_json::Value::String(source.to_string()),
+                    )
+                    .is_some()
+                {
+                    return Err(NylError::config(format!(
+                        "Helm manifest uses reserved annotation {HELM_SOURCE_ANNOTATION}"
+                    )));
+                }
+            }
+        }
+        manifests.extend(parsed);
+    }
+    Ok(manifests)
+}
+
+fn split_helm_documents(input: &str) -> Vec<&str> {
+    let mut documents = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    for line in input.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']).trim_end() == "---" {
+            if offset > start {
+                documents.push(&input[start..offset]);
+            }
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    if start < input.len() {
+        documents.push(&input[start..]);
+    }
+    documents
 }
 
 #[cfg(test)]
@@ -475,6 +564,32 @@ metadata:
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");
         assert_eq!(docs[1]["kind"], "Service");
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_carries_helm_source_when_requested() {
+        let manifests = parse_yaml_documents_with_source_comments(
+            "---\n# Source: chart/crds/widgets.yaml\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.example.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("chart/crds/widgets.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_parser_does_not_treat_indented_content_as_helm_markers() {
+        let manifests = parse_yaml_documents_with_source_comments(
+            "# Source: chart/templates/config.yaml\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: script\ndata:\n  script: |\n    ---\n    # Source: not-a-template\n",
+        )
+        .unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0]["data"]["script"], "---\n# Source: not-a-template\n");
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("chart/templates/config.yaml".to_string()))
+        );
     }
 
     #[test]

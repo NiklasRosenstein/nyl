@@ -77,6 +77,7 @@ export default defineConfig({
               items: [
                 "commands",
                 "commands/rendering-pipeline",
+                "commands/gitops",
                 "commands/new",
                 "commands/validate",
                 "commands/render",

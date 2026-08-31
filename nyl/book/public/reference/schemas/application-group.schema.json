@@ -1,0 +1,396 @@
+{
+  "$defs": {
+    "ApplicationDeletionPolicy": {
+      "enum": [
+        "Foreground",
+        "Background",
+        "Orphan"
+      ],
+      "type": "string"
+    },
+    "ApplicationGroupSource": {
+      "additionalProperties": false,
+      "description": "A local source when no repository is given, otherwise an immutable remote source.",
+      "properties": {
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "default": [
+            "*.yaml",
+            "*.yml"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": true,
+          "type": "boolean"
+        },
+        "rendererConfig": {
+          "$ref": "#/$defs/RendererConfig",
+          "default": {
+            "mode": "Central"
+          }
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InlineGitRepository"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repositoryRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "ApplicationGroupSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "$ref": "#/$defs/ApplicationDeletionPolicy",
+          "default": "Foreground"
+        },
+        "applicationNameTemplate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "applicationNamespace": {
+          "type": "string"
+        },
+        "destination": {
+          "$ref": "#/$defs/KubernetesDestination"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "namespace": {
+          "$ref": "#/$defs/ManagedNamespacePolicy",
+          "default": {
+            "create": true,
+            "deletePolicy": "Confirm",
+            "prunePolicy": "Confirm"
+          }
+        },
+        "outputPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectRef": {
+          "type": "string"
+        },
+        "releaseCustomization": {
+          "$ref": "#/$defs/GitOpsReleaseCustomization",
+          "default": {}
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationGroupSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "syncPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetSelector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "projectRef",
+        "applicationNamespace",
+        "destination"
+      ],
+      "type": "object"
+    },
+    "GitOpsAutomatedSyncPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "prune": {
+          "default": false,
+          "type": "boolean"
+        },
+        "selfHeal": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsReleaseCustomization": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deniedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "GitOpsSyncPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "automated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsAutomatedSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "syncOptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "InlineGitRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "publishURL": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repoURL": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    },
+    "KubernetesDestination": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ManagedNamespacePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "default": true,
+          "type": "boolean"
+        },
+        "deletePolicy": {
+          "$ref": "#/$defs/ManagedResourceDeletionPolicy",
+          "default": "Confirm"
+        },
+        "prunePolicy": {
+          "$ref": "#/$defs/ManagedResourceDeletionPolicy",
+          "default": "Confirm"
+        }
+      },
+      "type": "object"
+    },
+    "ManagedResourceDeletionPolicy": {
+      "enum": [
+        "Automatic",
+        "Confirm",
+        "Retain"
+      ],
+      "type": "string"
+    },
+    "RendererConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/RendererConfigMode",
+          "default": "Central"
+        },
+        "projectPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RendererConfigMode": {
+      "enum": [
+        "Central",
+        "Remote"
+      ],
+      "type": "string"
+    },
+    "TargetSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Policy and source declaration for a set of NylRelease resources.",
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl.niklasrosenstein.github.com/v1",
+      "type": "string"
+    },
+    "kind": {
+      "const": "ApplicationGroup",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/ApplicationGroupSpec"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ApplicationGroup",
+  "type": "object"
+}

@@ -40,8 +40,23 @@ enum Commands {
     /// Render Kubernetes manifests to stdout
     Render(commands::render::RenderArgs),
 
+    /// Render a GitOps target into a deterministic manifest tree
+    RenderTree(commands::render_tree::RenderTreeArgs),
+
+    /// Render and compare-and-swap publish a GitOps target revision
+    PublishTree(commands::publish_tree::PublishTreeArgs),
+
+    /// Inspect rendered GitOps targets
+    Target(commands::target::TargetArgs),
+
+    /// Manage remote GitOps source locks
+    Source(commands::source::SourceArgs),
+
     /// Show diff between rendered manifests and cluster state
     Diff(commands::diff::DiffArgs),
+
+    /// Diff a rendered GitOps target against published or source-derived state
+    DiffTree(commands::diff_tree::DiffTreeArgs),
 
     /// Apply rendered manifests to the cluster
     Apply(commands::apply::ApplyArgs),
@@ -75,11 +90,16 @@ impl Cli {
     pub async fn execute(self) -> Result<()> {
         match self.command {
             Commands::Render(args) => commands::render::execute(args).await,
+            Commands::RenderTree(args) => commands::render_tree::execute(args).await,
+            Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
+            Commands::Target(args) => commands::target::execute(args),
+            Commands::Source(args) => commands::source::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
+            Commands::DiffTree(args) => commands::diff_tree::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::Generate(args) => commands::generate::execute(args),
             Commands::New(args) => commands::new::execute(args),
-            Commands::Validate(args) => commands::validate::execute(args),
+            Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::ClusterInfo(args) => commands::cluster_info::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
         }

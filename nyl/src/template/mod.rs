@@ -49,6 +49,11 @@ pub struct TemplateContext {
     pub values: serde_json::Value,
     pub secrets: serde_json::Value,
     pub profile: String,
+    /// Environment values explicitly admitted to templates.
+    pub env: serde_json::Map<String, serde_json::Value>,
+    /// Effective GitOps target exposed as `target.*` during tree rendering.
+    /// Ordinary single-file rendering leaves this unset.
+    pub target: Option<serde_json::Value>,
 }
 
 impl TemplateContext {
@@ -67,19 +72,30 @@ impl TemplateContext {
             values,
             secrets: serde_json::Value::Object(secrets_map),
             profile: profile_name.to_string(),
+            env: Self::filter_env_vars(std::env::vars()),
+            target: None,
         })
+    }
+
+    /// Attach the effective GitOps target to this rendering context.
+    #[must_use]
+    pub fn with_target(mut self, target: serde_json::Value) -> Self {
+        self.target = Some(target);
+        self
     }
 
     /// Convert context to JSON value for template rendering
     pub fn to_json(&self) -> serde_json::Value {
-        let env = Self::filter_env_vars(std::env::vars());
-
-        serde_json::json!({
-            "values": self.values,
-            "secrets": self.secrets,
-            "profile": self.profile,
-            "env": env,
-        })
+        let mut context = serde_json::Map::from_iter([
+            ("values".to_string(), self.values.clone()),
+            ("secrets".to_string(), self.secrets.clone()),
+            ("profile".to_string(), self.profile.clone().into()),
+            ("env".to_string(), self.env.clone().into()),
+        ]);
+        if let Some(target) = &self.target {
+            context.insert("target".to_string(), target.clone());
+        }
+        context.into()
     }
 
     /// Filter environment variables to only include NYL_ prefixed ones.

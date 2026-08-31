@@ -1,0 +1,443 @@
+//! Ownership-indexed reconciliation of rendered files.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{NylError, Result};
+
+pub const RENDER_INDEX_VERSION: u32 = 1;
+pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
+const TRANSACTION_PATH: &str = "_nyl/transaction.json";
+const TRANSACTION_TEMP_PATH: &str = "_nyl/transaction.json.tmp";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RenderTransaction {
+    index: RenderIndex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RenderIndexDestination {
+    pub repository: String,
+    pub revision: String,
+    #[serde(rename = "pathPrefix")]
+    pub path_prefix: String,
+}
+
+/// Provenance and ownership record for one rendered target prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RenderIndex {
+    pub version: u32,
+    pub target: String,
+    pub destination: RenderIndexDestination,
+    pub profile: String,
+    #[serde(rename = "sourceCommit", skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    pub dirty: bool,
+    pub inputs: BTreeMap<String, String>,
+    pub files: BTreeMap<String, String>,
+}
+
+impl RenderIndex {
+    pub fn new(
+        target: String,
+        destination: RenderIndexDestination,
+        profile: String,
+        source_commit: Option<String>,
+        dirty: bool,
+        inputs: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            version: RENDER_INDEX_VERSION,
+            target,
+            destination,
+            profile,
+            source_commit,
+            dirty,
+            inputs,
+            files: BTreeMap::new(),
+        }
+    }
+
+    fn same_owner(&self, other: &Self) -> bool {
+        self.version == other.version && self.target == other.target && self.destination == other.destination
+    }
+}
+
+/// SHA-256 digest used for source provenance and owned output verification.
+pub fn sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Reconcile a complete desired target tree while preserving unowned files.
+///
+/// All bytes and collisions are validated in a sibling staging directory first.
+/// Each file is renamed atomically and the ownership index is installed last.
+pub fn reconcile_rendered_tree(
+    output_root: &Path,
+    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    mut next_index: RenderIndex,
+) -> Result<RenderIndex> {
+    validate_desired_paths(desired)?;
+    let index_relative = Path::new(DEFAULT_INDEX_PATH);
+    let index_path = output_root.join(index_relative);
+    let transaction_path = output_root.join(TRANSACTION_PATH);
+
+    reject_symlink_components(output_root, output_root)?;
+    reject_symlink_components(output_root, &index_path)?;
+    reject_symlink_components(output_root, &transaction_path)?;
+    let previous = load_index(&index_path)?;
+    let transaction = load_transaction(&transaction_path)?;
+
+    next_index.files = desired
+        .iter()
+        .map(|(path, bytes)| Ok((path_text(path)?.to_string(), sha256(bytes))))
+        .collect::<Result<_>>()?;
+    let resumes_transaction = transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.index == next_index);
+
+    if let Some(previous) = &previous {
+        if !previous.same_owner(&next_index) {
+            return Err(NylError::config(format!(
+                "Rendered ownership index {} belongs to a different target or destination",
+                index_path.display()
+            )));
+        }
+        verify_owned_files(output_root, previous, desired, resumes_transaction)?;
+    }
+
+    let previous_files = previous.as_ref().map(|index| &index.files).cloned().unwrap_or_default();
+    for relative in desired.keys() {
+        reject_symlink_components(output_root, &output_root.join(relative))?;
+        let relative_text = path_text(relative)?;
+        let destination = output_root.join(relative);
+        if destination.exists() && !previous_files.contains_key(relative_text) {
+            let expected = desired.get(relative).expect("iterated desired key exists");
+            let actual = fs::read(&destination)?;
+            if !resumes_transaction || actual.as_slice() != expected.as_slice() {
+                return Err(NylError::config(format!(
+                    "Refusing to overwrite unowned rendered path {}",
+                    destination.display()
+                )));
+            }
+        }
+    }
+
+    let parent = output_root.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staged = tempfile::Builder::new().prefix(".nyl-render-").tempdir_in(parent)?;
+    for (relative, bytes) in desired {
+        let path = staged.path().join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, bytes)?;
+    }
+    let staged_index = staged.path().join(index_relative);
+    if let Some(parent) = staged_index.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut index_bytes = serde_json::to_vec_pretty(&next_index)?;
+    index_bytes.push(b'\n');
+    fs::write(&staged_index, index_bytes)?;
+
+    fs::create_dir_all(output_root)?;
+    install_transaction(output_root, &next_index)?;
+    for relative in desired.keys() {
+        let source = staged.path().join(relative);
+        let destination = output_root.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(source, destination)?;
+    }
+    for stale in previous_files
+        .keys()
+        .filter(|path| !next_index.files.contains_key(*path))
+    {
+        let stale_path = output_root.join(stale);
+        reject_symlink_components(output_root, &stale_path)?;
+        if stale_path.exists() {
+            fs::remove_file(stale_path)?;
+        }
+    }
+    if let Some(parent) = index_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(staged_index, index_path)?;
+    match fs::remove_file(&transaction_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    Ok(next_index)
+}
+
+fn load_transaction(path: &Path) -> Result<Option<RenderTransaction>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&fs::read(path)?)
+        .map(Some)
+        .map_err(|error| NylError::config(format!("Invalid rendered transaction {}: {error}", path.display())))
+}
+
+fn install_transaction(output_root: &Path, index: &RenderIndex) -> Result<()> {
+    let path = output_root.join(TRANSACTION_PATH);
+    let temporary = output_root.join(TRANSACTION_TEMP_PATH);
+    reject_symlink_components(output_root, &path)?;
+    reject_symlink_components(output_root, &temporary)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(&RenderTransaction { index: index.clone() })?;
+    bytes.push(b'\n');
+    let mut file = fs::File::create(&temporary)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let index: RenderIndex = serde_json::from_slice(&fs::read(path)?)
+        .map_err(|error| NylError::config(format!("Invalid rendered ownership index {}: {error}", path.display())))?;
+    if index.version != RENDER_INDEX_VERSION {
+        return Err(NylError::config(format!(
+            "Unsupported rendered ownership index version {} in {}",
+            index.version,
+            path.display()
+        )));
+    }
+    Ok(Some(index))
+}
+
+fn verify_owned_files(
+    output_root: &Path,
+    index: &RenderIndex,
+    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    resumes_transaction: bool,
+) -> Result<()> {
+    for (relative, expected) in &index.files {
+        crate::resources::validate_relative_path("owned rendered path", relative, false, false)?;
+        let path = output_root.join(relative);
+        reject_symlink_components(output_root, &path)?;
+        let actual = match fs::read(&path) {
+            Ok(actual) => actual,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && !desired.contains_key(Path::new(relative)) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(NylError::config(format!(
+                    "Owned rendered file {} is missing or unreadable: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let actual_hash = sha256(&actual);
+        let desired_hash = desired.get(Path::new(relative)).map(|bytes| sha256(bytes));
+        if actual_hash != *expected && (!resumes_transaction || desired_hash.as_deref() != Some(&actual_hash)) {
+            return Err(NylError::config(format!(
+                "Owned rendered file {} was modified outside Nyl",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_components(output_root: &Path, path: &Path) -> Result<()> {
+    let relative = path.strip_prefix(output_root).map_err(|error| {
+        NylError::config(format!(
+            "Rendered output path {} is outside {}: {error}",
+            path.display(),
+            output_root.display()
+        ))
+    })?;
+    let mut current = output_root.to_path_buf();
+    for component in std::iter::once(std::path::Component::CurDir).chain(relative.components()) {
+        if component != std::path::Component::CurDir {
+            current.push(component.as_os_str());
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(NylError::config(format!(
+                    "Refusing to traverse symbolic link in rendered output path {}",
+                    current.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_desired_paths(desired: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+    for path in desired.keys() {
+        let text = path_text(path)?;
+        crate::resources::validate_relative_path("rendered output path", text, false, false)?;
+        if matches!(text, DEFAULT_INDEX_PATH | TRANSACTION_PATH | TRANSACTION_TEMP_PATH) {
+            return Err(NylError::config(format!(
+                "Rendered output path {text} is reserved for ownership reconciliation"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn path_text(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| NylError::config(format!("Rendered path is not valid UTF-8: {}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index() -> RenderIndex {
+        RenderIndex::new(
+            "production".to_string(),
+            RenderIndexDestination {
+                repository: "deploy".to_string(),
+                revision: "deploy/production".to_string(),
+                path_prefix: "production".to_string(),
+            },
+            "production".to_string(),
+            None,
+            true,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn reconciles_owned_files_and_preserves_unowned_files() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([
+            (PathBuf::from("apps/a.yaml"), b"a\n".to_vec()),
+            (PathBuf::from("apps/stale.yaml"), b"stale\n".to_vec()),
+        ]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+        fs::write(root.join("unowned.txt"), "keep\n").unwrap();
+
+        let second = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"b\n".to_vec())]);
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+
+        assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"b\n");
+        assert!(!root.join("apps/stale.yaml").exists());
+        assert_eq!(fs::read_to_string(root.join("unowned.txt")).unwrap(), "keep\n");
+    }
+
+    #[test]
+    fn rejects_modified_owned_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        reconcile_rendered_tree(&root, &desired, index()).unwrap();
+        fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
+        let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
+        assert!(error.to_string().contains("modified outside Nyl"));
+    }
+
+    #[test]
+    fn rejects_owned_file_preemptively_changed_to_next_output_without_transaction() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"old\n".to_vec())]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+        fs::write(root.join("apps/a.yaml"), "new\n").unwrap();
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"new\n".to_vec())]);
+
+        let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
+        assert!(error.to_string().contains("modified outside Nyl"));
+    }
+
+    #[test]
+    fn rejects_unowned_collision() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        fs::create_dir_all(root.join("apps")).unwrap();
+        fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
+        assert!(error.to_string().contains("unowned"));
+    }
+
+    #[test]
+    fn resumes_an_interrupted_owned_file_installation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([
+            (PathBuf::from("apps/a.yaml"), b"old\n".to_vec()),
+            (PathBuf::from("apps/stale.yaml"), b"stale\n".to_vec()),
+        ]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+
+        let desired = BTreeMap::from([
+            (PathBuf::from("apps/a.yaml"), b"new\n".to_vec()),
+            (PathBuf::from("apps/new.yaml"), b"added\n".to_vec()),
+        ]);
+        let mut intended = index();
+        intended.files = desired
+            .iter()
+            .map(|(path, bytes)| (path.to_string_lossy().into_owned(), sha256(bytes)))
+            .collect();
+        install_transaction(&root, &intended).unwrap();
+        fs::write(root.join("apps/a.yaml"), "new\n").unwrap();
+        fs::write(root.join("apps/new.yaml"), "added\n").unwrap();
+        fs::remove_file(root.join("apps/stale.yaml")).unwrap();
+
+        reconcile_rendered_tree(&root, &desired, index()).unwrap();
+        assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"new\n");
+        assert_eq!(fs::read(root.join("apps/new.yaml")).unwrap(), b"added\n");
+    }
+
+    #[test]
+    fn rejects_identical_unowned_file_without_transaction() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        fs::create_dir_all(root.join("apps")).unwrap();
+        fs::write(root.join("apps/a.yaml"), "a\n").unwrap();
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+
+        let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
+        assert!(error.to_string().contains("unowned"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestors_in_the_output_tree() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("apps")).unwrap();
+
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(!outside.join("a.yaml").exists());
+    }
+}

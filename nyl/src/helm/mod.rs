@@ -14,6 +14,7 @@ mod oci;
 mod template;
 pub use oci::OciChartPuller;
 pub use template::HelmTemplateExecutor;
+pub(crate) use template::HELM_SOURCE_ANNOTATION;
 
 /// Repository protocol type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

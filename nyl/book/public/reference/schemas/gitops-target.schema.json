@@ -1,0 +1,142 @@
+{
+  "$defs": {
+    "GitDestination": {
+      "additionalProperties": false,
+      "description": "Git coordinates used as a rendered output and Argo CD source.",
+      "properties": {
+        "pathPrefix": {
+          "type": "string"
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InlineGitRepository"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repositoryRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "GitOpsTargetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/GitDestination"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "values": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "profile",
+        "destination"
+      ],
+      "type": "object"
+    },
+    "InlineGitRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "publishURL": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repoURL": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A named, independently renderable and publishable deployment slice.",
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl.niklasrosenstein.github.com/v1",
+      "type": "string"
+    },
+    "kind": {
+      "const": "GitOpsTarget",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/GitOpsTargetSpec"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "GitOpsTarget",
+  "type": "object"
+}

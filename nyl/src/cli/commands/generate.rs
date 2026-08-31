@@ -2,7 +2,12 @@ use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::{resources::extract_nyl_release, NylError, Result};
+use crate::{
+    resources::{
+        extract_nyl_release, generate_gitops_aggregate_schema, generate_gitops_resource_schema, GitOpsResourceKind,
+    },
+    NylError, Result,
+};
 
 /// Generate configurations (ArgoCD Applications, etc.)
 #[derive(Args, Debug)]
@@ -51,6 +56,21 @@ pub enum GenerateSubcommand {
 pub enum SchemaSubcommand {
     /// Generate JSON schema for nyl.toml project configuration
     Config,
+
+    /// Generate JSON schema for one GitOps resource kind
+    Resource {
+        #[arg(value_enum)]
+        kind: GitOpsResourceKind,
+    },
+
+    /// Generate the aggregate schema for all GitOps resource kinds
+    Gitops,
+
+    /// Write all project and GitOps schemas to a directory
+    All {
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
 }
 
 pub fn execute(args: GenerateArgs) -> Result<()> {
@@ -70,16 +90,57 @@ pub fn execute(args: GenerateArgs) -> Result<()> {
             &project,
             output.as_deref(),
         ),
-        GenerateSubcommand::Schema {
-            command: SchemaSubcommand::Config,
-        } => {
-            let schema = crate::config::schema::generate_project_config_schema();
-            let output = serde_json::to_string_pretty(&schema)
-                .map_err(|e| NylError::Config(format!("Failed to serialize schema JSON: {}", e)))?;
-            println!("{}", output);
-            Ok(())
-        }
+        GenerateSubcommand::Schema { command } => execute_schema(command),
     }
+}
+
+fn execute_schema(command: SchemaSubcommand) -> Result<()> {
+    match command {
+        SchemaSubcommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
+        SchemaSubcommand::Resource { kind } => print_schema(&generate_gitops_resource_schema(kind)),
+        SchemaSubcommand::Gitops => print_schema(&generate_gitops_aggregate_schema()),
+        SchemaSubcommand::All { output_dir } => write_all_schemas(&output_dir),
+    }
+}
+
+fn print_schema(schema: &serde_json::Value) -> Result<()> {
+    let output = serialize_schema(schema)?;
+    print!("{output}");
+    Ok(())
+}
+
+fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
+    serde_json::to_string_pretty(schema)
+        .map(|mut output| {
+            output.push('\n');
+            output
+        })
+        .map_err(|error| NylError::Config(format!("Failed to serialize schema JSON: {error}")))
+}
+
+fn write_all_schemas(output_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(output_dir)?;
+    write_schema(
+        &output_dir.join("nyl.schema.json"),
+        &crate::config::schema::generate_project_config_schema(),
+    )?;
+    for kind in GitOpsResourceKind::all() {
+        write_schema(
+            &output_dir.join(kind.schema_filename()),
+            &generate_gitops_resource_schema(kind),
+        )?;
+    }
+    write_schema(
+        &output_dir.join("gitops-resource.schema.json"),
+        &generate_gitops_aggregate_schema(),
+    )?;
+    Ok(())
+}
+
+fn write_schema(path: &Path, schema: &serde_json::Value) -> Result<()> {
+    std::fs::write(path, serialize_schema(schema)?)?;
+    println!("Generated {}", path.display());
+    Ok(())
 }
 
 fn generate_argocd_applications(

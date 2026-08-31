@@ -2,142 +2,297 @@
 title: 'Rendered Manifest GitOps'
 ---
 
-The rendered manifest pattern keeps Nyl in CI and keeps the runtime GitOps controller simple. Nyl renders your source manifests into ordinary Kubernetes YAML, and ArgoCD, Flux, or another reconciler syncs that rendered output.
+Rendered manifest GitOps is the recommended Nyl deployment model. Nyl compiles
+trusted source configuration into ordinary Kubernetes YAML in a deployment Git
+revision. Argo CD reads plain recursive directories and does not need the Nyl CMP.
 
-## When to Use It
+## Responsibility and security boundaries
 
-Use this workflow when you want:
+Nyl is a compiler and publisher. It validates the authoring contract, renders a
+deterministic tree, and records file ownership and provenance. It is not the
+ultimate admission boundary.
 
-- A plain-YAML contract between generation and deployment.
-- ArgoCD or Flux to run without a custom plugin sidecar.
-- Rendered output that can be reviewed, diffed, signed, or promoted between environments.
-- A low-friction path for teams that already sync directories of Kubernetes manifests.
+- The Git forge controls who may change source resources, target policy, and
+  protected deployment revisions.
+- Argo CD controls which repositories, projects, destinations, and sync options
+  are accepted at reconciliation time.
+- Kubernetes admission controls the resources that may enter a cluster.
 
-Use the [ArgoCD CMP integration](/nyl/argocd/overview/) instead when ArgoCD must render directly from Nyl inputs, discover ArgoCD repository secrets, or use `ApplicationGenerator` at sync time.
+Keep `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`, CI definitions,
+and protected deployment revisions under platform-owner review. Use
+`releaseCustomization.allowedPaths` and `deniedPaths` to constrain per-release
+Argo CD Application overrides. Argo CD AppProject policy remains effective even
+when a source repository is compromised.
 
-## Repository Shape
+## Project conventions
 
-Keep source and rendered output separate:
+Discovery is project-wide and follows Git visibility. Tracked files and
+non-ignored untracked YAML files are eligible, so the directories below are
+conventions rather than mandatory lookup paths.
 
 ```text
-platform/
-├── nyl.toml
-├── apps/
-│   └── web.yaml
-├── components/
-└── rendered/
-    ├── dev/
-    │   └── web.yaml
-    └── prod/
-        └── web.yaml
+nyl.toml
+config/
+  repositories/
+    deploy.yaml
+    workloads.yaml
+  targets/
+    production.yaml
+  projects/
+    workloads.yaml
+  application-groups/
+    workloads.yaml
+applications/
+  app1.yaml
+  workloads/
+    app2.yaml
+components/
 ```
 
-The `apps/` directory contains the Nyl input. The `rendered/` directory contains generated Kubernetes manifests that a GitOps controller can sync with its normal directory support.
+Set `project.gitops_scaffold_path` in `nyl.toml` when generated control resources
+should live somewhere other than `config/`. This setting only changes scaffold
+destinations; it does not restrict discovery.
 
-## Render in CI
-
-`nyl render` writes YAML to stdout, so the CI job should redirect output to the rendered manifest location:
+Create the layout or individual resources with:
 
 ```bash
-nyl validate --strict
-mkdir -p rendered/prod
-nyl render -p prod apps/web.yaml > rendered/prod/web.yaml
+nyl new project platform
+nyl new gitops repository deploy
+nyl new gitops target production
+nyl new gitops project workloads
+nyl new gitops application-group workloads
 ```
 
-For CI jobs that should not talk to a cluster, use offline rendering:
-
-```toml
-[project.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
-
-[profile.prod.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
-```
-
-With that metadata committed, CI can render without talking to the cluster:
+An ApplicationGroup can also be colocated with its source:
 
 ```bash
-nyl render --profile prod --offline apps/web.yaml > rendered/prod/web.yaml
+nyl new gitops application-group workloads \
+  --source applications/workloads \
+  --colocate
 ```
 
-You can still pass the values on the CLI when they are not committed:
+The resulting `applications/workloads/_application-group.yaml` derives its
+source directory from its location. A centrally stored group with no explicit
+source derives `applications/<group-name>`. `spec.source.path` selects any other
+project-relative location.
 
-```bash
-nyl render \
-  --profile prod \
-  --offline \
-  --kube-version 1.30.0 \
-  --kube-api-versions v1,apps/v1,batch/v1,networking.k8s.io/v1 \
-  apps/web.yaml > rendered/prod/web.yaml
-```
+## Control resources
 
-You can capture the Kubernetes version and API versions from a representative cluster with Nyl:
-
-```bash
-nyl cluster-info --output csv
-```
-
-The first line is `kube_version`; the second line is the comma-separated `api_versions` value. You can also capture API versions directly with `kubectl`:
-
-```bash
-kubectl api-versions | paste -sd, -
-```
-
-That produces the comma-separated value expected by `--kube-api-versions`. In CI, either run this against the target cluster before rendering or store a checked-in value for each supported cluster version:
-
-```bash
-KUBE_API_VERSIONS="$(kubectl api-versions | paste -sd, -)"
-
-nyl render \
-  --profile prod \
-  --offline \
-  --kube-version 1.30.0 \
-  --kube-api-versions "$KUBE_API_VERSIONS" \
-  apps/web.yaml > rendered/prod/web.yaml
-```
-
-Prefer sourcing this list from Kubernetes discovery when possible, because it includes CRDs and aggregated APIs installed in the cluster. A dedicated Nyl utility command would mostly wrap this discovery step; until Nyl has one, `kubectl api-versions` is the most direct source of truth.
-
-Nyl renders one input file per command. For multiple applications, use an explicit script, Makefile target, or CI matrix so each input has a predictable output path.
-
-## Sync Rendered Output
-
-Point ArgoCD, Flux, or another reconciler at the rendered directory. With ArgoCD this is a standard directory Application, not the Nyl CMP:
+`GitRepository` gives a stable local name to credential-free Git coordinates.
+`publishURL` can select a distinct write URL while Argo CD continues to use
+`repoURL`.
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: GitRepository
 metadata:
-  name: web-prod
-  namespace: argocd
+  name: deploy
 spec:
-  project: default
-  source:
-    repoURL: https://github.com/example/platform.git
-    targetRevision: main
-    path: rendered/prod
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: web
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
+  repoURL: https://git.example.com/platform/deploy.git
+  publishURL: git@git.example.com:platform/deploy.git
 ```
 
-If you want ArgoCD to render Nyl source files directly during sync instead, use the [Nyl CMP integration](/nyl/argocd/overview/). The CMP path is useful when you need controller-side rendering, ArgoCD repository credential reuse, or `ApplicationGenerator` to run inside ArgoCD.
+`GitOpsTarget` is one independently rendered and published deployment slice. A
+target selects a Nyl profile, adds target values and labels, and owns one
+repository, revision, and path prefix.
 
-`ApplicationGenerator` can also be run by `nyl render` outside of ArgoCD, so it is possible to generate ArgoCD `Application` manifests in CI and commit the result. Today those generated Applications are designed for the Nyl CMP workflow. To use `ApplicationGenerator` cleanly with rendered manifest GitOps, Nyl would need an option to generate standard directory Applications that point at rendered output instead of CMP-backed Nyl source files.
+```yaml
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: GitOpsTarget
+metadata:
+  name: production
+  labels:
+    environment: production
+spec:
+  profile: production
+  values:
+    region: eu-central-1
+  destination:
+    repositoryRef:
+      name: deploy
+    revision: deploy/production
+    pathPrefix: production
+  projects: [workloads]
+```
 
-## Review and Promotion
+The model supports one target, several targets with disjoint prefixes on one
+revision, a revision per target, and repositories that differ per target.
+Prefixes may overlap only when repository or revision differs.
 
-The rendered output can be handled like any other generated artifact:
+`AppProjectDefinition` assigns a stable local project identity. A `Rendered`
+project is written into the generated catalog; an `External` project is
+referenced by generated Applications but is not published by Nyl.
 
-- Commit rendered files back to the same repository.
-- Publish rendered files to a deployment repository.
-- Upload rendered files as CI artifacts for a separate promotion job.
-- Run policy checks, signing, or drift checks against the rendered YAML.
+```yaml
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: AppProjectDefinition
+metadata:
+  name: workloads
+spec:
+  management: Rendered
+  manifest:
+    apiVersion: argoproj.io/v1alpha1
+    kind: AppProject
+    metadata:
+      name: workloads
+      namespace: argocd
+    spec:
+      sourceRepos:
+        - https://git.example.com/platform/deploy.git
+      destinations:
+        - server: https://kubernetes.default.svc
+          namespace: '*'
+```
 
-The important boundary is that the cluster reconciler consumes rendered Kubernetes manifests. Nyl stays in the build path where failures are easier to debug and roll back.
+`ApplicationGroup` selects targets and source releases, assigns an Argo CD
+project, and defines the platform-owned Application and Namespace policy.
+
+```yaml
+apiVersion: gitops.nyl.niklasrosenstein.github.com/v1
+kind: ApplicationGroup
+metadata:
+  name: workloads
+spec:
+  targetSelector:
+    matchLabels:
+      environment: production
+  projectRef: workloads
+  applicationNamespace: argocd
+  source:
+    path: applications/workloads
+  destination:
+    server: https://kubernetes.default.svc
+  namespace:
+    create: true
+    prunePolicy: Confirm
+    deletePolicy: Confirm
+  applicationDeletionPolicy: Foreground
+  releaseCustomization:
+    allowedPaths:
+      - metadata.annotations.**
+    deniedPaths:
+      - spec.project
+      - spec.source.**
+      - spec.destination.**
+```
+
+Application deletion uses Argo CD's foreground resources finalizer by default,
+so deleting a generated Application cascades to its resources. `Background`
+uses the background finalizer and `Orphan` omits the resources finalizer.
+
+Missing destination Namespaces are created by default. The generated Namespace
+requires explicit Argo CD confirmation for prune and delete. `Automatic` omits
+the corresponding sync option; `Retain` writes `Prune=false` or `Delete=false`.
+Each Namespace is owned by one dedicated generated Application, even when many
+workload Applications share it. Conflicting project, destination, lifecycle, or
+metadata policy for the same Namespace is rejected.
+Workload releases may declare only their destination Namespace; any other
+Namespace is rejected so its lifecycle cannot overlap another Application.
+
+## Multiple clusters and conditional applications
+
+Templates receive the selected profile values plus target overlays. Target
+values win recursively, and the effective target is available as `target`:
+
+```yaml
+data:
+  environment: '{{ target.labels.environment }}'
+  region: '{{ values.region }}'
+```
+
+ApplicationGroup `targetSelector.matchLabels` can omit a whole group. Source
+files may use Nyl templating to omit a `NylRelease` or individual resources for
+a target. ApplicationGroup and AppProjectDefinition specs may also use
+target-dependent structural templating; their API version, kind, and local name
+remain static for discovery. Each target renders with its stored Kubernetes
+version and API versions, so CI does not need cluster access.
+Within one target, all ApplicationGroups identify clusters consistently with
+either `destination.server` or `destination.name`. Mixing both representations
+is rejected because Nyl cannot prove that two Argo CD cluster aliases are
+distinct.
+
+Remote ApplicationGroup sources have a human-readable mutable `revision` and an
+authoritative full `commit` lock. Central renderer mode uses the platform
+project configuration. Remote renderer mode loads the remote `nyl.toml`.
+Rendering any remote source exposes neither a secrets provider nor process
+environment variables. Remote checkouts and renderer paths may not contain
+symbolic links or escape the checkout root.
+
+```bash
+nyl source update workloads
+nyl source update --check
+```
+
+ApplicationGroups managed by `source update` keep their source coordinates and
+commit lock in a complete statically parseable resource. Target-dependent
+structural templating is intended for group selection and deployment policy.
+
+## Rendered layout
+
+For each release, Nyl writes:
+
+```text
+<target-prefix>/<group-output>/<release>/resources.yaml
+<target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml
+<target-prefix>/_nyl/namespaces/<identity>/resources.yaml
+<target-prefix>/_nyl/catalog/projects/<project-id>.yaml
+<target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml
+<target-prefix>/_nyl/index.json
+```
+
+CRDs are split one per file. Other resources are ordered deterministically.
+Managed Namespaces live outside workload directories and are referenced by one
+dedicated Application per cluster/namespace identity. Resources may not be
+owned by more than one workload Application.
+Generated Argo CD Applications use `source.directory.recurse: true`, so nested
+CRD directories are included. The versioned index records target identity,
+source provenance, owned files, and SHA-256 hashes. Nyl preserves unowned files
+and fails closed when an owned file was changed outside Nyl.
+
+## CI commands
+
+Validate and inspect targets:
+
+```bash
+nyl validate gitops
+nyl target list
+```
+
+Render into a checked-out destination repository:
+
+```bash
+nyl render-tree --target production --output-dir deploy-worktree
+```
+
+Diff a pull request against the currently published deployment revision:
+
+```bash
+nyl diff-tree --target production --against published > rendered.diff
+```
+
+Diff against the tree produced from the source default branch. This remains
+accurate when an earlier publication job has not updated the deployment branch:
+
+```bash
+nyl diff-tree \
+  --target production \
+  --against source \
+  --source-ref main > rendered.diff
+```
+
+Forge-specific CI can post `rendered.diff` in a merge request comment and update
+the same marker comment on later pipelines. Comment ownership and API calls stay
+in forge-specific tooling; Nyl only produces the diff.
+
+Publish directly with a clean, committed source worktree:
+
+```bash
+nyl publish-tree --target production
+```
+
+Publication clones the destination branch, reconciles only indexed files,
+creates one commit, refreshes the remote branch, and performs a negotiated
+compare-and-swap push. Interrupted local reconciliation resumes when installed
+files match the intended generation, while unrelated modifications and symlink
+ancestors fail closed. Protected-branch rules and Git credentials remain forge
+configuration.
