@@ -274,7 +274,7 @@ fn format_tree_diff(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBu
         if old == new {
             continue;
         }
-        let path = path.to_string_lossy();
+        let path = path.to_string_lossy().replace('\\', "/");
         output.push_str(
             &TextDiff::from_lines(old, new)
                 .unified_diff()

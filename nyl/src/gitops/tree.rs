@@ -796,10 +796,7 @@ fn insert_yaml(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, value: &Va
 }
 
 fn insert_file(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
-    let text = path
-        .to_str()
-        .ok_or_else(|| NylError::config(format!("Rendered path is not valid UTF-8: {}", path.display())))?;
-    crate::resources::validate_relative_path("rendered path", text, false, false)?;
+    crate::resources::relative_path_to_posix("rendered path", &path)?;
     if files.insert(path.clone(), bytes).is_some() {
         return Err(NylError::config(format!(
             "More than one rendered resource owns {}",

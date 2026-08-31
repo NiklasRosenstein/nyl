@@ -101,7 +101,7 @@ pub fn reconcile_rendered_tree(
 
     next_index.files = desired
         .iter()
-        .map(|(path, bytes)| Ok((path_text(path)?.to_string(), sha256(bytes))))
+        .map(|(path, bytes)| Ok((path_text(path)?, sha256(bytes))))
         .collect::<Result<_>>()?;
     if let Some(previous) = &previous {
         if previous.same_owner(&next_index)
@@ -131,7 +131,7 @@ pub fn reconcile_rendered_tree(
         reject_symlink_components(output_root, &output_root.join(relative))?;
         let relative_text = path_text(relative)?;
         let destination = output_root.join(relative);
-        if destination.exists() && !previous_files.contains_key(relative_text) {
+        if destination.exists() && !previous_files.contains_key(&relative_text) {
             let expected = desired.get(relative).expect("iterated desired key exists");
             let actual = fs::read(&destination)?;
             if !resumes_transaction || actual.as_slice() != expected.as_slice() {
@@ -307,8 +307,10 @@ fn reject_symlink_components(output_root: &Path, path: &Path) -> Result<()> {
 fn validate_desired_paths(desired: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
     for path in desired.keys() {
         let text = path_text(path)?;
-        crate::resources::validate_relative_path("rendered output path", text, false, false)?;
-        if matches!(text, DEFAULT_INDEX_PATH | TRANSACTION_PATH | TRANSACTION_TEMP_PATH) {
+        if matches!(
+            text.as_str(),
+            DEFAULT_INDEX_PATH | TRANSACTION_PATH | TRANSACTION_TEMP_PATH
+        ) {
             return Err(NylError::config(format!(
                 "Rendered output path {text} is reserved for ownership reconciliation"
             )));
@@ -317,9 +319,8 @@ fn validate_desired_paths(desired: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
     Ok(())
 }
 
-fn path_text(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| NylError::config(format!("Rendered path is not valid UTF-8: {}", path.display())))
+fn path_text(path: &Path) -> Result<String> {
+    crate::resources::relative_path_to_posix("rendered output path", path)
 }
 
 #[cfg(test)]
@@ -430,7 +431,7 @@ mod tests {
         let mut intended = index();
         intended.files = desired
             .iter()
-            .map(|(path, bytes)| (path.to_string_lossy().into_owned(), sha256(bytes)))
+            .map(|(path, bytes)| (path_text(path).unwrap(), sha256(bytes)))
             .collect();
         install_transaction(&root, &intended).unwrap();
         fs::write(root.join("apps/a.yaml"), "new\n").unwrap();

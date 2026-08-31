@@ -866,6 +866,27 @@ pub fn validate_relative_path(field: &str, value: &str, allow_empty: bool, allow
     Ok(())
 }
 
+/// Convert a platform-native relative path to the slash-separated form stored
+/// in rendered GitOps metadata.
+pub fn relative_path_to_posix(field: &str, value: &Path) -> Result<String> {
+    let mut segments = Vec::new();
+    for component in value.components() {
+        let Component::Normal(segment) = component else {
+            return Err(NylError::config(format!(
+                "{field} must be a normalized relative path without traversal"
+            )));
+        };
+        segments.push(
+            segment
+                .to_str()
+                .ok_or_else(|| NylError::config(format!("{field} must be valid UTF-8")))?,
+        );
+    }
+    let value = segments.join("/");
+    validate_relative_path(field, &value, false, false)?;
+    Ok(value)
+}
+
 /// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
 pub fn validate_immutable_git_commit(field: &str, value: &str) -> Result<()> {
     validate_static_required(field, value)?;
@@ -1098,6 +1119,15 @@ mod tests {
             value["spec"]["source"]["path"] = json!(path);
             assert!(parse_gitops_resource(&value).is_err(), "accepted {path}");
         }
+    }
+
+    #[test]
+    fn serializes_platform_paths_with_posix_separators() {
+        let path = PathBuf::from("applications").join("cloud").join("deployment.yaml");
+        assert_eq!(
+            relative_path_to_posix("rendered path", &path).unwrap(),
+            "applications/cloud/deployment.yaml"
+        );
     }
 
     #[test]
