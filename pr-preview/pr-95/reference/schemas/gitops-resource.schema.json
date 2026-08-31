@@ -6,6 +6,9 @@
       "$ref": "git-repository.schema.json"
     },
     {
+      "$ref": "cluster.schema.json"
+    },
+    {
       "$ref": "gitops-target.schema.json"
     },
     {

@@ -101,8 +101,11 @@
         "applicationNamespace": {
           "type": "string"
         },
-        "destination": {
-          "$ref": "#/$defs/KubernetesDestination"
+        "destinationNamespace": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "enabled": {
           "default": true,
@@ -168,8 +171,7 @@
       },
       "required": [
         "projectRef",
-        "applicationNamespace",
-        "destination"
+        "applicationNamespace"
       ],
       "type": "object"
     },
@@ -266,30 +268,6 @@
       "required": [
         "repoURL"
       ],
-      "type": "object"
-    },
-    "KubernetesDestination": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "namespace": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "server": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
       "type": "object"
     },
     "LocalReference": {
