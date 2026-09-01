@@ -901,6 +901,109 @@ metadata:
 }
 
 #[test]
+fn kubernetes_bootstrap_namespaces_are_external_by_default() {
+    let fixture = fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  additionalNamespaces: [default]\n---",
+    ) + r"---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uses-default
+  namespace: default
+";
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    assert!(workload.contains("namespace: default"));
+    assert!(!workload.contains("kind: Namespace\nmetadata:\n  name: default"));
+}
+
+#[test]
+fn implicit_external_bootstrap_namespace_rejects_authored_namespace() {
+    let fixture = fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  additionalNamespaces: [default]\n---",
+    ) + r"---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+";
+    fs::write(release_path, release).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "renders Namespace \"default\", but its configured owner kind is External",
+        ));
+}
+
+#[test]
+fn explicit_owner_can_manage_a_bootstrap_namespace() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  sharedNamespaces:\n    default:\n      owner:\n        kind: Release\n        applicationGroup: workloads\n        release: api\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "  namespace: api\n---",
+        "  namespace: api\nspec:\n  additionalNamespaces: [default]\n---",
+    );
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    assert!(workload.contains("name: default"));
+    assert_eq!(workload.matches("kind: Namespace").count(), 2);
+}
+
+#[test]
 fn shared_namespace_requires_explicit_policy() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");

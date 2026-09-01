@@ -31,7 +31,7 @@ spec:
 | `metadata.name` | Yes | — | Release and generated Application name. |
 | `metadata.namespace` | Yes | — | Default destination namespace. |
 | `spec.include` | No | `[]` | Additional manifest paths or glob patterns relative to this file. |
-| `spec.additionalNamespaces` | No | `[]` | Extra namespaces managed by this Release and available to its rendered resources. |
+| `spec.additionalNamespaces` | No | `[]` | Extra namespaces available to rendered resources. Ownership follows ApplicationGroup namespace policy. |
 | `spec.stripEmptyMetadataLabels` | No | Project setting | Controls empty `metadata.labels` removal. |
 | `spec.argocd.applicationOverride` | No | — | Partial generated Application override, subject to the group or generator customization policy. |
 
@@ -95,15 +95,19 @@ For rendered GitOps, Nyl validates every explicit resource
 set is the effective ApplicationGroup destination namespace plus
 `spec.additionalNamespaces`.
 
-An approved additional Namespace remains part of the workload Application.
-When `ApplicationGroup.spec.namespace.create` is enabled, Nyl synthesizes any
-listed Namespace that the Release does not render itself, using the same
-namespace lifecycle policy as the effective destination Namespace.
+An owned additional Namespace remains part of the workload Application. When
+`ApplicationGroup.spec.namespace.create` is enabled, Nyl synthesizes a missing
+owned Namespace using the same lifecycle policy as the effective destination
+Namespace. Externally owned namespaces are authorized but never emitted.
 
 When multiple workload Applications consume one namespace,
 `ApplicationGroup.spec.sharedNamespaces` must select one Release, a dedicated
 Namespace Application, or external ownership. Nyl rejects rendered Namespace
 objects that conflict with that selection.
+
+The Kubernetes bootstrap namespaces `default`, `kube-system`, `kube-public`,
+and `kube-node-lease` are externally owned when no explicit shared-namespace
+owner is configured. An explicit owner declaration overrides this default.
 
 This check prevents accidental scope expansion. The Argo CD AppProject remains
 the runtime authorization boundary.

@@ -510,6 +510,9 @@ fn resolve_shared_namespace_owner(
         .collect::<Vec<_>>();
 
     if declarations.is_empty() {
+        if is_kubernetes_bootstrap_namespace(namespace) {
+            return Ok(Some(SharedNamespaceOwner::External));
+        }
         if consumer_indexes.len() == 1 {
             return Ok(None);
         }
@@ -541,6 +544,10 @@ fn resolve_shared_namespace_owner(
         )));
     }
     Ok(Some(owner.clone()))
+}
+
+fn is_kubernetes_bootstrap_namespace(namespace: &str) -> bool {
+    matches!(namespace, "default" | "kube-system" | "kube-public" | "kube-node-lease")
 }
 
 fn resolve_release_namespace_owner(

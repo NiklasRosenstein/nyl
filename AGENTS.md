@@ -237,6 +237,9 @@ fn test_operation() -> Result<()> {
 - An ApplicationGroup has exactly one of `projectRef` and `projectTemplate`.
   Releases may narrow their resource content but never expand a generated
   project's namespace or cluster-resource policy.
+- Kubernetes bootstrap namespaces are externally owned unless an explicit
+  `sharedNamespaces` policy delegates ownership. Authorization to render into
+  one does not imply ownership of its Namespace object.
 - Names generated into one ArgoCDInstance namespace must be unambiguous across
   targets. Require explicit target-qualified templates instead of silently
   rewriting user-facing Application or AppProject names.

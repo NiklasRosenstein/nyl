@@ -151,8 +151,14 @@ part of that Application's rendered resources. Nyl synthesizes a missing
 destination Namespace and every Namespace listed in
 `Release.spec.additionalNamespaces` when `spec.namespace.create` is enabled.
 
-Every namespace consumed by more than one workload Application must have an
-identical `spec.sharedNamespaces.<namespace>.owner` declaration in every
+The Kubernetes bootstrap namespaces `default`, `kube-system`, `kube-public`,
+and `kube-node-lease` implicitly use `owner.kind: External`. Releases may use
+them when their namespace scope allows it, but Nyl neither synthesizes nor
+accepts an authored Namespace object. An explicit `sharedNamespaces` owner
+overrides this default when the platform deliberately delegates ownership.
+
+Every other namespace consumed by more than one workload Application must have
+an identical `spec.sharedNamespaces.<namespace>.owner` declaration in every
 contributing ApplicationGroup. The owner kinds are:
 
 | Owner kind | Required fields | Behavior |
