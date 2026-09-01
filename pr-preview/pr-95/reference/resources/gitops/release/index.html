@@ -123,7 +123,7 @@ output.</p>
 
 
 
-<table><thead><tr><th>Field</th><th>Required</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">metadata.name</code></td><td>Yes</td><td>—</td><td>Release and generated Application name.</td></tr><tr><td><code dir="auto">metadata.namespace</code></td><td>Yes</td><td>—</td><td>Default destination namespace.</td></tr><tr><td><code dir="auto">spec.include</code></td><td>No</td><td><code dir="auto">[]</code></td><td>Additional manifest paths or glob patterns relative to this file.</td></tr><tr><td><code dir="auto">spec.additionalNamespaces</code></td><td>No</td><td><code dir="auto">[]</code></td><td>Extra namespaces managed by this Release and available to its rendered resources.</td></tr><tr><td><code dir="auto">spec.stripEmptyMetadataLabels</code></td><td>No</td><td>Project setting</td><td>Controls empty <code dir="auto">metadata.labels</code> removal.</td></tr><tr><td><code dir="auto">spec.argocd.applicationOverride</code></td><td>No</td><td>—</td><td>Partial generated Application override, subject to the group or generator customization policy.</td></tr></tbody></table>
+<table><thead><tr><th>Field</th><th>Required</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">metadata.name</code></td><td>Yes</td><td>—</td><td>Release and generated Application name.</td></tr><tr><td><code dir="auto">metadata.namespace</code></td><td>Yes</td><td>—</td><td>Default destination namespace.</td></tr><tr><td><code dir="auto">spec.include</code></td><td>No</td><td><code dir="auto">[]</code></td><td>Additional manifest paths or glob patterns relative to this file.</td></tr><tr><td><code dir="auto">spec.additionalNamespaces</code></td><td>No</td><td><code dir="auto">[]</code></td><td>Extra namespaces available to rendered resources. Ownership follows ApplicationGroup namespace policy.</td></tr><tr><td><code dir="auto">spec.stripEmptyMetadataLabels</code></td><td>No</td><td>Project setting</td><td>Controls empty <code dir="auto">metadata.labels</code> removal.</td></tr><tr><td><code dir="auto">spec.argocd.applicationOverride</code></td><td>No</td><td>—</td><td>Partial generated Application override, subject to the group or generator customization policy.</td></tr></tbody></table>
 <p>Namespace names must be valid Kubernetes namespace names and entries in
 <code dir="auto">additionalNamespaces</code> must be unique.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="multi-file-releases">Multi-file releases</h2><a class="sl-anchor-link" href="#multi-file-releases"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Multi-file releases”</span></a></div>
@@ -158,14 +158,17 @@ them to the entry file’s deployment unit.</p>
 <code dir="auto">metadata.namespace</code> and every rendered <code dir="auto">Namespace.metadata.name</code>. The allowed
 set is the effective ApplicationGroup destination namespace plus
 <code dir="auto">spec.additionalNamespaces</code>.</p>
-<p>An approved additional Namespace remains part of the workload Application.
-When <code dir="auto">ApplicationGroup.spec.namespace.create</code> is enabled, Nyl synthesizes any
-listed Namespace that the Release does not render itself, using the same
-namespace lifecycle policy as the effective destination Namespace.</p>
+<p>An owned additional Namespace remains part of the workload Application. When
+<code dir="auto">ApplicationGroup.spec.namespace.create</code> is enabled, Nyl synthesizes a missing
+owned Namespace using the same lifecycle policy as the effective destination
+Namespace. Externally owned namespaces are authorized but never emitted.</p>
 <p>When multiple workload Applications consume one namespace,
 <code dir="auto">ApplicationGroup.spec.sharedNamespaces</code> must select one Release, a dedicated
 Namespace Application, or external ownership. Nyl rejects rendered Namespace
 objects that conflict with that selection.</p>
+<p>The Kubernetes bootstrap namespaces <code dir="auto">default</code>, <code dir="auto">kube-system</code>, <code dir="auto">kube-public</code>,
+and <code dir="auto">kube-node-lease</code> are externally owned when no explicit shared-namespace
+owner is configured. An explicit owner declaration overrides this default.</p>
 <p>This check prevents accidental scope expansion. The Argo CD AppProject remains
 the runtime authorization boundary.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="argo-cd-customization">Argo CD customization</h2><a class="sl-anchor-link" href="#argo-cd-customization"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Argo CD customization”</span></a></div>

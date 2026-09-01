@@ -116,8 +116,9 @@ retention independently for prune and Application deletion.</p>
 <p>Shared namespaces require an explicit, identical ownership declaration in
 every contributing ApplicationGroup. Ownership can stay with one selected
 Release, move to a dedicated Namespace Application, or remain external to Nyl.
-Nyl rejects conflicting declarations and Namespace objects rendered by a
-non-owner.</p>
+The Kubernetes bootstrap namespaces are implicitly external unless an explicit
+owner overrides that default. Nyl rejects conflicting declarations and
+Namespace objects rendered by a non-owner.</p>
 <p>Generated workload Applications use Argo CD’s foreground resources finalizer
 by default, so deleting an Application cascades to its resources. Background
 deletion and orphaning are explicit alternatives. A dedicated Namespace owner

@@ -331,8 +331,13 @@ adds no restriction.</p>
 part of that Application’s rendered resources. Nyl synthesizes a missing
 destination Namespace and every Namespace listed in
 <code dir="auto">Release.spec.additionalNamespaces</code> when <code dir="auto">spec.namespace.create</code> is enabled.</p>
-<p>Every namespace consumed by more than one workload Application must have an
-identical <code dir="auto">spec.sharedNamespaces.&#x3C;namespace>.owner</code> declaration in every
+<p>The Kubernetes bootstrap namespaces <code dir="auto">default</code>, <code dir="auto">kube-system</code>, <code dir="auto">kube-public</code>,
+and <code dir="auto">kube-node-lease</code> implicitly use <code dir="auto">owner.kind: External</code>. Releases may use
+them when their namespace scope allows it, but Nyl neither synthesizes nor
+accepts an authored Namespace object. An explicit <code dir="auto">sharedNamespaces</code> owner
+overrides this default when the platform deliberately delegates ownership.</p>
+<p>Every other namespace consumed by more than one workload Application must have
+an identical <code dir="auto">spec.sharedNamespaces.&#x3C;namespace>.owner</code> declaration in every
 contributing ApplicationGroup. The owner kinds are:</p>
 
 
