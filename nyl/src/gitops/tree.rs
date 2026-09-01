@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use glob::{MatchOptions, Pattern};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -21,11 +22,11 @@ use crate::{NylError, Result};
 
 use super::{
     build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout_with_provenance,
-    take_managed_namespace, DirectoryApplicationInput, GitOpsInventory, RenderSession,
+    take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession,
 };
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CompiledTargetTree {
     pub target: GitOpsTarget,
     pub cluster: Cluster,
@@ -163,6 +164,26 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 // The orchestration stays linear so ownership and policy checks remain visibly ordered.
 #[allow(clippy::too_many_lines)]
 pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, None, None).await
+}
+
+/// Compile one target while reusing a verified content-addressed result when possible.
+pub async fn compile_target_tree_cached(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: &GitOpsCache,
+    excluded_output: Option<&Path>,
+) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, Some(cache), excluded_output).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn compile_target_tree_inner(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: Option<&GitOpsCache>,
+    excluded_output: Option<&Path>,
+) -> Result<CompiledTargetTree> {
     validate_gitops_inventory(inventory)?;
     let target_discovered = inventory
         .get(GitOpsResourceKind::GitOpsTarget, target_name)
@@ -192,6 +213,11 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
     let central_session =
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?;
+    let cache_probe = prepare_target_cache(inventory, target_name, &central_session, cache, excluded_output)?;
+    if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+        return Ok(compiled);
+    }
+    let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
     let mut files = BTreeMap::new();
     let mut inputs = BTreeSet::from([
         target_discovered.source_path.clone(),
@@ -254,6 +280,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         }
 
         let source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
+        target_cacheable &= !source.remote;
         inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
             RendererConfigMode::Central if !source.remote => &central_session,
@@ -283,6 +310,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             let mut rendered = session
                 .render_release_file_with_provenance_root(source_file, provenance_root)
                 .await?;
+            target_cacheable &= rendered.cacheable;
             for bundle_input in &rendered.inputs {
                 claimed_source_files.insert(manifest_path_identity(bundle_input));
                 let input_path = if source.remote {
@@ -438,14 +466,103 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         )?;
     }
 
-    Ok(CompiledTargetTree {
+    let compiled = CompiledTargetTree {
         target,
         cluster,
         repository_name,
         repository,
         files,
         inputs,
-    })
+    };
+    store_cached_target(cache, cache_probe, target_cacheable, &compiled)?;
+    Ok(compiled)
+}
+
+struct TargetCacheProbe {
+    key: String,
+    record: crate::gitops::cache::DependencyRecord,
+    cacheable: bool,
+}
+
+fn prepare_target_cache(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    session: &RenderSession,
+    cache: Option<&GitOpsCache>,
+    excluded_output: Option<&Path>,
+) -> Result<Option<TargetCacheProbe>> {
+    let Some(cache) = cache else {
+        return Ok(None);
+    };
+    if cache.mode() == crate::gitops::CacheMode::Disabled {
+        return Ok(None);
+    }
+    let mut recorder = cache.recorder();
+    let mut excluded = excluded_output
+        .map(|path| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                inventory.project_root.join(path)
+            }
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    if cache.root().starts_with(&inventory.project_root) {
+        excluded.push(cache.root().to_path_buf());
+    }
+    recorder.record_project_tree(&inventory.project_root, &excluded)?;
+    recorder.record_template_context(&session.template_context().to_json())?;
+    recorder.record_renderer_tools()?;
+    let cacheable = recorder.is_cacheable();
+    let record = recorder.finish("target", String::new());
+    Ok(Some(TargetCacheProbe {
+        key: format!("{}\0{target_name}", inventory.project_root.display()),
+        record,
+        cacheable,
+    }))
+}
+
+fn load_cached_target(
+    cache: Option<&GitOpsCache>,
+    probe: Option<&TargetCacheProbe>,
+) -> Result<Option<CompiledTargetTree>> {
+    let (Some(cache), Some(probe)) = (cache, probe) else {
+        return Ok(None);
+    };
+    if !probe.cacheable {
+        return Ok(None);
+    }
+    let Some(record) = cache.load_record("target", &probe.key)? else {
+        return Ok(None);
+    };
+    if !record.same_inputs(&probe.record) {
+        return Ok(None);
+    }
+    let compiled = cache.load_artifact("target", &record.artifact_digest)?;
+    if compiled.is_some() {
+        tracing::debug!(target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key), "Reusing cached GitOps target tree");
+    }
+    Ok(compiled)
+}
+
+fn store_cached_target(
+    cache: Option<&GitOpsCache>,
+    probe: Option<TargetCacheProbe>,
+    cacheable: bool,
+    compiled: &CompiledTargetTree,
+) -> Result<()> {
+    let (Some(cache), Some(mut probe)) = (cache, probe) else {
+        return Ok(());
+    };
+    if !cacheable {
+        return Ok(());
+    }
+    let Some(digest) = cache.store_artifact("target", compiled)? else {
+        return Ok(());
+    };
+    probe.record.artifact_digest = digest;
+    cache.store_record("target", &probe.key, &probe.record)
 }
 
 fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::Release) -> String {

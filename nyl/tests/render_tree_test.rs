@@ -249,6 +249,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
+        .env("RUST_LOG", "nyl::gitops::tree=debug")
         .args([
             "render-tree",
             ".",
@@ -258,7 +259,8 @@ fn renders_plain_directory_applications_and_owned_layout() {
             output.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::contains("Reusing cached GitOps target tree"));
 
     let index_before_live_context = fs::read(root.join("_nyl/index.json")).unwrap();
     let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
@@ -281,6 +283,27 @@ fn renders_plain_directory_applications_and_owned_layout() {
         fs::read(root.join("_nyl/index.json")).unwrap(),
         index_before_live_context
     );
+}
+
+#[test]
+fn no_cache_render_leaves_no_persistent_cache() {
+    let fixture = fixture();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+            "--no-cache",
+        ])
+        .assert()
+        .success();
+
+    assert!(!fixture.path().join(".nyl/cache/gitops").exists());
 }
 
 #[test]

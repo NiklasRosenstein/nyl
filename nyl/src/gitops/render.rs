@@ -13,8 +13,8 @@ use crate::config::ProjectConfig;
 use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
-    extract_all_kyverno_policies, extract_application_generators, extract_release, Cluster, GitOpsTarget, KyvernoScope,
-    Release,
+    extract_all_kyverno_policies, extract_application_generators, extract_release, is_nyl_component,
+    is_remote_helm_chart_shortcut, Cluster, GitOpsTarget, HelmChart, KyvernoScope, Release, RemoteManifest,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -43,6 +43,8 @@ pub struct RenderedRelease {
     pub release_provenance: Option<String>,
     /// Entry and included files that contributed to this release.
     pub inputs: Vec<PathBuf>,
+    /// Whether every external renderer input can be validated without repeating the render.
+    pub cacheable: bool,
 }
 
 impl RenderSession {
@@ -222,6 +224,7 @@ impl RenderSession {
         let bundle =
             load_release_bundle_with_root(Path::new(path_text), &self.template_context, Some(provenance_root))?;
         let resources = bundle.resources;
+        let mut cacheable = resources_allow_render_cache(&resources, &self.project_config);
         let needs_helm_rendering = resources
             .iter()
             .any(|resource| is_renderable_resource(&resource.value, &self.project_config));
@@ -248,6 +251,7 @@ impl RenderSession {
                 )
                 .await?
                 {
+                    cacheable &= resource_allows_render_cache(&manifest.value, &self.project_config);
                     if is_renderable_resource(&manifest.value, &self.project_config) {
                         next.push(manifest);
                     } else {
@@ -312,8 +316,38 @@ impl RenderSession {
             manifest_provenance,
             release_provenance,
             inputs: bundle.inputs,
+            cacheable,
         })
     }
+}
+
+fn resource_allows_render_cache(resource: &Value, config: &ProjectConfig) -> bool {
+    if RemoteManifest::is_remote_manifest(resource) {
+        return false;
+    }
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+        && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
+    {
+        return serde_json::from_value::<HelmChart>(resource.clone())
+            .is_ok_and(|chart| chart.spec.chart.repository.is_none());
+    }
+    if !is_nyl_component(resource) {
+        return true;
+    }
+    let Some(api_version) = resource.get("apiVersion").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(kind) = resource.get("kind").and_then(Value::as_str) else {
+        return false;
+    };
+    let effective = config.get_alias_target_for_kind(api_version, kind).unwrap_or(kind);
+    !is_remote_helm_chart_shortcut(effective)
+}
+
+fn resources_allow_render_cache(resources: &[RenderResource], config: &ProjectConfig) -> bool {
+    resources
+        .iter()
+        .all(|resource| resource_allows_render_cache(&resource.value, config))
 }
 
 fn push_rendered_manifest(

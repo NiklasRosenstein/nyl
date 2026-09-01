@@ -6,8 +6,8 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, Sta
 
 use crate::git::CredentialProvider;
 use crate::gitops::{
-    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexPublication,
-    TreeCacheArgs,
+    compile_target_tree_cached, discover_gitops_inventory, reconcile_rendered_tree, GitOpsCache, RenderIndex,
+    RenderIndexPublication, TreeCacheArgs,
 };
 use crate::{NylError, Result};
 
@@ -38,7 +38,8 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             "publish-tree requires a clean source worktree at a committed revision",
         ));
     }
-    let compiled = compile_target_tree(&inventory, &args.target).await?;
+    let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
+    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
     let publication_url = compiled
         .repository
         .publish_url

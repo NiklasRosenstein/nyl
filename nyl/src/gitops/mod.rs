@@ -19,4 +19,4 @@ pub use reconcile::{
     RenderIndexPublication,
 };
 pub use render::{RenderSession, RenderedRelease};
-pub use tree::{compile_target_tree, validate_gitops_inventory, CompiledTargetTree};
+pub use tree::{compile_target_tree, compile_target_tree_cached, validate_gitops_inventory, CompiledTargetTree};

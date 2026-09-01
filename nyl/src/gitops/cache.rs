@@ -9,6 +9,7 @@ use getrandom::fill as fill_random;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 use crate::{NylError, Result};
 
@@ -77,6 +78,12 @@ pub struct DependencyRecord {
     pub artifact_digest: String,
 }
 
+impl DependencyRecord {
+    pub fn same_inputs(&self, other: &Self) -> bool {
+        self.version == other.version && self.action == other.action && self.dependencies == other.dependencies
+    }
+}
+
 /// Collects every input that can affect a cached renderer action.
 #[derive(Clone, Debug)]
 pub struct DependencyRecorder {
@@ -112,6 +119,81 @@ impl DependencyRecorder {
     pub fn record_file(&mut self, name: impl Into<String>, path: &Path) -> Result<()> {
         self.record_bytes(name, "file", &fs::read(path)?);
         Ok(())
+    }
+
+    /// Records file contents and directory membership beneath a project root.
+    pub fn record_project_tree(&mut self, project_root: &Path, excluded: &[PathBuf]) -> Result<()> {
+        let mut members = Vec::new();
+        let entries = WalkDir::new(project_root)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                let path = entry.path();
+                let relative = path.strip_prefix(project_root).unwrap_or(path);
+                path == project_root
+                    || !should_skip_project_path(relative)
+                        && !excluded.iter().any(|excluded| path.starts_with(excluded))
+            });
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| NylError::config(format!("Failed to inspect renderer inputs: {error}")))?;
+            if entry.file_type().is_symlink() {
+                self.mark_uncacheable();
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(project_root)
+                .expect("walk entry is beneath project root");
+            let relative = crate::resources::relative_path_to_posix("cache dependency", relative)?;
+            members.push(relative.clone());
+            self.record_file(format!("project:{relative}"), entry.path())?;
+        }
+        self.record_value("project:members", &members)
+    }
+
+    /// Records public template context normally and sensitive context with the cache-local key.
+    pub fn record_template_context(&mut self, context: &serde_json::Value) -> Result<()> {
+        let mut public = context.clone();
+        let object = public
+            .as_object_mut()
+            .ok_or_else(|| NylError::config("Template context must be an object"))?;
+        let secrets = object.remove("secrets").unwrap_or(serde_json::Value::Null);
+        let environment = object.remove("env").unwrap_or(serde_json::Value::Null);
+        self.record_value("context", &public)?;
+        self.record_secret("context:secrets", &serde_json::to_vec(&secrets)?);
+        self.record_secret("context:environment", &serde_json::to_vec(&environment)?);
+        Ok(())
+    }
+
+    /// Records executables that can affect rendered bytes.
+    pub fn record_renderer_tools(&mut self) -> Result<()> {
+        self.record_file("tool:nyl", &std::env::current_exe()?)?;
+        self.record_tool_version("helm", &["version", "--short"]);
+        self.record_tool_version("kyverno", &["version"]);
+        Ok(())
+    }
+
+    fn record_tool_version(&mut self, tool: &str, arguments: &[&str]) {
+        let Some(path) = find_executable(tool) else {
+            self.record_bytes(format!("tool:{tool}"), "tool", b"unavailable");
+            return;
+        };
+        let output = std::process::Command::new(&path).args(arguments).output();
+        let mut fingerprint = path.as_os_str().as_encoded_bytes().to_vec();
+        match output {
+            Ok(output) => {
+                fingerprint.extend_from_slice(&output.stdout);
+                fingerprint.extend_from_slice(&output.stderr);
+                fingerprint.extend_from_slice(&output.status.code().unwrap_or(-1).to_le_bytes());
+            }
+            Err(error) => fingerprint.extend_from_slice(error.to_string().as_bytes()),
+        }
+        self.record_bytes(format!("tool:{tool}"), "tool", &fingerprint);
     }
 
     /// Records a sensitive value without persisting it or a guessable plain digest.
@@ -171,6 +253,10 @@ impl GitOpsCache {
 
     pub fn mode(&self) -> CacheMode {
         self.mode
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn recorder(&self) -> DependencyRecorder {
@@ -257,6 +343,17 @@ impl GitOpsCache {
             .join(action)
             .join(format!("{}.json", sha256(key.as_bytes()))))
     }
+}
+
+fn should_skip_project_path(path: &Path) -> bool {
+    path.starts_with(".git") || path.starts_with(".nyl/cache")
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn validate_segment(label: &str, value: &str) -> Result<()> {

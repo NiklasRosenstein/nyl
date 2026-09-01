@@ -5,8 +5,8 @@ use clap::Args;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
-    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree_with_options, ReconcileOptions,
-    RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached, discover_gitops_inventory, reconcile_rendered_tree_with_options, GitOpsCache,
+    ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -70,7 +70,8 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         initial
     };
 
-    let compiled = compile_target_tree(&inventory, &args.target).await?;
+    let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
+    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache, excluded.as_deref()).await?;
     if args.check {
         println!(
             "✓ GitOps target {} renders {} file(s)",

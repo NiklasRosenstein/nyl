@@ -6,7 +6,9 @@ use git2::Repository;
 use similar::TextDiff;
 
 use crate::git::GitManager;
-use crate::gitops::{compile_target_tree, discover_gitops_inventory, RenderIndex, TreeCacheArgs};
+use crate::gitops::{
+    compile_target_tree, compile_target_tree_cached, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs,
+};
 use crate::{NylError, Result};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -49,7 +51,8 @@ struct PublishedRenderedTree {
 
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
-    let desired = compile_target_tree(&inventory, &args.target).await?;
+    let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
+    let desired = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
     let (mut base, source_baseline) = match args.against {
         DiffTreeBase::Published => (published_tree(&desired)?, None),
         DiffTreeBase::Source => {
