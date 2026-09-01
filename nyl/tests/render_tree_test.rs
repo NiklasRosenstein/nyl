@@ -1366,7 +1366,7 @@ metadata:
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("outside its allowed namespaces"));
+        .stderr(predicate::str::contains("Unexpected namespace \"another-namespace\""));
 }
 
 #[test]
@@ -1379,6 +1379,12 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: misplaced-api-config
+  namespace: monitoring
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: misplaced-api-monitor
   namespace: monitoring
 ";
     fs::write(api_path, api).unwrap();
@@ -1413,12 +1419,14 @@ metadata:
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("Rendered namespace scope validation found 2 issue(s)")
+            predicate::str::contains(
+                "Rendered namespace scope validation found 3 issues across 2 releases",
+            )
                 .and(predicate::str::contains(
-                    "Release \"api\" renders ConfigMap \"misplaced-api-config\" with metadata.namespace \"monitoring\"",
+                    "Release \"api\" (2 issues)\n  Allowed namespaces: \"api\"\n  Unexpected namespace \"monitoring\" (2 resources):\n    - ConfigMap \"misplaced-api-config\"\n    - ServiceMonitor \"misplaced-api-monitor\"",
                 ))
                 .and(predicate::str::contains(
-                    "Release \"coredns\" renders Deployment \"coredns\" with metadata.namespace \"kube-system\"",
+                    "Release \"coredns\" (1 issue)\n  Allowed namespaces: \"argocd\"\n  Unexpected namespace \"kube-system\" (1 resource):\n    - Deployment \"coredns\"",
                 )),
         );
 }

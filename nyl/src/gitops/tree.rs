@@ -1,6 +1,7 @@
 //! Compilation of one effective GitOps target into a rendered file tree.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use glob::{MatchOptions, Pattern};
@@ -55,6 +56,21 @@ struct PendingWorkload {
     argocd_project_name: String,
     release_directory: PathBuf,
     application_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamespaceScopeIssue {
+    release: String,
+    allowed_namespaces: BTreeSet<String>,
+    resource: String,
+    violation: NamespaceScopeViolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum NamespaceScopeViolation {
+    UnexpectedNamespace(String),
+    InvalidResourceNamespace,
+    InvalidNamespaceName,
 }
 
 struct EffectiveProject {
@@ -318,10 +334,8 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     }
 
     if !namespace_scope_errors.is_empty() {
-        let count = namespace_scope_errors.len();
-        return Err(NylError::validation(format!(
-            "Rendered namespace scope validation found {count} issue(s):\n- {}",
-            namespace_scope_errors.join("\n- ")
+        return Err(NylError::validation(format_namespace_scope_issues(
+            &namespace_scope_errors,
         )));
     }
 
@@ -668,14 +682,9 @@ fn validate_release_namespace_scope(
     manifests: &[Value],
     release: &crate::resources::Release,
     destination_namespace: &str,
-) -> Vec<String> {
-    let mut allowed = BTreeSet::from([destination_namespace]);
-    allowed.extend(release.spec.additional_namespaces.iter().map(String::as_str));
-    let allowed_display = allowed
-        .iter()
-        .map(|value| format!("{value:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+) -> Vec<NamespaceScopeIssue> {
+    let mut allowed_namespaces = BTreeSet::from([destination_namespace.to_owned()]);
+    allowed_namespaces.extend(release.spec.additional_namespaces.iter().cloned());
     let mut errors = Vec::new();
     for manifest in manifests {
         let resource = manifest_identity_hint(manifest);
@@ -683,36 +692,107 @@ fn validate_release_namespace_scope(
             match namespace {
                 Value::Null => {}
                 Value::String(namespace) if namespace.is_empty() => {}
-                Value::String(namespace) if allowed.contains(namespace.as_str()) => {}
+                Value::String(namespace) if allowed_namespaces.contains(namespace) => {}
                 Value::String(namespace) => {
-                    errors.push(format!(
-                        "Release {:?} renders {resource} with metadata.namespace {namespace:?}, outside its allowed namespaces [{allowed_display}]",
-                        release.metadata.name
-                    ));
+                    errors.push(NamespaceScopeIssue {
+                        release: release.metadata.name.clone(),
+                        allowed_namespaces: allowed_namespaces.clone(),
+                        resource: resource.clone(),
+                        violation: NamespaceScopeViolation::UnexpectedNamespace(namespace.clone()),
+                    });
                 }
                 _ => {
-                    errors.push(format!(
-                        "Release {:?} renders {resource} whose metadata.namespace is not a string",
-                        release.metadata.name
-                    ));
+                    errors.push(NamespaceScopeIssue {
+                        release: release.metadata.name.clone(),
+                        allowed_namespaces: allowed_namespaces.clone(),
+                        resource: resource.clone(),
+                        violation: NamespaceScopeViolation::InvalidResourceNamespace,
+                    });
                 }
             }
         }
         if is_namespace(manifest) {
             match manifest.pointer("/metadata/name").and_then(Value::as_str) {
-                Some(name) if allowed.contains(name) => {}
-                Some(name) => errors.push(format!(
-                    "Release {:?} renders Namespace {name:?}, outside its allowed namespaces [{allowed_display}]",
-                    release.metadata.name
-                )),
-                None => errors.push(format!(
-                    "Release {:?} renders a Namespace whose metadata.name is not a string",
-                    release.metadata.name
-                )),
+                Some(name) if allowed_namespaces.contains(name) => {}
+                Some(name) => errors.push(NamespaceScopeIssue {
+                    release: release.metadata.name.clone(),
+                    allowed_namespaces: allowed_namespaces.clone(),
+                    resource: resource.clone(),
+                    violation: NamespaceScopeViolation::UnexpectedNamespace(name.to_owned()),
+                }),
+                None => errors.push(NamespaceScopeIssue {
+                    release: release.metadata.name.clone(),
+                    allowed_namespaces: allowed_namespaces.clone(),
+                    resource: resource.clone(),
+                    violation: NamespaceScopeViolation::InvalidNamespaceName,
+                }),
             }
         }
     }
     errors
+}
+
+fn format_namespace_scope_issues(issues: &[NamespaceScopeIssue]) -> String {
+    let mut releases = BTreeMap::<(String, BTreeSet<String>), Vec<&NamespaceScopeIssue>>::new();
+    for issue in issues {
+        releases
+            .entry((issue.release.clone(), issue.allowed_namespaces.clone()))
+            .or_default()
+            .push(issue);
+    }
+
+    let mut output = format!(
+        "Rendered namespace scope validation found {} {} across {} {}:",
+        issues.len(),
+        if issues.len() == 1 { "issue" } else { "issues" },
+        releases.len(),
+        if releases.len() == 1 { "release" } else { "releases" }
+    );
+    for ((release, allowed_namespaces), release_issues) in releases {
+        let allowed_display = allowed_namespaces
+            .iter()
+            .map(|namespace| format!("{namespace:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(
+            output,
+            "\n\nRelease {release:?} ({} {})\n  Allowed namespaces: {allowed_display}",
+            release_issues.len(),
+            if release_issues.len() == 1 { "issue" } else { "issues" }
+        );
+
+        let mut violations = BTreeMap::<NamespaceScopeViolation, Vec<&str>>::new();
+        for issue in release_issues {
+            violations
+                .entry(issue.violation.clone())
+                .or_default()
+                .push(issue.resource.as_str());
+        }
+        for (violation, mut resources) in violations {
+            resources.sort_unstable();
+            let heading = match violation {
+                NamespaceScopeViolation::UnexpectedNamespace(namespace) => {
+                    format!("Unexpected namespace {namespace:?}")
+                }
+                NamespaceScopeViolation::InvalidResourceNamespace => {
+                    "Invalid metadata.namespace (expected a string)".to_owned()
+                }
+                NamespaceScopeViolation::InvalidNamespaceName => {
+                    "Invalid Namespace metadata.name (expected a string)".to_owned()
+                }
+            };
+            let _ = write!(
+                output,
+                "\n  {heading} ({} {}):",
+                resources.len(),
+                if resources.len() == 1 { "resource" } else { "resources" }
+            );
+            for resource in resources {
+                let _ = write!(output, "\n    - {resource}");
+            }
+        }
+    }
+    output
 }
 
 fn manifest_identity_hint(manifest: &Value) -> String {
