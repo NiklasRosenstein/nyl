@@ -164,6 +164,12 @@ fn is_project_cache_status(repository: &Repository, project_root: &Path, status_
     let Some(worktree) = repository.workdir() else {
         return false;
     };
+    let Ok(worktree) = worktree.canonicalize() else {
+        return false;
+    };
+    let Ok(project_root) = project_root.canonicalize() else {
+        return false;
+    };
     let Ok(project_relative) = project_root.strip_prefix(worktree) else {
         return false;
     };
