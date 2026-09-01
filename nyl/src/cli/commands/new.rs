@@ -11,6 +11,13 @@ use crate::resources::GitOpsResourceKind;
 use crate::util::path_for_display;
 use crate::{NylError, Result};
 
+fn display_path(path: &Path) -> String {
+    path_for_display(path)
+        .display()
+        .to_string()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 /// Create a new nyl project or component
 #[derive(Args, Debug)]
 pub struct NewArgs {
@@ -262,7 +269,7 @@ fn scaffold_resource(
     if output.exists() {
         return Err(NylError::config(format!(
             "Refusing to overwrite existing resource: {}",
-            path_for_display(&output).display()
+            display_path(&output)
         )));
     }
     if let Some(parent) = output.parent() {
@@ -281,11 +288,7 @@ fn scaffold_resource(
         repository_urls,
     );
     fs::write(&output, yaml)?;
-    println!(
-        "✓ Created {}: {}",
-        args.kind.as_str(),
-        path_for_display(&output).display()
-    );
+    println!("✓ Created {}: {}", args.kind.as_str(), display_path(&output));
     Ok(output)
 }
 
@@ -370,19 +373,13 @@ fn create_project(project_path: &Path) -> Result<()> {
         if toml_config.exists() {
             return Err(NylError::Config(format!(
                 "Project already exists at: {}",
-                path_for_display(project_path).display()
+                display_path(project_path)
             )));
         }
-        println!(
-            "✓ Using existing directory: {}",
-            path_for_display(project_path).display()
-        );
+        println!("✓ Using existing directory: {}", display_path(project_path));
     } else {
         fs::create_dir_all(project_path)?;
-        println!(
-            "✓ Created project directory: {}",
-            path_for_display(project_path).display()
-        );
+        println!("✓ Created project directory: {}", display_path(project_path));
     }
 
     let project_directories = [
@@ -397,7 +394,7 @@ fn create_project(project_path: &Path) -> Result<()> {
     ];
     for directory in project_directories {
         fs::create_dir_all(&directory)?;
-        println!("✓ Created directory: {}", path_for_display(&directory).display());
+        println!("✓ Created directory: {}", display_path(&directory));
     }
 
     let config_content = r#"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
@@ -409,20 +406,14 @@ gitops_scaffold_path = "config"
 "#;
     let config_path = project_path.join("nyl.toml");
     fs::write(&config_path, config_content)?;
-    println!(
-        "✓ Created configuration file: {}",
-        path_for_display(&config_path).display()
-    );
+    println!("✓ Created configuration file: {}", display_path(&config_path));
 
-    println!(
-        "\n✓ Project created successfully at: {}",
-        path_for_display(project_path).display()
-    );
+    println!("\n✓ Project created successfully at: {}", display_path(project_path));
     println!("\nNext steps:");
 
     let project_display = path_for_display(project_path);
     if project_display != Path::new(".") {
-        println!("  cd {}", project_display.display());
+        println!("  cd {}", display_path(project_path));
     }
 
     println!("  nyl new component <api-version> <kind>");
@@ -451,15 +442,12 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
     if component_dir.exists() {
         return Err(NylError::Config(format!(
             "Component already exists: {}",
-            path_for_display(&component_dir).display()
+            display_path(&component_dir)
         )));
     }
 
     fs::create_dir_all(&component_dir)?;
-    println!(
-        "✓ Created component directory: {}",
-        path_for_display(&component_dir).display()
-    );
+    println!("✓ Created component directory: {}", display_path(&component_dir));
 
     // Create Chart.yaml
     create_chart_yaml(&component_dir, kind)?;
@@ -477,15 +465,15 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
     println!("\nNext steps:");
     println!(
         "  Edit {}/Chart.yaml to customize metadata",
-        path_for_display(&component_dir).display()
+        display_path(&component_dir)
     );
     println!(
         "  Edit {}/values.yaml to define component values",
-        path_for_display(&component_dir).display()
+        display_path(&component_dir)
     );
     println!(
         "  Edit {}/templates/deployment.yaml to customize Kubernetes resources",
-        path_for_display(&component_dir).display()
+        display_path(&component_dir)
     );
 
     Ok(())
@@ -507,7 +495,7 @@ appVersion: "1.0"
     );
 
     fs::write(&chart_path, chart_content)?;
-    println!("✓ Created Chart.yaml: {}", path_for_display(&chart_path).display());
+    println!("✓ Created Chart.yaml: {}", display_path(&chart_path));
     Ok(())
 }
 
@@ -536,7 +524,7 @@ resources:
 "#;
 
     fs::write(&values_path, values_content)?;
-    println!("✓ Created values.yaml: {}", path_for_display(&values_path).display());
+    println!("✓ Created values.yaml: {}", display_path(&values_path));
     Ok(())
 }
 
@@ -585,10 +573,7 @@ fn create_values_schema(component_dir: &Path) -> Result<()> {
 "#;
 
     fs::write(&schema_path, schema_content)?;
-    println!(
-        "✓ Created values.schema.json: {}",
-        path_for_display(&schema_path).display()
-    );
+    println!("✓ Created values.schema.json: {}", display_path(&schema_path));
     Ok(())
 }
 
@@ -637,7 +622,7 @@ spec:
     fs::write(&deployment_path, deployment_content)?;
     println!(
         "✓ Created templates/deployment.yaml: {}",
-        path_for_display(&deployment_path).display()
+        display_path(&deployment_path)
     );
     Ok(())
 }
