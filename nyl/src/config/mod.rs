@@ -56,7 +56,7 @@ impl StripEmptyMetadataLabelsMode {
 }
 
 /// Project settings in `[project]` section of `nyl.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectSettings {
     /// Search paths for local component charts.
@@ -89,14 +89,14 @@ impl Default for ProjectSettings {
 }
 
 /// Root structure of `nyl.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
 }
 
 /// Wrapper for project configuration file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectConfig {
     /// Path to the configuration file (None if using defaults).
     pub file: Option<PathBuf>,

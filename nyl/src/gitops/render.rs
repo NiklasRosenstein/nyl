@@ -41,24 +41,35 @@ pub struct RenderedRelease {
 
 impl RenderSession {
     /// Build an offline rendering session from a project root and effective target.
-    pub fn for_target(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
-        Self::build(project_root, target, cluster, true, false)
+    pub fn for_target(
+        project_root: &Path,
+        project_config: &ProjectConfig,
+        target: &GitOpsTarget,
+        cluster: &Cluster,
+    ) -> Result<Self> {
+        Self::build(project_root, Some(project_config), target, cluster, true, false)
     }
 
     /// Build with the central project configuration but without secrets or
     /// process environment for independently controlled source manifests.
-    pub fn for_untrusted_source(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
-        Self::build(project_root, target, cluster, false, false)
+    pub fn for_untrusted_source(
+        project_root: &Path,
+        project_config: &ProjectConfig,
+        target: &GitOpsTarget,
+        cluster: &Cluster,
+    ) -> Result<Self> {
+        Self::build(project_root, Some(project_config), target, cluster, false, false)
     }
 
     /// Build a restricted remote-source session. Remote projects cannot load a
     /// secrets provider from their checkout.
     pub fn for_remote_target(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
-        Self::build(project_root, target, cluster, false, true)
+        Self::build(project_root, None, target, cluster, false, true)
     }
 
     fn build(
         project_root: &Path,
+        project_config: Option<&ProjectConfig>,
         target: &GitOpsTarget,
         cluster: &Cluster,
         load_secrets: bool,
@@ -70,7 +81,10 @@ impl RenderSession {
         let project_root = project_root
             .canonicalize()
             .map_err(|error| NylError::config(format!("Failed to resolve project root: {error}")))?;
-        let project_config = ProjectConfig::load_from_dir(None, Some(&project_root))?;
+        let project_config = match project_config {
+            Some(project_config) => project_config.clone(),
+            None => ProjectConfig::load_from_dir(None, Some(&project_root))?,
+        };
         if restrict_checkout {
             let config_file = project_config.file.as_ref().ok_or_else(|| {
                 NylError::config(format!(
@@ -329,6 +343,16 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn central_session_reuses_the_parsed_project_configuration() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        fs::write(temp.path().join("nyl.toml"), "not valid TOML = [").unwrap();
+
+        RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+    }
+
     #[tokio::test]
     async fn target_values_and_context_are_visible() {
         let temp = TempDir::new().unwrap();
@@ -355,7 +379,8 @@ data:
         )
         .unwrap();
 
-        let session = RenderSession::for_target(temp.path(), &target(), &cluster()).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
         assert_eq!(rendered.release.unwrap().metadata.name, "production");
         assert_eq!(rendered.manifests[0]["data"]["cluster"], "true");
@@ -383,7 +408,8 @@ spec: {}
         )
         .unwrap();
 
-        let session = RenderSession::for_target(temp.path(), &target(), &cluster()).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
         let error = session.render_release_file(Path::new("app.yaml")).await.unwrap_err();
         assert!(error.to_string().contains("ApplicationGenerator"));
     }
@@ -399,7 +425,8 @@ spec: {}
         assert_eq!(context["env"], serde_json::json!({}));
         assert!(context["target"]["spec"]["publication"].get("repository").is_none());
 
-        let session = RenderSession::for_untrusted_source(temp.path(), &target(), &cluster()).unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let session = RenderSession::for_untrusted_source(temp.path(), &config, &target(), &cluster()).unwrap();
         let context = session.template_context().to_json();
         assert_eq!(context["secrets"], serde_json::json!({}));
         assert_eq!(context["env"], serde_json::json!({}));

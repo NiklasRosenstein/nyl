@@ -55,6 +55,8 @@ pub struct DiscoveredGitOpsResource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitOpsInventory {
     pub project_root: PathBuf,
+    /// Parsed project configuration shared by discovery and central render sessions.
+    pub project_config: ProjectConfig,
     /// All eligible YAML files, relative to `project_root` and sorted.
     pub yaml_files: Vec<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
@@ -64,6 +66,12 @@ pub struct GitOpsInventory {
 impl GitOpsInventory {
     pub fn get(&self, kind: GitOpsResourceKind, name: &str) -> Option<&DiscoveredGitOpsResource> {
         self.resources.get(&GitOpsInventoryKey::new(kind, name))
+    }
+
+    /// Repeat discovery with a different output exclusion without re-reading
+    /// the project configuration.
+    pub fn rediscover(&self, output_subtree: Option<&Path>) -> Result<Self> {
+        discover_project_inventory(self.project_root.clone(), self.project_config.clone(), output_subtree)
     }
 }
 
@@ -79,7 +87,7 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
     };
     let config_file =
         ProjectConfig::find(Some(start_dir))?.ok_or_else(|| NylError::ConfigNotFound("nyl.toml".to_owned()))?;
-    ProjectConfig::load(Some(config_file.clone()))?;
+    let project_config = ProjectConfig::load(Some(config_file.clone()))?;
     let project_root = config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -91,6 +99,14 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
             ))
         })?;
 
+    discover_project_inventory(project_root, project_config, output_subtree)
+}
+
+fn discover_project_inventory(
+    project_root: PathBuf,
+    project_config: ProjectConfig,
+    output_subtree: Option<&Path>,
+) -> Result<GitOpsInventory> {
     let output_subtree = output_subtree.map(|path| {
         let path = if path.is_absolute() {
             path.to_path_buf()
@@ -128,6 +144,7 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
 
     Ok(GitOpsInventory {
         project_root,
+        project_config,
         yaml_files,
         resources,
     })
@@ -723,5 +740,20 @@ spec:
         let inventory = discover_gitops_inventory(&temporary.path().join("nested/deep"), None).unwrap();
         assert_eq!(inventory.project_root, temporary.path().canonicalize().unwrap());
         assert!(inventory.get(GitOpsResourceKind::GitOpsTarget, "production").is_some());
+    }
+
+    #[test]
+    fn rediscovery_reuses_the_parsed_project_configuration() {
+        let (temporary, _repository) = project();
+        fs::write(temporary.path().join("target.yaml"), TARGET).unwrap();
+
+        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+        fs::write(temporary.path().join("nyl.toml"), "not valid TOML = [").unwrap();
+
+        let rediscovered = inventory.rediscover(None).unwrap();
+        assert_eq!(rediscovered.project_config, inventory.project_config);
+        assert!(rediscovered
+            .get(GitOpsResourceKind::GitOpsTarget, "production")
+            .is_some());
     }
 }

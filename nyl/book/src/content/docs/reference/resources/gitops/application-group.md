@@ -79,8 +79,9 @@ requires a remote source. Run `nyl source update` to refresh commit locks.
 
 Source selectors identify candidate entry files. Nyl renders only candidates
 containing a literal, parseable `gitops.nyl/v1` Release document; other files
-are ignored. Use `Release.spec.include` to attach additional relative files or
-glob matches to that release.
+are ignored. It warns for each candidate that has no literal Release and is not
+claimed by another Release's `spec.include`. Use `Release.spec.include` to
+attach additional relative files or glob matches to that release.
 
 ## Sync and lifecycle policy
 

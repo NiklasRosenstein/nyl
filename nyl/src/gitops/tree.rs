@@ -121,7 +121,8 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     };
     let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
-    let central_session = RenderSession::for_target(&inventory.project_root, &target, &cluster)?;
+    let central_session =
+        RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?;
     let mut files = BTreeMap::new();
     let mut inputs = BTreeSet::from([target_discovered.source_path.clone(), cluster_path]);
     if let Some(repository_path) = repository_path {
@@ -170,8 +171,10 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 .as_ref()
                 .expect("remote source must carry a restricted rendering session"),
         };
+        let mut claimed_source_files = BTreeSet::new();
 
         for source_file in &source.files {
+            claimed_source_files.insert(manifest_path_identity(source_file));
             let input_path = if source.remote {
                 PathBuf::from("@remote").join(source_file.strip_prefix(&source.root).unwrap_or(source_file))
             } else {
@@ -183,6 +186,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             inputs.insert(input_path);
             let mut rendered = session.render_release_file(source_file).await?;
             for bundle_input in &rendered.inputs {
+                claimed_source_files.insert(manifest_path_identity(bundle_input));
                 let input_path = if source.remote {
                     PathBuf::from("@remote").join(bundle_input.strip_prefix(&source.root).unwrap_or(bundle_input))
                 } else {
@@ -284,6 +288,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 &application,
             )?;
         }
+        warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
     }
 
     for ((cluster, namespace), owner) in namespace_owners {
@@ -546,6 +551,7 @@ fn render_effective_control(
 
 struct ResolvedGroupSource {
     root: PathBuf,
+    candidate_files: Vec<PathBuf>,
     files: Vec<PathBuf>,
     renderer_mode: RendererConfigMode,
     source_session: Option<RenderSession>,
@@ -629,9 +635,30 @@ fn resolve_group_source(
         .map(|resource| inventory.project_root.join(&resource.source_path))
         .collect::<BTreeSet<_>>();
     files.retain(|path| !control_files.contains(path) && source_matches(&root, path, &source));
-    let files = static_release_files(files)?;
+    files.sort();
+    let candidate_files = files;
+    let files = static_release_files(&candidate_files)?;
 
-    let source_session = match (&remote_root, source.renderer_config.mode) {
+    let source_session = build_group_source_session(inventory, target, remote_root.as_deref(), &source)?;
+
+    Ok(ResolvedGroupSource {
+        root,
+        candidate_files,
+        files,
+        renderer_mode: source.renderer_config.mode,
+        source_session,
+        remote: remote_root.is_some(),
+        provenance_inputs,
+    })
+}
+
+fn build_group_source_session(
+    inventory: &GitOpsInventory,
+    target: &GitOpsTarget,
+    remote_root: Option<&Path>,
+    source: &ApplicationGroupSource,
+) -> Result<Option<RenderSession>> {
+    Ok(match (remote_root, source.renderer_config.mode) {
         (Some(remote_root), RendererConfigMode::Remote) => {
             let project_root = checked_checkout_subpath(
                 remote_root,
@@ -645,32 +672,54 @@ fn resolve_group_source(
             let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
             Some(RenderSession::for_untrusted_source(
                 &inventory.project_root,
+                &inventory.project_config,
                 target,
                 &cluster,
             )?)
         }
         (None, _) => None,
-    };
-
-    Ok(ResolvedGroupSource {
-        root,
-        files,
-        renderer_mode: source.renderer_config.mode,
-        source_session,
-        remote: remote_root.is_some(),
-        provenance_inputs,
     })
 }
 
-fn static_release_files(files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+fn static_release_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut release_files = Vec::new();
     for path in files {
-        if crate::cli::commands::render::has_static_release(&path)? {
-            release_files.push(path);
+        if crate::cli::commands::render::has_static_release(path)? {
+            release_files.push(path.clone());
         }
     }
-    release_files.sort();
     Ok(release_files)
+}
+
+fn manifest_path_identity(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn unclaimed_group_manifests<'a>(
+    source: &'a ResolvedGroupSource,
+    claimed_source_files: &BTreeSet<PathBuf>,
+) -> Vec<&'a Path> {
+    source
+        .candidate_files
+        .iter()
+        .filter(|path| !claimed_source_files.contains(&manifest_path_identity(path)))
+        .map(PathBuf::as_path)
+        .collect()
+}
+
+fn warn_unclaimed_group_manifests(
+    group: &ApplicationGroup,
+    source: &ResolvedGroupSource,
+    claimed_source_files: &BTreeSet<PathBuf>,
+) {
+    for path in unclaimed_group_manifests(source, claimed_source_files) {
+        let display_path = path.strip_prefix(&source.root).unwrap_or(path);
+        tracing::warn!(
+            application_group = %group.metadata.name,
+            manifest = %display_path.display(),
+            "ApplicationGroup ignored manifest because it contains no literal gitops.nyl/v1 Release and is not included by another Release"
+        );
+    }
 }
 
 fn checked_checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Result<PathBuf> {
@@ -928,6 +977,29 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn included_manifests_are_not_reported_as_unclaimed() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let entry = temporary.path().join("release.yaml");
+        let included = temporary.path().join("deployment.yaml");
+        let ignored = temporary.path().join("notes.yaml");
+        for path in [&entry, &included, &ignored] {
+            std::fs::write(path, "---\n").unwrap();
+        }
+        let source = ResolvedGroupSource {
+            root: temporary.path().to_path_buf(),
+            candidate_files: vec![entry.clone(), included.clone(), ignored.clone()],
+            files: vec![entry.clone()],
+            renderer_mode: RendererConfigMode::Central,
+            source_session: None,
+            remote: false,
+            provenance_inputs: Vec::new(),
+        };
+        let claimed = BTreeSet::from([manifest_path_identity(&entry), manifest_path_identity(&included)]);
+
+        assert_eq!(unclaimed_group_manifests(&source, &claimed), vec![ignored.as_path()]);
+    }
 
     #[cfg(unix)]
     #[test]

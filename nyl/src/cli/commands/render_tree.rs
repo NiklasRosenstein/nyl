@@ -57,7 +57,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         .ok()
         .map(Path::to_path_buf);
     let inventory = if let Some(excluded) = excluded.as_deref() {
-        discover_gitops_inventory(&args.path, Some(excluded))?
+        initial.rediscover(Some(excluded))?
     } else {
         initial
     };

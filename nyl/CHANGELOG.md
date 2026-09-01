@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a warning for every ApplicationGroup source candidate that has no
+  literal `gitops.nyl/v1` `Release` and is not claimed by another Release's
+  `spec.include`.
+
 - Added `--color` global flag to control colored output
   - `auto` (default): Automatically detect if colors should be used based on TTY detection
   - `always`: Always use colors, even when output is redirected
@@ -16,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Colors are now automatically disabled when output is piped or redirected to a file
 
 ### Changed
+
+- Rendered GitOps discovery and central render sessions share one parsed
+  `nyl.toml` configuration per project operation.
 
 - Optimized Git source resolution in ArgoCD plugin context to reuse ArgoCD's local checkout for matching `repoURL` + exact `targetRevision`, falling back to cache/worktree cloning on mismatch
 
