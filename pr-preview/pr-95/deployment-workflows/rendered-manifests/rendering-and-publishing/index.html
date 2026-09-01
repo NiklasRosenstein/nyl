@@ -133,15 +133,18 @@ cache records. Use <code dir="auto">--no-cache</code> to perform no persistent c
 temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.</p>
-<p>Rendering commands print a cache summary on standard error. It separates hits,
-misses, invalidations, refreshes, stored results, and bypassed work by target,
-Release, Helm, and source layer. Bypassed work includes the reason that prevents
-Nyl from safely revalidating it. Debug logging names the dependencies that
-changed when an existing entry is invalidated; secret and environment values
-remain represented only by keyed fingerprints.</p>
-<p>A complete target hit reports the work that it short-circuits instead of
-claiming hits for lower-level caches that were never consulted:</p>
-<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Cache:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Target: reused compiled tree</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Skipped: 38 Releases, 65 Helm renders</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Cache:  Target: reused compiled tree  Skipped: 38 Releases, 65 Helm renders"><div></div></button></div></figure></div>
+<p>Rendering commands print a cache summary on standard error. It reports work as
+reused, rebuilt or rendered, and skipped. Skipped work was not consulted because
+a higher-level artifact supplied the result. Inputs that cannot be cached retain
+their reason beneath the affected layer. Debug logging records the underlying
+miss, invalidation, refresh and store events and names changed dependencies;
+secret and environment values remain represented only by keyed fingerprints.</p>
+<p>A complete target reuse reports the work that it short-circuits instead of
+claiming reuse at lower-level caches that were never consulted:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Cache:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Target: reused</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Releases: 38 skipped</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Helm: 65 skipped</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Cache:  Target: reused  Releases: 38 skipped  Helm: 65 skipped"><div></div></button></div></figure></div>
+<p>A partial rebuild attributes lower-level work to the Release artifacts that
+short-circuited it:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Cache:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Target: rebuilt</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Releases: 37 reused, 1 rebuilt</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Helm: 65 skipped</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Cache:  Target: rebuilt  Releases: 37 reused, 1 rebuilt  Helm: 65 skipped"><div></div></button></div></figure></div>
 <p>The <code dir="auto">_nyl/index.json</code> ownership index is always verified when reading a
 published tree. Its hashes are publication integrity and provenance data, not
 a complete render cache key.</p>
