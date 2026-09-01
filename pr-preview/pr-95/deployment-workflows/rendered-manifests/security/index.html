@@ -92,7 +92,8 @@ source, destination, lifecycle, labels, and annotations. Use
 <code dir="auto">releaseCustomization.allowedPaths</code> and <code dir="auto">deniedPaths</code> to expose only deliberate
 per-release Application overrides. Deny wins when both lists match. Use
 <code dir="auto">releaseCustomization.allowedSyncOptions</code> to approve exact sync-option values
-that Releases may append without delegating the rest of the sync policy.</p>
+that Releases may merge without delegating the rest of the sync policy. Values
+with the same option key replace the generated or group-level value.</p>
 <p>AppProject source and destination policy remains an Argo CD enforcement layer
 even when an application source repository is compromised. An
 <code dir="auto">AppProjectDefinition</code> with <code dir="auto">management: External</code> references an administrator-
@@ -105,7 +106,8 @@ cluster-scoped permissions remain explicit. The generated policy complements,
 but does not replace, Argo CD admission.</p>
 <p>The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
-to catalog resources, and pruning the parent itself requires confirmation.
+to catalog resources, applies only out-of-sync resources, and pruning the parent
+itself requires confirmation.
 Review and protect the publication path because the parent can create Argo CD
 Applications and AppProjects.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="namespace-and-deletion-policy">Namespace and deletion policy</h2><a class="sl-anchor-link" href="#namespace-and-deletion-policy"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Namespace and deletion policy”</span></a></div>
