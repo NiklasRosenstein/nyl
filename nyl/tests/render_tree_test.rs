@@ -873,6 +873,109 @@ fn broad_release_policy_cannot_add_argocd_multi_sources() {
 }
 
 #[test]
+fn release_can_append_explicitly_allowed_sync_options() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  syncPolicy:\n    syncOptions: [ApplyOutOfSyncOnly=true]\n  releaseCustomization:\n    allowedSyncOptions: [ApplyOutOfSyncOnly=true, RespectIgnoreDifferences=false]\n{% if target.metadata.labels.environment == 'production' %}",
+    );
+    fs::write(group_path, group).unwrap();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "metadata:\n  name: api\n  namespace: api\n",
+        "metadata:\n  name: api\n  namespace: api\nspec:\n  argocd:\n    applicationOverride:\n      spec:\n        syncPolicy:\n          +syncOptions:\n            - ApplyOutOfSyncOnly=true\n            - RespectIgnoreDifferences=false\n",
+    );
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let application =
+        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+    assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
+    assert!(application.contains("- RespectIgnoreDifferences=false"));
+    assert!(!application.contains("+syncOptions"));
+}
+
+#[test]
+fn release_cannot_append_an_unapproved_sync_option() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  releaseCustomization:\n    allowedSyncOptions: [RespectIgnoreDifferences=true]\n{% if target.metadata.labels.environment == 'production' %}",
+    );
+    fs::write(group_path, group).unwrap();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "metadata:\n  name: api\n  namespace: api\n",
+        "metadata:\n  name: api\n  namespace: api\nspec:\n  argocd:\n    applicationOverride:\n      spec:\n        syncPolicy:\n          +syncOptions:\n            - RespectIgnoreDifferences=false\n",
+    );
+    fs::write(release_path, release).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is not allowed to add Argo CD sync option \"RespectIgnoreDifferences=false\"",
+        ));
+}
+
+#[test]
+fn allowed_sync_options_do_not_allow_replacing_group_sync_options() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  releaseCustomization:\n    allowedSyncOptions: [RespectIgnoreDifferences=false]\n{% if target.metadata.labels.environment == 'production' %}",
+    );
+    fs::write(group_path, group).unwrap();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "metadata:\n  name: api\n  namespace: api\n",
+        "metadata:\n  name: api\n  namespace: api\nspec:\n  argocd:\n    applicationOverride:\n      spec:\n        syncPolicy:\n          syncOptions:\n            - RespectIgnoreDifferences=false\n",
+    );
+    fs::write(release_path, release).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("platform-owned"));
+}
+
+#[test]
 fn workload_cannot_own_a_namespace_other_than_its_destination() {
     let fixture = fixture();
     let release_path = fixture.path().join("applications/workloads/api.yaml");

@@ -36,6 +36,8 @@ spec:
         kind: External
   applicationDeletionPolicy: Foreground
   releaseCustomization:
+    allowedSyncOptions:
+      - RespectIgnoreDifferences=false
     allowedPaths:
       - metadata.annotations.**
     deniedPaths:
@@ -138,9 +140,33 @@ the same resource instead of silently discarding an authored Namespace.
 lists applied to `Release.spec.argocd.applicationOverride`. `*` matches one
 path segment and `**` matches multiple segments. Deny wins.
 
-Core identity, finalizers, project, sources, destination, and sync policy are
-always platform-owned and cannot be customized, even when an allowed pattern
-matches. With no allowed paths, release overrides are rejected.
+`spec.releaseCustomization.allowedSyncOptions` is an exact allow-list for sync
+options that a Release may append with `spec.syncPolicy.+syncOptions` in its
+Application override:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+spec:
+  argocd:
+    applicationOverride:
+      spec:
+        syncPolicy:
+          +syncOptions:
+            - RespectIgnoreDifferences=false
+```
+
+Every appended value must appear verbatim in `allowedSyncOptions`. Nyl removes
+duplicate values already supplied by the ApplicationGroup. A plain
+`syncOptions` key attempts replacement and remains forbidden.
+
+Core identity, finalizers, project, sources, destination, and sync policy other
+than explicitly allowed sync-option additions are platform-owned and cannot be
+customized, even when an allowed path pattern matches. With no allowed paths,
+ordinary release overrides are rejected.
 
 ## Structural templating
 

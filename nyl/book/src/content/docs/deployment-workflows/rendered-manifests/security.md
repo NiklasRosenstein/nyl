@@ -25,7 +25,9 @@ change source repositories.
 An ApplicationGroup owns generated Application fields such as the project,
 source, destination, lifecycle, labels, and annotations. Use
 `releaseCustomization.allowedPaths` and `deniedPaths` to expose only deliberate
-per-release Application overrides. Deny wins when both lists match.
+per-release Application overrides. Deny wins when both lists match. Use
+`releaseCustomization.allowedSyncOptions` to approve exact sync-option values
+that Releases may append without delegating the rest of the sync policy.
 
 AppProject source and destination policy remains an Argo CD enforcement layer
 even when an application source repository is compromised. An

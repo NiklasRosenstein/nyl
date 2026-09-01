@@ -1076,16 +1076,19 @@ fn apply_release_application_override(
     release: &crate::resources::Release,
     group: &ApplicationGroup,
 ) -> Result<()> {
-    let Some(override_value) = release
+    let Some(mut override_value) = release
         .spec
         .argocd
         .as_ref()
-        .and_then(|argocd| argocd.application_override.as_ref())
+        .and_then(|argocd| argocd.application_override.clone())
     else {
         return Ok(());
     };
+    let sync_options = take_release_sync_option_additions(&mut override_value, release, group)?;
     let mut paths = Vec::new();
-    collect_leaf_paths(&Value::Object(override_value.clone()), &mut Vec::new(), &mut paths);
+    if !override_value.is_empty() {
+        collect_leaf_paths(&Value::Object(override_value.clone()), &mut Vec::new(), &mut paths);
+    }
     for path in &paths {
         const IMMUTABLE_PATHS: &[&str] = &[
             "apiVersion",
@@ -1133,7 +1136,87 @@ fn apply_release_application_override(
             )));
         }
     }
-    *application = crate::util::deep_merge_value(Some(application.clone()), Value::Object(override_value.clone()));
+    *application = crate::util::deep_merge_value(Some(application.clone()), Value::Object(override_value));
+    append_release_sync_options(application, sync_options)?;
+    Ok(())
+}
+
+fn take_release_sync_option_additions(
+    application_override: &mut serde_json::Map<String, Value>,
+    release: &crate::resources::Release,
+    group: &ApplicationGroup,
+) -> Result<Vec<String>> {
+    let Some(spec) = application_override.get_mut("spec").and_then(Value::as_object_mut) else {
+        return Ok(Vec::new());
+    };
+    let Some(sync_policy) = spec.get_mut("syncPolicy").and_then(Value::as_object_mut) else {
+        return Ok(Vec::new());
+    };
+    let Some(value) = sync_policy.remove("+syncOptions") else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        NylError::config(format!(
+            "Release {:?} spec.argocd.applicationOverride.spec.syncPolicy.+syncOptions must be an array of strings",
+            release.metadata.name
+        ))
+    })?;
+    let mut additions = Vec::new();
+    for value in values {
+        let option = value.as_str().ok_or_else(|| {
+            NylError::config(format!(
+                "Release {:?} spec.argocd.applicationOverride.spec.syncPolicy.+syncOptions must be an array of strings",
+                release.metadata.name
+            ))
+        })?;
+        if !group
+            .spec
+            .release_customization
+            .allowed_sync_options
+            .iter()
+            .any(|allowed| allowed == option)
+        {
+            return Err(NylError::config(format!(
+                "Release {:?} is not allowed to add Argo CD sync option {option:?}",
+                release.metadata.name
+            )));
+        }
+        if !additions.iter().any(|existing| existing == option) {
+            additions.push(option.to_owned());
+        }
+    }
+    if sync_policy.is_empty() {
+        spec.remove("syncPolicy");
+    }
+    if spec.is_empty() {
+        application_override.remove("spec");
+    }
+    Ok(additions)
+}
+
+fn append_release_sync_options(application: &mut Value, additions: Vec<String>) -> Result<()> {
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let spec = application
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| NylError::config("Generated Argo CD Application is missing spec"))?;
+    let sync_policy = spec
+        .entry("syncPolicy")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| NylError::config("Generated Argo CD Application spec.syncPolicy is not an object"))?;
+    let sync_options = sync_policy
+        .entry("syncOptions")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| NylError::config("Generated Argo CD Application spec.syncPolicy.syncOptions is not an array"))?;
+    for option in additions {
+        if !sync_options.iter().any(|existing| existing.as_str() == Some(&option)) {
+            sync_options.push(Value::String(option));
+        }
+    }
     Ok(())
 }
 

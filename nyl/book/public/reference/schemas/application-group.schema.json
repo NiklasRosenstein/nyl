@@ -208,6 +208,12 @@
           },
           "type": "array"
         },
+        "allowedSyncOptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "deniedPaths": {
           "items": {
             "type": "string"

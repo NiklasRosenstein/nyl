@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `ApplicationGroup.spec.releaseCustomization.allowedSyncOptions` for
+  exact, platform-approved Argo CD sync options that Releases may append to
+  their generated Applications.
+
 - Added a warning for every ApplicationGroup source candidate that has no
   literal `gitops.nyl/v1` `Release` and is not claimed by another Release's
   `spec.include`.

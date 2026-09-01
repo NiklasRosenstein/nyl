@@ -361,6 +361,8 @@ pub struct GitOpsReleaseCustomization {
     pub allowed_paths: Vec<String>,
     #[serde(default, rename = "deniedPaths", skip_serializing_if = "Vec::is_empty")]
     pub denied_paths: Vec<String>,
+    #[serde(default, rename = "allowedSyncOptions", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_sync_options: Vec<String>,
 }
 
 /// The supported static kind from a GitOps control-resource envelope.
@@ -718,6 +720,10 @@ impl ApplicationGroup {
         {
             crate::resources::validate_path_glob_pattern(pattern)?;
         }
+        validate_unique_static_names(
+            "spec.releaseCustomization.allowedSyncOptions",
+            &self.spec.release_customization.allowed_sync_options,
+        )?;
         Ok(())
     }
 }
@@ -1240,6 +1246,20 @@ mod tests {
             }
         });
         assert!(parse_gitops_resource(&value).is_err());
+    }
+
+    #[test]
+    fn validates_allowed_release_sync_options() {
+        let mut value = application_group();
+        value["spec"]["releaseCustomization"] = json!({
+            "allowedSyncOptions": ["RespectIgnoreDifferences=false"]
+        });
+        assert!(parse_gitops_resource(&value).is_ok());
+
+        value["spec"]["releaseCustomization"]["allowedSyncOptions"] =
+            json!(["RespectIgnoreDifferences=false", "RespectIgnoreDifferences=false"]);
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert!(error.contains("contains duplicate value"));
     }
 
     #[test]
