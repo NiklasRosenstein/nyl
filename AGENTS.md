@@ -122,6 +122,22 @@ Current status:
 - 34 integration tests  
 - 90%+ code coverage
 
+### High-value assertions
+
+- Every test and assertion must protect a user-visible behavior, a durable
+  invariant, or an integration boundary. Be able to name the failure it would
+  catch and why that failure matters.
+- Test shared behavior once at the layer that owns it. Command integration
+  tests should cover command-specific composition instead of repeating generic
+  error-formatting assertions already covered by the error type.
+- Prefer positive assertions that define the current contract. Do not assert
+  that obsolete wording or an implementation detail is absent merely because
+  it appeared in a previous version. A negative assertion is appropriate when
+  absence is itself a durable safety, security, or compatibility invariant.
+- Regression tests should describe a reachable failure mode and its lasting
+  expected behavior. Do not accumulate assertions whose only purpose is to
+  memorialize the individual symptom of a completed change.
+
 Run tests with coverage:
 ```bash
 mise run coverage  # Generates HTML report in nyl/coverage/

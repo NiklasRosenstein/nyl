@@ -14,7 +14,6 @@ fn test_error_variants() {
     let validation_err = NylError::validation("test validation");
     let validation_display = format!("{validation_err}");
     assert!(validation_display.contains("rerun the command"));
-    assert!(!validation_display.contains("nyl validate"));
 
     let k8s_err = NylError::kubernetes("test k8s error");
     assert!(k8s_err.is_kubernetes_error());
