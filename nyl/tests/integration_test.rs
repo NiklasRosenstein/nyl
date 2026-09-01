@@ -65,6 +65,32 @@ fn test_cli_version() {
 }
 
 #[test]
+fn test_render_reuses_the_shared_bundle_cache() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
+    fs::write(
+        temp.path().join("app.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cached\n",
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["render", "app.yaml", "--offline"])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .env("RUST_LOG", "nyl::render::session=debug")
+        .args(["render", "app.yaml", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Reusing cached rendered Release"));
+}
+
+#[test]
 fn test_cluster_help_exposes_only_list_and_update() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("cluster").arg("--help");

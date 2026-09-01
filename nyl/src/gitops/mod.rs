@@ -6,8 +6,8 @@ pub mod layout;
 pub mod reconcile;
 pub mod tree;
 
-pub use crate::render::cache::{CacheMode, GitOpsCache, TreeCacheArgs};
-pub use crate::render::{RenderSession, RenderedRelease};
+pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
+pub use crate::render::{RenderSession, RenderedBundle};
 pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
 pub use discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey};

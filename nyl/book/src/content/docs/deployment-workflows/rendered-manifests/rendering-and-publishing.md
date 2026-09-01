@@ -67,8 +67,10 @@ and symbolic-link protections remain enforced.
 
 ## Render cache and source freshness
 
-The tree commands cache three expensive results: complete target trees,
-individual rendered Releases, and parsed local Helm output. Cache entries are
+Nyl caches three expensive results: complete target trees, individual rendered
+Release bundles, and parsed local Helm output. Complete target trees apply only
+to `render-tree`, `diff-tree`, and `publish-tree`; bundle and Helm artifacts are
+also shared by `render`, `diff`, and `apply`. Cache entries are
 content-addressed and accompanied by dependency records. Nyl verifies project
 file and directory membership, target context, Kubernetes capabilities,
 admitted `NYL_*` environment, secrets through a cache-local keyed fingerprint,
@@ -87,9 +89,9 @@ RemoteManifest URLs are requested again, and repository chart coordinates are
 pulled and identified by their resulting content. Immutable content trees and
 render results can then be reused.
 
-Use `--refresh` on `render-tree`, `diff-tree`, or `publish-tree` to bypass all
-render cache reads, retrieve sources, rerender, and replace successful cache
-records. Use `--no-cache` to perform no persistent cache reads or writes;
+Use `--refresh` on a rendering command to bypass render cache reads, retrieve
+sources, rerender, and replace successful cache records. Use `--no-cache` to
+perform no persistent cache reads or writes;
 temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.

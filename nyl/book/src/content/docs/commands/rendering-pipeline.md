@@ -2,7 +2,10 @@
 title: 'Rendering Pipeline'
 ---
 
-`nyl render`, `nyl diff`, and `nyl apply` share the same manifest generation pipeline.
+`nyl render`, `nyl diff`, `nyl apply`, and the rendered-tree commands share one
+manifest generation pipeline. Tree commands add target composition, policy,
+layout, and whole-target caching after each Release bundle has passed through
+that pipeline.
 
 ## Shared Pipeline Steps
 
@@ -15,6 +18,11 @@ title: 'Rendering Pipeline'
 7. Apply Kyverno policies (Global scope currently supported).
 8. Deduplicate final manifests (last occurrence wins).
 9. Apply post-render kind filtering with `--only-kind` / `--exclude-kind`.
+
+Bundle expansion and parsed Helm output are cached by their complete observed
+inputs. `--refresh` bypasses cache reads and replaces successful entries;
+`--no-cache` disables persistent reads and writes. `diff` and `apply` always
+perform their live-cluster work even when desired-manifest rendering is reused.
 
 ## Namespace Resolution (Online Mode)
 

@@ -25,7 +25,7 @@ use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
 
-use super::cache::GitOpsCache;
+use super::cache::RenderCache;
 
 /// Immutable rendering state shared by every release in one GitOps target.
 pub struct RenderSession {
@@ -37,14 +37,14 @@ pub struct RenderSession {
     template_context: TemplateContext,
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     missing_capabilities_error: Option<String>,
-    cache: Option<GitOpsCache>,
+    cache: Option<RenderCache>,
 }
 
 /// Options that select one bundle and control its recursive expansion.
 #[derive(Clone, Debug)]
 pub struct RenderRequest<'a> {
     pub path: &'a Path,
-    pub path_relative_to_project_root: bool,
+    pub path_mode: RenderPathMode,
     pub provenance_root: Option<&'a Path>,
     pub only_source_kind: Option<&'a str>,
     pub max_depth: usize,
@@ -53,11 +53,17 @@ pub struct RenderRequest<'a> {
     pub strip_empty_metadata_labels_default: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum RenderPathMode {
+    ProjectRootRelative,
+    AsProvided,
+}
+
 impl<'a> RenderRequest<'a> {
     pub fn new(path: &'a Path, provenance_root: Option<&'a Path>) -> Self {
         Self {
             path,
-            path_relative_to_project_root: true,
+            path_mode: RenderPathMode::ProjectRootRelative,
             provenance_root,
             only_source_kind: None,
             max_depth: 10,
@@ -90,8 +96,6 @@ pub struct RenderedBundle {
     /// Whether every external renderer input can be validated without repeating the render.
     pub cacheable: bool,
 }
-
-pub type RenderedRelease = RenderedBundle;
 
 impl RenderSession {
     /// Build an offline rendering session from a project root and effective target.
@@ -282,12 +286,12 @@ impl RenderSession {
     }
 
     #[must_use]
-    pub fn with_cache(mut self, cache: Option<GitOpsCache>) -> Self {
+    pub fn with_cache(mut self, cache: Option<RenderCache>) -> Self {
         self.cache = cache;
         self
     }
 
-    pub fn set_cache(&mut self, cache: Option<GitOpsCache>) {
+    pub fn set_cache(&mut self, cache: Option<RenderCache>) {
         self.cache = cache;
     }
 
@@ -313,10 +317,9 @@ impl RenderSession {
         } else {
             self.project_root.join(request.path)
         };
-        let source_path = if request.path_relative_to_project_root {
-            &path
-        } else {
-            request.path
+        let source_path = match request.path_mode {
+            RenderPathMode::ProjectRootRelative => &path,
+            RenderPathMode::AsProvided => request.path,
         };
         let source_path_text = source_path
             .to_str()
@@ -468,7 +471,7 @@ impl RenderSession {
         inputs: &[PathBuf],
         resources: &[RenderResource],
         request: &RenderRequest<'_>,
-    ) -> Result<(Option<ReleaseCacheProbe>, Option<CachedRenderedRelease>)> {
+    ) -> Result<(Option<ReleaseCacheProbe>, Option<CachedRenderedBundle>)> {
         let Some(cache) = &self.cache else {
             return Ok((None, None));
         };
@@ -494,7 +497,7 @@ impl RenderSession {
             "request",
             &serde_json::json!({
                 "onlySourceKind": request.only_source_kind,
-                "pathRelativeToProjectRoot": request.path_relative_to_project_root,
+                "pathMode": format!("{:?}", request.path_mode),
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
                 "expandApplicationGenerators": request.expand_application_generators,
@@ -524,7 +527,7 @@ impl RenderSession {
         if !rendered.cacheable || !probe.recorder.is_cacheable() {
             return Ok(());
         }
-        let cached = CachedRenderedRelease::from_rendered(rendered);
+        let cached = CachedRenderedBundle::from_rendered(rendered);
         let Some(digest) = cache.store_artifact("release", &cached)? else {
             return Ok(());
         };
@@ -539,7 +542,7 @@ struct ReleaseCacheProbe {
 }
 
 #[derive(Deserialize, Serialize)]
-struct CachedRenderedRelease {
+struct CachedRenderedBundle {
     release: Option<Release>,
     manifests: Vec<Value>,
     application_generators: Vec<ApplicationGenerator>,
@@ -550,7 +553,7 @@ struct CachedRenderedRelease {
     inputs: Vec<PathBuf>,
 }
 
-impl CachedRenderedRelease {
+impl CachedRenderedBundle {
     fn from_rendered(rendered: &RenderedBundle) -> Self {
         let mut manifest_provenance = rendered
             .manifest_provenance

@@ -17,9 +17,9 @@ use crate::{NylError, Result};
 const CACHE_LAYOUT_VERSION: &str = "v1";
 const SECRET_KEY_FILE: &str = "secret-fingerprint-key";
 
-/// Cache controls shared by all rendered-tree commands.
+/// Cache controls shared by all manifest-rendering commands.
 #[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TreeCacheArgs {
+pub struct RenderCacheArgs {
     /// Retrieve external inputs again and rebuild cached render artifacts.
     #[arg(long, conflicts_with = "no_cache")]
     pub refresh: bool,
@@ -29,7 +29,7 @@ pub struct TreeCacheArgs {
     pub no_cache: bool,
 }
 
-impl TreeCacheArgs {
+impl RenderCacheArgs {
     pub fn mode(self) -> CacheMode {
         if self.no_cache {
             CacheMode::Disabled
@@ -244,9 +244,9 @@ impl DependencyRecorder {
     }
 }
 
-/// Cache storage scoped to the stable GitOps cache layout.
+/// Cache storage shared by bundle, Helm, source, and target-tree rendering.
 #[derive(Clone, Debug)]
-pub struct GitOpsCache {
+pub struct RenderCache {
     root: PathBuf,
     mode: CacheMode,
     secret_key: [u8; 32],
@@ -254,7 +254,7 @@ pub struct GitOpsCache {
     source_cache: Option<Arc<tempfile::TempDir>>,
 }
 
-impl GitOpsCache {
+impl RenderCache {
     pub fn new(project_root: &Path, mode: CacheMode) -> Result<Self> {
         let cache_root =
             std::env::var_os("NYL_CACHE_DIR").map_or_else(|| project_root.join(".nyl/cache"), PathBuf::from);
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn artifact_corruption_is_a_safe_cache_miss() {
         let temp = tempfile::TempDir::new().unwrap();
-        let cache = GitOpsCache::with_root(temp.path(), CacheMode::Default).unwrap();
+        let cache = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
         let digest = cache.store_artifact("target", &vec!["manifest"]).unwrap().unwrap();
         fs::write(cache.artifact_path("target", &digest).unwrap(), b"corrupt").unwrap();
 
@@ -573,9 +573,9 @@ mod tests {
     #[test]
     fn disabled_cache_neither_reads_nor_writes() {
         let temp = tempfile::TempDir::new().unwrap();
-        let persistent = GitOpsCache::with_root(temp.path(), CacheMode::Default).unwrap();
+        let persistent = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
         let digest = persistent.store_artifact("target", &vec!["manifest"]).unwrap().unwrap();
-        let disabled = GitOpsCache::with_root(temp.path(), CacheMode::Disabled).unwrap();
+        let disabled = RenderCache::with_root(temp.path(), CacheMode::Disabled).unwrap();
 
         assert_eq!(disabled.load_artifact::<Vec<String>>("target", &digest).unwrap(), None);
         assert_eq!(disabled.store_artifact("target", &vec!["other"]).unwrap(), None);
@@ -588,8 +588,8 @@ mod tests {
     fn secret_dependencies_use_a_cache_local_key() {
         let first_root = tempfile::TempDir::new().unwrap();
         let second_root = tempfile::TempDir::new().unwrap();
-        let first = GitOpsCache::with_root(first_root.path(), CacheMode::Default).unwrap();
-        let second = GitOpsCache::with_root(second_root.path(), CacheMode::Default).unwrap();
+        let first = RenderCache::with_root(first_root.path(), CacheMode::Default).unwrap();
+        let second = RenderCache::with_root(second_root.path(), CacheMode::Default).unwrap();
         let mut first_recording = first.recorder();
         let mut second_recording = second.recorder();
         first_recording.record_secret("token", b"shared secret");

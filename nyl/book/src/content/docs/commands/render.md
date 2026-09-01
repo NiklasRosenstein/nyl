@@ -30,6 +30,8 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 - `--target <TARGET>` - GitOpsTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
+- `--refresh` - Bypass cached rendering results and replace successful entries.
+- `--no-cache` - Perform no persistent cache reads or writes.
 
 ### Offline Mode Options
 
@@ -77,6 +79,9 @@ nyl render --max-depth 5 manifest.yaml
 # Track parent resources in annotations
 nyl render --track-parent manifest.yaml
 
+# Force source resolution and manifest expansion to run again
+nyl render --refresh manifest.yaml
+
 # Combine options
 nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 ```
@@ -85,6 +90,7 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.
+- Bundle and Helm rendering use the shared content-addressed render cache. `diff` and `apply` reuse the same desired-manifest artifacts before performing their live-cluster operations.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution, filter semantics, and online/offline behavior.
 - `ApplicationGenerator` source resolution first honors `NYL_APPGEN_REPO_PATH_OVERRIDE`, then tries to reuse the current local Git checkout when `repoURL` matches a local remote and `targetRevision` is `HEAD` or the current branch, then falls back to ArgoCD checkout reuse and normal Git cache/worktree resolution.
 - Local ApplicationGenerator testing override: set `NYL_APPGEN_REPO_PATH_OVERRIDE` to a local repository root (or `@git` to auto-detect the Git root from the current `PWD`) to make ApplicationGenerator scan the local filesystem instead of cloning. This affects `render`, `diff`, and `apply` (all use the same render pipeline). Using `@git` outside a Git repository fails with a configuration error.
