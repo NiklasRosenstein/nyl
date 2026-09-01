@@ -362,6 +362,70 @@ metadata:
 }
 
 #[test]
+fn rerendered_release_reuses_unchanged_helm_output() {
+    let fixture = fixture();
+    let chart = fixture.path().join("components/Test");
+    fs::create_dir_all(chart.join("templates")).unwrap();
+    fs::write(chart.join("Chart.yaml"), "apiVersion: v2\nname: test\nversion: 1.0.0\n").unwrap();
+    fs::write(
+        chart.join("templates/configmap.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: from-helm\n",
+    )
+    .unwrap();
+    let release = fixture.path().join("applications/workloads/helm.yaml");
+    fs::write(
+        &release,
+        r#"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: helm
+  namespace: helm
+---
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: Test
+metadata:
+  name: helm
+  namespace: helm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alongside
+  namespace: helm
+data:
+  revision: first
+"#,
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+    let args = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+        "--check",
+    ];
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(&release).unwrap();
+    fs::write(&release, contents.replace("revision: first", "revision: second")).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("RUST_LOG", "nyl::helm::template=debug")
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Reusing cached Helm output"));
+}
+
+#[test]
 fn explicit_argocd_instances_are_strict_and_drive_the_catalog() {
     let fixture = fixture();
     fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();

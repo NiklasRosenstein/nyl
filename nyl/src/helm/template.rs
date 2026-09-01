@@ -29,6 +29,8 @@ pub struct HelmTemplateExecutor {
 
     /// Whether to pass --include-crds to helm template (default: true)
     include_crds: bool,
+
+    gitops_cache: Option<crate::gitops::GitOpsCache>,
 }
 
 impl HelmTemplateExecutor {
@@ -38,6 +40,7 @@ impl HelmTemplateExecutor {
             kube_version: None,
             api_versions: Vec::new(),
             include_crds: true,
+            gitops_cache: None,
         }
     }
 
@@ -59,6 +62,12 @@ impl HelmTemplateExecutor {
     #[must_use]
     pub fn with_include_crds(mut self, include_crds: bool) -> Self {
         self.include_crds = include_crds;
+        self
+    }
+
+    #[must_use]
+    pub fn with_gitops_cache(mut self, cache: Option<crate::gitops::GitOpsCache>) -> Self {
+        self.gitops_cache = cache;
         self
     }
 
@@ -144,6 +153,17 @@ impl HelmTemplateExecutor {
         values: &serde_json::Value,
         preserve_source_comments: bool,
     ) -> Result<Vec<serde_json::Value>> {
+        let (cache_probe, cached) = self.prepare_cache(
+            resolved,
+            release_name,
+            release_namespace,
+            values,
+            preserve_source_comments,
+        )?;
+        if let Some(cached) = cached {
+            tracing::debug!(chart = %resolved.path.display(), release = release_name, "Reusing cached Helm output");
+            return Ok(cached);
+        }
         tracing::debug!(
             "Rendering Helm chart: {} (release: {})",
             resolved.path.display(),
@@ -182,11 +202,72 @@ impl HelmTemplateExecutor {
 
         // Parse YAML output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if preserve_source_comments {
+        let manifests = if preserve_source_comments {
             parse_yaml_documents_with_source_comments(&stdout, resolved, release_name)
         } else {
             parse_yaml_documents(&stdout)
+        }?;
+        self.store_cache(cache_probe, &manifests)?;
+        Ok(manifests)
+    }
+
+    fn prepare_cache(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+        preserve_source_comments: bool,
+    ) -> Result<(Option<HelmCacheProbe>, Option<Vec<serde_json::Value>>)> {
+        let Some(cache) = &self.gitops_cache else {
+            return Ok((None, None));
+        };
+        if cache.mode() == crate::gitops::CacheMode::Disabled || resolved.chart_ref.repository.is_some() {
+            return Ok((None, None));
         }
+        let key = format!(
+            "{}\0{release_name}\0{}",
+            resolved.path.display(),
+            release_namespace.unwrap_or_default()
+        );
+        let mut recorder = cache.recorder();
+        recorder.record_directory(&resolved.path)?;
+        recorder.record_value(
+            "parameters",
+            &serde_json::json!({
+                "releaseName": release_name,
+                "releaseNamespace": release_namespace,
+                "values": values,
+                "kubeVersion": self.kube_version,
+                "apiVersions": self.api_versions,
+                "includeCrds": self.include_crds,
+                "preserveSourceComments": preserve_source_comments,
+            }),
+        )?;
+        cache.record_renderer_tools(&mut recorder)?;
+        let current = recorder.clone().finish("helm", String::new());
+        let cached = if let Some(previous) = cache
+            .load_record("helm", &key)?
+            .filter(|record| record.same_inputs(&current))
+        {
+            cache.load_artifact("helm", &previous.artifact_digest)?
+        } else {
+            None
+        };
+        Ok((Some(HelmCacheProbe { key, recorder }), cached))
+    }
+
+    fn store_cache(&self, probe: Option<HelmCacheProbe>, manifests: &[serde_json::Value]) -> Result<()> {
+        let (Some(cache), Some(probe)) = (&self.gitops_cache, probe) else {
+            return Ok(());
+        };
+        if !probe.recorder.is_cacheable() {
+            return Ok(());
+        }
+        let Some(digest) = cache.store_artifact("helm", &manifests)? else {
+            return Ok(());
+        };
+        cache.store_record("helm", &probe.key, &probe.recorder.finish("helm", digest))
     }
 
     /// Check if helm is installed and available
@@ -226,8 +307,14 @@ impl std::fmt::Debug for HelmTemplateExecutor {
             .field("kube_version", &self.kube_version)
             .field("api_versions", &self.api_versions)
             .field("include_crds", &self.include_crds)
+            .field("gitops_cache", &self.gitops_cache.as_ref().map(|_| "configured"))
             .finish()
     }
+}
+
+struct HelmCacheProbe {
+    key: String,
+    recorder: crate::gitops::cache::DependencyRecorder,
 }
 
 /// Helper to write values to a temporary file

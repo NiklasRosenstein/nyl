@@ -392,6 +392,7 @@ pub(crate) async fn render_manifests(
                 &api_versions,
                 credential_provider.clone(),
                 track_parent,
+                None,
             )
             .await?;
             for manifest in manifests {
@@ -1080,6 +1081,7 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
 }
 
 /// Generate manifests from a resource
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_render_resource(
     resource: &RenderResource,
     context: &TemplateContext,
@@ -1088,6 +1090,7 @@ pub(crate) async fn generate_render_resource(
     api_versions: &[String],
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
+    gitops_cache: Option<&crate::gitops::GitOpsCache>,
 ) -> Result<Vec<RenderResource>> {
     let provenance = resource.provenance.resource(&resource.value);
     let generated = generate_resource(
@@ -1098,6 +1101,7 @@ pub(crate) async fn generate_render_resource(
         api_versions,
         credential_provider,
         track_parent,
+        gitops_cache,
     )
     .await
     .map_err(|error| error.with_render_provenance(provenance.to_string()))?;
@@ -1162,7 +1166,7 @@ fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
     reference
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn generate_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
@@ -1171,6 +1175,7 @@ pub(crate) async fn generate_resource(
     api_versions: &[String],
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
+    gitops_cache: Option<&crate::gitops::GitOpsCache>,
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -1187,6 +1192,7 @@ pub(crate) async fn generate_resource(
             kube_version,
             api_versions,
             credential_provider.clone(),
+            gitops_cache,
         )?;
 
         Ok(apply_parent_tracking_annotations(
@@ -1261,6 +1267,7 @@ pub(crate) async fn generate_resource(
                 kube_version,
                 api_versions,
                 credential_provider.clone(),
+                gitops_cache,
             )?;
 
             Ok(apply_parent_tracking_annotations(
@@ -1301,6 +1308,7 @@ pub(crate) async fn generate_resource(
                 kube_version,
                 api_versions,
                 credential_provider.clone(),
+                gitops_cache,
             )?;
 
             Ok(apply_parent_tracking_annotations(
@@ -1535,6 +1543,7 @@ fn render_helm_chart(
     kube_version: &str,
     api_versions: &[String],
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+    gitops_cache: Option<&crate::gitops::GitOpsCache>,
 ) -> Result<Vec<serde_json::Value>> {
     let working_dir = if let Some(config_file) = &config.file {
         config_file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
@@ -1553,7 +1562,8 @@ fn render_helm_chart(
     let executor = HelmTemplateExecutor::new()
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec())
-        .with_include_crds(chart.spec.include_crds.unwrap_or(true));
+        .with_include_crds(chart.spec.include_crds.unwrap_or(true))
+        .with_gitops_cache(gitops_cache.cloned());
 
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));
@@ -4498,7 +4508,7 @@ metadata:
             "spec": {"url": "http://example.com/manifests.yaml"}
         });
 
-        let result = generate_resource(&resource, &context, &config, "", &[], None, false).await;
+        let result = generate_resource(&resource, &context, &config, "", &[], None, false, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
     }

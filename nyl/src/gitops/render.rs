@@ -278,6 +278,7 @@ impl RenderSession {
                     &api_versions,
                     None,
                     false,
+                    self.cache.as_ref(),
                 )
                 .await?
                 {
