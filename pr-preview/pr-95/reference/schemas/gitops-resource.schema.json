@@ -16,6 +16,9 @@
     },
     {
       "$ref": "application-group.schema.json"
+    },
+    {
+      "$ref": "release.schema.json"
     }
   ],
   "title": "Nyl GitOps resource"
