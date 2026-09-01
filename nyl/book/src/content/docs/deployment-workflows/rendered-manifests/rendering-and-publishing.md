@@ -105,6 +105,15 @@ Nyl from safely revalidating it. Debug logging names the dependencies that
 changed when an existing entry is invalidated; secret and environment values
 remain represented only by keyed fingerprints.
 
+A complete target hit reports the work that it short-circuits instead of
+claiming hits for lower-level caches that were never consulted:
+
+```text
+Cache:
+  Target: reused compiled tree
+  Skipped: 38 Releases, 65 Helm renders
+```
+
 The `_nyl/index.json` ownership index is always verified when reading a
 published tree. Its hashes are publication integrity and provenance data, not
 a complete render cache key.

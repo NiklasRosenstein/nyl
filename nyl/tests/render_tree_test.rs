@@ -344,6 +344,60 @@ fn no_cache_render_leaves_no_persistent_cache() {
 }
 
 #[test]
+fn warm_target_cache_reports_the_rendering_work_it_skips() {
+    let fixture = fixture();
+    let chart = fixture.path().join("components/Test");
+    fs::create_dir_all(chart.join("templates")).unwrap();
+    fs::write(chart.join("Chart.yaml"), "apiVersion: v2\nname: test\nversion: 1.0.0\n").unwrap();
+    fs::write(
+        chart.join("templates/configmap.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: from-helm\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/helm.yaml"),
+        r#"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: helm
+  namespace: helm
+---
+apiVersion: components.nyl.niklasrosenstein.github.com/v1
+kind: Test
+metadata:
+  name: helm
+  namespace: helm
+"#,
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+    let args = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+        "--check",
+    ];
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Cache:\n  Target: reused compiled tree\n  Skipped: 2 Releases, 1 Helm render",
+        ));
+}
+
+#[test]
 fn changing_one_release_reuses_unchanged_release_artifacts() {
     let fixture = fixture();
     let worker = fixture.path().join("applications/workloads/worker.yaml");

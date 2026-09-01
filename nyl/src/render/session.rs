@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    deduplicate_manifests, filter_render_resources, generate_render_resource, is_renderable_resource,
-    load_release_bundle_with_root, prepare_manifests_for_output, process_application_generator,
+    deduplicate_manifests, filter_render_resources, generate_render_resource, is_helm_renderable_resource,
+    is_renderable_resource, load_release_bundle_with_root, prepare_manifests_for_output, process_application_generator,
     resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
 use crate::config::ProjectConfig;
@@ -99,6 +99,8 @@ pub struct RenderedBundle {
     pub cache_bypass_reasons: BTreeSet<String>,
     /// Concrete files and directories observed while rendering this bundle.
     pub cache_dependencies: std::collections::BTreeMap<String, super::cache::RecordedDependency>,
+    /// Number of Helm expansions represented by this rendered bundle.
+    pub helm_render_count: usize,
 }
 
 impl RenderSession {
@@ -376,10 +378,12 @@ impl RenderSession {
 
         let mut manifests = Vec::new();
         let mut manifest_provenance = HashMap::new();
+        let mut helm_render_count = 0;
         let mut pending = resources;
         for _ in 0..request.max_depth {
             let mut next = Vec::new();
             for resource in pending {
+                helm_render_count += usize::from(is_helm_renderable_resource(&resource.value, &self.project_config));
                 if let Some(probe) = &mut cache_probe {
                     record_resource_directory_dependency(&mut probe.recorder, &resource.value, &self.project_config)?;
                 }
@@ -494,6 +498,7 @@ impl RenderSession {
             cacheable,
             cache_bypass_reasons,
             cache_dependencies,
+            helm_render_count,
         };
         self.store_release_cache(cache_probe, &rendered)?;
         Ok(rendered)
@@ -658,6 +663,7 @@ struct CachedRenderedBundle {
     manifest_provenance: Vec<(ResourceKey, String)>,
     release_provenance: Option<String>,
     inputs: Vec<PathBuf>,
+    helm_render_count: usize,
 }
 
 impl CachedRenderedBundle {
@@ -683,6 +689,7 @@ impl CachedRenderedBundle {
             manifest_provenance,
             release_provenance: rendered.release_provenance.clone(),
             inputs: rendered.inputs.clone(),
+            helm_render_count: rendered.helm_render_count,
         }
     }
 
@@ -702,6 +709,7 @@ impl CachedRenderedBundle {
             cacheable: true,
             cache_bypass_reasons: BTreeSet::new(),
             cache_dependencies,
+            helm_render_count: self.helm_render_count,
         }
     }
 }

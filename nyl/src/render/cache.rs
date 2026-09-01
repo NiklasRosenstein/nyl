@@ -63,10 +63,10 @@ pub enum CacheLayer {
 impl CacheLayer {
     fn label(self) -> &'static str {
         match self {
-            Self::Target => "target",
-            Self::Release => "releases",
+            Self::Target => "Target",
+            Self::Release => "Releases",
             Self::Helm => "Helm",
-            Self::Source => "sources",
+            Self::Source => "Sources",
         }
     }
 }
@@ -103,6 +103,13 @@ impl CacheOutcome {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
     layers: BTreeMap<CacheLayer, CacheLayerStats>,
+    target_reuse: Option<TargetReuse>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TargetReuse {
+    releases: usize,
+    helm_renders: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -129,35 +136,55 @@ impl CacheStats {
 
 impl fmt::Display for CacheStats {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Cache: ")?;
-        let mut first_layer = true;
+        write!(formatter, "Cache:")?;
         for (layer, stats) in &self.layers {
-            if !first_layer {
-                write!(formatter, "; ")?;
-            }
-            first_layer = false;
-            write!(formatter, "{}: ", layer.label())?;
-            let mut first_outcome = true;
-            for (outcome, count) in &stats.outcomes {
-                if !first_outcome {
-                    write!(formatter, ", ")?;
+            write!(formatter, "\n  {}: ", layer.label())?;
+            if *layer == CacheLayer::Target && self.target_reuse.is_some() {
+                write!(formatter, "reused compiled tree")?;
+            } else {
+                for (index, (outcome, count)) in stats.outcomes.iter().enumerate() {
+                    if index > 0 {
+                        write!(formatter, ", ")?;
+                    }
+                    if *layer == CacheLayer::Target {
+                        write!(formatter, "{}", outcome.label(1))?;
+                    } else {
+                        write!(formatter, "{count} {}", outcome.label(*count))?;
+                    }
                 }
-                first_outcome = false;
-                write!(formatter, "{count} {}", outcome.label(*count))?;
+            }
+            if *layer == CacheLayer::Target {
+                if let Some(reuse) = &self.target_reuse {
+                    if reuse.releases > 0 || reuse.helm_renders > 0 {
+                        write!(formatter, "\n  Skipped: ")?;
+                        match (reuse.releases, reuse.helm_renders) {
+                            (0, helm_renders) => write_count(formatter, helm_renders, "Helm render", "Helm renders")?,
+                            (releases, 0) => write_count(formatter, releases, "Release", "Releases")?,
+                            (releases, helm_renders) => {
+                                write_count(formatter, releases, "Release", "Releases")?;
+                                write!(formatter, ", ")?;
+                                write_count(formatter, helm_renders, "Helm render", "Helm renders")?;
+                            }
+                        }
+                    }
+                }
             }
             if !stats.bypass_reasons.is_empty() {
-                write!(formatter, " (")?;
+                write!(formatter, "\n    Bypass reasons: ")?;
                 for (index, (reason, count)) in stats.bypass_reasons.iter().enumerate() {
                     if index > 0 {
                         write!(formatter, ", ")?;
                     }
                     write!(formatter, "{reason}: {count}")?;
                 }
-                write!(formatter, ")")?;
             }
         }
         Ok(())
     }
+}
+
+fn write_count(formatter: &mut fmt::Formatter<'_>, count: usize, singular: &str, plural: &str) -> fmt::Result {
+    write!(formatter, "{count} {}", if count == 1 { singular } else { plural })
 }
 
 impl CacheMode {
@@ -458,6 +485,12 @@ impl RenderCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .observe(layer, outcome, reasons);
+    }
+
+    pub fn observe_target_hit(&self, releases: usize, helm_renders: usize) {
+        let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        stats.observe(CacheLayer::Target, CacheOutcome::Hit, &[]);
+        stats.target_reuse = Some(TargetReuse { releases, helm_renders });
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -792,8 +825,21 @@ mod tests {
 
         assert_eq!(
             cache.stats().to_string(),
-            "Cache: target: 1 miss, 1 bypassed (RemoteManifest: 1, remote Helm chart: 1); \
-             releases: 2 hits; Helm: 1 bypassed (remote Helm chart: 1)"
+            "Cache:\n  Target: miss, bypassed\n    Bypass reasons: RemoteManifest: 1, remote Helm chart: 1\n  \
+             Releases: 2 hits\n  Helm: 1 bypassed\n    Bypass reasons: remote Helm chart: 1"
+        );
+    }
+
+    #[test]
+    fn target_hit_explains_short_circuited_rendering_work() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cache = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
+
+        cache.observe_target_hit(38, 65);
+
+        assert_eq!(
+            cache.stats().to_string(),
+            "Cache:\n  Target: reused compiled tree\n  Skipped: 38 Releases, 65 Helm renders"
         );
     }
 

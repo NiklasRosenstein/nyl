@@ -60,10 +60,16 @@ pub(crate) fn filter_render_resources(
 
 /// Check whether a resource will be recursively expanded.
 pub(crate) fn is_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
+    is_helm_renderable_resource(resource, config)
+        || (resource.get("kind").and_then(|kind| kind.as_str()) == Some("RemoteManifest")
+            && resource.get("apiVersion").and_then(|api_version| api_version.as_str()) == Some(API_VERSION))
+}
+
+/// Check whether expanding a resource invokes the Helm rendering path.
+pub(crate) fn is_helm_renderable_resource(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
     (kind == Some("HelmChart") && api_version == Some(API_VERSION))
-        || (kind == Some("RemoteManifest") && api_version == Some(API_VERSION))
         || is_nyl_component(resource)
         || api_version
             .zip(kind)
@@ -73,16 +79,9 @@ pub(crate) fn is_renderable_resource(resource: &serde_json::Value, config: &Proj
 
 #[cfg(test)]
 pub(crate) fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig) -> bool {
-    resources.iter().any(|resource| {
-        let kind = resource.get("kind").and_then(|k| k.as_str());
-        let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
-        (kind == Some("HelmChart") && api_version == Some(API_VERSION))
-            || api_version == Some(API_VERSION_COMPONENTS)
-            || api_version
-                .zip(kind)
-                .and_then(|(av, k)| config.get_alias_target_for_kind(av, k))
-                .is_some()
-    })
+    resources
+        .iter()
+        .any(|resource| is_helm_renderable_resource(resource, config))
 }
 
 /// Maximum Levenshtein distance for considering an API version as "similar" to a known Nyl domain.

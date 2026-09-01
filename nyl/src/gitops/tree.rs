@@ -37,6 +37,20 @@ pub struct CompiledTargetTree {
     pub inputs: BTreeSet<PathBuf>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedTargetTree {
+    compiled: CompiledTargetTree,
+    releases: usize,
+    helm_renders: usize,
+}
+
+#[derive(Serialize)]
+struct CachedTargetTreeRef<'a> {
+    compiled: &'a CompiledTargetTree,
+    releases: usize,
+    helm_renders: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ManagedNamespaceOwner {
     manifest: Value,
@@ -309,6 +323,8 @@ async fn compile_target_tree_inner(
     let mut workload_owners = HashMap::new();
     let mut pending_workloads = Vec::new();
     let mut namespace_scope_errors = Vec::new();
+    let mut release_count = 0;
+    let mut helm_render_count = 0;
 
     for PreparedGroup {
         group_resource_path,
@@ -360,6 +376,7 @@ async fn compile_target_tree_inner(
             let mut rendered = session
                 .render_release_file_with_provenance_root(source_file, provenance_root)
                 .await?;
+            helm_render_count += rendered.helm_render_count;
             if let Some(probe) = &mut cache_probe {
                 probe
                     .recorder
@@ -388,6 +405,7 @@ async fn compile_target_tree_inner(
             let Some(release) = rendered.release.take() else {
                 continue;
             };
+            release_count += 1;
             let destination_namespace = group
                 .spec
                 .destination_namespace
@@ -542,6 +560,8 @@ async fn compile_target_tree_inner(
         target_cacheable,
         &target_cache_bypass_reasons,
         &compiled,
+        release_count,
+        helm_render_count,
     )?;
     Ok(compiled)
 }
@@ -646,14 +666,15 @@ fn load_cached_target(
         cache.observe(CacheLayer::Target, CacheOutcome::Invalidated, &[]);
         return Ok(None);
     }
-    let compiled = cache.load_artifact("target", &record.artifact_digest)?;
-    if compiled.is_some() {
-        cache.observe(CacheLayer::Target, CacheOutcome::Hit, &[]);
+    let cached: Option<CachedTargetTree> = cache.load_artifact("target", &record.artifact_digest)?;
+    if let Some(cached) = cached {
+        cache.observe_target_hit(cached.releases, cached.helm_renders);
         tracing::debug!(target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key), "Reusing cached GitOps target tree");
+        Ok(Some(cached.compiled))
     } else {
         cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
+        Ok(None)
     }
-    Ok(compiled)
 }
 
 fn store_cached_target(
@@ -662,6 +683,8 @@ fn store_cached_target(
     cacheable: bool,
     bypass_reasons: &BTreeSet<String>,
     compiled: &CompiledTargetTree,
+    releases: usize,
+    helm_renders: usize,
 ) -> Result<()> {
     let (Some(cache), Some(probe)) = (cache, probe) else {
         return Ok(());
@@ -674,7 +697,12 @@ fn store_cached_target(
         );
         return Ok(());
     }
-    let Some(digest) = cache.store_artifact("target", compiled)? else {
+    let cached = CachedTargetTreeRef {
+        compiled,
+        releases,
+        helm_renders,
+    };
+    let Some(digest) = cache.store_artifact("target", &cached)? else {
         return Ok(());
     };
     let record = probe.recorder.finish("target", digest);
