@@ -491,7 +491,7 @@ async fn compile_target_tree_inner(
 
 struct TargetCacheProbe {
     key: String,
-    record: crate::gitops::cache::DependencyRecord,
+    record: crate::render::cache::DependencyRecord,
     cacheable: bool,
 }
 
@@ -1655,7 +1655,7 @@ fn build_group_source_session(
 fn static_release_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut release_files = Vec::new();
     for path in files {
-        if crate::cli::commands::render::has_static_release(path)? {
+        if crate::render::has_static_release(path)? {
             release_files.push(path.clone());
         }
     }

@@ -314,7 +314,7 @@ impl std::fmt::Debug for HelmTemplateExecutor {
 
 struct HelmCacheProbe {
     key: String,
-    recorder: crate::gitops::cache::DependencyRecorder,
+    recorder: crate::render::cache::DependencyRecorder,
 }
 
 /// Helper to write values to a temporary file

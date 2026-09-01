@@ -383,7 +383,7 @@ metadata:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::gitops::render=debug")
+        .env("RUST_LOG", "nyl::render::session=debug")
         .args(args)
         .assert()
         .success()

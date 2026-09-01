@@ -1,4 +1,4 @@
-//! Versioned, content-addressed storage for rendered GitOps operations.
+//! Versioned, content-addressed storage shared by manifest and tree rendering.
 
 use std::collections::BTreeMap;
 use std::fs;

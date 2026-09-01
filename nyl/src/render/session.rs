@@ -1,4 +1,4 @@
-//! Target-aware, offline rendering for rendered GitOps trees.
+//! Session-scoped, target-aware manifest rendering.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cli::commands::render::{
+use super::{
     deduplicate_manifests, generate_render_resource, is_renderable_resource, load_release_bundle_with_root,
     prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
@@ -22,7 +22,7 @@ use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
 
-use super::GitOpsCache;
+use super::cache::GitOpsCache;
 
 /// Immutable rendering state shared by every release in one GitOps target.
 pub struct RenderSession {
@@ -362,7 +362,7 @@ impl RenderSession {
         let Some(cache) = &self.cache else {
             return Ok((None, None));
         };
-        if cache.mode() == crate::gitops::CacheMode::Disabled {
+        if cache.mode() == crate::render::cache::CacheMode::Disabled {
             return Ok((None, None));
         }
         let key = format!(
@@ -414,7 +414,7 @@ impl RenderSession {
 
 struct ReleaseCacheProbe {
     key: String,
-    recorder: crate::gitops::cache::DependencyRecorder,
+    recorder: crate::render::cache::DependencyRecorder,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -456,7 +456,7 @@ impl CachedRenderedRelease {
 }
 
 fn record_resource_directory_dependency(
-    recorder: &mut crate::gitops::cache::DependencyRecorder,
+    recorder: &mut crate::render::cache::DependencyRecorder,
     resource: &Value,
     config: &ProjectConfig,
 ) -> Result<()> {
