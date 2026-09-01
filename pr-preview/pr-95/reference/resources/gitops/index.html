@@ -81,13 +81,15 @@ cluster.</p>
 reusable, credential-free repository identity.</li>
 <li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/cluster/"><code dir="auto">Cluster</code></a> defines a concrete Argo
 CD destination and deterministic Kubernetes capabilities.</li>
+<li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/argocd-instance/"><code dir="auto">ArgoCDInstance</code></a> defines
+an Argo CD control plane and catalog defaults.</li>
 <li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/gitops-target/"><code dir="auto">GitOpsTarget</code></a> defines one
 independently rendered and published deployment slice.</li>
 <li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/app-project-definition/"><code dir="auto">AppProjectDefinition</code></a>
 defines a local identity for a rendered or externally managed Argo CD
 AppProject.</li>
 <li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/application-group/"><code dir="auto">ApplicationGroup</code></a>
-selects releases and targets and owns generated Application and Namespace
+declares release sources and owns generated Application, AppProject, and Namespace
 policy.</li>
 <li><a href="/nyl/pr-preview/pr-95/reference/resources/gitops/release/"><code dir="auto">Release</code></a> defines one deployment
 unit, its namespace scope, included manifests, and approved Application
