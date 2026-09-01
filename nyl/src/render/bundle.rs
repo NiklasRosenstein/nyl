@@ -14,6 +14,7 @@ use crate::{NylError, Result};
 pub(crate) struct LoadedReleaseBundle {
     pub resources: Vec<RenderResource>,
     pub inputs: Vec<PathBuf>,
+    pub dependency_directories: Vec<PathBuf>,
 }
 
 /// Load one manifest entrypoint and any files selected by its Release.
@@ -35,9 +36,22 @@ pub(crate) fn load_release_bundle_with_root(
     let (release, _) = extract_release(&values)?;
     let mut inputs = vec![path.to_path_buf()];
     let Some(release) = release else {
-        return Ok(LoadedReleaseBundle { resources, inputs });
+        return Ok(LoadedReleaseBundle {
+            resources,
+            inputs,
+            dependency_directories: Vec::new(),
+        });
     };
 
+    let dependency_directories = if release.spec.include.is_empty() {
+        Vec::new()
+    } else {
+        vec![path
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()?]
+    };
     let include_paths = resolve_release_includes(path, &release)?;
     for include_path in &include_paths {
         let included = load_resource_file(include_path, context, provenance_root)?;
@@ -56,7 +70,11 @@ pub(crate) fn load_release_bundle_with_root(
         resources.extend(included);
     }
     inputs.extend(include_paths);
-    Ok(LoadedReleaseBundle { resources, inputs })
+    Ok(LoadedReleaseBundle {
+        resources,
+        inputs,
+        dependency_directories,
+    })
 }
 
 /// Check for a literal Release envelope without rendering the candidate file.

@@ -232,6 +232,11 @@ impl DependencyRecorder {
         Ok(())
     }
 
+    pub fn record_path_file(&mut self, path: &Path) -> Result<()> {
+        let path = path.canonicalize()?;
+        self.record_file(format!("file:{}", path.display()), &path)
+    }
+
     pub fn record_directory(&mut self, path: &Path) -> Result<()> {
         let path = path.canonicalize()?;
         let mut contents = Vec::new();
@@ -275,39 +280,45 @@ impl DependencyRecorder {
         Ok(())
     }
 
-    /// Records file contents and directory membership beneath a project root.
-    pub fn record_project_tree(&mut self, project_root: &Path, excluded: &[PathBuf]) -> Result<()> {
-        let mut members = Vec::new();
-        let entries = WalkDir::new(project_root)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|entry| {
-                let path = entry.path();
-                let relative = path.strip_prefix(project_root).unwrap_or(path);
-                path == project_root
-                    || !should_skip_project_path(relative)
-                        && !excluded.iter().any(|excluded| path.starts_with(excluded))
-            });
-        for entry in entries {
-            let entry =
-                entry.map_err(|error| NylError::config(format!("Failed to inspect renderer inputs: {error}")))?;
-            if entry.file_type().is_symlink() {
-                self.mark_uncacheable();
+    pub fn replay_filesystem_dependencies(&mut self, record: &DependencyRecord) -> Result<()> {
+        for (name, dependency) in &record.dependencies {
+            let path = match dependency.kind.as_str() {
+                "file" => name.strip_prefix("file:"),
+                "directory" => name.strip_prefix("directory:"),
+                _ => continue,
+            };
+            let Some(path) = path else {
                 continue;
+            };
+            let path = Path::new(path);
+            let result = if dependency.kind == "directory" {
+                self.record_directory(path)
+            } else {
+                self.record_path_file(path)
+            };
+            if let Err(error) = result {
+                tracing::debug!(path = %path.display(), %error, "Recorded cache filesystem dependency is unavailable; treating it as changed");
+                self.record_bytes(name.clone(), dependency.kind.clone(), b"unavailable");
             }
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(project_root)
-                .expect("walk entry is beneath project root");
-            let relative = crate::resources::relative_path_to_posix("cache dependency", relative)?;
-            members.push(relative.clone());
-            self.record_file(format!("project:{relative}"), entry.path())?;
         }
-        self.record_value("project:members", &members)
+        Ok(())
+    }
+
+    pub fn filesystem_dependencies(&self) -> BTreeMap<String, RecordedDependency> {
+        self.dependencies
+            .iter()
+            .filter(|(_, dependency)| matches!(dependency.kind.as_str(), "file" | "directory"))
+            .map(|(name, dependency)| (name.clone(), dependency.clone()))
+            .collect()
+    }
+
+    pub fn extend_filesystem_dependencies(&mut self, dependencies: &BTreeMap<String, RecordedDependency>) {
+        self.dependencies.extend(
+            dependencies
+                .iter()
+                .filter(|(_, dependency)| matches!(dependency.kind.as_str(), "file" | "directory"))
+                .map(|(name, dependency)| (name.clone(), dependency.clone())),
+        );
     }
 
     /// Records public template context normally and sensitive context with the cache-local key.
@@ -538,10 +549,6 @@ impl RenderCache {
             .join(action)
             .join(format!("{}.json", sha256(key.as_bytes()))))
     }
-}
-
-fn should_skip_project_path(path: &Path) -> bool {
-    path.starts_with(".git") || path.starts_with(".nyl/cache")
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {

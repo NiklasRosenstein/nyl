@@ -259,6 +259,12 @@ fn renders_plain_directory_applications_and_owned_layout() {
         assert!(index["inputs"].get(input).is_some(), "missing provenance input {input}");
     }
 
+    // Renderer implementation files beneath an application source are not
+    // semantic inputs unless the ApplicationGroup include patterns select them.
+    let nested_cache = fixture.path().join("applications/workloads/.nyl/cache");
+    fs::create_dir_all(&nested_cache).unwrap();
+    fs::write(nested_cache.join("noise.yaml"), "cache implementation detail\n").unwrap();
+
     // A byte-identical second render is accepted and keeps ownership stable.
     Command::cargo_bin("nyl")
         .unwrap()

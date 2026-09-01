@@ -42,7 +42,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     }
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
-    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
+    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache).await?;
     let publication_url = compiled
         .repository
         .publish_url

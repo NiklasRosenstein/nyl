@@ -97,6 +97,8 @@ pub struct RenderedBundle {
     pub cacheable: bool,
     /// Inputs that prevent the complete bundle from being revalidated.
     pub cache_bypass_reasons: BTreeSet<String>,
+    /// Concrete files and directories observed while rendering this bundle.
+    pub cache_dependencies: std::collections::BTreeMap<String, super::cache::RecordedDependency>,
 }
 
 impl RenderSession {
@@ -335,14 +337,26 @@ impl RenderSession {
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
-        let (mut cache_probe, cached) = if cacheable {
-            self.prepare_release_cache(&path, &bundle.inputs, &resources, &request)?
+        let ReleaseCacheLookup {
+            probe: mut cache_probe,
+            cached,
+        } = if cacheable {
+            self.prepare_release_cache(
+                &path,
+                &bundle.inputs,
+                &bundle.dependency_directories,
+                &resources,
+                &request,
+            )?
         } else {
-            (None, None)
+            ReleaseCacheLookup {
+                probe: None,
+                cached: None,
+            }
         };
         if let Some(cached) = cached {
             tracing::debug!(path = %path.display(), "Reusing cached rendered Release");
-            return Ok(cached.into_rendered());
+            return Ok(cached.bundle.into_rendered(cached.dependencies));
         }
         let needs_helm_rendering = resources
             .iter()
@@ -460,6 +474,14 @@ impl RenderSession {
             });
         }
 
+        let cache_dependencies = cache_probe
+            .as_ref()
+            .map(|probe| probe.recorder.filesystem_dependencies())
+            .unwrap_or_default();
+        if cache_probe.as_ref().is_some_and(|probe| !probe.recorder.is_cacheable()) {
+            cacheable = false;
+            cache_bypass_reasons.insert("unobservable filesystem dependency".to_string());
+        }
         let rendered = RenderedBundle {
             release,
             manifests,
@@ -471,6 +493,7 @@ impl RenderSession {
             inputs: bundle.inputs,
             cacheable,
             cache_bypass_reasons,
+            cache_dependencies,
         };
         self.store_release_cache(cache_probe, &rendered)?;
         Ok(rendered)
@@ -480,14 +503,21 @@ impl RenderSession {
         &self,
         path: &Path,
         inputs: &[PathBuf],
+        dependency_directories: &[PathBuf],
         resources: &[RenderResource],
         request: &RenderRequest<'_>,
-    ) -> Result<(Option<ReleaseCacheProbe>, Option<CachedRenderedBundle>)> {
+    ) -> Result<ReleaseCacheLookup> {
         let Some(cache) = &self.cache else {
-            return Ok((None, None));
+            return Ok(ReleaseCacheLookup {
+                probe: None,
+                cached: None,
+            });
         };
         if cache.mode() == CacheMode::Disabled {
-            return Ok((None, None));
+            return Ok(ReleaseCacheLookup {
+                probe: None,
+                cached: None,
+            });
         }
         let key = format!(
             "{}\0{}\0{}",
@@ -498,10 +528,13 @@ impl RenderSession {
         let previous = cache.load_record("release", &key)?;
         let mut recorder = cache.recorder();
         for input in inputs {
-            recorder.record_file(format!("input:{}", input.display()), input)?;
+            recorder.record_path_file(input)?;
+        }
+        for directory in dependency_directories {
+            recorder.record_directory(directory)?;
         }
         if let Some(config_file) = &self.project_config.file {
-            recorder.record_file(format!("config:{}", config_file.display()), config_file)?;
+            recorder.record_path_file(config_file)?;
         }
         recorder.record_template_context(&self.template_context.to_json())?;
         recorder.record_value(
@@ -520,7 +553,7 @@ impl RenderSession {
             record_resource_directory_dependency(&mut recorder, &resource.value, &self.project_config)?;
         }
         if let Some(previous) = &previous {
-            recorder.replay_directories(previous)?;
+            recorder.replay_filesystem_dependencies(previous)?;
         }
         let current = recorder.clone().finish("release", String::new());
         let cached = if cache.mode() == CacheMode::Refresh {
@@ -543,7 +576,10 @@ impl RenderSession {
                         },
                         &[],
                     );
-                    cached
+                    cached.map(|bundle| CachedReleaseHit {
+                        bundle,
+                        dependencies: recorder.filesystem_dependencies(),
+                    })
                 }
                 Some(_) => {
                     cache.observe(CacheLayer::Release, CacheOutcome::Invalidated, &[]);
@@ -551,7 +587,10 @@ impl RenderSession {
                 }
             }
         };
-        Ok((Some(ReleaseCacheProbe { key, recorder }), cached))
+        Ok(ReleaseCacheLookup {
+            probe: Some(ReleaseCacheProbe { key, recorder }),
+            cached,
+        })
     }
 
     fn store_release_cache(&self, probe: Option<ReleaseCacheProbe>, rendered: &RenderedBundle) -> Result<()> {
@@ -593,6 +632,16 @@ struct ReleaseCacheProbe {
     recorder: crate::render::cache::DependencyRecorder,
 }
 
+struct ReleaseCacheLookup {
+    probe: Option<ReleaseCacheProbe>,
+    cached: Option<CachedReleaseHit>,
+}
+
+struct CachedReleaseHit {
+    bundle: CachedRenderedBundle,
+    dependencies: std::collections::BTreeMap<String, super::cache::RecordedDependency>,
+}
+
 #[derive(Deserialize, Serialize)]
 struct CachedRenderedBundle {
     release: Option<Release>,
@@ -631,7 +680,10 @@ impl CachedRenderedBundle {
         }
     }
 
-    fn into_rendered(self) -> RenderedBundle {
+    fn into_rendered(
+        self,
+        cache_dependencies: std::collections::BTreeMap<String, super::cache::RecordedDependency>,
+    ) -> RenderedBundle {
         RenderedBundle {
             release: self.release,
             manifests: self.manifests,
@@ -643,6 +695,7 @@ impl CachedRenderedBundle {
             inputs: self.inputs,
             cacheable: true,
             cache_bypass_reasons: BTreeSet::new(),
+            cache_dependencies,
         }
     }
 }

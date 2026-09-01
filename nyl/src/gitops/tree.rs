@@ -86,6 +86,13 @@ struct EffectiveProject {
     destination_namespaces: Option<Vec<String>>,
 }
 
+struct PreparedGroup {
+    group_resource_path: PathBuf,
+    group: ApplicationGroup,
+    project: EffectiveProject,
+    source: ResolvedGroupSource,
+}
+
 struct EffectiveArgoCDInstance {
     identity: String,
     resource: ArgoCDInstance,
@@ -165,7 +172,7 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 // The orchestration stays linear so ownership and policy checks remain visibly ordered.
 #[allow(clippy::too_many_lines)]
 pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, None, None).await
+    compile_target_tree_inner(inventory, target_name, None).await
 }
 
 /// Compile one target while reusing a verified content-addressed result when possible.
@@ -173,9 +180,8 @@ pub async fn compile_target_tree_cached(
     inventory: &GitOpsInventory,
     target_name: &str,
     cache: &GitOpsCache,
-    excluded_output: Option<&Path>,
 ) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, Some(cache), excluded_output).await
+    compile_target_tree_inner(inventory, target_name, Some(cache)).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -183,7 +189,6 @@ async fn compile_target_tree_inner(
     inventory: &GitOpsInventory,
     target_name: &str,
     cache: Option<&GitOpsCache>,
-    excluded_output: Option<&Path>,
 ) -> Result<CompiledTargetTree> {
     validate_gitops_inventory(inventory)?;
     let target_discovered = inventory
@@ -215,30 +220,7 @@ async fn compile_target_tree_inner(
     let central_session =
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
             .with_cache(cache.cloned());
-    let cache_probe = prepare_target_cache(inventory, target_name, &central_session, cache, excluded_output)?;
-    if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
-        return Ok(compiled);
-    }
-    let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
-    let mut target_cache_bypass_reasons = BTreeSet::new();
-    let mut files = BTreeMap::new();
-    let mut inputs = BTreeSet::from([
-        target_discovered.source_path.clone(),
-        cluster_path,
-        argocd.cluster_path.clone(),
-    ]);
-    if let Some(path) = &argocd.source_path {
-        inputs.insert(path.clone());
-    }
-    if let Some(repository_path) = repository_path {
-        inputs.insert(repository_path);
-    }
-    let mut emitted_projects = BTreeSet::new();
     let mut git_manager = None;
-    let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
-    let mut workload_owners = HashMap::new();
-    let mut pending_workloads = Vec::new();
-    let mut namespace_scope_errors = Vec::new();
 
     let mut groups = Vec::new();
     for discovered in inventory.resources.values() {
@@ -258,8 +240,8 @@ async fn compile_target_tree_inner(
     }
     groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
 
+    let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
-        inputs.insert(group_resource_path.clone());
         let project = resolve_effective_group_project(
             inventory,
             &group,
@@ -268,7 +250,75 @@ async fn compile_target_tree_inner(
             &cluster,
             &argocd.resource,
         )?;
-        if let Some(project_path) = project.source_path {
+        let mut source = resolve_group_source(
+            inventory,
+            &group_resource_path,
+            &group,
+            &target,
+            &mut git_manager,
+            cache,
+        )?;
+        if let Some(session) = &mut source.source_session {
+            session.set_cache(cache.cloned());
+        }
+        prepared_groups.push(PreparedGroup {
+            group_resource_path,
+            group,
+            project,
+            source,
+        });
+    }
+
+    let base_input_paths = [
+        Some(target_discovered.source_path.as_path()),
+        Some(cluster_path.as_path()),
+        Some(argocd.cluster_path.as_path()),
+        argocd.source_path.as_deref(),
+        repository_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut cache_probe = prepare_target_cache(
+        inventory,
+        target_name,
+        &central_session,
+        cache,
+        &base_input_paths,
+        &prepared_groups,
+    )?;
+    if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+        return Ok(compiled);
+    }
+    let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
+    let mut target_cache_bypass_reasons = BTreeSet::new();
+    let mut files = BTreeMap::new();
+    let mut inputs = BTreeSet::from([
+        target_discovered.source_path.clone(),
+        cluster_path,
+        argocd.cluster_path.clone(),
+    ]);
+    if let Some(path) = &argocd.source_path {
+        inputs.insert(path.clone());
+    }
+    if let Some(repository_path) = repository_path {
+        inputs.insert(repository_path);
+    }
+    let mut emitted_projects = BTreeSet::new();
+    let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
+    let mut workload_owners = HashMap::new();
+    let mut pending_workloads = Vec::new();
+    let mut namespace_scope_errors = Vec::new();
+
+    for PreparedGroup {
+        group_resource_path,
+        group,
+        project,
+        source,
+    } in prepared_groups
+    {
+        inputs.insert(group_resource_path.clone());
+        if let Some(project_path) = project.source_path.clone() {
             inputs.insert(project_path);
         }
         let argocd_project_name = project.name;
@@ -280,18 +330,6 @@ async fn compile_target_tree_inner(
                     &manifest,
                 )?;
             }
-        }
-
-        let mut source = resolve_group_source(
-            inventory,
-            &group_resource_path,
-            &group,
-            &target,
-            &mut git_manager,
-            cache,
-        )?;
-        if let Some(session) = &mut source.source_session {
-            session.set_cache(cache.cloned());
         }
         if source.remote {
             target_cacheable = false;
@@ -326,6 +364,11 @@ async fn compile_target_tree_inner(
             let mut rendered = session
                 .render_release_file_with_provenance_root(source_file, provenance_root)
                 .await?;
+            if let Some(probe) = &mut cache_probe {
+                probe
+                    .recorder
+                    .extend_filesystem_dependencies(&rendered.cache_dependencies);
+            }
             if !rendered.application_generators.is_empty() {
                 return Err(NylError::config(format!(
                     "ApplicationGenerator is not supported in rendered GitOps source {}",
@@ -509,7 +552,7 @@ async fn compile_target_tree_inner(
 
 struct TargetCacheProbe {
     key: String,
-    record: crate::render::cache::DependencyRecord,
+    recorder: crate::render::cache::DependencyRecorder,
     cacheable: bool,
 }
 
@@ -518,7 +561,8 @@ fn prepare_target_cache(
     target_name: &str,
     session: &RenderSession,
     cache: Option<&GitOpsCache>,
-    excluded_output: Option<&Path>,
+    base_input_paths: &[&Path],
+    groups: &[PreparedGroup],
 ) -> Result<Option<TargetCacheProbe>> {
     let Some(cache) = cache else {
         return Ok(None);
@@ -526,28 +570,48 @@ fn prepare_target_cache(
     if cache.mode() == crate::gitops::CacheMode::Disabled {
         return Ok(None);
     }
+    let key = format!("{}\0{target_name}", inventory.project_root.display());
+    let previous = cache.load_record("target", &key)?;
     let mut recorder = cache.recorder();
-    let mut excluded = excluded_output
-        .map(|path| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                inventory.project_root.join(path)
-            }
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    if cache.root().starts_with(&inventory.project_root) {
-        excluded.push(cache.root().to_path_buf());
+    if let Some(config_file) = &inventory.project_config.file {
+        recorder.record_path_file(config_file)?;
     }
-    recorder.record_project_tree(&inventory.project_root, &excluded)?;
+    for path in base_input_paths {
+        recorder.record_path_file(&inventory.project_root.join(path))?;
+    }
+    for prepared in groups {
+        recorder.record_path_file(&inventory.project_root.join(&prepared.group_resource_path))?;
+        if let Some(path) = &prepared.project.source_path {
+            recorder.record_path_file(&inventory.project_root.join(path))?;
+        }
+        for path in &prepared.source.provenance_inputs {
+            recorder.record_path_file(&inventory.project_root.join(path))?;
+        }
+        let members = prepared
+            .source
+            .candidate_files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&prepared.source.root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        recorder.record_value(format!("source:{}:members", prepared.group.metadata.name), &members)?;
+        for path in &prepared.source.candidate_files {
+            recorder.record_path_file(path)?;
+        }
+    }
     recorder.record_template_context(&session.template_context().to_json())?;
     cache.record_renderer_tools(&mut recorder)?;
+    if let Some(previous) = &previous {
+        recorder.replay_filesystem_dependencies(previous)?;
+    }
     let cacheable = recorder.is_cacheable();
-    let record = recorder.finish("target", String::new());
     Ok(Some(TargetCacheProbe {
-        key: format!("{}\0{target_name}", inventory.project_root.display()),
-        record,
+        key,
+        recorder,
         cacheable,
     }))
 }
@@ -575,7 +639,8 @@ fn load_cached_target(
         cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
         return Ok(None);
     };
-    if !record.same_inputs(&probe.record) {
+    let current = probe.recorder.clone().finish("target", String::new());
+    if !record.same_inputs(&current) {
         cache.observe(CacheLayer::Target, CacheOutcome::Invalidated, &[]);
         return Ok(None);
     }
@@ -596,7 +661,7 @@ fn store_cached_target(
     bypass_reasons: &BTreeSet<String>,
     compiled: &CompiledTargetTree,
 ) -> Result<()> {
-    let (Some(cache), Some(mut probe)) = (cache, probe) else {
+    let (Some(cache), Some(probe)) = (cache, probe) else {
         return Ok(());
     };
     if !cacheable {
@@ -610,8 +675,8 @@ fn store_cached_target(
     let Some(digest) = cache.store_artifact("target", compiled)? else {
         return Ok(());
     };
-    probe.record.artifact_digest = digest;
-    cache.store_record("target", &probe.key, &probe.record)?;
+    let record = probe.recorder.finish("target", digest);
+    cache.store_record("target", &probe.key, &record)?;
     cache.observe(CacheLayer::Target, CacheOutcome::Stored, &[]);
     Ok(())
 }

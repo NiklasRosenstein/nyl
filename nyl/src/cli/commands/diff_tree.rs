@@ -51,7 +51,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
-    let desired = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
+    let desired = compile_target_tree_cached(&inventory, &args.target, &cache).await?;
     let (mut base, source_baseline) = match args.against {
         DiffTreeBase::Published => (published_tree(&desired, &cache)?, None),
         DiffTreeBase::Source => {
@@ -189,7 +189,7 @@ async fn source_derived_tree(
         .resolve_ref_fresh(&repository_url, Some(source_ref), None)
         .map_err(NylError::Git)?;
     let inventory = discover_gitops_inventory(&checkout, None)?;
-    compile_target_tree_cached(&inventory, target, cache, None).await
+    compile_target_tree_cached(&inventory, target, cache).await
 }
 
 fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
