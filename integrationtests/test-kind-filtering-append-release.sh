@@ -129,7 +129,7 @@ echo ""
 echo "======================================="
 echo "Phase 1: Applying CRDs only"
 echo "======================================="
-nyl apply "${SCRIPT_DIR}/${TEST_NAME}.yaml" --only-kind=CustomResourceDefinition
+nyl apply --target minikube "${SCRIPT_DIR}/${TEST_NAME}.yaml" --only-kind=CustomResourceDefinition
 
 # Verify CRD exists
 if ! kubectl get crd testresources.example.com &> /dev/null; then
@@ -152,7 +152,7 @@ echo ""
 echo "======================================="
 echo "Previewing Phase 2 with diff"
 echo "======================================="
-nyl diff "${SCRIPT_DIR}/${TEST_NAME}.yaml" \
+nyl diff --target minikube "${SCRIPT_DIR}/${TEST_NAME}.yaml" \
     --exclude-kind=CustomResourceDefinition \
     --append-release
 echo ""
@@ -161,7 +161,7 @@ echo ""
 echo "======================================="
 echo "Phase 2: Applying remaining resources"
 echo "======================================="
-nyl apply "${SCRIPT_DIR}/${TEST_NAME}.yaml" \
+nyl apply --target minikube "${SCRIPT_DIR}/${TEST_NAME}.yaml" \
     --exclude-kind=CustomResourceDefinition \
     --append-release
 

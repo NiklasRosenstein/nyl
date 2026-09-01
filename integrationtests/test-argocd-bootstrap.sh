@@ -143,7 +143,7 @@ cd "${PROJECT_ROOT}/examples/argocd-bootstrap"
 echo "======================================="
 echo "Phase 1: Applying CRDs only"
 echo "======================================="
-nyl apply bootstrap.yaml --only-kind=CustomResourceDefinition
+nyl apply --target minikube bootstrap.yaml --only-kind=CustomResourceDefinition
 
 echo "✓ CRDs applied"
 echo ""
@@ -167,7 +167,7 @@ echo ""
 echo "======================================="
 echo "Phase 2: Applying remaining resources"
 echo "======================================="
-nyl apply bootstrap.yaml \
+nyl apply --target minikube bootstrap.yaml \
     --exclude-kind=CustomResourceDefinition \
     --append-release
 

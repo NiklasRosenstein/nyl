@@ -22,7 +22,8 @@ export NYL_IMAGE_TAG="sha-abc1234"
 export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
 export NYL_TARGET_REVISION="HEAD"
 
-nyl apply examples/argocd-bootstrap/bootstrap.yaml
+cd examples/argocd-bootstrap
+nyl apply --target minikube bootstrap.yaml
 ```
 
 ## What Gets Deployed
