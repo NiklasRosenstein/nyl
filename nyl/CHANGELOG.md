@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rendered destination Namespaces stay in their workload Application by
+  default. `ApplicationGroup.spec.sharedNamespaces` explicitly assigns a
+  namespace used by multiple Applications to one Release, a dedicated
+  Namespace Application, or external management.
+
 - Rendered GitOps discovery and central render sessions share one parsed
   `nyl.toml` configuration per project operation.
 

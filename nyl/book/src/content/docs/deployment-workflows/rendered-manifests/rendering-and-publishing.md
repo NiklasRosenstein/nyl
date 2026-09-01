@@ -12,7 +12,6 @@ For each release, Nyl writes:
 ```text
 <target-prefix>/<group-output>/<release>/resources.yaml
 <target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml
-<target-prefix>/_nyl/namespaces/<identity>/resources.yaml
 <target-prefix>/_nyl/catalog/projects/<project-id>.yaml
 <target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml
 <target-prefix>/_nyl/index.json
@@ -23,9 +22,12 @@ resources are ordered deterministically in `resources.yaml`. Generated Argo CD
 Applications use `source.directory.recurse: true`, so nested CRD directories
 are included.
 
-Managed Namespaces live outside workload directories. One dedicated generated
-Application owns each cluster/namespace identity, even when several workload
-Applications use it. Nyl rejects overlapping resource ownership.
+Managed Namespaces normally live in the owning workload's `resources.yaml`.
+When several workload Applications use one namespace, their ApplicationGroups
+must agree on a `sharedNamespaces` owner. `Release` keeps ownership in the
+selected workload, `External` emits no Namespace, and `Dedicated` writes the
+Namespace to `<target-prefix>/_nyl/namespaces/<identity>/resources.yaml` with a
+separate generated Application. Nyl rejects overlapping resource ownership.
 
 The versioned index records target identity, source provenance, owned files,
 and SHA-256 hashes. Nyl preserves unowned files and rejects changes to indexed

@@ -34,15 +34,22 @@ managed project without publishing its manifest.
 
 ## Namespace and deletion policy
 
-Missing destination Namespaces are created by default and owned by dedicated
-generated Applications. Namespace pruning and deletion require explicit Argo
-CD confirmation by default. A group can select automatic deletion or retention
-independently for prune and Application deletion.
+Missing destination Namespaces are created by default in the workload
+Application that uses them. Namespace pruning and deletion require explicit
+Argo CD confirmation by default. A group can select automatic deletion or
+retention independently for prune and Application deletion.
+
+Shared namespaces require an explicit, identical ownership declaration in
+every contributing ApplicationGroup. Ownership can stay with one selected
+Release, move to a dedicated Namespace Application, or remain external to Nyl.
+Nyl rejects conflicting declarations and Namespace objects rendered by a
+non-owner.
 
 Generated workload Applications use Argo CD's foreground resources finalizer
 by default, so deleting an Application cascades to its resources. Background
-deletion and orphaning are explicit alternatives. Conflicting project,
-destination, lifecycle, or metadata policy for one Namespace is rejected.
+deletion and orphaning are explicit alternatives. A dedicated Namespace owner
+uses the selected ApplicationGroup's project, destination, lifecycle, and
+metadata policy.
 
 See the [ApplicationGroup reference](/nyl/reference/resources/gitops/application-group/#lifecycle-policy)
 for the exact controls and defaults.

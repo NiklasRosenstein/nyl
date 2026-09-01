@@ -25,6 +25,15 @@ spec:
     create: true
     prunePolicy: Confirm
     deletePolicy: Confirm
+  sharedNamespaces:
+    monitoring:
+      owner:
+        kind: Release
+        applicationGroup: workloads
+        release: metrics
+    kube-system:
+      owner:
+        kind: External
   applicationDeletionPolicy: Foreground
   releaseCustomization:
     allowedPaths:
@@ -50,6 +59,7 @@ spec:
 | `spec.applicationNameTemplate` | No | Release name | Template for generated Application names; receives `release`. |
 | `spec.labels` | No | `{}` | Labels added to generated Applications. |
 | `spec.annotations` | No | `{}` | Annotations added to generated Applications. |
+| `spec.sharedNamespaces` | No | `{}` | Explicit ownership policy for namespaces consumed by more than one workload Application. |
 
 The group applies only when it is enabled, its project is permitted by the
 target's `projects` list, and its target selector matches.
@@ -101,12 +111,26 @@ Orphan omits it. For Namespace policy, `Confirm` writes `Prune=confirm` or
 `Delete=confirm`; `Retain` writes `Prune=false` or `Delete=false`; `Automatic`
 adds no restriction.
 
-Each managed Namespace is owned by one dedicated generated Application. Nyl
-rejects conflicting project, destination, lifecycle, or metadata policy for the
-same cluster/namespace identity. A Release may target its effective destination
-namespace plus `Release.spec.additionalNamespaces`. An approved additional
-Namespace uses the same dedicated Application and lifecycle policy when the
-Release renders it, but is never synthesized from the allow-list alone.
+For a namespace consumed by one workload Application, the Namespace object is
+part of that Application's rendered resources. Nyl synthesizes a missing
+destination Namespace when `spec.namespace.create` is enabled. An additional
+namespace is never synthesized from `Release.spec.additionalNamespaces`; it is
+managed only when the Release renders the Namespace object.
+
+Every namespace consumed by more than one workload Application must have an
+identical `spec.sharedNamespaces.<namespace>.owner` declaration in every
+contributing ApplicationGroup. The owner kinds are:
+
+| Owner kind | Required fields | Behavior |
+| --- | --- | --- |
+| `Release` | `applicationGroup`, `release` | The selected workload Application owns the Namespace object. Nyl synthesizes it when it is that Release's destination namespace and namespace creation is enabled. |
+| `Dedicated` | `applicationGroup` | Nyl synthesizes the Namespace in a separate generated Application using the selected group's project, destination, metadata, sync, and lifecycle policy. |
+| `External` | — | Nyl emits no Namespace object. Use this for namespaces managed outside the rendered tree, such as `kube-system`. |
+
+`Release` ownership rejects Namespace objects rendered by other Releases.
+`Dedicated` and `External` ownership reject Namespace objects rendered by any
+workload Release. These checks prevent two Argo CD Applications from claiming
+the same resource instead of silently discarding an authored Namespace.
 
 ## Per-release Application customization
 

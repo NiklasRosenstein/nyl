@@ -209,6 +209,8 @@ pub struct ApplicationGroupSpec {
     pub application_deletion_policy: ApplicationDeletionPolicy,
     #[serde(default)]
     pub namespace: ManagedNamespacePolicy,
+    #[serde(rename = "sharedNamespaces", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shared_namespaces: BTreeMap<String, SharedNamespacePolicy>,
     #[serde(rename = "releaseCustomization", default)]
     pub release_customization: GitOpsReleaseCustomization,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -309,6 +311,29 @@ pub struct ManagedNamespacePolicy {
     pub prune_policy: ManagedResourceDeletionPolicy,
     #[serde(rename = "deletePolicy", default)]
     pub delete_policy: ManagedResourceDeletionPolicy,
+}
+
+/// Explicit authorization and ownership for a namespace consumed by more than
+/// one generated workload Application.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedNamespacePolicy {
+    pub owner: SharedNamespaceOwner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SharedNamespaceOwner {
+    Release {
+        #[serde(rename = "applicationGroup")]
+        application_group: String,
+        release: String,
+    },
+    Dedicated {
+        #[serde(rename = "applicationGroup")]
+        application_group: String,
+    },
+    External,
 }
 
 impl Default for ManagedNamespacePolicy {
@@ -660,7 +685,23 @@ impl ApplicationGroup {
         validate_static_required("spec.projectRef", &self.spec.project_ref)?;
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
         if let Some(namespace) = &self.spec.destination_namespace {
-            validate_required("spec.destinationNamespace", namespace)?;
+            super::release::validate_namespace_name("spec.destinationNamespace", namespace)?;
+        }
+        for (namespace, policy) in &self.spec.shared_namespaces {
+            super::release::validate_namespace_name("spec.sharedNamespaces key", namespace)?;
+            match &policy.owner {
+                SharedNamespaceOwner::Release {
+                    application_group,
+                    release,
+                } => {
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.applicationGroup", application_group)?;
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.release", release)?;
+                }
+                SharedNamespaceOwner::Dedicated { application_group } => {
+                    validate_dns_subdomain("spec.sharedNamespaces.*.owner.applicationGroup", application_group)?;
+                }
+                SharedNamespaceOwner::External => {}
+            }
         }
         if let Some(path) = &self.spec.output_path {
             validate_relative_path("spec.outputPath", path, false, false)?;
@@ -1168,6 +1209,37 @@ mod tests {
         value["spec"]["source"]["include"] = json!(["["]);
         let error = parse_gitops_resource(&value).unwrap_err().to_string();
         assert!(error.contains("include/exclude pattern"));
+    }
+
+    #[test]
+    fn validates_shared_namespace_owners() {
+        let mut value = application_group();
+        value["spec"]["sharedNamespaces"] = json!({
+            "monitoring": {
+                "owner": {
+                    "kind": "Release",
+                    "applicationGroup": "cloud",
+                    "release": "prometheus"
+                }
+            },
+            "kube-system": {"owner": {"kind": "External"}}
+        });
+        assert!(parse_gitops_resource(&value).is_ok());
+
+        value["spec"]["sharedNamespaces"] = json!({
+            "not.valid": {"owner": {"kind": "External"}}
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+
+        value["spec"]["sharedNamespaces"] = json!({
+            "monitoring": {
+                "owner": {
+                    "kind": "Release",
+                    "applicationGroup": "cloud"
+                }
+            }
+        });
+        assert!(parse_gitops_resource(&value).is_err());
     }
 
     #[test]

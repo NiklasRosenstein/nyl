@@ -93,11 +93,15 @@ For rendered GitOps, Nyl validates every explicit resource
 set is the effective ApplicationGroup destination namespace plus
 `spec.additionalNamespaces`.
 
-An approved additional Namespace is managed by the ApplicationGroup's
-dedicated Namespace Application and receives its prune and delete policy only
-when the Release actually renders that Namespace object. Listing a namespace
-does not synthesize it. The effective destination Namespace may still be
-synthesized when `ApplicationGroup.spec.namespace.create` is enabled.
+An approved additional Namespace remains part of the workload Application when
+the Release renders that Namespace object. Listing a namespace does not
+synthesize it. The effective destination Namespace is synthesized in the same
+workload Application when `ApplicationGroup.spec.namespace.create` is enabled.
+
+When multiple workload Applications consume one namespace,
+`ApplicationGroup.spec.sharedNamespaces` must select one Release, a dedicated
+Namespace Application, or external ownership. Nyl rejects rendered Namespace
+objects that conflict with that selection.
 
 This check prevents accidental scope expansion. The Argo CD AppProject remains
 the runtime authorization boundary.

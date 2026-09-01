@@ -28,8 +28,8 @@ pub fn ensure_managed_namespace(
     Ok(())
 }
 
-/// Remove and return the destination Namespace so it can be owned by one
-/// dedicated Argo CD Application rather than every workload Application.
+/// Remove and return a managed Namespace for callers that place it outside the
+/// resource list being processed.
 pub fn take_managed_namespace(
     resources: &mut Vec<Value>,
     namespace: &str,

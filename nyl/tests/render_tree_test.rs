@@ -194,16 +194,9 @@ fn renders_plain_directory_applications_and_owned_layout() {
     let root = output.join("production");
     let resources = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
     assert!(resources.contains("kind: ConfigMap"));
-    assert!(!resources.contains("kind: Namespace"));
-    let namespace_directory = fs::read_dir(root.join("_nyl/namespaces"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let namespace = fs::read_to_string(namespace_directory.join("resources.yaml")).unwrap();
-    assert!(namespace.contains("kind: Namespace"));
-    assert!(namespace.contains("Delete=confirm,Prune=confirm"));
+    assert!(resources.contains("kind: Namespace"));
+    assert!(resources.contains("Delete=confirm,Prune=confirm"));
+    assert!(!root.join("_nyl/namespaces").exists());
 
     let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
     assert!(application.contains("targetRevision: deploy/production"));
@@ -213,7 +206,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(application.contains("resources-finalizer.argocd.argoproj.io"));
     assert!(application.contains("environment: production"));
     assert!(application.contains("server: https://kubernetes.default.svc"));
-    assert!(fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
+    assert!(!fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
         .unwrap()
         .filter_map(std::result::Result::ok)
         .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-")));
@@ -531,7 +524,7 @@ fn one_dedicated_application_owns_a_shared_namespace() {
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
         "  applicationNamespace:",
-        "  destinationNamespace: shared\n  applicationNamespace:",
+        "  destinationNamespace: shared\n  sharedNamespaces:\n    shared:\n      owner:\n        kind: Dedicated\n        applicationGroup: workloads\n  applicationNamespace:",
     );
     fs::write(group_path, group).unwrap();
     let api_path = fixture.path().join("applications/workloads/api.yaml");
@@ -575,6 +568,244 @@ metadata:
         let resources = fs::read_to_string(root.join(format!("workloads/{release}/resources.yaml"))).unwrap();
         assert!(!resources.contains("kind: Namespace"));
     }
+}
+
+#[test]
+fn one_release_can_own_a_shared_namespace() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  destinationNamespace: shared\n  sharedNamespaces:\n    shared:\n      owner:\n        kind: Release\n        applicationGroup: workloads\n        release: api\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path)
+        .unwrap()
+        .replace("  namespace: api\ndata:", "  namespace: shared\ndata:");
+    fs::write(api_path, api).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: worker
+  namespace: worker
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker
+  namespace: shared
+",
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let root = output.join("production");
+    let api = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
+    let worker = fs::read_to_string(root.join("workloads/worker/resources.yaml")).unwrap();
+    assert!(api.contains("kind: Namespace"));
+    assert!(!worker.contains("kind: Namespace"));
+    assert!(!root.join("_nyl/namespaces").exists());
+}
+
+#[test]
+fn external_shared_namespace_is_not_managed() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  destinationNamespace: kube-system\n  sharedNamespaces:\n    kube-system:\n      owner:\n        kind: External\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path)
+        .unwrap()
+        .replace("  namespace: api\ndata:", "  namespace: kube-system\ndata:");
+    fs::write(api_path, api).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: worker
+  namespace: worker
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker
+  namespace: kube-system
+",
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let root = output.join("production");
+    for release in ["api", "worker"] {
+        let resources = fs::read_to_string(root.join(format!("workloads/{release}/resources.yaml"))).unwrap();
+        assert!(!resources.contains("kind: Namespace"));
+    }
+    assert!(!root.join("_nyl/namespaces").exists());
+}
+
+#[test]
+fn shared_namespace_requires_explicit_policy() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  destinationNamespace: shared\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path)
+        .unwrap()
+        .replace("  namespace: api\ndata:", "  namespace: shared\ndata:");
+    fs::write(api_path, api).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: worker
+  namespace: worker
+",
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("consumed by multiple workload Applications"));
+}
+
+#[test]
+fn non_owner_release_cannot_render_a_shared_namespace() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  destinationNamespace: shared\n  sharedNamespaces:\n    shared:\n      owner:\n        kind: Release\n        applicationGroup: workloads\n        release: api\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path)
+        .unwrap()
+        .replace("  namespace: api\ndata:", "  namespace: shared\ndata:");
+    fs::write(api_path, api).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: worker
+  namespace: worker
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shared
+",
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "renders shared Namespace \"shared\", but ownership is delegated to another Release",
+        ));
+}
+
+#[test]
+fn external_namespace_cannot_be_rendered_by_a_release() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  applicationNamespace:",
+        "  destinationNamespace: kube-system\n  sharedNamespaces:\n    kube-system:\n      owner:\n        kind: External\n  applicationNamespace:",
+    );
+    fs::write(group_path, group).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+",
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "renders Namespace \"kube-system\", but its configured owner kind is External",
+        ));
 }
 
 #[test]
@@ -671,7 +902,7 @@ metadata:
 }
 
 #[test]
-fn additional_namespace_is_owned_only_when_rendered() {
+fn additional_namespace_stays_with_its_workload_when_rendered() {
     let fixture = fixture();
     let release_path = fixture.path().join("applications/workloads/api.yaml");
     let release = fs::read_to_string(&release_path).unwrap().replace(
@@ -706,20 +937,12 @@ metadata:
         .success();
 
     let root = output.join("production");
-    let namespace_manifests = fs::read_dir(root.join("_nyl/namespaces"))
-        .unwrap()
-        .map(|entry| fs::read_to_string(entry.unwrap().path().join("resources.yaml")).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(namespace_manifests.len(), 2);
-    let monitoring = namespace_manifests
-        .iter()
-        .find(|manifest| manifest.contains("name: monitoring"))
-        .unwrap();
-    assert!(monitoring.contains("Prune=confirm"));
-    assert!(monitoring.contains("Delete=confirm"));
     let workload = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
     assert!(workload.contains("namespace: monitoring"));
-    assert!(!workload.contains("kind: Namespace"));
+    assert_eq!(workload.matches("kind: Namespace").count(), 2);
+    assert!(workload.contains("Prune=confirm"));
+    assert!(workload.contains("Delete=confirm"));
+    assert!(!root.join("_nyl/namespaces").exists());
 }
 
 #[test]
@@ -746,10 +969,10 @@ fn additional_namespace_is_not_synthesized() {
         .assert()
         .success();
 
-    assert_eq!(
-        fs::read_dir(output.join("production/_nyl/namespaces")).unwrap().count(),
-        1
-    );
+    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    assert!(workload.contains("name: api"));
+    assert!(!workload.contains("name: monitoring"));
+    assert!(!output.join("production/_nyl/namespaces").exists());
 }
 
 #[test]

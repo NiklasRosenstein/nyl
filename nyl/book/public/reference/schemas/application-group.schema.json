@@ -138,6 +138,12 @@
           "$ref": "#/$defs/GitOpsReleaseCustomization",
           "default": {}
         },
+        "sharedNamespaces": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedNamespacePolicy"
+          },
+          "type": "object"
+        },
         "source": {
           "anyOf": [
             {
@@ -330,6 +336,74 @@
         "Remote"
       ],
       "type": "string"
+    },
+    "SharedNamespaceOwner": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applicationGroup": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "Release",
+              "type": "string"
+            },
+            "release": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "applicationGroup",
+            "release"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applicationGroup": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "Dedicated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "applicationGroup"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "External",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SharedNamespacePolicy": {
+      "additionalProperties": false,
+      "description": "Explicit authorization and ownership for a namespace consumed by more than\none generated workload Application.",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/SharedNamespaceOwner"
+        }
+      },
+      "required": [
+        "owner"
+      ],
+      "type": "object"
     },
     "TargetSelector": {
       "additionalProperties": false,

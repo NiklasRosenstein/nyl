@@ -11,15 +11,15 @@ use crate::git::GitManager;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
     ApplicationGroup, ApplicationGroupSource, Cluster, ClusterDestination, GitOpsResource, GitOpsResourceKind,
-    GitOpsTarget, GitPublication, InlineGitRepository, RendererConfig, RendererConfigMode,
+    GitOpsTarget, GitPublication, InlineGitRepository, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::TemplateEngine;
 use crate::util::SourceContext;
 use crate::{NylError, Result};
 
 use super::{
-    build_directory_application, render_manifest_layout, take_managed_namespace, DirectoryApplicationInput,
-    GitOpsInventory, RenderSession,
+    build_directory_application, ensure_managed_namespace, render_manifest_layout, take_managed_namespace,
+    DirectoryApplicationInput, GitOpsInventory, RenderSession,
 };
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -43,6 +43,17 @@ struct ManagedNamespaceOwner {
     deletion_policy: crate::resources::ApplicationDeletionPolicy,
     labels: BTreeMap<String, String>,
     annotations: BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+struct PendingWorkload {
+    group: ApplicationGroup,
+    release: crate::resources::Release,
+    manifests: Vec<Value>,
+    destination_namespace: String,
+    argocd_project_name: String,
+    release_directory: PathBuf,
+    application_name: String,
 }
 
 /// Validate cross-resource references and target-prefix ownership without rendering releases.
@@ -132,6 +143,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     let mut git_manager = None;
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
+    let mut pending_workloads = Vec::new();
 
     let mut groups = Vec::new();
     for discovered in inventory.resources.values() {
@@ -206,36 +218,6 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 .clone()
                 .unwrap_or_else(|| release.metadata.namespace.clone());
             validate_release_namespace_scope(&rendered.manifests, &release, &destination_namespace)?;
-            if let Some(manifest) =
-                take_managed_namespace(&mut rendered.manifests, &destination_namespace, &group.spec.namespace)?
-            {
-                register_namespace_owner(
-                    &mut namespace_owners,
-                    &cluster,
-                    &group,
-                    &argocd_project_name,
-                    &destination_namespace,
-                    manifest,
-                )?;
-            }
-            let mut additional_policy = group.spec.namespace.clone();
-            additional_policy.create = false;
-            for namespace in &release.spec.additional_namespaces {
-                if namespace == &destination_namespace {
-                    continue;
-                }
-                if let Some(manifest) = take_managed_namespace(&mut rendered.manifests, namespace, &additional_policy)?
-                {
-                    register_namespace_owner(
-                        &mut namespace_owners,
-                        &cluster,
-                        &group,
-                        &argocd_project_name,
-                        namespace,
-                        manifest,
-                    )?;
-                }
-            }
 
             let group_output = group.spec.output_path.as_deref().unwrap_or(&group.metadata.name);
             crate::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
@@ -246,49 +228,66 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);
-            for manifest in &rendered.manifests {
-                let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
-                if let Some(previous) = workload_owners.insert(
-                    (cluster.metadata.name.clone(), key.clone()),
-                    application_name_hint(&group, &release),
-                ) {
-                    return Err(NylError::config(format!(
-                        "Rendered resource {key} is owned by more than one workload Application ({previous:?} and {:?})",
-                        release.metadata.name
-                    )));
-                }
-            }
-            for (relative, bytes) in render_manifest_layout(&rendered.manifests)? {
-                insert_file(&mut files, release_directory.join(relative), bytes)?;
-            }
-
             let application_name = render_application_name(session, &group, &release)?;
             validate_path_segment("rendered Application name", &application_name)?;
-            let rendered_path = join_posix(target.spec.publication.path_prefix.as_str(), &release_directory)?;
-            let mut application = build_directory_application(&DirectoryApplicationInput {
-                name: application_name.clone(),
-                application_namespace: group.spec.application_namespace.clone(),
-                project: argocd_project_name.clone(),
-                repo_url: repository.repo_url.clone(),
-                revision: target.spec.publication.revision.clone(),
-                rendered_path,
-                destination: cluster.spec.destination.clone(),
+            pending_workloads.push(PendingWorkload {
+                group: group.clone(),
+                release,
+                manifests: rendered.manifests,
                 destination_namespace,
-                sync_policy: group.spec.sync_policy.clone(),
-                deletion_policy: group.spec.application_deletion_policy,
-                labels: group.spec.labels.clone(),
-                annotations: group.spec.annotations.clone(),
-            })?;
-            apply_release_application_override(&mut application, &release, &group)?;
-            insert_yaml(
-                &mut files,
-                PathBuf::from("_nyl/catalog/applications")
-                    .join(&group.spec.application_namespace)
-                    .join(format!("{application_name}.yaml")),
-                &application,
-            )?;
+                argocd_project_name: argocd_project_name.clone(),
+                release_directory,
+                application_name,
+            });
         }
         warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+    }
+
+    resolve_namespace_ownership(&mut pending_workloads, &mut namespace_owners, &cluster)?;
+
+    for workload in pending_workloads {
+        for manifest in &workload.manifests {
+            let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
+            if let Some(previous) = workload_owners.insert(
+                (cluster.metadata.name.clone(), key.clone()),
+                application_name_hint(&workload.group, &workload.release),
+            ) {
+                return Err(NylError::config(format!(
+                    "Rendered resource {key} is owned by more than one workload Application ({previous:?} and {:?})",
+                    workload.release.metadata.name
+                )));
+            }
+        }
+        for (relative, bytes) in render_manifest_layout(&workload.manifests)? {
+            insert_file(&mut files, workload.release_directory.join(relative), bytes)?;
+        }
+
+        let rendered_path = join_posix(
+            target.spec.publication.path_prefix.as_str(),
+            &workload.release_directory,
+        )?;
+        let mut application = build_directory_application(&DirectoryApplicationInput {
+            name: workload.application_name.clone(),
+            application_namespace: workload.group.spec.application_namespace.clone(),
+            project: workload.argocd_project_name,
+            repo_url: repository.repo_url.clone(),
+            revision: target.spec.publication.revision.clone(),
+            rendered_path,
+            destination: cluster.spec.destination.clone(),
+            destination_namespace: workload.destination_namespace,
+            sync_policy: workload.group.spec.sync_policy.clone(),
+            deletion_policy: workload.group.spec.application_deletion_policy,
+            labels: workload.group.spec.labels.clone(),
+            annotations: workload.group.spec.annotations.clone(),
+        })?;
+        apply_release_application_override(&mut application, &workload.release, &workload.group)?;
+        insert_yaml(
+            &mut files,
+            PathBuf::from("_nyl/catalog/applications")
+                .join(&workload.group.spec.application_namespace)
+                .join(format!("{}.yaml", workload.application_name)),
+            &application,
+        )?;
     }
 
     for ((cluster, namespace), owner) in namespace_owners {
@@ -335,6 +334,233 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
 
 fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::Release) -> String {
     format!("{}/{}", group.metadata.name, release.metadata.name)
+}
+
+fn resolve_namespace_ownership(
+    workloads: &mut [PendingWorkload],
+    namespace_owners: &mut BTreeMap<(String, String), ManagedNamespaceOwner>,
+    cluster: &Cluster,
+) -> Result<()> {
+    let mut consumers = BTreeMap::<String, BTreeSet<usize>>::new();
+    for (index, workload) in workloads.iter().enumerate() {
+        consumers
+            .entry(workload.destination_namespace.clone())
+            .or_default()
+            .insert(index);
+        for manifest in &workload.manifests {
+            if let Some(namespace) = manifest.pointer("/metadata/namespace").and_then(Value::as_str) {
+                if !namespace.is_empty() {
+                    consumers.entry(namespace.to_owned()).or_default().insert(index);
+                }
+            }
+            if is_namespace(manifest) {
+                let namespace = manifest
+                    .pointer("/metadata/name")
+                    .and_then(Value::as_str)
+                    .expect("Namespace names were validated before ownership resolution");
+                consumers.entry(namespace.to_owned()).or_default().insert(index);
+            }
+        }
+    }
+
+    for (namespace, consumer_indexes) in consumers {
+        let consumer_indexes = consumer_indexes.into_iter().collect::<Vec<_>>();
+        let owner = resolve_shared_namespace_owner(workloads, &namespace, &consumer_indexes)?;
+        match owner {
+            None => manage_namespace_in_release(&mut workloads[consumer_indexes[0]], &namespace)?,
+            Some(SharedNamespaceOwner::Release {
+                application_group,
+                release,
+            }) => {
+                let owner_index = resolve_release_namespace_owner(
+                    workloads,
+                    &namespace,
+                    &consumer_indexes,
+                    &application_group,
+                    &release,
+                )?;
+                reject_namespace_manifests_from_non_owner(workloads, &namespace, &consumer_indexes, owner_index)?;
+                manage_namespace_in_release(&mut workloads[owner_index], &namespace)?;
+            }
+            Some(SharedNamespaceOwner::Dedicated { application_group }) => {
+                reject_all_workload_namespace_manifests(workloads, &namespace, &consumer_indexes, "Dedicated")?;
+                let owner_index =
+                    resolve_group_namespace_owner(workloads, &namespace, &consumer_indexes, &application_group)?;
+                let workload = &workloads[owner_index];
+                if !workload.group.spec.namespace.create {
+                    return Err(NylError::config(format!(
+                        "Shared namespace {namespace:?} uses a Dedicated owner, but ApplicationGroup {application_group:?} has spec.namespace.create disabled"
+                    )));
+                }
+                let mut resources = Vec::new();
+                let manifest = take_managed_namespace(&mut resources, &namespace, &workload.group.spec.namespace)?
+                    .expect("Dedicated ownership with namespace creation yields a manifest");
+                register_namespace_owner(
+                    namespace_owners,
+                    cluster,
+                    &workload.group,
+                    &workload.argocd_project_name,
+                    &namespace,
+                    manifest,
+                )?;
+            }
+            Some(SharedNamespaceOwner::External) => {
+                reject_all_workload_namespace_manifests(workloads, &namespace, &consumer_indexes, "External")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_shared_namespace_owner(
+    workloads: &[PendingWorkload],
+    namespace: &str,
+    consumer_indexes: &[usize],
+) -> Result<Option<SharedNamespaceOwner>> {
+    let group_indexes = consumer_indexes
+        .iter()
+        .map(|index| (workloads[*index].group.metadata.name.as_str(), *index))
+        .collect::<BTreeMap<_, _>>();
+    let declarations = group_indexes
+        .values()
+        .filter_map(|index| {
+            workloads[*index]
+                .group
+                .spec
+                .shared_namespaces
+                .get(namespace)
+                .map(|policy| (workloads[*index].group.metadata.name.as_str(), &policy.owner))
+        })
+        .collect::<Vec<_>>();
+
+    if declarations.is_empty() {
+        if consumer_indexes.len() == 1 {
+            return Ok(None);
+        }
+        return Err(NylError::config(format!(
+            "Namespace {namespace:?} is consumed by multiple workload Applications [{}]; every contributing ApplicationGroup must declare the same spec.sharedNamespaces.{namespace} owner",
+            consumer_indexes
+                .iter()
+                .map(|index| application_name_hint(&workloads[*index].group, &workloads[*index].release))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if declarations.len() != group_indexes.len() {
+        let declared = declarations.iter().map(|(group, _)| *group).collect::<BTreeSet<_>>();
+        let missing = group_indexes
+            .keys()
+            .filter(|group| !declared.contains(**group))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(NylError::config(format!(
+            "Namespace {namespace:?} is shared across ApplicationGroups, but [{}] do not declare spec.sharedNamespaces.{namespace}",
+            missing.join(", ")
+        )));
+    }
+    let owner = declarations[0].1;
+    if declarations.iter().any(|(_, candidate)| *candidate != owner) {
+        return Err(NylError::config(format!(
+            "ApplicationGroups declare conflicting owners for shared namespace {namespace:?}"
+        )));
+    }
+    Ok(Some(owner.clone()))
+}
+
+fn resolve_release_namespace_owner(
+    workloads: &[PendingWorkload],
+    namespace: &str,
+    consumer_indexes: &[usize],
+    application_group: &str,
+    release: &str,
+) -> Result<usize> {
+    let matches = consumer_indexes
+        .iter()
+        .copied()
+        .filter(|index| {
+            workloads[*index].group.metadata.name == application_group
+                && workloads[*index].release.metadata.name == release
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(NylError::config(format!(
+            "Shared namespace {namespace:?} owner references Release {application_group}/{release}, which does not consume that namespace"
+        ))),
+        _ => Err(NylError::config(format!(
+            "Shared namespace {namespace:?} owner Release {application_group}/{release} is ambiguous"
+        ))),
+    }
+}
+
+fn resolve_group_namespace_owner(
+    workloads: &[PendingWorkload],
+    namespace: &str,
+    consumer_indexes: &[usize],
+    application_group: &str,
+) -> Result<usize> {
+    consumer_indexes
+        .iter()
+        .copied()
+        .find(|index| workloads[*index].group.metadata.name == application_group)
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "Shared namespace {namespace:?} Dedicated owner references ApplicationGroup {application_group:?}, which does not consume that namespace"
+            ))
+        })
+}
+
+fn manage_namespace_in_release(workload: &mut PendingWorkload, namespace: &str) -> Result<()> {
+    let mut policy = workload.group.spec.namespace.clone();
+    policy.create &= namespace == workload.destination_namespace;
+    ensure_managed_namespace(&mut workload.manifests, namespace, &policy)
+}
+
+fn reject_namespace_manifests_from_non_owner(
+    workloads: &[PendingWorkload],
+    namespace: &str,
+    consumer_indexes: &[usize],
+    owner_index: usize,
+) -> Result<()> {
+    for index in consumer_indexes.iter().copied().filter(|index| *index != owner_index) {
+        if workload_renders_namespace(&workloads[index], namespace) {
+            return Err(NylError::config(format!(
+                "Release {:?} renders shared Namespace {namespace:?}, but ownership is delegated to another Release",
+                application_name_hint(&workloads[index].group, &workloads[index].release)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_all_workload_namespace_manifests(
+    workloads: &[PendingWorkload],
+    namespace: &str,
+    consumer_indexes: &[usize],
+    owner_kind: &str,
+) -> Result<()> {
+    if let Some(index) = consumer_indexes
+        .iter()
+        .copied()
+        .find(|index| workload_renders_namespace(&workloads[*index], namespace))
+    {
+        return Err(NylError::config(format!(
+            "Release {:?} renders Namespace {namespace:?}, but its configured owner kind is {owner_kind}",
+            application_name_hint(&workloads[index].group, &workloads[index].release)
+        )));
+    }
+    Ok(())
+}
+
+fn workload_renders_namespace(workload: &PendingWorkload, namespace: &str) -> bool {
+    workload.manifests.iter().any(|manifest| {
+        is_namespace(manifest) && manifest.pointer("/metadata/name").and_then(Value::as_str) == Some(namespace)
+    })
+}
+
+fn is_namespace(manifest: &Value) -> bool {
+    manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
+        && manifest.get("kind").and_then(Value::as_str) == Some("Namespace")
 }
 
 fn validate_release_namespace_scope(
