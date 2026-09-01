@@ -190,6 +190,7 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
     let mut pending_workloads = Vec::new();
+    let mut namespace_scope_errors = Vec::new();
 
     let mut groups = Vec::new();
     for discovered in inventory.resources.values() {
@@ -255,7 +256,14 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                     .to_path_buf()
             };
             inputs.insert(input_path);
-            let mut rendered = session.render_release_file(source_file).await?;
+            let provenance_root = if source.remote {
+                &source.root
+            } else {
+                &inventory.project_root
+            };
+            let mut rendered = session
+                .render_release_file_with_provenance_root(source_file, provenance_root)
+                .await?;
             for bundle_input in &rendered.inputs {
                 claimed_source_files.insert(manifest_path_identity(bundle_input));
                 let input_path = if source.remote {
@@ -276,7 +284,11 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 .destination_namespace
                 .clone()
                 .unwrap_or_else(|| release.metadata.namespace.clone());
-            validate_release_namespace_scope(&rendered.manifests, &release, &destination_namespace)?;
+            namespace_scope_errors.extend(validate_release_namespace_scope(
+                &rendered.manifests,
+                &release,
+                &destination_namespace,
+            ));
             if let Some(patterns) = &project.destination_namespaces {
                 validate_project_namespace_scope(&group, &release, &destination_namespace, patterns)?;
             }
@@ -303,6 +315,14 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             });
         }
         warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+    }
+
+    if !namespace_scope_errors.is_empty() {
+        let count = namespace_scope_errors.len();
+        return Err(NylError::validation(format!(
+            "Rendered namespace scope validation found {count} issue(s):\n- {}",
+            namespace_scope_errors.join("\n- ")
+        )));
     }
 
     resolve_namespace_ownership(&mut pending_workloads, &mut namespace_owners, &cluster)?;
@@ -648,51 +668,59 @@ fn validate_release_namespace_scope(
     manifests: &[Value],
     release: &crate::resources::Release,
     destination_namespace: &str,
-) -> Result<()> {
+) -> Vec<String> {
     let mut allowed = BTreeSet::from([destination_namespace]);
     allowed.extend(release.spec.additional_namespaces.iter().map(String::as_str));
+    let allowed_display = allowed
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut errors = Vec::new();
     for manifest in manifests {
+        let resource = manifest_identity_hint(manifest);
         if let Some(namespace) = manifest.pointer("/metadata/namespace") {
             match namespace {
                 Value::Null => {}
                 Value::String(namespace) if namespace.is_empty() => {}
                 Value::String(namespace) if allowed.contains(namespace.as_str()) => {}
                 Value::String(namespace) => {
-                    return Err(NylError::config(format!(
-                        "Release {:?} renders resource with metadata.namespace {namespace:?}, outside its allowed namespaces [{}]",
-                        release.metadata.name,
-                        allowed.iter().map(|value| format!("{value:?}")).collect::<Vec<_>>().join(", ")
-                    )))
+                    errors.push(format!(
+                        "Release {:?} renders {resource} with metadata.namespace {namespace:?}, outside its allowed namespaces [{allowed_display}]",
+                        release.metadata.name
+                    ));
                 }
                 _ => {
-                    return Err(NylError::config(format!(
-                        "Release {:?} renders a resource whose metadata.namespace is not a string",
+                    errors.push(format!(
+                        "Release {:?} renders {resource} whose metadata.namespace is not a string",
                         release.metadata.name
-                    )))
+                    ));
                 }
             }
         }
-        if manifest.get("apiVersion").and_then(Value::as_str) == Some("v1")
-            && manifest.get("kind").and_then(Value::as_str) == Some("Namespace")
-        {
-            let name = manifest
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| NylError::config("Namespace metadata.name must be a string"))?;
-            if !allowed.contains(name) {
-                return Err(NylError::config(format!(
-                    "Release {:?} renders Namespace {name:?}, outside its allowed namespaces [{}]",
-                    release.metadata.name,
-                    allowed
-                        .iter()
-                        .map(|value| format!("{value:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
+        if is_namespace(manifest) {
+            match manifest.pointer("/metadata/name").and_then(Value::as_str) {
+                Some(name) if allowed.contains(name) => {}
+                Some(name) => errors.push(format!(
+                    "Release {:?} renders Namespace {name:?}, outside its allowed namespaces [{allowed_display}]",
+                    release.metadata.name
+                )),
+                None => errors.push(format!(
+                    "Release {:?} renders a Namespace whose metadata.name is not a string",
+                    release.metadata.name
+                )),
             }
         }
     }
-    Ok(())
+    errors
+}
+
+fn manifest_identity_hint(manifest: &Value) -> String {
+    let kind = manifest.get("kind").and_then(Value::as_str).unwrap_or("resource");
+    match manifest.pointer("/metadata/name").and_then(Value::as_str) {
+        Some(name) => format!("{kind} {name:?}"),
+        None => kind.to_owned(),
+    }
 }
 
 fn register_namespace_owner(

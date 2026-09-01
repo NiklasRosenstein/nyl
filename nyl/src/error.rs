@@ -6,8 +6,15 @@ pub enum NylError {
     #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined by the selected target.")]
     Template(#[from] minijinja::Error),
 
-    #[error("Helm chart error: {0}\nHint: Verify the chart path exists and Helm is installed. Run 'helm version' to check Helm availability.")]
+    #[error("Helm chart error: {0}\nHint: Check the chart reference and explicit Helm values. Run with RUST_LOG=debug for Helm execution details.")]
     HelmChart(String),
+
+    #[error("Render error:\n{provenance}\nCaused by: {source}")]
+    Render {
+        provenance: String,
+        #[source]
+        source: Box<NylError>,
+    },
 
     #[error("Helm output error: {0}")]
     HelmOutput(String),
@@ -77,6 +84,15 @@ impl NylError {
     /// Create a Helm chart error with context
     pub fn helm_chart(msg: impl Into<String>) -> Self {
         NylError::HelmChart(msg.into())
+    }
+
+    /// Attach the source and expansion chain of a rendered resource.
+    #[must_use]
+    pub fn with_render_provenance(self, provenance: impl Into<String>) -> Self {
+        NylError::Render {
+            provenance: provenance.into(),
+            source: Box::new(self),
+        }
     }
 
     /// Create a process execution error with context
@@ -214,7 +230,16 @@ mod tests {
         let helm_err = NylError::HelmChart("chart error".to_string());
         let display = format!("{}", helm_err);
         assert!(display.contains("Hint:"));
-        assert!(display.contains("helm version"));
+        assert!(display.contains("explicit Helm values"));
+    }
+
+    #[test]
+    fn test_render_error_includes_provenance_and_cause() {
+        let error =
+            NylError::helm_chart("invalid values").with_render_provenance("Source: system/flyctr.yaml (document 4)");
+        let display = error.to_string();
+        assert!(display.contains("Source: system/flyctr.yaml (document 4)"));
+        assert!(display.contains("Helm chart error: invalid values"));
     }
 
     #[test]

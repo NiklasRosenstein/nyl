@@ -206,15 +206,20 @@ spec:
 
 ### Cluster and target values
 
-A target-aware render overlays merged Cluster and GitOpsTarget values on the
-chart-specific values. The complete precedence is:
+Cluster and GitOpsTarget values are Nyl template inputs. They are not passed to
+Helm implicitly. This keeps strict chart schemas effective and prevents an
+unrelated target value from overriding or extending a chart's values.
 
-```text
-HelmChart.spec.values < Cluster.spec.values < GitOpsTarget.spec.values
+Pass a target-aware value explicitly from the Nyl template context:
+
+```yaml
+spec:
+  values:
+    environment: "{{ values.environment }}"
 ```
 
-Use chart values for chart-specific defaults, Cluster values for concrete
-destination facts, and target values for deployment intent.
+Helm receives only `HelmChart.spec.values`. Component resources follow the same
+rule and pass only their `spec` payload to Helm.
 
 ### Templating in Values
 

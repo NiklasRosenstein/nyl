@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::cli::commands::render::{
-    deduplicate_manifests, generate_resource, is_renderable_resource, load_release_bundle, needs_helm_rendering,
+    deduplicate_manifests, generate_render_resource, is_renderable_resource, load_release_bundle_with_root,
     prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode,
 };
 use crate::config::ProjectConfig;
@@ -193,6 +193,17 @@ impl RenderSession {
 
     /// Render one source file without contacting a Kubernetes cluster.
     pub async fn render_release_file(&self, path: &Path) -> Result<RenderedRelease> {
+        self.render_release_file_with_provenance_root(path, &self.project_root)
+            .await
+    }
+
+    /// Render one source file while displaying provenance relative to the
+    /// logical source root instead of an internal checkout location.
+    pub async fn render_release_file_with_provenance_root(
+        &self,
+        path: &Path,
+        provenance_root: &Path,
+    ) -> Result<RenderedRelease> {
         let path = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -202,9 +213,13 @@ impl RenderSession {
             .to_str()
             .ok_or_else(|| NylError::config(format!("Release path is not valid UTF-8: {}", path.display())))?;
 
-        let bundle = load_release_bundle(Path::new(path_text), &self.template_context)?;
+        let bundle =
+            load_release_bundle_with_root(Path::new(path_text), &self.template_context, Some(provenance_root))?;
         let resources = bundle.resources;
-        let (kube_version, api_versions) = if needs_helm_rendering(&resources, &self.project_config) {
+        let needs_helm_rendering = resources
+            .iter()
+            .any(|resource| is_renderable_resource(&resource.value, &self.project_config));
+        let (kube_version, api_versions) = if needs_helm_rendering {
             (self.kube_version.clone(), self.api_versions.clone())
         } else {
             (String::new(), Vec::new())
@@ -215,7 +230,7 @@ impl RenderSession {
         for _ in 0..10 {
             let mut next = Vec::new();
             for resource in pending {
-                for manifest in generate_resource(
+                for manifest in generate_render_resource(
                     &resource,
                     &self.template_context,
                     &self.project_config,
@@ -226,10 +241,10 @@ impl RenderSession {
                 )
                 .await?
                 {
-                    if is_renderable_resource(&manifest, &self.project_config) {
+                    if is_renderable_resource(&manifest.value, &self.project_config) {
                         next.push(manifest);
                     } else {
-                        manifests.push(manifest);
+                        manifests.push(manifest.value);
                     }
                 }
             }
@@ -238,7 +253,7 @@ impl RenderSession {
                 break;
             }
         }
-        manifests.extend(pending);
+        manifests.extend(pending.into_iter().map(|resource| resource.value));
 
         let (release, manifests) = extract_release(&manifests)?;
         let strip_mode = resolve_strip_empty_metadata_labels_mode(
@@ -309,7 +324,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::constants::API_VERSION_GITOPS;
+    use crate::constants::{API_VERSION, API_VERSION_GITOPS};
 
     fn target() -> GitOpsTarget {
         serde_json::from_value(serde_json::json!({
@@ -318,7 +333,7 @@ mod tests {
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "kasoku"},
-                "values": {"nested": {"target": true}},
+                "values": {"environment": "production", "nested": {"target": true}},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
                     "revision": "deploy/production"
@@ -341,6 +356,39 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn write_strict_chart(root: &Path) {
+        let chart = root.join("chart");
+        fs::create_dir_all(chart.join("templates")).unwrap();
+        fs::write(
+            chart.join("Chart.yaml"),
+            "apiVersion: v2\nname: strict-values\nversion: 1.0.0\n",
+        )
+        .unwrap();
+        fs::write(chart.join("values.yaml"), "environment: \"\"\n").unwrap();
+        fs::write(
+            chart.join("values.schema.json"),
+            r#"{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {"environment": {"type": "string"}}
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            chart.join("templates/configmap.yaml"),
+            r"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strict-values
+data:
+  environment: {{ .Values.environment | quote }}
+",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -391,6 +439,91 @@ data:
         let context = session.template_context().to_json();
         assert!(context.get("profile").is_none());
         assert!(context["cluster"]["spec"].get("live").is_none());
+    }
+
+    #[tokio::test]
+    async fn target_values_reach_helm_only_through_explicit_templating() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_strict_chart(temp.path());
+        fs::write(
+            temp.path().join("app.yaml"),
+            format!(
+                r#"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: strict-values
+  namespace: strict-values
+---
+apiVersion: {API_VERSION}
+kind: HelmChart
+metadata:
+  name: strict-values
+  namespace: strict-values
+spec:
+  chart:
+    name: chart
+  values:
+    environment: "{{{{ values.environment }}}}"
+"#
+            ),
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
+
+        assert_eq!(rendered.manifests[0]["data"]["environment"], "production");
+    }
+
+    #[tokio::test]
+    async fn helm_errors_report_source_resource_and_chart_provenance() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_strict_chart(temp.path());
+        fs::write(
+            temp.path().join("bad.yaml"),
+            format!(
+                r"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: strict-values
+  namespace: strict-values
+---
+apiVersion: {API_VERSION}
+kind: HelmChart
+metadata:
+  name: strict-values
+  namespace: strict-values
+spec:
+  chart:
+    name: chart
+  values:
+    unexpected: true
+"
+            ),
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        let error = session
+            .render_release_file(Path::new("bad.yaml"))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Source: bad.yaml (document 2)"), "{error}");
+        assert!(
+            error.contains("Resource: nyl.niklasrosenstein.github.com/v1 HelmChart strict-values/strict-values"),
+            "{error}"
+        );
+        assert!(error.contains("chart: chart"), "{error}");
+        assert!(
+            error.contains("additional properties 'unexpected' not allowed"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

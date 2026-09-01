@@ -354,11 +354,14 @@ pub(crate) async fn render_manifests(
     // 5. Create generator
 
     // 6. Load and filter resources (rendering Jinja templates in manifest files)
-    let resources = load_resources(path, &context)?;
-    let filtered = filter_resources(resources, only_source_kind)?;
+    let provenance_root = project_config.file.as_ref().and_then(|file| file.parent());
+    let resources = load_release_bundle_with_root(Path::new(path), &context, provenance_root)?.resources;
+    let filtered = filter_render_resources(resources, only_source_kind);
 
     // 7. Check if any resources need Helm rendering (HelmChart or Component)
-    let needs_helm_rendering = needs_helm_rendering(&filtered, &project_config);
+    let needs_helm_rendering = filtered
+        .iter()
+        .any(|resource| is_renderable_resource(&resource.value, &project_config));
 
     // 8. Determine kube_version and api_versions (only if needed)
     let (kube_version, api_versions) = if !needs_helm_rendering {
@@ -380,7 +383,7 @@ pub(crate) async fn render_manifests(
     for _ in 0..max_depth {
         let mut next_pending = Vec::new();
         for resource in pending {
-            let manifests = generate_resource(
+            let manifests = generate_render_resource(
                 &resource,
                 &context,
                 &project_config,
@@ -391,10 +394,10 @@ pub(crate) async fn render_manifests(
             )
             .await?;
             for manifest in manifests {
-                if is_renderable_resource(&manifest, &project_config) {
+                if is_renderable_resource(&manifest.value, &project_config) {
                     next_pending.push(manifest);
                 } else {
-                    all_manifests.push(manifest);
+                    all_manifests.push(manifest.value);
                 }
             }
         }
@@ -406,7 +409,7 @@ pub(crate) async fn render_manifests(
 
     // Include any remaining pending resources that weren't fully evaluated
     // This happens when max_depth is reached before all resources are expanded
-    all_manifests.extend(pending);
+    all_manifests.extend(pending.into_iter().map(|resource| resource.value));
 
     Ok((
         all_manifests,
@@ -558,23 +561,97 @@ fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool 
     crate::kubernetes::extract_gvk(manifest).map_or(true, |gvk| !crate::kubernetes::is_known_cluster_scoped_gvk(&gvk))
 }
 
-/// Load YAML/JSON resources from a file path, rendering Jinja templates.
-///
-/// The path is a single entry file; a Release may select additional files.
-pub(crate) fn load_resources(path: &str, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
-    Ok(load_release_bundle(Path::new(path), context)?.resources)
+#[derive(Debug, Clone)]
+pub(crate) struct RenderResource {
+    pub value: serde_json::Value,
+    provenance: RenderProvenance,
+}
+
+impl std::ops::Deref for RenderResource {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RenderProvenance(Arc<RenderProvenanceNode>);
+
+#[derive(Debug)]
+struct RenderProvenanceNode {
+    frame: RenderProvenanceFrame,
+    parent: Option<RenderProvenance>,
+}
+
+#[derive(Debug)]
+enum RenderProvenanceFrame {
+    Source { path: PathBuf, document: usize },
+    Resource(String),
+}
+
+impl RenderProvenance {
+    fn source(path: PathBuf, document: usize) -> Self {
+        Self(Arc::new(RenderProvenanceNode {
+            frame: RenderProvenanceFrame::Source { path, document },
+            parent: None,
+        }))
+    }
+
+    fn resource(&self, value: &serde_json::Value) -> Self {
+        Self(Arc::new(RenderProvenanceNode {
+            frame: RenderProvenanceFrame::Resource(render_resource_identity(value)),
+            parent: Some(self.clone()),
+        }))
+    }
+}
+
+impl std::fmt::Display for RenderProvenance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut frames = Vec::new();
+        let mut current = Some(self);
+        while let Some(provenance) = current {
+            frames.push(&provenance.0.frame);
+            current = provenance.0.parent.as_ref();
+        }
+        for (index, frame) in frames.into_iter().rev().enumerate() {
+            if index > 0 {
+                writeln!(formatter)?;
+            }
+            match frame {
+                RenderProvenanceFrame::Source { path, document } => {
+                    write!(formatter, "Source: {} (document {document})", path.display())?;
+                }
+                RenderProvenanceFrame::Resource(identity) => write!(formatter, "Resource: {identity}")?,
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct LoadedReleaseBundle {
-    pub resources: Vec<serde_json::Value>,
+    pub resources: Vec<RenderResource>,
     pub inputs: Vec<PathBuf>,
 }
 
 /// Load one manifest entrypoint and any files selected by its Release.
+#[cfg(test)]
 pub(crate) fn load_release_bundle(path: &Path, context: &TemplateContext) -> Result<LoadedReleaseBundle> {
-    let mut resources = load_resource_file(path, context)?;
-    let (release, _) = extract_release(&resources)?;
+    load_release_bundle_with_root(path, context, None)
+}
+
+pub(crate) fn load_release_bundle_with_root(
+    path: &Path,
+    context: &TemplateContext,
+    provenance_root: Option<&Path>,
+) -> Result<LoadedReleaseBundle> {
+    let mut resources = load_resource_file(path, context, provenance_root)?;
+    let values = resources
+        .iter()
+        .map(|resource| resource.value.clone())
+        .collect::<Vec<_>>();
+    let (release, _) = extract_release(&values)?;
     let mut inputs = vec![path.to_path_buf()];
     let Some(release) = release else {
         return Ok(LoadedReleaseBundle { resources, inputs });
@@ -582,8 +659,12 @@ pub(crate) fn load_release_bundle(path: &Path, context: &TemplateContext) -> Res
 
     let include_paths = resolve_release_includes(path, &release)?;
     for include_path in &include_paths {
-        let included = load_resource_file(include_path, context)?;
-        let (nested_release, _) = extract_release(&included)?;
+        let included = load_resource_file(include_path, context, provenance_root)?;
+        let included_values = included
+            .iter()
+            .map(|resource| resource.value.clone())
+            .collect::<Vec<_>>();
+        let (nested_release, _) = extract_release(&included_values)?;
         if nested_release.is_some() {
             return Err(NylError::config(format!(
                 "Release {:?} includes {}, which contains another Release resource",
@@ -685,7 +766,11 @@ fn resolve_release_includes(path: &Path, release: &Release) -> Result<Vec<PathBu
     Ok(selected.into_iter().collect())
 }
 
-fn load_resource_file(path: &Path, context: &TemplateContext) -> Result<Vec<serde_json::Value>> {
+fn load_resource_file(
+    path: &Path,
+    context: &TemplateContext,
+    provenance_root: Option<&Path>,
+) -> Result<Vec<RenderResource>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
         return Err(NylError::Config(format!("File not found: {}", path.display())));
@@ -717,15 +802,40 @@ fn load_resource_file(path: &Path, context: &TemplateContext) -> Result<Vec<serd
     let raw = std::fs::read_to_string(path).map_err(|e| NylError::Config(format!("Failed to read file: {e}")))?;
     let rendered = engine.render_named(&path.display().to_string(), &raw, &ctx_json)?;
     let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
-    resources.extend(source_ctx.parse_yaml_documents(&rendered)?);
+    let source_path = provenance_path(path, provenance_root);
+    resources.extend(
+        source_ctx
+            .parse_yaml_documents(&rendered)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| RenderResource {
+                value,
+                provenance: RenderProvenance::source(source_path.clone(), index + 1),
+            }),
+    );
 
     Ok(resources)
+}
+
+fn provenance_path(path: &Path, root: Option<&Path>) -> PathBuf {
+    if let Some(root) = root {
+        if let Ok(relative) = path.strip_prefix(root) {
+            return relative.to_path_buf();
+        }
+        if let (Ok(path), Ok(root)) = (path.canonicalize(), root.canonicalize()) {
+            if let Ok(relative) = path.strip_prefix(root) {
+                return relative.to_path_buf();
+            }
+        }
+    }
+    crate::util::path_for_display(path)
 }
 
 // Note: parse_yaml_documents is now replaced by SourceContext::parse_yaml_documents
 // to provide better error messages with file context
 
 /// Filter resources by source kind (before expansion)
+#[cfg(test)]
 fn filter_resources(
     resources: Vec<serde_json::Value>,
     only_source_kind: Option<&str>,
@@ -742,6 +852,24 @@ fn filter_resources(
     } else {
         Ok(resources)
     }
+}
+
+fn filter_render_resources(resources: Vec<RenderResource>, only_source_kind: Option<&str>) -> Vec<RenderResource> {
+    let Some(filter) = only_source_kind else {
+        return resources;
+    };
+    resources
+        .into_iter()
+        .filter(|resource| {
+            let kind = resource.value.get("kind").and_then(|kind| kind.as_str()).unwrap_or("");
+            let api_version = resource
+                .value
+                .get("apiVersion")
+                .and_then(|api_version| api_version.as_str())
+                .unwrap_or("");
+            filter == kind || filter == format!("{api_version}/{kind}")
+        })
+        .collect()
 }
 
 /// Deduplicate manifests and warn about duplicates
@@ -797,6 +925,7 @@ pub(crate) fn is_renderable_resource(resource: &serde_json::Value, config: &Proj
             .is_some()
 }
 
+#[cfg(test)]
 pub(crate) fn needs_helm_rendering(resources: &[serde_json::Value], config: &ProjectConfig) -> bool {
     resources.iter().any(|resource| {
         let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -917,6 +1046,88 @@ fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
 }
 
 /// Generate manifests from a resource
+pub(crate) async fn generate_render_resource(
+    resource: &RenderResource,
+    context: &TemplateContext,
+    config: &ProjectConfig,
+    kube_version: &str,
+    api_versions: &[String],
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+    track_parent: bool,
+) -> Result<Vec<RenderResource>> {
+    let provenance = resource.provenance.resource(&resource.value);
+    let generated = generate_resource(
+        &resource.value,
+        context,
+        config,
+        kube_version,
+        api_versions,
+        credential_provider,
+        track_parent,
+    )
+    .await
+    .map_err(|error| error.with_render_provenance(provenance.to_string()))?;
+    Ok(generated
+        .into_iter()
+        .map(|value| RenderResource {
+            value,
+            provenance: provenance.clone(),
+        })
+        .collect())
+}
+
+fn render_resource_identity(resource: &serde_json::Value) -> String {
+    let api_version = resource
+        .get("apiVersion")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown-apiVersion>");
+    let kind = resource
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown-kind>");
+    let name = resource
+        .pointer("/metadata/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown-name>");
+    let namespace = resource
+        .pointer("/metadata/namespace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|namespace| !namespace.is_empty());
+    let identity = match namespace {
+        Some(namespace) => format!("{api_version} {kind} {namespace}/{name}"),
+        None => format!("{api_version} {kind} {name}"),
+    };
+    if api_version == API_VERSION && kind == "HelmChart" {
+        let chart = render_chart_reference(resource.pointer("/spec/chart"));
+        format!("{identity} (chart: {chart})")
+    } else {
+        identity
+    }
+}
+
+fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
+    let repository = chart
+        .and_then(|chart| chart.get("repository"))
+        .and_then(serde_json::Value::as_str);
+    let name = chart
+        .and_then(|chart| chart.get("name"))
+        .and_then(serde_json::Value::as_str);
+    let version = chart
+        .and_then(|chart| chart.get("version"))
+        .and_then(serde_json::Value::as_str);
+    let mut reference = match (repository, name) {
+        (Some(repository), Some(name)) => format!("{repository}#{name}"),
+        (Some(repository), None) => repository.to_owned(),
+        (None, Some(name)) => name.to_owned(),
+        (None, None) => "<unknown-chart>".to_owned(),
+    };
+    if let Some(version) = version {
+        reference.push('@');
+        reference.push_str(version);
+    }
+    reference
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn generate_resource(
     resource: &serde_json::Value,
@@ -1305,9 +1516,6 @@ fn render_helm_chart(
     );
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
-    // Merge context values into chart values
-    let merged_values = deep_merge_value(Some(chart.spec.values.clone()), context.values.clone());
-
     let executor = HelmTemplateExecutor::new()
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec())
@@ -1317,9 +1525,9 @@ fn render_helm_chart(
     let namespace = chart.release_namespace().or(Some("default"));
 
     if context.target.is_some() {
-        executor.template_with_source_comments(&resolved, chart.release_name(), namespace, &merged_values)
+        executor.template_with_source_comments(&resolved, chart.release_name(), namespace, &chart.spec.values)
     } else {
-        executor.template(&resolved, chart.release_name(), namespace, &merged_values)
+        executor.template(&resolved, chart.release_name(), namespace, &chart.spec.values)
     }
 }
 
@@ -4823,11 +5031,19 @@ spec:
             target: None,
         };
 
-        let bundle = load_release_bundle(&entry, &context).unwrap();
+        let bundle = load_release_bundle_with_root(&entry, &context, Some(temporary.path())).unwrap();
         assert_eq!(bundle.resources.len(), 3);
         assert_eq!(bundle.inputs.len(), 3);
         assert_eq!(bundle.resources[1]["metadata"]["name"], "one");
         assert_eq!(bundle.resources[2]["metadata"]["name"], "two");
+        assert_eq!(
+            bundle.resources[0].provenance.to_string(),
+            "Source: release.yaml (document 1)"
+        );
+        assert_eq!(
+            bundle.resources[1].provenance.to_string(),
+            "Source: manifests/config-one.yaml (document 1)"
+        );
     }
 
     #[test]

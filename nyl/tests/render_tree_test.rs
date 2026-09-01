@@ -1332,6 +1332,60 @@ metadata:
 }
 
 #[test]
+fn namespace_scope_validation_collects_issues_across_releases() {
+    let fixture = fixture();
+    let api_path = fixture.path().join("applications/workloads/api.yaml");
+    let api = fs::read_to_string(&api_path).unwrap()
+        + r"---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: misplaced-api-config
+  namespace: monitoring
+";
+    fs::write(api_path, api).unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/coredns.yaml"),
+        r#"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: coredns
+  namespace: argocd
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns
+  namespace: kube-system
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Rendered namespace scope validation found 2 issue(s)")
+                .and(predicate::str::contains(
+                    "Release \"api\" renders ConfigMap \"misplaced-api-config\" with metadata.namespace \"monitoring\"",
+                ))
+                .and(predicate::str::contains(
+                    "Release \"coredns\" renders Deployment \"coredns\" with metadata.namespace \"kube-system\"",
+                )),
+        );
+}
+
+#[test]
 fn additional_namespace_stays_with_its_workload_when_rendered() {
     let fixture = fixture();
     let release_path = fixture.path().join("applications/workloads/api.yaml");

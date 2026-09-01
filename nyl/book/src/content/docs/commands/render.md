@@ -84,6 +84,7 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 ## Notes
 
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
+- Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution, filter semantics, and online/offline behavior.
 - `ApplicationGenerator` source resolution first honors `NYL_APPGEN_REPO_PATH_OVERRIDE`, then tries to reuse the current local Git checkout when `repoURL` matches a local remote and `targetRevision` is `HEAD` or the current branch, then falls back to ArgoCD checkout reuse and normal Git cache/worktree resolution.
 - Local ApplicationGenerator testing override: set `NYL_APPGEN_REPO_PATH_OVERRIDE` to a local repository root (or `@git` to auto-detect the Git root from the current `PWD`) to make ApplicationGenerator scan the local filesystem instead of cloning. This affects `render`, `diff`, and `apply` (all use the same render pipeline). Using `@git` outside a Git repository fails with a configuration error.

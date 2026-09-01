@@ -21,6 +21,15 @@ A Component resource is a compact wrapper around Helm rendering:
 - `metadata.namespace` is used as Helm release namespace (defaults to `default` if omitted).
 - `spec` is forwarded as Helm values.
 
+Cluster and GitOpsTarget values remain in Nyl's template context and are not
+forwarded automatically. Reference them explicitly in `spec` when the chart
+accepts the corresponding value:
+
+```yaml
+spec:
+  environment: "{{ values.environment }}"
+```
+
 Example:
 
 ```yaml
