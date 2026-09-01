@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    deduplicate_manifests, generate_render_resource, is_renderable_resource, load_release_bundle_with_root,
-    prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode, RenderResource,
+    deduplicate_manifests, filter_render_resources, generate_render_resource, is_renderable_resource,
+    load_release_bundle_with_root, prepare_manifests_for_output, process_application_generator,
+    resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
 use crate::config::ProjectConfig;
 use crate::helm::HelmChartResolver;
@@ -16,7 +18,8 @@ use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
     extract_all_kyverno_policies, extract_application_generators, extract_release, is_nyl_component,
-    is_remote_helm_chart_shortcut, Cluster, GitOpsTarget, HelmChart, KyvernoScope, Release, RemoteManifest,
+    is_remote_helm_chart_shortcut, ApplicationGenerator, Cluster, GitOpsTarget, HelmChart, KyvernoScope, Release,
+    RemoteManifest,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -28,20 +31,56 @@ use super::cache::GitOpsCache;
 pub struct RenderSession {
     project_root: PathBuf,
     project_config: ProjectConfig,
-    target_name: String,
+    target_name: Option<String>,
     kube_version: String,
     api_versions: Vec<String>,
     template_context: TemplateContext,
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+    missing_capabilities_error: Option<String>,
     cache: Option<GitOpsCache>,
 }
 
-/// The result of rendering one possible Nyl release.
+/// Options that select one bundle and control its recursive expansion.
+#[derive(Clone, Debug)]
+pub struct RenderRequest<'a> {
+    pub path: &'a Path,
+    pub path_relative_to_project_root: bool,
+    pub provenance_root: Option<&'a Path>,
+    pub only_source_kind: Option<&'a str>,
+    pub max_depth: usize,
+    pub track_parent: bool,
+    pub expand_application_generators: bool,
+    pub strip_empty_metadata_labels_default: bool,
+}
+
+impl<'a> RenderRequest<'a> {
+    pub fn new(path: &'a Path, provenance_root: Option<&'a Path>) -> Self {
+        Self {
+            path,
+            path_relative_to_project_root: true,
+            provenance_root,
+            only_source_kind: None,
+            max_depth: 10,
+            track_parent: false,
+            expand_application_generators: false,
+            strip_empty_metadata_labels_default: false,
+        }
+    }
+}
+
+/// The result of rendering one source bundle through the authoritative pipeline.
 #[derive(Debug)]
-pub struct RenderedRelease {
+pub struct RenderedBundle {
     /// The release declaration. `None` means target templating omitted it.
     pub release: Option<Release>,
     /// Fully expanded, policy-processed and deduplicated Kubernetes manifests.
     pub manifests: Vec<Value>,
+    /// ApplicationGenerator controls found in the source bundle.
+    pub application_generators: Vec<ApplicationGenerator>,
+    /// Duplicate Kubernetes resources discarded by last-write-wins processing.
+    pub duplicates: HashMap<ResourceKey, usize>,
+    /// Whether empty `metadata.labels` objects were normalized out.
+    pub strip_empty_metadata_labels: bool,
     /// Per-resource Nyl expansion provenance, keyed by final Kubernetes identity.
     pub manifest_provenance: HashMap<ResourceKey, String>,
     /// Provenance of the Release declaration, used for Nyl-synthesized resources.
@@ -51,6 +90,8 @@ pub struct RenderedRelease {
     /// Whether every external renderer input can be validated without repeating the render.
     pub cacheable: bool,
 }
+
+pub type RenderedRelease = RenderedBundle;
 
 impl RenderSession {
     /// Build an offline rendering session from a project root and effective target.
@@ -186,12 +227,46 @@ impl RenderSession {
         Ok(Self {
             project_root,
             project_config,
-            target_name: target.metadata.name.clone(),
+            target_name: Some(target.metadata.name.clone()),
             kube_version,
             api_versions,
             template_context,
+            credential_provider: None,
+            missing_capabilities_error: None,
             cache: None,
         })
+    }
+
+    /// Build the session used by `render`, `apply`, and `diff`.
+    pub async fn for_cli(
+        project_root: &Path,
+        project_config: &ProjectConfig,
+        target: Option<(&GitOpsTarget, &Cluster)>,
+        explicit_capabilities: Option<(String, Vec<String>)>,
+        missing_capabilities_error: Option<String>,
+    ) -> Result<Self> {
+        let mut session = if let Some((target, cluster)) = target {
+            Self::build(project_root, Some(project_config), target, cluster, true, false)?
+        } else {
+            let project_root = project_root
+                .canonicalize()
+                .map_err(|error| NylError::config(format!("Failed to resolve project root: {error}")))?;
+            let secrets = SecretsConfig::load_from_dir(None, Some(&project_root))?;
+            let (kube_version, api_versions) = explicit_capabilities.unwrap_or_default();
+            Self {
+                project_root,
+                project_config: project_config.clone(),
+                target_name: None,
+                kube_version,
+                api_versions,
+                template_context: TemplateContext::build(serde_json::json!({}), &secrets)?,
+                credential_provider: None,
+                missing_capabilities_error,
+                cache: None,
+            }
+        };
+        session.credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
+        Ok(session)
     }
 
     pub fn project_root(&self) -> &Path {
@@ -199,7 +274,7 @@ impl RenderSession {
     }
 
     pub fn target_name(&self) -> &str {
-        &self.target_name
+        self.target_name.as_deref().unwrap_or("targetless")
     }
 
     pub fn template_context(&self) -> &TemplateContext {
@@ -217,9 +292,8 @@ impl RenderSession {
     }
 
     /// Render one source file without contacting a Kubernetes cluster.
-    pub async fn render_release_file(&self, path: &Path) -> Result<RenderedRelease> {
-        self.render_release_file_with_provenance_root(path, &self.project_root)
-            .await
+    pub async fn render_release_file(&self, path: &Path) -> Result<RenderedBundle> {
+        self.render(RenderRequest::new(path, Some(&self.project_root))).await
     }
 
     /// Render one source file while displaying provenance relative to the
@@ -228,25 +302,33 @@ impl RenderSession {
         &self,
         path: &Path,
         provenance_root: &Path,
-    ) -> Result<RenderedRelease> {
-        self.render_release_file_cached(path, provenance_root).await
+    ) -> Result<RenderedBundle> {
+        self.render(RenderRequest::new(path, Some(provenance_root))).await
     }
 
     #[allow(clippy::too_many_lines)]
-    pub async fn render_release_file_cached(&self, path: &Path, provenance_root: &Path) -> Result<RenderedRelease> {
-        let path = if path.is_absolute() {
-            path.to_path_buf()
+    pub async fn render(&self, request: RenderRequest<'_>) -> Result<RenderedBundle> {
+        let path = if request.path.is_absolute() {
+            request.path.to_path_buf()
         } else {
-            self.project_root.join(path)
+            self.project_root.join(request.path)
         };
-        let path_text = path
+        let source_path = if request.path_relative_to_project_root {
+            &path
+        } else {
+            request.path
+        };
+        let source_path_text = source_path
             .to_str()
             .ok_or_else(|| NylError::config(format!("Release path is not valid UTF-8: {}", path.display())))?;
 
-        let bundle =
-            load_release_bundle_with_root(Path::new(path_text), &self.template_context, Some(provenance_root))?;
-        let resources = bundle.resources;
-        let (mut cache_probe, cached) = self.prepare_release_cache(&path, &bundle.inputs, &resources)?;
+        let bundle = load_release_bundle_with_root(
+            Path::new(source_path_text),
+            &self.template_context,
+            request.provenance_root,
+        )?;
+        let resources = filter_render_resources(bundle.resources, request.only_source_kind);
+        let (mut cache_probe, cached) = self.prepare_release_cache(&path, &bundle.inputs, &resources, &request)?;
         if let Some(cached) = cached {
             tracing::debug!(path = %path.display(), "Reusing cached rendered Release");
             return Ok(cached.into_rendered());
@@ -256,6 +338,13 @@ impl RenderSession {
             .iter()
             .any(|resource| is_renderable_resource(&resource.value, &self.project_config));
         let (kube_version, api_versions) = if needs_helm_rendering {
+            if let Some(error) = self
+                .missing_capabilities_error
+                .as_ref()
+                .filter(|_| self.kube_version.is_empty() || self.api_versions.is_empty())
+            {
+                return Err(NylError::config(error.clone()));
+            }
             (self.kube_version.clone(), self.api_versions.clone())
         } else {
             (String::new(), Vec::new())
@@ -264,7 +353,7 @@ impl RenderSession {
         let mut manifests = Vec::new();
         let mut manifest_provenance = HashMap::new();
         let mut pending = resources;
-        for _ in 0..10 {
+        for _ in 0..request.max_depth {
             let mut next = Vec::new();
             for resource in pending {
                 if let Some(probe) = &mut cache_probe {
@@ -276,8 +365,8 @@ impl RenderSession {
                     &self.project_config,
                     &kube_version,
                     &api_versions,
-                    None,
-                    false,
+                    self.credential_provider.clone(),
+                    request.track_parent,
                     self.cache.as_ref(),
                 )
                 .await?
@@ -311,23 +400,40 @@ impl RenderSession {
             release.as_ref(),
         );
 
-        let (generators, manifests) = extract_application_generators(&manifests)?;
-        if !generators.is_empty() {
-            return Err(NylError::config(format!(
-                "ApplicationGenerator is not supported in rendered GitOps source {}",
-                path.display()
-            )));
+        let (application_generators, mut manifests) = extract_application_generators(&manifests)?;
+        if request.expand_application_generators {
+            for generator in &application_generators {
+                manifests.extend(process_application_generator(
+                    generator,
+                    source_path_text,
+                    self.credential_provider.clone(),
+                    &self.template_context,
+                )?);
+            }
         }
 
         let (policies, manifests) = extract_all_kyverno_policies(&manifests)?;
         let global = policies.get(&KyvernoScope::Global).cloned().unwrap_or_default();
+        let non_global_count: usize = policies
+            .iter()
+            .filter(|(scope, _)| **scope != KyvernoScope::Global)
+            .map(|(_, policies)| policies.len())
+            .sum();
+        if non_global_count > 0 {
+            tracing::warn!(
+                "Found {} non-Global Kyverno policies. Only Global scope is currently supported. \
+                 Immediate and Subtree scopes will be supported in a future version.",
+                non_global_count
+            );
+        }
         let manifests = if global.is_empty() {
             manifests
         } else {
             apply_kyverno_policies(&manifests, &global)?
         };
-        let (manifests, _) = deduplicate_manifests(manifests)?;
-        let manifests = prepare_manifests_for_output(&manifests, strip_mode.should_strip(false));
+        let (manifests, duplicates) = deduplicate_manifests(manifests)?;
+        let strip_empty_metadata_labels = strip_mode.should_strip(request.strip_empty_metadata_labels_default);
+        let manifests = prepare_manifests_for_output(&manifests, strip_empty_metadata_labels);
 
         for manifest in &manifests {
             let key = ResourceKey::from_json_value(manifest)?;
@@ -341,9 +447,12 @@ impl RenderSession {
             });
         }
 
-        let rendered = RenderedRelease {
+        let rendered = RenderedBundle {
             release,
             manifests,
+            application_generators,
+            duplicates,
+            strip_empty_metadata_labels,
             manifest_provenance,
             release_provenance,
             inputs: bundle.inputs,
@@ -358,6 +467,7 @@ impl RenderSession {
         path: &Path,
         inputs: &[PathBuf],
         resources: &[RenderResource],
+        request: &RenderRequest<'_>,
     ) -> Result<(Option<ReleaseCacheProbe>, Option<CachedRenderedRelease>)> {
         let Some(cache) = &self.cache else {
             return Ok((None, None));
@@ -368,7 +478,7 @@ impl RenderSession {
         let key = format!(
             "{}\0{}\0{}",
             self.project_root.display(),
-            self.target_name,
+            self.target_name(),
             path.display()
         );
         let previous = cache.load_record("release", &key)?;
@@ -380,6 +490,17 @@ impl RenderSession {
             recorder.record_file(format!("config:{}", config_file.display()), config_file)?;
         }
         recorder.record_template_context(&self.template_context.to_json())?;
+        recorder.record_value(
+            "request",
+            &serde_json::json!({
+                "onlySourceKind": request.only_source_kind,
+                "pathRelativeToProjectRoot": request.path_relative_to_project_root,
+                "maxDepth": request.max_depth,
+                "trackParent": request.track_parent,
+                "expandApplicationGenerators": request.expand_application_generators,
+                "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,
+            }),
+        )?;
         cache.record_renderer_tools(&mut recorder)?;
         for resource in resources {
             record_resource_directory_dependency(&mut recorder, &resource.value, &self.project_config)?;
@@ -396,7 +517,7 @@ impl RenderSession {
         Ok((Some(ReleaseCacheProbe { key, recorder }), cached))
     }
 
-    fn store_release_cache(&self, probe: Option<ReleaseCacheProbe>, rendered: &RenderedRelease) -> Result<()> {
+    fn store_release_cache(&self, probe: Option<ReleaseCacheProbe>, rendered: &RenderedBundle) -> Result<()> {
         let (Some(cache), Some(probe)) = (&self.cache, probe) else {
             return Ok(());
         };
@@ -421,32 +542,47 @@ struct ReleaseCacheProbe {
 struct CachedRenderedRelease {
     release: Option<Release>,
     manifests: Vec<Value>,
+    application_generators: Vec<ApplicationGenerator>,
+    duplicates: Vec<(ResourceKey, usize)>,
+    strip_empty_metadata_labels: bool,
     manifest_provenance: Vec<(ResourceKey, String)>,
     release_provenance: Option<String>,
     inputs: Vec<PathBuf>,
 }
 
 impl CachedRenderedRelease {
-    fn from_rendered(rendered: &RenderedRelease) -> Self {
+    fn from_rendered(rendered: &RenderedBundle) -> Self {
         let mut manifest_provenance = rendered
             .manifest_provenance
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>();
         manifest_provenance.sort_by_cached_key(|(key, _)| serde_json::to_string(key).unwrap_or_default());
+        let mut duplicates = rendered
+            .duplicates
+            .iter()
+            .map(|(key, count)| (key.clone(), *count))
+            .collect::<Vec<_>>();
+        duplicates.sort_by_cached_key(|(key, _)| serde_json::to_string(key).unwrap_or_default());
         Self {
             release: rendered.release.clone(),
             manifests: rendered.manifests.clone(),
+            application_generators: rendered.application_generators.clone(),
+            duplicates,
+            strip_empty_metadata_labels: rendered.strip_empty_metadata_labels,
             manifest_provenance,
             release_provenance: rendered.release_provenance.clone(),
             inputs: rendered.inputs.clone(),
         }
     }
 
-    fn into_rendered(self) -> RenderedRelease {
-        RenderedRelease {
+    fn into_rendered(self) -> RenderedBundle {
+        RenderedBundle {
             release: self.release,
             manifests: self.manifests,
+            application_generators: self.application_generators,
+            duplicates: self.duplicates.into_iter().collect(),
+            strip_empty_metadata_labels: self.strip_empty_metadata_labels,
             manifest_provenance: self.manifest_provenance.into_iter().collect(),
             release_provenance: self.release_provenance,
             inputs: self.inputs,
@@ -767,7 +903,7 @@ spec:
     }
 
     #[tokio::test]
-    async fn rejects_cmp_application_generator() {
+    async fn retains_application_generator_for_the_consumer() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
@@ -776,15 +912,22 @@ spec:
 kind: ApplicationGenerator
 metadata:
   name: legacy
-spec: {}
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: https://example.invalid/source.git
+    path: applications
 ",
         )
         .unwrap();
 
         let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
         let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
-        let error = session.render_release_file(Path::new("app.yaml")).await.unwrap_err();
-        assert!(error.to_string().contains("ApplicationGenerator"));
+        let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
+        assert_eq!(rendered.application_generators.len(), 1);
+        assert!(rendered.manifests.is_empty());
     }
 
     #[test]

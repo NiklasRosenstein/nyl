@@ -3,7 +3,7 @@
 pub mod cache;
 mod session;
 
-pub use session::{RenderSession, RenderedRelease};
+pub use session::{RenderRequest, RenderSession, RenderedBundle, RenderedRelease};
 
 use clap::Args;
 use glob::{glob, Pattern};
@@ -23,14 +23,11 @@ use crate::{
     git::is_argocd_env,
     helm::{HelmChartResolver, HelmTemplateExecutor},
     kubernetes::{KubeRsClient, ResourceKey},
-    postprocess::apply_kyverno_policies,
     resources::{
-        component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_release,
-        is_nyl_component, is_remote_helm_chart_shortcut, is_supported_application_array_field_path,
-        is_supported_application_field_path, join_field_path_segments, parse_component_kind, path_matches_glob,
-        ChartRef, HelmChart, KyvernoScope, NylComponent, Release, RemoteManifest,
+        component_kind_to_chart_ref, extract_release, is_nyl_component, is_remote_helm_chart_shortcut,
+        is_supported_application_array_field_path, is_supported_application_field_path, join_field_path_segments,
+        parse_component_kind, path_matches_glob, ChartRef, HelmChart, NylComponent, Release, RemoteManifest,
     },
-    secrets::SecretsConfig,
     template::{TemplateContext, TemplateEngine},
     util::deep_merge_value,
     NylError, Result,
@@ -71,6 +68,9 @@ pub struct RenderOptions {
     /// Track parent resource information in annotations
     #[arg(long)]
     pub track_parent: bool,
+
+    #[command(flatten)]
+    pub cache: cache::TreeCacheArgs,
 }
 
 /// Render Kubernetes manifests to stdout
@@ -136,19 +136,71 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
-    let (mut manifests, release, strip_empty_metadata_labels_mode, resolved_target, mut duplicates) =
-        render_manifests_complete(
-            &options.common.path,
-            options.common.only_source_kind.as_deref(),
-            options.common.target.as_deref(),
-            options.offline,
-            options.kube_version,
-            options.kube_api_versions,
-            options.common.max_depth,
-            options.common.track_parent,
-            options.context_override,
+    let project_config = ProjectConfig::load_with_warning(None)?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root = project_config
+        .file
+        .as_deref()
+        .and_then(Path::parent)
+        .unwrap_or(&current_dir);
+    let resolved_target = options
+        .common
+        .target
+        .as_deref()
+        .map(|name| resolve_target_cluster(project_root, name))
+        .transpose()?;
+
+    if resolved_target.is_some() && (options.kube_version.is_some() || !options.kube_api_versions.is_empty()) {
+        return Err(NylError::config(
+            "--kube-version and --kube-api-versions cannot be used with --target; the Cluster resource is authoritative",
+        ));
+    }
+    let explicit_capabilities = match (options.kube_version, options.kube_api_versions.is_empty()) {
+        (Some(version), false) if !version.trim().is_empty() => {
+            Some((version.to_owned(), options.kube_api_versions.to_vec()))
+        }
+        _ => None,
+    };
+    let missing_capabilities_error = if options.offline {
+        Some("Offline targetless Helm rendering requires --kube-version and --kube-api-versions".to_string())
+    } else {
+        Some(
+            "Rendering Helm resources online requires --target; alternatively use --offline with --kube-version and --kube-api-versions"
+                .to_string(),
         )
-        .await?;
+    };
+    let mut session = RenderSession::for_cli(
+        project_root,
+        &project_config,
+        resolved_target
+            .as_ref()
+            .map(|resolved| (&resolved.target, &resolved.cluster)),
+        explicit_capabilities,
+        missing_capabilities_error,
+    )
+    .await?;
+    session.set_cache(Some(cache::GitOpsCache::new(
+        project_root,
+        options.common.cache.mode(),
+    )?));
+    let path = Path::new(&options.common.path);
+    let provenance_root = project_config
+        .file
+        .as_deref()
+        .and_then(Path::parent)
+        .or_else(|| path.is_absolute().then(|| path.parent()).flatten());
+    let mut request = RenderRequest::new(path, provenance_root);
+    request.path_relative_to_project_root = false;
+    request.only_source_kind = options.common.only_source_kind.as_deref();
+    request.max_depth = options.common.max_depth;
+    request.track_parent = options.common.track_parent;
+    request.expand_application_generators = true;
+    request.strip_empty_metadata_labels_default = is_argocd_env();
+    let rendered = session.render(request).await?;
+    let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
+    let mut manifests = rendered.manifests;
+    let release = rendered.release;
+    let mut duplicates = rendered.duplicates;
 
     manifests = crate::cli::filter::filter_manifests_by_kind(
         manifests,
@@ -196,271 +248,12 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     Ok(RenderPreflightResult {
         manifests,
         release,
-        strip_empty_metadata_labels: strip_empty_metadata_labels_mode.should_strip(is_argocd_env()),
+        strip_empty_metadata_labels,
         resolved_target,
         duplicates,
         kube_client,
         raw_client,
     })
-}
-
-/// Complete manifest rendering pipeline used by render, diff, and apply.
-/// Returns final manifests ready for output/apply/diff, with all Nyl resources processed.
-/// Also returns the extracted Release metadata (if present) for diff/apply commands.
-/// Returns manifests, release metadata, output policy, the resolved target, and duplicate resources.
-#[allow(clippy::too_many_arguments)]
-pub async fn render_manifests_complete(
-    path: &str,
-    only_source_kind: Option<&str>,
-    target_name: Option<&str>,
-    offline: bool,
-    cli_kube_version: Option<&str>,
-    cli_api_versions: &[String],
-    max_depth: usize,
-    track_parent: bool,
-    context_override: Option<&str>,
-) -> Result<(
-    Vec<serde_json::Value>,
-    Option<Release>,
-    StripEmptyMetadataLabelsMode,
-    Option<ResolvedTargetCluster>,
-    std::collections::HashMap<ResourceKey, usize>,
-)> {
-    // 1. Render manifests (base pipeline)
-    let (manifests, strip_empty_metadata_labels_mode, resolved_target, credential_provider, template_context) =
-        render_manifests(
-            path,
-            only_source_kind,
-            target_name,
-            offline,
-            cli_kube_version,
-            cli_api_versions,
-            max_depth,
-            track_parent,
-            context_override,
-        )
-        .await?;
-
-    // 2. Extract Release metadata (before filtering it out)
-    let (release, manifests) = extract_release(&manifests)?;
-    let strip_empty_metadata_labels_mode =
-        resolve_strip_empty_metadata_labels_mode(strip_empty_metadata_labels_mode, release.as_ref());
-
-    // 3. Extract ApplicationGenerator resources and replace with ArgoCD Applications
-    let (generators, mut final_manifests) = extract_application_generators(&manifests)?;
-    if !generators.is_empty() {
-        tracing::debug!(
-            "Found {} ApplicationGenerator resource(s) in {}",
-            generators.len(),
-            path
-        );
-    }
-    for generator in generators {
-        let applications =
-            process_application_generator(&generator, path, credential_provider.clone(), &template_context)?;
-        final_manifests.extend(applications);
-    }
-
-    // 4. Extract and apply Kyverno policies (Global scope only for now)
-    let (policies_by_scope, final_manifests) = extract_all_kyverno_policies(&final_manifests)?;
-    let global_policies = policies_by_scope
-        .get(&KyvernoScope::Global)
-        .cloned()
-        .unwrap_or_default();
-
-    // Warn if non-Global policies are used (not yet supported)
-    let non_global_count: usize = policies_by_scope
-        .iter()
-        .filter(|(scope, _)| **scope != KyvernoScope::Global)
-        .map(|(_, policies)| policies.len())
-        .sum();
-    if non_global_count > 0 {
-        tracing::warn!(
-            "Found {} non-Global Kyverno policies. Only Global scope is currently supported. \
-             Immediate and Subtree scopes will be supported in a future version.",
-            non_global_count
-        );
-    }
-
-    let final_manifests = if global_policies.is_empty() {
-        final_manifests
-    } else {
-        apply_kyverno_policies(&final_manifests, &global_policies)?
-    };
-
-    // 5. Detect and deduplicate resources (after all generation/transformation is complete)
-    let (final_manifests, duplicates) = deduplicate_manifests(final_manifests)?;
-
-    Ok((
-        final_manifests,
-        release,
-        strip_empty_metadata_labels_mode,
-        resolved_target,
-        duplicates,
-    ))
-}
-
-/// Shared manifest rendering logic used by render, diff, and apply
-/// Returns manifests, output policy, the resolved target, credentials, and template context.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn render_manifests(
-    path: &str,
-    only_source_kind: Option<&str>,
-    target_name: Option<&str>,
-    offline: bool,
-    cli_kube_version: Option<&str>,
-    cli_api_versions: &[String],
-    max_depth: usize,
-    track_parent: bool,
-    _context_override: Option<&str>,
-) -> Result<(
-    Vec<serde_json::Value>,
-    StripEmptyMetadataLabelsMode,
-    Option<ResolvedTargetCluster>,
-    Option<Arc<crate::git::CredentialProvider>>,
-    TemplateContext,
-)> {
-    // 1. Load project configuration (with warning if not found)
-    let project_config = ProjectConfig::load_with_warning(None)?;
-
-    // 2. Resolve the optional target and its concrete cluster.
-    let resolved_target = target_name
-        .map(|name| resolve_target_cluster(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), name))
-        .transpose()?;
-
-    if resolved_target.is_some() && (cli_kube_version.is_some() || !cli_api_versions.is_empty()) {
-        return Err(NylError::config(
-            "--kube-version and --kube-api-versions cannot be used with --target; the Cluster resource is authoritative",
-        ));
-    }
-
-    // 3. Load secrets
-    let secrets_config = SecretsConfig::load(None)?;
-
-    // 4. Build template context
-    let values = if let Some(resolved) = &resolved_target {
-        deep_merge_value(
-            Some(serde_json::to_value(&resolved.cluster.spec.values)?),
-            serde_json::to_value(&resolved.target.spec.values)?,
-        )
-    } else {
-        serde_json::json!({})
-    };
-    let mut context = TemplateContext::build(values, &secrets_config)?;
-    if let Some(resolved) = &resolved_target {
-        let mut cluster = serde_json::to_value(&resolved.cluster)?;
-        cluster
-            .get_mut("spec")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("serialized Cluster spec is an object")
-            .remove("live");
-        context = context.with_gitops_context(cluster, serde_json::to_value(&resolved.target)?);
-    }
-
-    let credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
-
-    // 5. Create generator
-
-    // 6. Load and filter resources (rendering Jinja templates in manifest files)
-    let provenance_root = project_config.file.as_ref().and_then(|file| file.parent());
-    let resources = load_release_bundle_with_root(Path::new(path), &context, provenance_root)?.resources;
-    let filtered = filter_render_resources(resources, only_source_kind);
-
-    // 7. Check if any resources need Helm rendering (HelmChart or Component)
-    let needs_helm_rendering = filtered
-        .iter()
-        .any(|resource| is_renderable_resource(&resource.value, &project_config));
-
-    // 8. Determine kube_version and api_versions (only if needed)
-    let (kube_version, api_versions) = if !needs_helm_rendering {
-        // No HelmCharts, version info not needed
-        (String::new(), Vec::new())
-    } else if let Some(resolved) = &resolved_target {
-        resolve_cluster_kubernetes_capabilities(resolved)?
-    } else if offline {
-        resolve_explicit_kubernetes_capabilities(cli_kube_version, cli_api_versions)?
-    } else {
-        return Err(NylError::config(
-            "Rendering Helm resources online requires --target; alternatively use --offline with --kube-version and --kube-api-versions",
-        ));
-    };
-
-    // 9. Generate manifests, recursively expanding nested HelmChart/Component resources
-    let mut all_manifests = Vec::new();
-    let mut pending = filtered;
-    for _ in 0..max_depth {
-        let mut next_pending = Vec::new();
-        for resource in pending {
-            let manifests = generate_render_resource(
-                &resource,
-                &context,
-                &project_config,
-                &kube_version,
-                &api_versions,
-                credential_provider.clone(),
-                track_parent,
-                None,
-            )
-            .await?;
-            for manifest in manifests {
-                if is_renderable_resource(&manifest.value, &project_config) {
-                    next_pending.push(manifest);
-                } else {
-                    all_manifests.push(manifest.value);
-                }
-            }
-        }
-        pending = next_pending;
-        if pending.is_empty() {
-            break;
-        }
-    }
-
-    // Include any remaining pending resources that weren't fully evaluated
-    // This happens when max_depth is reached before all resources are expanded
-    all_manifests.extend(pending.into_iter().map(|resource| resource.value));
-
-    Ok((
-        all_manifests,
-        project_config.get_strip_empty_metadata_labels_mode(),
-        resolved_target,
-        credential_provider,
-        context,
-    ))
-}
-
-fn resolve_explicit_kubernetes_capabilities(
-    cli_kube_version: Option<&str>,
-    cli_api_versions: &[String],
-) -> Result<(String, Vec<String>)> {
-    let Some(kube_version) = cli_kube_version.filter(|version| !version.trim().is_empty()) else {
-        return Err(NylError::config(
-            "Offline targetless Helm rendering requires --kube-version",
-        ));
-    };
-    if cli_api_versions.is_empty() {
-        return Err(NylError::config(
-            "Offline targetless Helm rendering requires --kube-api-versions",
-        ));
-    }
-    Ok((kube_version.to_owned(), cli_api_versions.to_vec()))
-}
-
-fn resolve_cluster_kubernetes_capabilities(resolved: &ResolvedTargetCluster) -> Result<(String, Vec<String>)> {
-    let capabilities = &resolved.cluster.spec.kubernetes;
-    let kube_version = capabilities.kube_version.clone().ok_or_else(|| {
-        NylError::config(format!(
-            "Cluster '{}' is missing spec.kubernetes.kubeVersion",
-            resolved.cluster.metadata.name
-        ))
-    })?;
-    if capabilities.api_versions.is_empty() {
-        return Err(NylError::config(format!(
-            "Cluster '{}' is missing spec.kubernetes.apiVersions",
-            resolved.cluster.metadata.name
-        )));
-    }
-    Ok((kube_version, capabilities.api_versions.clone()))
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
@@ -2861,34 +2654,6 @@ mod tests {
             file: None,
             config: crate::config::ProjectFile::default(),
         }
-    }
-
-    #[test]
-    fn test_resolve_explicit_kubernetes_capabilities() {
-        let cli_api_versions = vec!["v1".to_string(), "networking.k8s.io/v1".to_string()];
-        let (kube_version, api_versions) =
-            resolve_explicit_kubernetes_capabilities(Some("1.31.0"), &cli_api_versions).unwrap();
-
-        assert_eq!(kube_version, "1.31.0");
-        assert_eq!(api_versions, cli_api_versions);
-    }
-
-    #[test]
-    fn test_explicit_kubernetes_capabilities_require_version() {
-        let err = resolve_explicit_kubernetes_capabilities(None, &["v1".to_string()])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("targetless Helm rendering"));
-        assert!(err.contains("--kube-version"));
-    }
-
-    #[test]
-    fn test_explicit_kubernetes_capabilities_require_api_versions() {
-        let err = resolve_explicit_kubernetes_capabilities(Some("1.30.0"), &[])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("targetless Helm rendering"));
-        assert!(err.contains("--kube-api-versions"));
     }
 
     fn create_test_worktree_paths() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {

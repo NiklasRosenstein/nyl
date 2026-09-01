@@ -321,6 +321,12 @@ async fn compile_target_tree_inner(
             let mut rendered = session
                 .render_release_file_with_provenance_root(source_file, provenance_root)
                 .await?;
+            if !rendered.application_generators.is_empty() {
+                return Err(NylError::config(format!(
+                    "ApplicationGenerator is not supported in rendered GitOps source {}",
+                    source_file.display()
+                )));
+            }
             target_cacheable &= rendered.cacheable;
             for bundle_input in &rendered.inputs {
                 claimed_source_files.insert(manifest_path_identity(bundle_input));
