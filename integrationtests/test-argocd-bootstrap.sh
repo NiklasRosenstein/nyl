@@ -239,20 +239,20 @@ kubectl get pod "${REPO_POD}" -n "${NAMESPACE}" \
 echo ""
 
 NYL_READY=$(kubectl get pod "${REPO_POD}" -n "${NAMESPACE}" \
-    -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v1")].ready}')
+    -o jsonpath='{.status.containerStatuses[?(@.name=="nyl-v2")].ready}')
 
 if [ "${NYL_READY}" != "true" ]; then
-    echo "ERROR: nyl-v1 sidecar not ready"
+    echo "ERROR: nyl-v2 sidecar not ready"
     echo ""
     echo "Pod details:"
     kubectl describe pod "${REPO_POD}" -n "${NAMESPACE}"
     echo ""
     echo "Nyl sidecar logs:"
-    kubectl logs "${REPO_POD}" -n "${NAMESPACE}" -c nyl-v1 --tail=50 || true
+    kubectl logs "${REPO_POD}" -n "${NAMESPACE}" -c nyl-v2 --tail=50 || true
     exit 1
 fi
 
-echo "✓ nyl-v1 sidecar is ready"
+echo "✓ nyl-v2 sidecar is ready"
 echo ""
 
 # Install ArgoCD CLI if not already installed
@@ -343,14 +343,75 @@ echo "✓ Self-managed application 'argocd' found"
 echo ""
 
 echo "Syncing ArgoCD application..."
-if ! argocd app sync argocd --timeout "${SYNC_TIMEOUT}"; then
-    echo "ERROR: Sync failed"
+if ! argocd app sync argocd --async; then
+    echo "ERROR: Failed to request sync"
     echo ""
     argocd app get argocd --show-operation
     exit 1
 fi
 
+echo "Waiting for the sync operation through the Kubernetes API..."
+SYNC_START=${SECONDS}
+SYNC_PHASE=""
+while (( SECONDS - SYNC_START < SYNC_TIMEOUT )); do
+    SYNC_PHASE=$(kubectl get application argocd -n "${NAMESPACE}" \
+        -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+    case "${SYNC_PHASE}" in
+        Succeeded)
+            break
+            ;;
+        Error|Failed)
+            echo "ERROR: Sync operation finished with phase ${SYNC_PHASE}"
+            kubectl get application argocd -n "${NAMESPACE}" -o yaml
+            exit 1
+            ;;
+    esac
+    sleep 5
+done
+
+if [ "${SYNC_PHASE}" != "Succeeded" ]; then
+    echo "ERROR: Sync operation did not succeed within ${SYNC_TIMEOUT}s (phase: ${SYNC_PHASE:-unset})"
+    kubectl get application argocd -n "${NAMESPACE}" -o yaml
+    exit 1
+fi
+
 echo "✓ Application synced"
+echo ""
+
+# Self-management can restart ArgoCD while applying its own Deployment.
+kill "${PORT_FORWARD_PID}" 2>/dev/null || true
+wait "${PORT_FORWARD_PID}" 2>/dev/null || true
+unset PORT_FORWARD_PID
+
+echo "Waiting for ArgoCD deployments after self-sync..."
+for deployment in argocd-server argocd-repo-server; do
+    kubectl rollout status deployment/${deployment} -n "${NAMESPACE}" \
+        --timeout="${DEPLOYMENT_TIMEOUT}s"
+done
+
+echo "Reconnecting to ArgoCD..."
+kubectl port-forward svc/argocd-server -n "${NAMESPACE}" 8080:443 &>/dev/null &
+PORT_FORWARD_PID=$!
+
+ARGOCD_RECONNECTED=false
+for i in $(seq 1 30); do
+    if argocd login localhost:8080 \
+        --username admin \
+        --password "${PASSWORD}" \
+        --insecure &>/dev/null; then
+        ARGOCD_RECONNECTED=true
+        break
+    fi
+    echo "  Reconnect attempt $i/30..."
+    sleep 2
+done
+
+if [ "${ARGOCD_RECONNECTED}" != "true" ]; then
+    echo "ERROR: Could not reconnect to ArgoCD after self-sync"
+    exit 1
+fi
+
+echo "✓ Reconnected to ArgoCD"
 echo ""
 
 echo "Waiting for healthy status..."

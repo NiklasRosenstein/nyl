@@ -2136,6 +2136,20 @@ fn create_argocd_application_from_generator(
         rel_dir_normalized
     };
 
+    let mut plugin_env = vec![
+        serde_json::json!({"name": "NYL_RELEASE_NAME", "value": release.metadata.name}),
+        serde_json::json!({"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace}),
+        serde_json::json!({"name": "NYL_CMP_TEMPLATE_INPUT", "value": template_input}),
+    ];
+    plugin_env.extend(
+        generator
+            .spec
+            .source
+            .plugin_env
+            .iter()
+            .map(|(name, value)| serde_json::json!({"name": name, "value": value})),
+    );
+
     // Build the Application manifest
     let mut app = serde_json::json!({
         "apiVersion": "argoproj.io/v1alpha1",
@@ -2152,11 +2166,7 @@ fn create_argocd_application_from_generator(
                 "targetRevision": generator.spec.source.target_revision,
                 "plugin": {
                     "name": "nyl-v2",
-                    "env": [
-                        {"name": "NYL_RELEASE_NAME", "value": release.metadata.name},
-                        {"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace},
-                        {"name": "NYL_CMP_TEMPLATE_INPUT", "value": template_input},
-                    ],
+                    "env": plugin_env,
                 },
             },
             "destination": {
@@ -2667,6 +2677,7 @@ mod tests {
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy,
@@ -2731,6 +2742,7 @@ mod tests {
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -2790,6 +2802,7 @@ mod tests {
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -2942,12 +2955,12 @@ metadata:
     }
 
     #[test]
-    fn test_create_argocd_application_from_generator_sets_template_input() {
+    fn test_create_argocd_application_from_generator_sets_plugin_env() {
         use crate::resources::{
             ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata, ApplicationGeneratorSpec,
             ApplicationSource, ReleaseMetadata, ReleaseSpec,
         };
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
 
         let release = Release {
             api_version: API_VERSION_GITOPS.to_string(),
@@ -2978,6 +2991,10 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: BTreeMap::from([
+                        ("ENVIRONMENT".to_string(), "production".to_string()),
+                        ("REGION".to_string(), "eu-central-1".to_string()),
+                    ]),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -3001,6 +3018,18 @@ metadata:
             .and_then(|v| v["value"].as_str())
             .unwrap();
         assert_eq!(template_input, "nginx.yaml");
+        assert_eq!(
+            env.iter()
+                .find(|v| v["name"] == "ENVIRONMENT")
+                .and_then(|v| v["value"].as_str()),
+            Some("production")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|v| v["name"] == "REGION")
+                .and_then(|v| v["value"].as_str()),
+            Some("eu-central-1")
+        );
     }
 
     fn make_test_release(override_map: serde_json::Value) -> Release {
@@ -3042,6 +3071,7 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -3369,6 +3399,7 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -3533,6 +3564,7 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -3581,6 +3613,7 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -3657,6 +3690,7 @@ metadata:
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,

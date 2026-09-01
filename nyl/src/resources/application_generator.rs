@@ -4,7 +4,7 @@
 /// from Nyl YAML files by scanning directories and creating Applications for
 /// each discovered Release.
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::constants::API_VERSION_ARGOCD;
 use crate::resources::validate_path_glob_pattern;
@@ -104,6 +104,9 @@ pub struct ApplicationSource {
     /// Exclude patterns for file filtering
     #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
+    /// Environment variables passed to the Nyl CMP plugin in generated Applications
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", rename = "pluginEnv")]
+    pub plugin_env: BTreeMap<String, String>,
 }
 
 /// ArgoCD sync policy
@@ -199,6 +202,21 @@ impl ApplicationGenerator {
         }
         if self.spec.destination.namespace.is_empty() {
             return Err(NylError::Config("spec.destination.namespace is required".to_string()));
+        }
+        for name in self.spec.source.plugin_env.keys() {
+            if name.trim().is_empty() {
+                return Err(NylError::Config(
+                    "spec.source.pluginEnv variable names must not be empty".to_string(),
+                ));
+            }
+            if matches!(
+                name.as_str(),
+                "NYL_RELEASE_NAME" | "NYL_RELEASE_NAMESPACE" | "NYL_CMP_TEMPLATE_INPUT"
+            ) {
+                return Err(NylError::Config(format!(
+                    "spec.source.pluginEnv cannot override reserved variable {name}"
+                )));
+            }
         }
         if let Some(customization) = &self.spec.release_customization {
             let patterns = customization.effective_allowed_paths();
@@ -357,7 +375,10 @@ mod tests {
                     "targetRevision": "main",
                     "path": "clusters/default",
                     "include": ["*.yaml"],
-                    "exclude": ["test_*"]
+                    "exclude": ["test_*"],
+                    "pluginEnv": {
+                        "ENVIRONMENT": "production"
+                    }
                 },
                 "project": "production",
                 "syncPolicy": {
@@ -378,6 +399,10 @@ mod tests {
         assert_eq!(gen.spec.source.target_revision, "main");
         assert_eq!(gen.spec.source.include, vec!["*.yaml"]);
         assert_eq!(gen.spec.source.exclude, vec!["test_*"]);
+        assert_eq!(
+            gen.spec.source.plugin_env.get("ENVIRONMENT").map(String::as_str),
+            Some("production")
+        );
         assert_eq!(
             gen.spec.application_name_template,
             "{{ .release.namespace }}-{{ .release.name }}"
@@ -430,6 +455,7 @@ mod tests {
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,
@@ -441,6 +467,19 @@ mod tests {
         };
 
         assert!(gen.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_reserved_plugin_env_variable() {
+        let mut generator = create_test_generator();
+        generator
+            .spec
+            .source
+            .plugin_env
+            .insert("NYL_CMP_TEMPLATE_INPUT".to_string(), "another-file.yaml".to_string());
+
+        let error = generator.validate().unwrap_err().to_string();
+        assert!(error.contains("cannot override reserved variable NYL_CMP_TEMPLATE_INPUT"));
     }
 
     #[test]
@@ -692,6 +731,7 @@ mod tests {
                     paths: None,
                     include: vec!["*.yaml".to_string()],
                     exclude: vec![".*".to_string()],
+                    plugin_env: std::collections::BTreeMap::default(),
                 },
                 project: "default".to_string(),
                 sync_policy: None,

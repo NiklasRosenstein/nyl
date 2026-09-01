@@ -70,8 +70,13 @@ jobs:
         working-directory: nyl
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo binstall cargo-audit --no-confirm --disable-strategies compile --only-signed --disable-telemetry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Security audit
         run: cargo audit
@@ -304,8 +309,10 @@ jobs:
 
   integration-minikube:
     name: Integration tests (Minikube)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: [package-image-and-chart, build-all-platform-binaries]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    needs: [package-image-and-chart]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -365,7 +372,22 @@ jobs:
           cd integrationtests
           ./test-argocd-bootstrap.sh
 
+      - name: Check ArgoCD credential test configuration
+        id: credential_test
+        env:
+          TEST_REPO_URL: ${{ secrets.TEST_REPO_URL }}
+          TEST_REPO_USERNAME: ${{ secrets.TEST_REPO_USERNAME }}
+          TEST_REPO_PASSWORD: ${{ secrets.TEST_REPO_PASSWORD }}
+        run: |
+          if [ -n "$TEST_REPO_URL" ] && [ -n "$TEST_REPO_USERNAME" ] && [ -n "$TEST_REPO_PASSWORD" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping ArgoCD credential lookup test because its repository credentials are not configured."
+          fi
+
       - name: Run ArgoCD credential lookup test
+        if: steps.credential_test.outputs.enabled == 'true'
         env:
           NYL_BIN: /usr/local/bin/nyl
           TEST_REPO_URL: ${{ secrets.TEST_REPO_URL }}
