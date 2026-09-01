@@ -393,7 +393,24 @@ metadata:
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Cache:\n  Target: reused compiled tree\n  Skipped: 2 Releases, 1 Helm render",
+            "Cache:\n  Target: reused\n  Releases: 2 skipped\n  Helm: 1 skipped",
+        ));
+
+    let api = fixture.path().join("applications/workloads/api.yaml");
+    let contents = fs::read_to_string(&api).unwrap();
+    fs::write(
+        &api,
+        contents.replace("  environment:", "  changed: yes\n  environment:"),
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Cache:\n  Target: rebuilt\n  Releases: 1 reused, 1 rebuilt\n  Helm: 1 skipped",
         ));
 }
 

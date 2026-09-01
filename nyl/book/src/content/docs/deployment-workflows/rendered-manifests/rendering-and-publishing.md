@@ -98,20 +98,31 @@ temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.
 
-Rendering commands print a cache summary on standard error. It separates hits,
-misses, invalidations, refreshes, stored results, and bypassed work by target,
-Release, Helm, and source layer. Bypassed work includes the reason that prevents
-Nyl from safely revalidating it. Debug logging names the dependencies that
-changed when an existing entry is invalidated; secret and environment values
-remain represented only by keyed fingerprints.
+Rendering commands print a cache summary on standard error. It reports work as
+reused, rebuilt or rendered, and skipped. Skipped work was not consulted because
+a higher-level artifact supplied the result. Inputs that cannot be cached retain
+their reason beneath the affected layer. Debug logging records the underlying
+miss, invalidation, refresh and store events and names changed dependencies;
+secret and environment values remain represented only by keyed fingerprints.
 
-A complete target hit reports the work that it short-circuits instead of
-claiming hits for lower-level caches that were never consulted:
+A complete target reuse reports the work that it short-circuits instead of
+claiming reuse at lower-level caches that were never consulted:
 
 ```text
 Cache:
-  Target: reused compiled tree
-  Skipped: 38 Releases, 65 Helm renders
+  Target: reused
+  Releases: 38 skipped
+  Helm: 65 skipped
+```
+
+A partial rebuild attributes lower-level work to the Release artifacts that
+short-circuited it:
+
+```text
+Cache:
+  Target: rebuilt
+  Releases: 37 reused, 1 rebuilt
+  Helm: 65 skipped
 ```
 
 The `_nyl/index.json` ownership index is always verified when reading a

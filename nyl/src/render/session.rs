@@ -571,16 +571,13 @@ impl RenderSession {
                     None
                 }
                 Some(previous) if previous.same_inputs(&current) => {
-                    let cached = cache.load_artifact("release", &previous.artifact_digest)?;
-                    cache.observe(
-                        CacheLayer::Release,
-                        if cached.is_some() {
-                            CacheOutcome::Hit
-                        } else {
-                            CacheOutcome::Miss
-                        },
-                        &[],
-                    );
+                    let cached: Option<CachedRenderedBundle> =
+                        cache.load_artifact("release", &previous.artifact_digest)?;
+                    if let Some(bundle) = &cached {
+                        cache.observe_release_hit(bundle.helm_render_count);
+                    } else {
+                        cache.observe(CacheLayer::Release, CacheOutcome::Miss, &[]);
+                    }
                     cached.map(|bundle| CachedReleaseHit {
                         bundle,
                         dependencies: recorder.filesystem_dependencies(),
