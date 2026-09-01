@@ -280,7 +280,14 @@ async fn compile_target_tree_inner(
             }
         }
 
-        let mut source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
+        let mut source = resolve_group_source(
+            inventory,
+            &group_resource_path,
+            &group,
+            &target,
+            &mut git_manager,
+            cache,
+        )?;
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
         }
@@ -1522,6 +1529,7 @@ fn resolve_group_source(
     group: &ApplicationGroup,
     target: &GitOpsTarget,
     git_manager: &mut Option<GitManager>,
+    cache: Option<&GitOpsCache>,
 ) -> Result<ResolvedGroupSource> {
     let mut provenance_inputs = Vec::new();
     let (root, source, remote_root) = match &group.spec.source {
@@ -1532,7 +1540,13 @@ fn resolve_group_source(
             }
             let manager = match git_manager {
                 Some(manager) => manager,
-                None => git_manager.insert(GitManager::new().map_err(NylError::Git)?),
+                None => git_manager.insert(
+                    if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
+                        GitManager::with_cache_dir(cache_root)
+                    } else {
+                        GitManager::new().map_err(NylError::Git)?
+                    },
+                ),
             };
             let commit = source.commit.as_deref().expect("validated remote source has commit");
             let checkout = manager

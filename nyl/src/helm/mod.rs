@@ -131,7 +131,7 @@ impl HelmChartResolver {
                     let version = chart_ref.version.as_ref().ok_or_else(|| {
                         NylError::Config("Chart version is required when using repository".to_string())
                     })?;
-                    return Self::resolve_repository(repository, version, chart_ref);
+                    return self.resolve_repository(repository, version, chart_ref);
                 }
             }
         }
@@ -229,8 +229,12 @@ impl HelmChartResolver {
     }
 
     /// Resolve a chart from an OCI or Helm repository using `helm pull`
-    fn resolve_repository(repository: &str, version: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
-        let puller = OciChartPuller::new()?;
+    fn resolve_repository(&self, repository: &str, version: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let puller = if let Some(cache_dir) = &self.cache_dir {
+            OciChartPuller::with_cache_dir(cache_dir)
+        } else {
+            OciChartPuller::new()?
+        };
         let chart_path = puller.pull(repository, version, chart_ref.name.as_deref())?;
 
         Ok(ResolvedChart {

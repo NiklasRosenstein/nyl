@@ -1554,7 +1554,9 @@ fn render_helm_chart(
     let resolver = HelmChartResolver::with_cache_dir_and_provider(
         config.get_helm_chart_search_paths().to_vec(),
         working_dir,
-        None,
+        gitops_cache
+            .and_then(crate::gitops::GitOpsCache::external_cache_root)
+            .map(Path::to_path_buf),
         credential_provider,
     );
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;

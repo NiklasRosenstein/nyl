@@ -6,9 +6,7 @@ use git2::Repository;
 use similar::TextDiff;
 
 use crate::git::GitManager;
-use crate::gitops::{
-    compile_target_tree, compile_target_tree_cached, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs,
-};
+use crate::gitops::{compile_target_tree_cached, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs};
 use crate::{NylError, Result};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -54,7 +52,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let desired = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
     let (mut base, source_baseline) = match args.against {
-        DiffTreeBase::Published => (published_tree(&desired)?, None),
+        DiffTreeBase::Published => (published_tree(&desired, &cache)?, None),
         DiffTreeBase::Source => {
             let source_ref = args
                 .source_ref
@@ -65,6 +63,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
                 args.source_repository.as_deref(),
                 source_ref,
                 &args.target,
+                &cache,
             )
             .await?;
             (baseline.files.clone(), Some(baseline))
@@ -92,8 +91,11 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     }
 }
 
-fn published_tree(compiled: &crate::gitops::CompiledTargetTree) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
-    let mut manager = GitManager::new().map_err(NylError::Git)?;
+fn published_tree(
+    compiled: &crate::gitops::CompiledTargetTree,
+    cache: &GitOpsCache,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut manager = git_manager(cache)?;
     let checkout = manager
         .resolve_ref_fresh(
             &compiled.repository.repo_url,
@@ -164,6 +166,7 @@ async fn source_derived_tree(
     source_repository: Option<&str>,
     source_ref: &str,
     target: &str,
+    cache: &GitOpsCache,
 ) -> Result<crate::gitops::CompiledTargetTree> {
     let repository_url = if let Some(url) = source_repository {
         url.to_string()
@@ -176,12 +179,20 @@ async fn source_derived_tree(
             .and_then(|remote| remote.url().map(ToOwned::to_owned))
             .ok_or_else(|| NylError::config("Source repository has no origin; pass --source-repository"))?
     };
-    let mut manager = GitManager::new().map_err(NylError::Git)?;
+    let mut manager = git_manager(cache)?;
     let checkout = manager
         .resolve_ref_fresh(&repository_url, Some(source_ref), None)
         .map_err(NylError::Git)?;
     let inventory = discover_gitops_inventory(&checkout, None)?;
-    compile_target_tree(&inventory, target).await
+    compile_target_tree_cached(&inventory, target, cache, None).await
+}
+
+fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
+    if let Some(cache_root) = cache.external_cache_root() {
+        Ok(GitManager::with_cache_dir(cache_root))
+    } else {
+        GitManager::new().map_err(NylError::Git)
+    }
 }
 
 fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Vec<u8>> {

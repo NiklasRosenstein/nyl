@@ -251,6 +251,7 @@ pub struct GitOpsCache {
     mode: CacheMode,
     secret_key: [u8; 32],
     renderer_tools: Arc<OnceLock<BTreeMap<String, RecordedDependency>>>,
+    source_cache: Option<Arc<tempfile::TempDir>>,
 }
 
 impl GitOpsCache {
@@ -267,11 +268,17 @@ impl GitOpsCache {
         } else {
             load_or_create_secret_key(&root)?
         };
+        let source_cache = if mode == CacheMode::Disabled {
+            Some(Arc::new(tempfile::TempDir::new()?))
+        } else {
+            None
+        };
         Ok(Self {
             root,
             mode,
             secret_key,
             renderer_tools: Arc::new(OnceLock::new()),
+            source_cache,
         })
     }
 
@@ -281,6 +288,11 @@ impl GitOpsCache {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Explicit source cache root used to keep --no-cache checkouts ephemeral.
+    pub fn external_cache_root(&self) -> Option<&Path> {
+        self.source_cache.as_deref().map(tempfile::TempDir::path)
     }
 
     pub fn recorder(&self) -> DependencyRecorder {
@@ -567,6 +579,9 @@ mod tests {
 
         assert_eq!(disabled.load_artifact::<Vec<String>>("target", &digest).unwrap(), None);
         assert_eq!(disabled.store_artifact("target", &vec!["other"]).unwrap(), None);
+        let source_cache = disabled.external_cache_root().unwrap();
+        assert!(source_cache.is_dir());
+        assert!(!source_cache.starts_with(temp.path()));
     }
 
     #[test]

@@ -1,13 +1,14 @@
 /// OCI registry chart pulling via `helm pull`
 ///
-/// Downloads and caches Helm charts from OCI registries (e.g. ghcr.io).
-/// Charts are cached locally to avoid redundant pulls.
+/// Downloads Helm charts from OCI registries and stores immutable extracted
+/// trees by content digest. Mutable repository coordinates are resolved on
+/// every invocation.
 ///
 /// # Cache Layout
 ///
 /// ```text
 /// $NYL_CACHE_DIR/helm/oci/
-/// └── {repo_hash}-{version}/  # Extracted chart directory
+/// └── {repo_hash}-{version}-{content_hash}/  # Extracted chart directory
 /// ```
 use crate::{NylError, Result};
 use sha2::{Digest, Sha256};
@@ -55,13 +56,7 @@ impl OciChartPuller {
     /// # Returns
     /// Path to the extracted chart directory
     pub fn pull(&self, repository: &str, version: &str, chart_name: Option<&str>) -> Result<PathBuf> {
-        let chart_dir = self.chart_cache_path(repository, version);
-
-        // Return cached chart if it exists and contains Chart.yaml
-        if chart_dir.join("Chart.yaml").exists() {
-            tracing::debug!("Using cached Helm chart: {}", chart_dir.display());
-            return Ok(chart_dir);
-        }
+        let coordinate_path = self.chart_cache_path(repository, version);
 
         tracing::debug!("Pulling Helm chart from {}", crate::util::sanitize_url(repository));
 
@@ -130,13 +125,22 @@ impl OciChartPuller {
             )));
         }
 
-        // Move to the versioned cache path
+        let digest = directory_digest(&extracted)?;
+        let coordinate_name = coordinate_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("chart");
+        let chart_dir = coordinate_path.with_file_name(format!("{coordinate_name}-{}", &digest[..16]));
+        if chart_dir.join("Chart.yaml").is_file() {
+            tracing::debug!("Reusing identical Helm chart content: {}", chart_dir.display());
+            return Ok(chart_dir);
+        }
+
+        // Install the immutable content tree or reuse an identical concurrent pull.
         match std::fs::rename(&extracted, &chart_dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Another concurrent pull populated the cache between our existence
-                // check and this rename. Treat this as a cache hit, but verify the
-                // cache looks valid before proceeding.
+                // Another concurrent pull populated the same content tree.
                 if !chart_dir.join("Chart.yaml").exists() {
                     return Err(NylError::Process(format!("Failed to move cached chart: {}", e)));
                 }
@@ -184,6 +188,25 @@ impl OciChartPuller {
             sanitized
         }
     }
+}
+
+fn directory_digest(path: &std::path::Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    for entry in walkdir::WalkDir::new(path).follow_links(false).sort_by_file_name() {
+        let entry = entry.map_err(|error| NylError::Process(format!("Failed to inspect pulled chart: {error}")))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(path)
+            .expect("chart entry is beneath chart root");
+        hasher.update(relative.as_os_str().as_encoded_bytes());
+        hasher.update([0]);
+        hasher.update(std::fs::read(entry.path())?);
+        hasher.update([0]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Extract the chart name from an OCI repository URL
@@ -244,29 +267,6 @@ mod tests {
         let path1 = puller.chart_cache_path("oci://ghcr.io/owner1/nyl/chart", "0.1.0");
         let path2 = puller.chart_cache_path("oci://ghcr.io/owner2/nyl/chart", "0.1.0");
         assert_ne!(path1, path2);
-    }
-
-    #[test]
-    fn test_pull_returns_cached_chart() {
-        let temp = TempDir::new().unwrap();
-        let puller = OciChartPuller::with_cache_dir(temp.path());
-
-        let repo = "oci://ghcr.io/owner/nyl/chart";
-        let version = "0.1.0";
-
-        // Pre-populate the cache
-        let cache_path = puller.chart_cache_path(repo, version);
-        std::fs::create_dir_all(&cache_path).unwrap();
-        std::fs::write(
-            cache_path.join("Chart.yaml"),
-            "apiVersion: v2\nname: chart\nversion: 0.1.0\n",
-        )
-        .unwrap();
-
-        // Pull should return the cached path without running helm
-        let result = puller.pull(repo, version, None).unwrap();
-        assert_eq!(result, cache_path);
-        assert!(result.join("Chart.yaml").exists());
     }
 
     #[test]
