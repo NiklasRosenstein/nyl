@@ -65,6 +65,39 @@ nyl render-tree --target production --output-dir deploy-worktree --force
 Nyl warns for every repaired owned file. Unowned files, ownership boundaries,
 and symbolic-link protections remain enforced.
 
+## Render cache and source freshness
+
+The tree commands cache three expensive results: complete target trees,
+individual rendered Releases, and parsed local Helm output. Cache entries are
+content-addressed and accompanied by dependency records. Nyl verifies project
+file and directory membership, target context, Kubernetes capabilities,
+admitted `NYL_*` environment, secrets through a cache-local keyed fingerprint,
+and renderer tool versions before reuse. A target miss can still reuse
+unchanged Releases, while target-wide ownership, namespace, project, catalog,
+and layout validation runs again.
+
+The cache lives under `$NYL_CACHE_DIR/gitops/v1`. Without `NYL_CACHE_DIR`, the
+project-local `.nyl/cache/gitops/v1` directory is used. Artifacts can contain
+the same rendered secret data as the publication tree and use private file
+permissions. CI caches should therefore have the same access restrictions as
+deployment artifacts.
+
+Normal commands revalidate mutable inputs. Git branches and tags are fetched,
+RemoteManifest URLs are requested again, and repository chart coordinates are
+pulled and identified by their resulting content. Immutable content trees and
+render results can then be reused.
+
+Use `--refresh` on `render-tree`, `diff-tree`, or `publish-tree` to bypass all
+render cache reads, retrieve sources, rerender, and replace successful cache
+records. Use `--no-cache` to perform no persistent cache reads or writes;
+temporary Git and chart storage is deleted with the command. The two options
+are mutually exclusive. Neither option changes rendered bytes, validation, or
+publication semantics.
+
+The `_nyl/index.json` ownership index is always verified when reading a
+published tree. Its hashes are publication integrity and provenance data, not
+a complete render cache key.
+
 ## Diff in pull-request CI
 
 Compare the desired tree with the currently published deployment revision:

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 use git2::build::RepoBuilder;
 use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, StatusOptions};
 
 use crate::git::CredentialProvider;
+use crate::git::GitManager;
 use crate::gitops::{
     compile_target_tree_cached, discover_gitops_inventory, reconcile_rendered_tree, GitOpsCache, RenderIndex,
     RenderIndexPublication, TreeCacheArgs,
@@ -32,7 +34,7 @@ pub struct PublishTreeArgs {
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
-    let (source_commit, dirty) = source_state(&inventory.project_root)?;
+    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
     if dirty || source_commit.is_none() {
         return Err(NylError::config(
             "publish-tree requires a clean source worktree at a committed revision",
@@ -46,7 +48,11 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
-    let credentials = CredentialProvider::new();
+    let credentials = Arc::new(CredentialProvider::new());
+    if publication_is_current(&compiled, publication_url, &credentials, &cache)? {
+        println!("GitOps target {} is already published", args.target);
+        return Ok(());
+    }
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
@@ -106,6 +112,53 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     push_branch(&repository, publication_url, branch, expected, &credentials)?;
     println!("✓ Published GitOps target {} as commit {commit}", args.target);
     Ok(())
+}
+
+fn publication_is_current(
+    compiled: &crate::gitops::CompiledTargetTree,
+    publication_url: &str,
+    credentials: &Arc<CredentialProvider>,
+    cache: &GitOpsCache,
+) -> Result<bool> {
+    let mut manager = if let Some(cache_root) = cache.external_cache_root() {
+        GitManager::with_cache_dir_and_provider(cache_root, Some(Arc::clone(credentials)))
+    } else {
+        GitManager::with_credential_provider(Some(Arc::clone(credentials))).map_err(NylError::Git)?
+    };
+    let checkout =
+        match manager.resolve_ref_fresh(publication_url, Some(&compiled.target.spec.publication.revision), None) {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                tracing::debug!(%error, "Published revision is unavailable for preflight comparison");
+                return Ok(false);
+            }
+        };
+    let root = super::diff_tree::checked_published_root(&checkout, &compiled.target.spec.publication.path_prefix)?;
+    let published = super::diff_tree::read_rendered_tree(&root)?;
+    let Some(index) = published.index else {
+        return Ok(false);
+    };
+    let repository = compiled
+        .repository_name
+        .as_deref()
+        .unwrap_or(&compiled.repository.repo_url);
+    if index.target != compiled.target.metadata.name
+        || index.cluster != compiled.cluster.metadata.name
+        || index.publication.repository != repository
+        || index.publication.revision != compiled.target.spec.publication.revision
+        || index.publication.path_prefix != compiled.target.spec.publication.path_prefix
+    {
+        return Ok(false);
+    }
+    let desired = compiled
+        .files
+        .iter()
+        .map(|(path, bytes)| {
+            crate::resources::relative_path_to_posix("rendered output path", path)
+                .map(|path| (path, crate::gitops::reconcile::sha256(bytes)))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+    Ok(index.files == desired)
 }
 
 fn writable_branch_name(revision: &str) -> Result<&str> {
@@ -231,23 +284,6 @@ fn push_branch(
     remote
         .push(&[format!("refs/heads/{branch}:{publication_ref}")], Some(&mut options))
         .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
-}
-
-fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
-    let repository = Repository::discover(project_root)
-        .map_err(|error| NylError::config(format!("Failed to inspect source repository: {error}")))?;
-    let commit = repository
-        .head()
-        .ok()
-        .and_then(|head| head.target())
-        .map(|oid| oid.to_string());
-    let mut options = StatusOptions::new();
-    options.include_untracked(true).recurse_untracked_dirs(true);
-    let dirty = !repository
-        .statuses(Some(&mut options))
-        .map_err(|error| NylError::config(format!("Failed to inspect source status: {error}")))?
-        .is_empty();
-    Ok((commit, dirty))
 }
 
 #[cfg(test)]

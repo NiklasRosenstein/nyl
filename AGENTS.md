@@ -359,6 +359,23 @@ src/
 - **Caching:** Cache expensive operations (Git clones, Helm downloads)
 - **Profile before optimizing:** Use `cargo bench` to measure performance
 
+### Rendered GitOps cache invariants
+
+- Every value that can affect rendered bytes must enter the shared dependency
+  recorder at the layer that consumes it. This includes file content and
+  directory membership, effective target context, admitted environment and
+  secrets, resolved source identities, Kubernetes capabilities, and external
+  tool fingerprints.
+- Treat an input as non-cacheable when it cannot be observed or revalidated
+  completely. A cache hit must never depend on an assumed input.
+- Sensitive context uses the cache-local keyed fingerprint and never appears
+  raw or as a directly guessable digest in dependency records. Cache artifacts
+  can contain rendered secrets and must retain private filesystem permissions.
+- The rendered ownership index describes published ownership and provenance;
+  it is not a complete render-cache key.
+- Corrupt, incomplete, or unavailable cache state is a cache miss. It must not
+  change output semantics or turn a valid uncached render into a failure.
+
 See `BENCHMARKS.md` for detailed performance analysis.
 
 ## Documentation

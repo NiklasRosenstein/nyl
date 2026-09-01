@@ -42,9 +42,9 @@ pub struct DiffTreeArgs {
 }
 
 #[derive(Debug)]
-struct PublishedRenderedTree {
-    files: BTreeMap<PathBuf, Vec<u8>>,
-    index: Option<RenderIndex>,
+pub(super) struct PublishedRenderedTree {
+    pub(super) files: BTreeMap<PathBuf, Vec<u8>>,
+    pub(super) index: Option<RenderIndex>,
 }
 
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
@@ -74,6 +74,10 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
         let marker = PathBuf::from("_nyl/publication.json");
         base.insert(marker.clone(), publication_marker(&baseline)?);
         desired_files.insert(marker, publication_marker(&desired)?);
+    }
+    if tree_hashes(&base) == tree_hashes(&desired_files) {
+        println!("GitOps target {} has no rendered differences", args.target);
+        return Ok(());
     }
     let diff = format_tree_diff(&base, &desired_files);
     if diff.is_empty() {
@@ -125,7 +129,7 @@ fn published_tree(
     Ok(published.files)
 }
 
-fn checked_published_root(checkout: &Path, path_prefix: &str) -> Result<PathBuf> {
+pub(super) fn checked_published_root(checkout: &Path, path_prefix: &str) -> Result<PathBuf> {
     crate::resources::validate_relative_path("GitOpsTarget publication.pathPrefix", path_prefix, true, false)?;
     let canonical_checkout = checkout.canonicalize().map_err(|error| {
         NylError::config(format!(
@@ -207,7 +211,7 @@ fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Ve
     Ok(bytes)
 }
 
-fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
+pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
     if !root.exists() {
         return Ok(PublishedRenderedTree {
             files: BTreeMap::new(),
@@ -253,6 +257,13 @@ fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
         files,
         index: Some(index),
     })
+}
+
+fn tree_hashes(files: &BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<&Path, String> {
+    files
+        .iter()
+        .map(|(path, bytes)| (path.as_path(), crate::gitops::reconcile::sha256(bytes)))
+        .collect()
 }
 
 fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {

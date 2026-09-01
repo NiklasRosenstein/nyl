@@ -20,6 +20,8 @@ to `--output-dir`.
 nyl render-tree --target production --output-dir deploy
 nyl render-tree --target production --output-dir deploy --check
 nyl render-tree --target production --output-dir deploy --force
+nyl render-tree --target production --output-dir deploy --refresh
+nyl render-tree --target production --output-dir deploy --no-cache
 ```
 
 `--check` renders and validates without writing files.
@@ -28,12 +30,18 @@ from their recorded digest. `--force` warns and recreates those owned files from
 the current render. It does not overwrite unowned paths, cross ownership
 boundaries, or permit symbolic-link traversal.
 
+`--refresh` bypasses render cache reads and repopulates successful entries.
+`--no-cache` uses ephemeral source storage and performs no persistent cache
+reads or writes. These mutually exclusive flags are also available on
+`diff-tree` and `publish-tree`.
+
 ## `nyl diff-tree`
 
 Compare the current desired tree with the published destination revision:
 
 ```bash
 nyl diff-tree --target production --against published
+nyl diff-tree --target production --against published --refresh
 ```
 
 An existing published target prefix must contain a valid ownership index, and
@@ -75,6 +83,7 @@ Render and publish one destination branch with compare-and-swap protection:
 ```bash
 nyl publish-tree --target production
 nyl publish-tree --target production --dry-run
+nyl publish-tree --target production --no-cache
 ```
 
 The source worktree must be clean and committed. Nyl clones the destination

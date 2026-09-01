@@ -1,9 +1,23 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
 
 use assert_cmd::Command;
 use git2::Repository;
 use predicates::prelude::*;
 use tempfile::TempDir;
+
+fn read_tree(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            let path = entry.path().strip_prefix(root).unwrap().to_path_buf();
+            (path, fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
 
 fn fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
@@ -261,6 +275,23 @@ fn renders_plain_directory_applications_and_owned_layout() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Reusing cached GitOps target tree"));
+
+    let cached_tree = read_tree(&root);
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            ".",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+            "--refresh",
+        ])
+        .assert()
+        .success();
+    assert_eq!(read_tree(&root), cached_tree);
 
     let index_before_live_context = fs::read(root.join("_nyl/index.json")).unwrap();
     let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
@@ -1732,6 +1763,14 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     assert!(tree
         .get_path(std::path::Path::new("production/_nyl/index.json"))
         .is_ok());
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is already published"));
 
     Command::cargo_bin("nyl")
         .unwrap()

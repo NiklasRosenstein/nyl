@@ -138,7 +138,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
+pub(super) fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
     let repository = Repository::discover(project_root)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git repository: {error}")))?;
     let commit = repository
@@ -151,11 +151,23 @@ fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
         .include_untracked(true)
         .recurse_untracked_dirs(true)
         .include_ignored(false);
-    let dirty = !repository
+    let statuses = repository
         .statuses(Some(&mut options))
-        .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?
-        .is_empty();
+        .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
+    let dirty = statuses
+        .iter()
+        .any(|entry| !is_project_cache_status(&repository, project_root, entry.path()));
     Ok((commit, dirty))
+}
+
+fn is_project_cache_status(repository: &Repository, project_root: &Path, status_path: Option<&str>) -> bool {
+    let Some(worktree) = repository.workdir() else {
+        return false;
+    };
+    let Ok(project_relative) = project_root.strip_prefix(worktree) else {
+        return false;
+    };
+    status_path.is_some_and(|path| Path::new(path).starts_with(project_relative.join(".nyl/cache")))
 }
 
 pub(super) fn hash_inputs(
