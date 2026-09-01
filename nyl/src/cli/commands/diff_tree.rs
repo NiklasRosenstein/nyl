@@ -50,6 +50,7 @@ pub(super) struct PublishedRenderedTree {
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
+    let _cache_reporter = cache.reporter();
     let desired = compile_target_tree_cached(&inventory, &args.target, &cache, None).await?;
     let (mut base, source_baseline) = match args.against {
         DiffTreeBase::Published => (published_tree(&desired, &cache)?, None),

@@ -1,6 +1,6 @@
 //! Session-scoped, target-aware manifest rendering.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
 
-use super::cache::RenderCache;
+use super::cache::{CacheLayer, CacheMode, CacheOutcome, RenderCache};
 
 /// Immutable rendering state shared by every release in one GitOps target.
 pub struct RenderSession {
@@ -95,6 +95,8 @@ pub struct RenderedBundle {
     pub inputs: Vec<PathBuf>,
     /// Whether every external renderer input can be validated without repeating the render.
     pub cacheable: bool,
+    /// Inputs that prevent the complete bundle from being revalidated.
+    pub cache_bypass_reasons: BTreeSet<String>,
 }
 
 impl RenderSession {
@@ -331,12 +333,17 @@ impl RenderSession {
             request.provenance_root,
         )?;
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
-        let (mut cache_probe, cached) = self.prepare_release_cache(&path, &bundle.inputs, &resources, &request)?;
+        let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
+        let mut cacheable = cache_bypass_reasons.is_empty();
+        let (mut cache_probe, cached) = if cacheable {
+            self.prepare_release_cache(&path, &bundle.inputs, &resources, &request)?
+        } else {
+            (None, None)
+        };
         if let Some(cached) = cached {
             tracing::debug!(path = %path.display(), "Reusing cached rendered Release");
             return Ok(cached.into_rendered());
         }
-        let mut cacheable = resources_allow_render_cache(&resources, &self.project_config);
         let needs_helm_rendering = resources
             .iter()
             .any(|resource| is_renderable_resource(&resource.value, &self.project_config));
@@ -374,7 +381,10 @@ impl RenderSession {
                 )
                 .await?
                 {
-                    cacheable &= resource_allows_render_cache(&manifest.value, &self.project_config);
+                    if let Some(reason) = resource_render_cache_bypass_reason(&manifest.value, &self.project_config) {
+                        cacheable = false;
+                        cache_bypass_reasons.insert(reason);
+                    }
                     if is_renderable_resource(&manifest.value, &self.project_config) {
                         next.push(manifest);
                     } else {
@@ -460,6 +470,7 @@ impl RenderSession {
             release_provenance,
             inputs: bundle.inputs,
             cacheable,
+            cache_bypass_reasons,
         };
         self.store_release_cache(cache_probe, &rendered)?;
         Ok(rendered)
@@ -475,7 +486,7 @@ impl RenderSession {
         let Some(cache) = &self.cache else {
             return Ok((None, None));
         };
-        if cache.mode() == crate::render::cache::CacheMode::Disabled {
+        if cache.mode() == CacheMode::Disabled {
             return Ok((None, None));
         }
         let key = format!(
@@ -512,19 +523,58 @@ impl RenderSession {
             recorder.replay_directories(previous)?;
         }
         let current = recorder.clone().finish("release", String::new());
-        let cached = if let Some(previous) = previous.filter(|previous| previous.same_inputs(&current)) {
-            cache.load_artifact("release", &previous.artifact_digest)?
-        } else {
+        let cached = if cache.mode() == CacheMode::Refresh {
+            cache.observe(CacheLayer::Release, CacheOutcome::Refreshed, &[]);
             None
+        } else {
+            match previous {
+                None => {
+                    cache.observe(CacheLayer::Release, CacheOutcome::Miss, &[]);
+                    None
+                }
+                Some(previous) if previous.same_inputs(&current) => {
+                    let cached = cache.load_artifact("release", &previous.artifact_digest)?;
+                    cache.observe(
+                        CacheLayer::Release,
+                        if cached.is_some() {
+                            CacheOutcome::Hit
+                        } else {
+                            CacheOutcome::Miss
+                        },
+                        &[],
+                    );
+                    cached
+                }
+                Some(_) => {
+                    cache.observe(CacheLayer::Release, CacheOutcome::Invalidated, &[]);
+                    None
+                }
+            }
         };
         Ok((Some(ReleaseCacheProbe { key, recorder }), cached))
     }
 
     fn store_release_cache(&self, probe: Option<ReleaseCacheProbe>, rendered: &RenderedBundle) -> Result<()> {
-        let (Some(cache), Some(probe)) = (&self.cache, probe) else {
+        let Some(cache) = &self.cache else {
             return Ok(());
         };
-        if !rendered.cacheable || !probe.recorder.is_cacheable() {
+        if !rendered.cacheable {
+            cache.observe(
+                CacheLayer::Release,
+                CacheOutcome::Bypassed,
+                &rendered.cache_bypass_reasons.iter().cloned().collect::<Vec<_>>(),
+            );
+            return Ok(());
+        }
+        let Some(probe) = probe else {
+            return Ok(());
+        };
+        if !probe.recorder.is_cacheable() {
+            cache.observe(
+                CacheLayer::Release,
+                CacheOutcome::Bypassed,
+                &["unobservable filesystem dependency".to_string()],
+            );
             return Ok(());
         }
         let cached = CachedRenderedBundle::from_rendered(rendered);
@@ -532,7 +582,9 @@ impl RenderSession {
             return Ok(());
         };
         let record = probe.recorder.finish("release", digest);
-        cache.store_record("release", &probe.key, &record)
+        cache.store_record("release", &probe.key, &record)?;
+        cache.observe(CacheLayer::Release, CacheOutcome::Stored, &[]);
+        Ok(())
     }
 }
 
@@ -590,6 +642,7 @@ impl CachedRenderedBundle {
             release_provenance: self.release_provenance,
             inputs: self.inputs,
             cacheable: true,
+            cache_bypass_reasons: BTreeSet::new(),
         }
     }
 }
@@ -626,33 +679,37 @@ fn record_resource_directory_dependency(
     Ok(())
 }
 
-fn resource_allows_render_cache(resource: &Value, config: &ProjectConfig) -> bool {
+fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig) -> Option<String> {
     if RemoteManifest::is_remote_manifest(resource) {
-        return false;
+        return Some("RemoteManifest".to_string());
     }
     if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
-        return serde_json::from_value::<HelmChart>(resource.clone())
-            .is_ok_and(|chart| chart.spec.chart.repository.is_none());
+        return match serde_json::from_value::<HelmChart>(resource.clone()) {
+            Ok(chart) if chart.spec.chart.repository.is_some() => Some("remote Helm chart".to_string()),
+            Ok(_) => None,
+            Err(_) => Some("invalid HelmChart dependency".to_string()),
+        };
     }
     if !is_nyl_component(resource) {
-        return true;
+        return None;
     }
     let Some(api_version) = resource.get("apiVersion").and_then(Value::as_str) else {
-        return false;
+        return Some("component without apiVersion".to_string());
     };
     let Some(kind) = resource.get("kind").and_then(Value::as_str) else {
-        return false;
+        return Some("component without kind".to_string());
     };
     let effective = config.get_alias_target_for_kind(api_version, kind).unwrap_or(kind);
-    !is_remote_helm_chart_shortcut(effective)
+    is_remote_helm_chart_shortcut(effective).then(|| "remote Helm chart".to_string())
 }
 
-fn resources_allow_render_cache(resources: &[RenderResource], config: &ProjectConfig) -> bool {
+fn resources_render_cache_bypass_reasons(resources: &[RenderResource], config: &ProjectConfig) -> BTreeSet<String> {
     resources
         .iter()
-        .all(|resource| resource_allows_render_cache(&resource.value, config))
+        .filter_map(|resource| resource_render_cache_bypass_reason(&resource.value, config))
+        .collect()
 }
 
 fn push_rendered_manifest(

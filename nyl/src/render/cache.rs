@@ -1,9 +1,10 @@
 //! Versioned, content-addressed storage shared by manifest and tree rendering.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use clap::Args;
 use getrandom::fill as fill_random;
@@ -48,6 +49,115 @@ pub enum CacheMode {
     Default,
     Refresh,
     Disabled,
+}
+
+/// Rendering layer that performed one observable cache action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CacheLayer {
+    Target,
+    Release,
+    Helm,
+    Source,
+}
+
+impl CacheLayer {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Release => "releases",
+            Self::Helm => "Helm",
+            Self::Source => "sources",
+        }
+    }
+}
+
+/// Outcome of one cache lookup or publication decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+    Invalidated,
+    Bypassed,
+    Refreshed,
+    Stored,
+    Corrupt,
+}
+
+impl CacheOutcome {
+    fn label(self, count: usize) -> &'static str {
+        match (self, count) {
+            (Self::Hit, 1) => "hit",
+            (Self::Hit, _) => "hits",
+            (Self::Miss, 1) => "miss",
+            (Self::Miss, _) => "misses",
+            (Self::Invalidated, _) => "invalidated",
+            (Self::Bypassed, _) => "bypassed",
+            (Self::Refreshed, _) => "refreshed",
+            (Self::Stored, _) => "stored",
+            (Self::Corrupt, _) => "corrupt",
+        }
+    }
+}
+
+/// Aggregated cache activity for one rendering command.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    layers: BTreeMap<CacheLayer, CacheLayerStats>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CacheLayerStats {
+    outcomes: BTreeMap<CacheOutcome, usize>,
+    bypass_reasons: BTreeMap<String, usize>,
+}
+
+impl CacheStats {
+    fn observe(&mut self, layer: CacheLayer, outcome: CacheOutcome, reasons: &[String]) {
+        let stats = self.layers.entry(layer).or_default();
+        *stats.outcomes.entry(outcome).or_default() += 1;
+        if outcome == CacheOutcome::Bypassed {
+            for reason in reasons {
+                *stats.bypass_reasons.entry(reason.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+}
+
+impl fmt::Display for CacheStats {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Cache: ")?;
+        let mut first_layer = true;
+        for (layer, stats) in &self.layers {
+            if !first_layer {
+                write!(formatter, "; ")?;
+            }
+            first_layer = false;
+            write!(formatter, "{}: ", layer.label())?;
+            let mut first_outcome = true;
+            for (outcome, count) in &stats.outcomes {
+                if !first_outcome {
+                    write!(formatter, ", ")?;
+                }
+                first_outcome = false;
+                write!(formatter, "{count} {}", outcome.label(*count))?;
+            }
+            if !stats.bypass_reasons.is_empty() {
+                write!(formatter, " (")?;
+                for (index, (reason, count)) in stats.bypass_reasons.iter().enumerate() {
+                    if index > 0 {
+                        write!(formatter, ", ")?;
+                    }
+                    write!(formatter, "{reason}: {count}")?;
+                }
+                write!(formatter, ")")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CacheMode {
@@ -252,6 +362,21 @@ pub struct RenderCache {
     secret_key: [u8; 32],
     renderer_tools: Arc<OnceLock<BTreeMap<String, RecordedDependency>>>,
     source_cache: Option<Arc<tempfile::TempDir>>,
+    stats: Arc<Mutex<CacheStats>>,
+}
+
+/// Prints the shared cache summary when a command leaves its rendering scope.
+pub struct CacheReporter {
+    cache: RenderCache,
+}
+
+impl Drop for CacheReporter {
+    fn drop(&mut self) {
+        let stats = self.cache.stats();
+        if !stats.is_empty() {
+            eprintln!("{stats}");
+        }
+    }
 }
 
 impl RenderCache {
@@ -279,6 +404,7 @@ impl RenderCache {
             secret_key,
             renderer_tools: Arc::new(OnceLock::new()),
             source_cache,
+            stats: Arc::new(Mutex::new(CacheStats::default())),
         })
     }
 
@@ -297,6 +423,25 @@ impl RenderCache {
 
     pub fn recorder(&self) -> DependencyRecorder {
         DependencyRecorder::new(self.secret_key)
+    }
+
+    pub fn observe(&self, layer: CacheLayer, outcome: CacheOutcome, reasons: &[String]) {
+        self.stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(layer, outcome, reasons);
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        self.stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[must_use]
+    pub fn reporter(&self) -> CacheReporter {
+        CacheReporter { cache: self.clone() }
     }
 
     pub fn record_renderer_tools(&self, recorder: &mut DependencyRecorder) -> Result<()> {
@@ -598,6 +743,33 @@ mod tests {
         assert_ne!(
             first_recording.dependencies["token"].digest,
             second_recording.dependencies["token"].digest
+        );
+    }
+
+    #[test]
+    fn shared_statistics_explain_cache_effectiveness() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cache = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
+        let clone = cache.clone();
+
+        cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
+        cache.observe(
+            CacheLayer::Target,
+            CacheOutcome::Bypassed,
+            &["remote Helm chart".to_string(), "RemoteManifest".to_string()],
+        );
+        clone.observe(CacheLayer::Release, CacheOutcome::Hit, &[]);
+        clone.observe(CacheLayer::Release, CacheOutcome::Hit, &[]);
+        clone.observe(
+            CacheLayer::Helm,
+            CacheOutcome::Bypassed,
+            &["remote Helm chart".to_string()],
+        );
+
+        assert_eq!(
+            cache.stats().to_string(),
+            "Cache: target: 1 miss, 1 bypassed (RemoteManifest: 1, remote Helm chart: 1); \
+             releases: 2 hits; Helm: 1 bypassed (remote Helm chart: 1)"
         );
     }
 }

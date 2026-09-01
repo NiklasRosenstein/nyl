@@ -1,5 +1,6 @@
 /// Helm template command building and execution
 use super::ResolvedChart;
+use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
 use crate::{NylError, Result};
 use std::process::Command;
 
@@ -222,7 +223,15 @@ impl HelmTemplateExecutor {
         let Some(cache) = &self.gitops_cache else {
             return Ok((None, None));
         };
-        if cache.mode() == crate::gitops::CacheMode::Disabled || resolved.chart_ref.repository.is_some() {
+        if cache.mode() == CacheMode::Disabled {
+            return Ok((None, None));
+        }
+        if resolved.chart_ref.repository.is_some() {
+            cache.observe(
+                CacheLayer::Helm,
+                CacheOutcome::Bypassed,
+                &["remote Helm chart".to_string()],
+            );
             return Ok((None, None));
         }
         let key = format!(
@@ -246,13 +255,33 @@ impl HelmTemplateExecutor {
         )?;
         cache.record_renderer_tools(&mut recorder)?;
         let current = recorder.clone().finish("helm", String::new());
-        let cached = if let Some(previous) = cache
-            .load_record("helm", &key)?
-            .filter(|record| record.same_inputs(&current))
-        {
-            cache.load_artifact("helm", &previous.artifact_digest)?
-        } else {
+        let cached = if cache.mode() == CacheMode::Refresh {
+            cache.observe(CacheLayer::Helm, CacheOutcome::Refreshed, &[]);
             None
+        } else {
+            match cache.load_record("helm", &key)? {
+                None => {
+                    cache.observe(CacheLayer::Helm, CacheOutcome::Miss, &[]);
+                    None
+                }
+                Some(previous) if previous.same_inputs(&current) => {
+                    let cached = cache.load_artifact("helm", &previous.artifact_digest)?;
+                    cache.observe(
+                        CacheLayer::Helm,
+                        if cached.is_some() {
+                            CacheOutcome::Hit
+                        } else {
+                            CacheOutcome::Miss
+                        },
+                        &[],
+                    );
+                    cached
+                }
+                Some(_) => {
+                    cache.observe(CacheLayer::Helm, CacheOutcome::Invalidated, &[]);
+                    None
+                }
+            }
         };
         Ok((Some(HelmCacheProbe { key, recorder }), cached))
     }
@@ -267,7 +296,9 @@ impl HelmTemplateExecutor {
         let Some(digest) = cache.store_artifact("helm", &manifests)? else {
             return Ok(());
         };
-        cache.store_record("helm", &probe.key, &probe.recorder.finish("helm", digest))
+        cache.store_record("helm", &probe.key, &probe.recorder.finish("helm", digest))?;
+        cache.observe(CacheLayer::Helm, CacheOutcome::Stored, &[]);
+        Ok(())
     }
 
     /// Check if helm is installed and available

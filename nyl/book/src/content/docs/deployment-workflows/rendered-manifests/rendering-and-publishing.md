@@ -92,6 +92,11 @@ render results can then be reused.
 Use `--refresh` on a rendering command to bypass render cache reads, retrieve
 sources, rerender, and replace successful cache records. Use `--no-cache` to
 perform no persistent cache reads or writes;
+
+Rendering commands print a cache summary on standard error. It separates hits,
+misses, invalidations, refreshes, stored results, and bypassed work by target,
+Release, Helm, and source layer. Bypassed work includes the reason that prevents
+Nyl from safely revalidating it.
 temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.

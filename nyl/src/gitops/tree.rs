@@ -10,6 +10,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::git::GitManager;
+use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
     ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster,
@@ -219,6 +220,7 @@ async fn compile_target_tree_inner(
         return Ok(compiled);
     }
     let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
+    let mut target_cache_bypass_reasons = BTreeSet::new();
     let mut files = BTreeMap::new();
     let mut inputs = BTreeSet::from([
         target_discovered.source_path.clone(),
@@ -291,7 +293,10 @@ async fn compile_target_tree_inner(
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
         }
-        target_cacheable &= !source.remote;
+        if source.remote {
+            target_cacheable = false;
+            target_cache_bypass_reasons.insert("remote ApplicationGroup source".to_string());
+        }
         inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
             RendererConfigMode::Central if !source.remote => &central_session,
@@ -328,6 +333,7 @@ async fn compile_target_tree_inner(
                 )));
             }
             target_cacheable &= rendered.cacheable;
+            target_cache_bypass_reasons.extend(rendered.cache_bypass_reasons.iter().cloned());
             for bundle_input in &rendered.inputs {
                 claimed_source_files.insert(manifest_path_identity(bundle_input));
                 let input_path = if source.remote {
@@ -491,7 +497,13 @@ async fn compile_target_tree_inner(
         files,
         inputs,
     };
-    store_cached_target(cache, cache_probe, target_cacheable, &compiled)?;
+    store_cached_target(
+        cache,
+        cache_probe,
+        target_cacheable,
+        &target_cache_bypass_reasons,
+        &compiled,
+    )?;
     Ok(compiled)
 }
 
@@ -548,17 +560,31 @@ fn load_cached_target(
         return Ok(None);
     };
     if !probe.cacheable {
+        cache.observe(
+            CacheLayer::Target,
+            CacheOutcome::Bypassed,
+            &["unobservable project input".to_string()],
+        );
+        return Ok(None);
+    }
+    if cache.mode() == CacheMode::Refresh {
+        cache.observe(CacheLayer::Target, CacheOutcome::Refreshed, &[]);
         return Ok(None);
     }
     let Some(record) = cache.load_record("target", &probe.key)? else {
+        cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
         return Ok(None);
     };
     if !record.same_inputs(&probe.record) {
+        cache.observe(CacheLayer::Target, CacheOutcome::Invalidated, &[]);
         return Ok(None);
     }
     let compiled = cache.load_artifact("target", &record.artifact_digest)?;
     if compiled.is_some() {
+        cache.observe(CacheLayer::Target, CacheOutcome::Hit, &[]);
         tracing::debug!(target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key), "Reusing cached GitOps target tree");
+    } else {
+        cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
     }
     Ok(compiled)
 }
@@ -567,19 +593,27 @@ fn store_cached_target(
     cache: Option<&GitOpsCache>,
     probe: Option<TargetCacheProbe>,
     cacheable: bool,
+    bypass_reasons: &BTreeSet<String>,
     compiled: &CompiledTargetTree,
 ) -> Result<()> {
     let (Some(cache), Some(mut probe)) = (cache, probe) else {
         return Ok(());
     };
     if !cacheable {
+        cache.observe(
+            CacheLayer::Target,
+            CacheOutcome::Bypassed,
+            &bypass_reasons.iter().cloned().collect::<Vec<_>>(),
+        );
         return Ok(());
     }
     let Some(digest) = cache.store_artifact("target", compiled)? else {
         return Ok(());
     };
     probe.record.artifact_digest = digest;
-    cache.store_record("target", &probe.key, &probe.record)
+    cache.store_record("target", &probe.key, &probe.record)?;
+    cache.observe(CacheLayer::Target, CacheOutcome::Stored, &[]);
+    Ok(())
 }
 
 fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::Release) -> String {

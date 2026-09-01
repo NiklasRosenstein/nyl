@@ -163,10 +163,9 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         missing_capabilities_error,
     )
     .await?;
-    session.set_cache(Some(cache::RenderCache::new(
-        project_root,
-        options.common.cache.mode(),
-    )?));
+    let render_cache = cache::RenderCache::new(project_root, options.common.cache.mode())?;
+    let _cache_reporter = render_cache.reporter();
+    session.set_cache(Some(render_cache));
     let path = Path::new(&options.common.path);
     let provenance_root = project_config
         .file
