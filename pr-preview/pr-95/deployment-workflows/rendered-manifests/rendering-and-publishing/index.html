@@ -110,10 +110,12 @@ and symbolic-link protections remain enforced.</p>
 Release bundles, and parsed local Helm output. Complete target trees apply only
 to <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, and <code dir="auto">publish-tree</code>; bundle and Helm artifacts are
 also shared by <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code>. Cache entries are
-content-addressed and accompanied by dependency records. Nyl verifies project
-file and directory membership, target context, Kubernetes capabilities,
-admitted <code dir="auto">NYL_*</code> environment, secrets through a cache-local keyed fingerprint,
-and renderer tool versions before reuse. A target miss can still reuse
+content-addressed and accompanied by dependency records. Nyl verifies the
+selected control-resource files, exact ApplicationGroup candidate membership,
+Release entrypoints and includes, resolved local chart directories, target
+context, Kubernetes capabilities, admitted <code dir="auto">NYL_*</code> environment, secrets through
+a cache-local keyed fingerprint, and renderer tool versions before reuse. It
+does not fingerprint the whole project checkout. A target miss can still reuse
 unchanged Releases, while target-wide ownership, namespace, project, catalog,
 and layout validation runs again.</p>
 <p>The cache lives under <code dir="auto">$NYL_CACHE_DIR/gitops/v1</code>. Without <code dir="auto">NYL_CACHE_DIR</code>, the
@@ -127,14 +129,13 @@ pulled and identified by their resulting content. Immutable content trees and
 render results can then be reused.</p>
 <p>Use <code dir="auto">--refresh</code> on a rendering command to bypass render cache reads, retrieve
 sources, rerender, and replace successful cache records. Use <code dir="auto">--no-cache</code> to
-perform no persistent cache reads or writes;</p>
+perform no persistent cache reads or writes; temporary Git and chart storage is
+deleted with the command. The two options are mutually exclusive. Neither
+option changes rendered bytes, validation, or publication semantics.</p>
 <p>Rendering commands print a cache summary on standard error. It separates hits,
 misses, invalidations, refreshes, stored results, and bypassed work by target,
 Release, Helm, and source layer. Bypassed work includes the reason that prevents
-Nyl from safely revalidating it.
-temporary Git and chart storage is deleted with the command. The two options
-are mutually exclusive. Neither option changes rendered bytes, validation, or
-publication semantics.</p>
+Nyl from safely revalidating it.</p>
 <p>The <code dir="auto">_nyl/index.json</code> ownership index is always verified when reading a
 published tree. Its hashes are publication integrity and provenance data, not
 a complete render cache key.</p>
