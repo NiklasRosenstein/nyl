@@ -106,8 +106,10 @@ from the current render explicitly:</p>
 <p>Nyl warns for every repaired owned file. Unowned files, ownership boundaries,
 and symbolic-link protections remain enforced.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="render-cache-and-source-freshness">Render cache and source freshness</h2><a class="sl-anchor-link" href="#render-cache-and-source-freshness"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Render cache and source freshness”</span></a></div>
-<p>The tree commands cache three expensive results: complete target trees,
-individual rendered Releases, and parsed local Helm output. Cache entries are
+<p>Nyl caches three expensive results: complete target trees, individual rendered
+Release bundles, and parsed local Helm output. Complete target trees apply only
+to <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, and <code dir="auto">publish-tree</code>; bundle and Helm artifacts are
+also shared by <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code>. Cache entries are
 content-addressed and accompanied by dependency records. Nyl verifies project
 file and directory membership, target context, Kubernetes capabilities,
 admitted <code dir="auto">NYL_*</code> environment, secrets through a cache-local keyed fingerprint,
@@ -123,9 +125,9 @@ deployment artifacts.</p>
 RemoteManifest URLs are requested again, and repository chart coordinates are
 pulled and identified by their resulting content. Immutable content trees and
 render results can then be reused.</p>
-<p>Use <code dir="auto">--refresh</code> on <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, or <code dir="auto">publish-tree</code> to bypass all
-render cache reads, retrieve sources, rerender, and replace successful cache
-records. Use <code dir="auto">--no-cache</code> to perform no persistent cache reads or writes;
+<p>Use <code dir="auto">--refresh</code> on a rendering command to bypass render cache reads, retrieve
+sources, rerender, and replace successful cache records. Use <code dir="auto">--no-cache</code> to
+perform no persistent cache reads or writes;
 temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.</p>
