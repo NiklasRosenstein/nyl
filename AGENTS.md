@@ -259,8 +259,11 @@ src/
   fails when owned files were modified outside Nyl. It accepts bytes from an
   interrupted intended generation so the next run can converge, and rejects
   symlink traversal inside the output tree.
-- Managed Namespaces have dedicated generated Applications. Workload resources
-  may have only one Application owner per destination cluster.
+- Destination and additional Namespaces belong to their owning workload
+  Application by default. Shared namespace policy may instead select one
+  workload Release, a dedicated generated Application, or external ownership.
+  Workload resources may have only one Application owner per destination
+  cluster.
 - Remote source sessions expose neither secrets nor process environment and
   reject checkout symlinks and search paths outside the remote project root.
 - Generated Argo CD Applications use ordinary recursive directory sources. CMP
