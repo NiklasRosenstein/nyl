@@ -307,6 +307,61 @@ fn no_cache_render_leaves_no_persistent_cache() {
 }
 
 #[test]
+fn changing_one_release_reuses_unchanged_release_artifacts() {
+    let fixture = fixture();
+    let worker = fixture.path().join("applications/workloads/worker.yaml");
+    fs::write(
+        &worker,
+        r#"apiVersion: gitops.nyl/v1
+kind: Release
+metadata:
+  name: worker
+  namespace: worker
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker
+  namespace: worker
+"#,
+    )
+    .unwrap();
+    let output = fixture.path().join("deploy");
+    let args = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+        "--check",
+    ];
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success();
+
+    let api = fixture.path().join("applications/workloads/api.yaml");
+    let contents = fs::read_to_string(&api).unwrap();
+    fs::write(
+        &api,
+        contents.replace("  environment:", "  changed: yes\n  environment:"),
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("RUST_LOG", "nyl::gitops::render=debug")
+        .args(args)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Reusing cached rendered Release").and(predicate::str::contains("worker.yaml")),
+        );
+}
+
+#[test]
 fn explicit_argocd_instances_are_strict_and_drive_the_catalog() {
     let fixture = fixture();
     fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();

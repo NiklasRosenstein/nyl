@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::commands::render::{
@@ -10,6 +11,7 @@ use crate::cli::commands::render::{
     prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
 use crate::config::ProjectConfig;
+use crate::helm::HelmChartResolver;
 use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
@@ -20,6 +22,8 @@ use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
 
+use super::GitOpsCache;
+
 /// Immutable rendering state shared by every release in one GitOps target.
 pub struct RenderSession {
     project_root: PathBuf,
@@ -28,6 +32,7 @@ pub struct RenderSession {
     kube_version: String,
     api_versions: Vec<String>,
     template_context: TemplateContext,
+    cache: Option<GitOpsCache>,
 }
 
 /// The result of rendering one possible Nyl release.
@@ -75,6 +80,7 @@ impl RenderSession {
         Self::build(project_root, None, target, cluster, false, true)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build(
         project_root: &Path,
         project_config: Option<&ProjectConfig>,
@@ -184,6 +190,7 @@ impl RenderSession {
             kube_version,
             api_versions,
             template_context,
+            cache: None,
         })
     }
 
@@ -199,6 +206,16 @@ impl RenderSession {
         &self.template_context
     }
 
+    #[must_use]
+    pub fn with_cache(mut self, cache: Option<GitOpsCache>) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    pub fn set_cache(&mut self, cache: Option<GitOpsCache>) {
+        self.cache = cache;
+    }
+
     /// Render one source file without contacting a Kubernetes cluster.
     pub async fn render_release_file(&self, path: &Path) -> Result<RenderedRelease> {
         self.render_release_file_with_provenance_root(path, &self.project_root)
@@ -212,6 +229,11 @@ impl RenderSession {
         path: &Path,
         provenance_root: &Path,
     ) -> Result<RenderedRelease> {
+        self.render_release_file_cached(path, provenance_root).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn render_release_file_cached(&self, path: &Path, provenance_root: &Path) -> Result<RenderedRelease> {
         let path = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -224,6 +246,11 @@ impl RenderSession {
         let bundle =
             load_release_bundle_with_root(Path::new(path_text), &self.template_context, Some(provenance_root))?;
         let resources = bundle.resources;
+        let (mut cache_probe, cached) = self.prepare_release_cache(&path, &bundle.inputs, &resources)?;
+        if let Some(cached) = cached {
+            tracing::debug!(path = %path.display(), "Reusing cached rendered Release");
+            return Ok(cached.into_rendered());
+        }
         let mut cacheable = resources_allow_render_cache(&resources, &self.project_config);
         let needs_helm_rendering = resources
             .iter()
@@ -240,6 +267,9 @@ impl RenderSession {
         for _ in 0..10 {
             let mut next = Vec::new();
             for resource in pending {
+                if let Some(probe) = &mut cache_probe {
+                    record_resource_directory_dependency(&mut probe.recorder, &resource.value, &self.project_config)?;
+                }
                 for manifest in generate_render_resource(
                     &resource,
                     &self.template_context,
@@ -310,15 +340,150 @@ impl RenderSession {
             });
         }
 
-        Ok(RenderedRelease {
+        let rendered = RenderedRelease {
             release,
             manifests,
             manifest_provenance,
             release_provenance,
             inputs: bundle.inputs,
             cacheable,
-        })
+        };
+        self.store_release_cache(cache_probe, &rendered)?;
+        Ok(rendered)
     }
+
+    fn prepare_release_cache(
+        &self,
+        path: &Path,
+        inputs: &[PathBuf],
+        resources: &[RenderResource],
+    ) -> Result<(Option<ReleaseCacheProbe>, Option<CachedRenderedRelease>)> {
+        let Some(cache) = &self.cache else {
+            return Ok((None, None));
+        };
+        if cache.mode() == crate::gitops::CacheMode::Disabled {
+            return Ok((None, None));
+        }
+        let key = format!(
+            "{}\0{}\0{}",
+            self.project_root.display(),
+            self.target_name,
+            path.display()
+        );
+        let previous = cache.load_record("release", &key)?;
+        let mut recorder = cache.recorder();
+        for input in inputs {
+            recorder.record_file(format!("input:{}", input.display()), input)?;
+        }
+        if let Some(config_file) = &self.project_config.file {
+            recorder.record_file(format!("config:{}", config_file.display()), config_file)?;
+        }
+        recorder.record_template_context(&self.template_context.to_json())?;
+        cache.record_renderer_tools(&mut recorder)?;
+        for resource in resources {
+            record_resource_directory_dependency(&mut recorder, &resource.value, &self.project_config)?;
+        }
+        if let Some(previous) = &previous {
+            recorder.replay_directories(previous)?;
+        }
+        let current = recorder.clone().finish("release", String::new());
+        let cached = if let Some(previous) = previous.filter(|previous| previous.same_inputs(&current)) {
+            cache.load_artifact("release", &previous.artifact_digest)?
+        } else {
+            None
+        };
+        Ok((Some(ReleaseCacheProbe { key, recorder }), cached))
+    }
+
+    fn store_release_cache(&self, probe: Option<ReleaseCacheProbe>, rendered: &RenderedRelease) -> Result<()> {
+        let (Some(cache), Some(probe)) = (&self.cache, probe) else {
+            return Ok(());
+        };
+        if !rendered.cacheable || !probe.recorder.is_cacheable() {
+            return Ok(());
+        }
+        let cached = CachedRenderedRelease::from_rendered(rendered);
+        let Some(digest) = cache.store_artifact("release", &cached)? else {
+            return Ok(());
+        };
+        let record = probe.recorder.finish("release", digest);
+        cache.store_record("release", &probe.key, &record)
+    }
+}
+
+struct ReleaseCacheProbe {
+    key: String,
+    recorder: crate::gitops::cache::DependencyRecorder,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CachedRenderedRelease {
+    release: Option<Release>,
+    manifests: Vec<Value>,
+    manifest_provenance: Vec<(ResourceKey, String)>,
+    release_provenance: Option<String>,
+    inputs: Vec<PathBuf>,
+}
+
+impl CachedRenderedRelease {
+    fn from_rendered(rendered: &RenderedRelease) -> Self {
+        let mut manifest_provenance = rendered
+            .manifest_provenance
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        manifest_provenance.sort_by_cached_key(|(key, _)| serde_json::to_string(key).unwrap_or_default());
+        Self {
+            release: rendered.release.clone(),
+            manifests: rendered.manifests.clone(),
+            manifest_provenance,
+            release_provenance: rendered.release_provenance.clone(),
+            inputs: rendered.inputs.clone(),
+        }
+    }
+
+    fn into_rendered(self) -> RenderedRelease {
+        RenderedRelease {
+            release: self.release,
+            manifests: self.manifests,
+            manifest_provenance: self.manifest_provenance.into_iter().collect(),
+            release_provenance: self.release_provenance,
+            inputs: self.inputs,
+            cacheable: true,
+        }
+    }
+}
+
+fn record_resource_directory_dependency(
+    recorder: &mut crate::gitops::cache::DependencyRecorder,
+    resource: &Value,
+    config: &ProjectConfig,
+) -> Result<()> {
+    if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
+        && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
+    {
+        let chart: HelmChart = serde_json::from_value(resource.clone())?;
+        if chart.spec.chart.repository.is_none() {
+            let working_dir = config
+                .file
+                .as_deref()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let resolver = HelmChartResolver::new(config.get_helm_chart_search_paths().to_vec(), working_dir);
+            recorder.record_directory(&resolver.resolve_chart(&chart.spec.chart)?.path)?;
+        }
+        return Ok(());
+    }
+    if is_nyl_component(resource) {
+        let api_version = resource.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
+        let kind = resource.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let effective = config.get_alias_target_for_kind(api_version, kind).unwrap_or(kind);
+        if !is_remote_helm_chart_shortcut(effective) {
+            recorder.record_directory(&config.resolve_component_chart_dir(effective)?)?;
+        }
+    }
+    Ok(())
 }
 
 fn resource_allows_render_cache(resource: &Value, config: &ProjectConfig) -> bool {

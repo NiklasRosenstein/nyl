@@ -212,7 +212,8 @@ async fn compile_target_tree_inner(
     }
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
     let central_session =
-        RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?;
+        RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
+            .with_cache(cache.cloned());
     let cache_probe = prepare_target_cache(inventory, target_name, &central_session, cache, excluded_output)?;
     if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
         return Ok(compiled);
@@ -279,7 +280,10 @@ async fn compile_target_tree_inner(
             }
         }
 
-        let source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
+        let mut source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
+        if let Some(session) = &mut source.source_session {
+            session.set_cache(cache.cloned());
+        }
         target_cacheable &= !source.remote;
         inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
@@ -513,7 +517,7 @@ fn prepare_target_cache(
     }
     recorder.record_project_tree(&inventory.project_root, &excluded)?;
     recorder.record_template_context(&session.template_context().to_json())?;
-    recorder.record_renderer_tools()?;
+    cache.record_renderer_tools(&mut recorder)?;
     let cacheable = recorder.is_cacheable();
     let record = recorder.finish("target", String::new());
     Ok(Some(TargetCacheProbe {

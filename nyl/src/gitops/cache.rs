@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use clap::Args;
 use getrandom::fill as fill_random;
@@ -121,6 +122,49 @@ impl DependencyRecorder {
         Ok(())
     }
 
+    pub fn record_directory(&mut self, path: &Path) -> Result<()> {
+        let path = path.canonicalize()?;
+        let mut contents = Vec::new();
+        for entry in WalkDir::new(&path).follow_links(false).sort_by_file_name() {
+            let entry =
+                entry.map_err(|error| NylError::config(format!("Failed to inspect {}: {error}", path.display())))?;
+            if entry.file_type().is_symlink() {
+                self.mark_uncacheable();
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&path)
+                .expect("walk entry is beneath dependency root");
+            let relative = crate::resources::relative_path_to_posix("cache directory dependency", relative)?;
+            contents.extend_from_slice(&(relative.len() as u64).to_le_bytes());
+            contents.extend_from_slice(relative.as_bytes());
+            let bytes = fs::read(entry.path())?;
+            contents.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            contents.extend_from_slice(&bytes);
+        }
+        self.record_bytes(format!("directory:{}", path.display()), "directory", &contents);
+        Ok(())
+    }
+
+    pub fn replay_directories(&mut self, record: &DependencyRecord) -> Result<()> {
+        for (name, dependency) in &record.dependencies {
+            if dependency.kind == "directory" {
+                let path = name
+                    .strip_prefix("directory:")
+                    .ok_or_else(|| NylError::config(format!("Invalid cached directory dependency name {name:?}")))?;
+                if let Err(error) = self.record_directory(Path::new(path)) {
+                    tracing::debug!(path, %error, "Recorded cache directory is unavailable; treating it as changed");
+                    self.record_bytes(name.clone(), "directory", b"unavailable");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Records file contents and directory membership beneath a project root.
     pub fn record_project_tree(&mut self, project_root: &Path, excluded: &[PathBuf]) -> Result<()> {
         let mut members = Vec::new();
@@ -170,32 +214,6 @@ impl DependencyRecorder {
         Ok(())
     }
 
-    /// Records executables that can affect rendered bytes.
-    pub fn record_renderer_tools(&mut self) -> Result<()> {
-        self.record_file("tool:nyl", &std::env::current_exe()?)?;
-        self.record_tool_version("helm", &["version", "--short"]);
-        self.record_tool_version("kyverno", &["version"]);
-        Ok(())
-    }
-
-    fn record_tool_version(&mut self, tool: &str, arguments: &[&str]) {
-        let Some(path) = find_executable(tool) else {
-            self.record_bytes(format!("tool:{tool}"), "tool", b"unavailable");
-            return;
-        };
-        let output = std::process::Command::new(&path).args(arguments).output();
-        let mut fingerprint = path.as_os_str().as_encoded_bytes().to_vec();
-        match output {
-            Ok(output) => {
-                fingerprint.extend_from_slice(&output.stdout);
-                fingerprint.extend_from_slice(&output.stderr);
-                fingerprint.extend_from_slice(&output.status.code().unwrap_or(-1).to_le_bytes());
-            }
-            Err(error) => fingerprint.extend_from_slice(error.to_string().as_bytes()),
-        }
-        self.record_bytes(format!("tool:{tool}"), "tool", &fingerprint);
-    }
-
     /// Records a sensitive value without persisting it or a guessable plain digest.
     pub fn record_secret(&mut self, name: impl Into<String>, value: &[u8]) {
         self.dependencies.insert(
@@ -227,11 +245,12 @@ impl DependencyRecorder {
 }
 
 /// Cache storage scoped to the stable GitOps cache layout.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GitOpsCache {
     root: PathBuf,
     mode: CacheMode,
     secret_key: [u8; 32],
+    renderer_tools: Arc<OnceLock<BTreeMap<String, RecordedDependency>>>,
 }
 
 impl GitOpsCache {
@@ -248,7 +267,12 @@ impl GitOpsCache {
         } else {
             load_or_create_secret_key(&root)?
         };
-        Ok(Self { root, mode, secret_key })
+        Ok(Self {
+            root,
+            mode,
+            secret_key,
+            renderer_tools: Arc::new(OnceLock::new()),
+        })
     }
 
     pub fn mode(&self) -> CacheMode {
@@ -261,6 +285,20 @@ impl GitOpsCache {
 
     pub fn recorder(&self) -> DependencyRecorder {
         DependencyRecorder::new(self.secret_key)
+    }
+
+    pub fn record_renderer_tools(&self, recorder: &mut DependencyRecorder) -> Result<()> {
+        if self.renderer_tools.get().is_none() {
+            let dependencies = renderer_tool_dependencies()?;
+            let _ = self.renderer_tools.set(dependencies);
+        }
+        recorder.dependencies.extend(
+            self.renderer_tools
+                .get()
+                .expect("renderer tool dependencies were initialized")
+                .clone(),
+        );
+        Ok(())
     }
 
     pub fn load_artifact<T: DeserializeOwned>(&self, kind: &str, digest: &str) -> Result<Option<T>> {
@@ -354,6 +392,45 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
+}
+
+fn renderer_tool_dependencies() -> Result<BTreeMap<String, RecordedDependency>> {
+    let mut dependencies = BTreeMap::new();
+    let executable = std::env::current_exe()?;
+    dependencies.insert(
+        "tool:nyl".to_string(),
+        RecordedDependency {
+            kind: "file".to_string(),
+            digest: sha256(&fs::read(executable)?),
+        },
+    );
+    for (tool, arguments) in [("helm", &["version", "--short"][..]), ("kyverno", &["version"][..])] {
+        dependencies.insert(format!("tool:{tool}"), tool_dependency(tool, arguments));
+    }
+    Ok(dependencies)
+}
+
+fn tool_dependency(tool: &str, arguments: &[&str]) -> RecordedDependency {
+    let Some(path) = find_executable(tool) else {
+        return RecordedDependency {
+            kind: "tool".to_string(),
+            digest: sha256(b"unavailable"),
+        };
+    };
+    let output = std::process::Command::new(&path).args(arguments).output();
+    let mut fingerprint = path.as_os_str().as_encoded_bytes().to_vec();
+    match output {
+        Ok(output) => {
+            fingerprint.extend_from_slice(&output.stdout);
+            fingerprint.extend_from_slice(&output.stderr);
+            fingerprint.extend_from_slice(&output.status.code().unwrap_or(-1).to_le_bytes());
+        }
+        Err(error) => fingerprint.extend_from_slice(error.to_string().as_bytes()),
+    }
+    RecordedDependency {
+        kind: "tool".to_string(),
+        digest: sha256(&fingerprint),
+    }
 }
 
 fn validate_segment(label: &str, value: &str) -> Result<()> {
