@@ -205,7 +205,10 @@ fn renders_plain_directory_applications_and_owned_layout() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Rendered GitOps target production"));
+        .stdout(predicate::str::contains("Rendered GitOps target production"))
+        .stderr(predicate::str::contains(
+            "[1/1] Release workloads/api (applications/workloads/api.yaml)",
+        ));
 
     let root = output.join("production");
     let resources = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
@@ -280,7 +283,8 @@ fn renders_plain_directory_applications_and_owned_layout() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Reusing cached GitOps target tree"));
+        .stderr(predicate::str::contains("Reusing cached GitOps target tree"))
+        .stderr(predicate::str::contains("[1/1] Release").not());
 
     let cached_tree = read_tree(&root);
     Command::cargo_bin("nyl")
@@ -336,9 +340,12 @@ fn no_cache_render_leaves_no_persistent_cache() {
             fixture.path().join("deploy").to_str().unwrap(),
             "--check",
             "--no-cache",
+            "--progress",
+            "off",
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::contains("[1/1] Release").not());
 
     assert!(!fixture.path().join(".nyl/cache/gitops").exists());
 }

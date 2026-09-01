@@ -35,6 +35,13 @@ boundaries, or permit symbolic-link traversal.
 reads or writes. These mutually exclusive flags are also available on
 `diff-tree` and `publish-tree`.
 
+All three tree commands report Release progress on stderr. The default
+`--progress auto` displays an updating bar when stderr is attached to a terminal
+and prints one line as each Release starts in CI or other non-interactive
+environments. Use `--progress bar` or `--progress plain` to select a presentation
+explicitly, or `--progress off` to disable it. A complete target-tree cache hit
+has no per-Release work to report.
+
 ## `nyl diff-tree`
 
 Compare the current desired tree with the published destination revision:

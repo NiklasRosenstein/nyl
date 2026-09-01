@@ -77,11 +77,24 @@ pub(crate) fn load_release_bundle_with_root(
     })
 }
 
-/// Check for a literal Release envelope without rendering the candidate file.
-pub(crate) fn has_static_release(path: &Path) -> Result<bool> {
+/// Literal Release metadata discovered without rendering the candidate file.
+pub(crate) struct StaticReleaseEnvelope {
+    pub(crate) name: Option<String>,
+}
+
+/// Find a literal Release envelope without rendering the candidate file.
+pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleaseEnvelope>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
-    Ok(best_effort_parse_yaml_documents(&raw).iter().any(Release::is_release))
+    Ok(best_effort_parse_yaml_documents(&raw)
+        .iter()
+        .find(|document| Release::is_release(document))
+        .map(|release| StaticReleaseEnvelope {
+            name: release
+                .pointer("/metadata/name")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        }))
 }
 
 fn resolve_release_includes(path: &Path, release: &Release) -> Result<Vec<PathBuf>> {

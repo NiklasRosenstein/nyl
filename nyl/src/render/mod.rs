@@ -9,7 +9,7 @@ mod session;
 
 #[cfg(test)]
 pub(crate) use bundle::load_release_bundle;
-pub(crate) use bundle::{has_static_release, load_release_bundle_with_root};
+pub(crate) use bundle::{load_release_bundle_with_root, static_release_envelope};
 pub(crate) use expand::*;
 pub(crate) use postprocess::*;
 pub(crate) use provenance::{RenderProvenance, RenderResource};
@@ -2229,7 +2229,7 @@ spec:
             "{% if values.enabled %}\napiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
         )
         .unwrap();
-        assert!(!has_static_release(&structural).unwrap());
+        assert!(static_release_envelope(&structural).unwrap().is_none());
 
         let value_templated = temporary.path().join("value.yaml");
         std::fs::write(
@@ -2237,7 +2237,12 @@ spec:
             "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
         )
         .unwrap();
-        assert!(has_static_release(&value_templated).unwrap());
+        assert_eq!(
+            static_release_envelope(&value_templated)
+                .unwrap()
+                .and_then(|release| release.name),
+            Some("example".to_string())
+        );
     }
 
     #[test]

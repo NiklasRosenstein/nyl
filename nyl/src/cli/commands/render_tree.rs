@@ -5,17 +5,22 @@ use clap::Args;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
-    compile_target_tree_cached, discover_gitops_inventory, reconcile_rendered_tree_with_options, GitOpsCache,
-    ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree_with_options,
+    GitOpsCache, ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
+
+use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
 /// Render one GitOps target into its owned manifest tree.
 #[derive(Args, Debug)]
 pub struct RenderTreeArgs {
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+
+    #[command(flatten)]
+    pub progress: TreeProgressArgs,
 
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
@@ -72,7 +77,8 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
 
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
-    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache).await?;
+    let mut progress = TreeProgressReporter::new(args.progress, None);
+    let compiled = compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut progress).await?;
     if args.check {
         println!(
             "✓ GitOps target {} renders {} file(s)",

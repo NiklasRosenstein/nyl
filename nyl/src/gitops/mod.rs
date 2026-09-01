@@ -17,4 +17,7 @@ pub use reconcile::{
     reconcile_rendered_tree, reconcile_rendered_tree_with_options, ReconcileOptions, RenderIndex,
     RenderIndexPublication,
 };
-pub use tree::{compile_target_tree, compile_target_tree_cached, validate_gitops_inventory, CompiledTargetTree};
+pub use tree::{
+    compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,
+    validate_gitops_inventory, CompiledTargetTree, ReleaseProgress, TreeRenderObserver,
+};

@@ -6,8 +6,12 @@ use git2::Repository;
 use similar::TextDiff;
 
 use crate::git::GitManager;
-use crate::gitops::{compile_target_tree_cached, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs};
+use crate::gitops::{
+    compile_target_tree_cached_with_observer, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs,
+};
 use crate::{NylError, Result};
+
+use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DiffTreeBase {
@@ -22,6 +26,9 @@ pub enum DiffTreeBase {
 pub struct DiffTreeArgs {
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+
+    #[command(flatten)]
+    pub progress: TreeProgressArgs,
 
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
@@ -51,7 +58,10 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
-    let desired = compile_target_tree_cached(&inventory, &args.target, &cache).await?;
+    let desired_phase = matches!(args.against, DiffTreeBase::Source).then(|| "Desired".to_string());
+    let mut desired_progress = TreeProgressReporter::new(args.progress, desired_phase);
+    let desired =
+        compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut desired_progress).await?;
     let (mut base, source_baseline) = match args.against {
         DiffTreeBase::Published => (published_tree(&desired, &cache)?, None),
         DiffTreeBase::Source => {
@@ -65,6 +75,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
                 source_ref,
                 &args.target,
                 &cache,
+                args.progress,
             )
             .await?;
             (baseline.files.clone(), Some(baseline))
@@ -172,6 +183,7 @@ async fn source_derived_tree(
     source_ref: &str,
     target: &str,
     cache: &GitOpsCache,
+    progress_args: TreeProgressArgs,
 ) -> Result<crate::gitops::CompiledTargetTree> {
     let repository_url = if let Some(url) = source_repository {
         url.to_string()
@@ -189,7 +201,8 @@ async fn source_derived_tree(
         .resolve_ref_fresh(&repository_url, Some(source_ref), None)
         .map_err(NylError::Git)?;
     let inventory = discover_gitops_inventory(&checkout, None)?;
-    compile_target_tree_cached(&inventory, target, cache).await
+    let mut progress = TreeProgressReporter::new(progress_args, Some(format!("Baseline {source_ref}")));
+    compile_target_tree_cached_with_observer(&inventory, target, cache, &mut progress).await
 }
 
 fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {

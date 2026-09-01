@@ -55,6 +55,11 @@ nyl render-tree --target production --output-dir deploy-worktree
 the target's `pathPrefix`. Use `nyl render-tree --check` to render and validate
 without writing.
 
+Tree commands display an updating Release progress bar on an attended stderr.
+In CI they instead print one line before processing each Release, keeping stdout
+available for rendered diffs. Select the behavior explicitly with
+`--progress bar`, `--progress plain`, or `--progress off`.
+
 If an indexed rendered file was deleted or edited locally, repair the worktree
 from the current render explicitly:
 

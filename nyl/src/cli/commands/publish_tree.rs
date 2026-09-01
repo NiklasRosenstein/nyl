@@ -8,16 +8,21 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, Sta
 use crate::git::CredentialProvider;
 use crate::git::GitManager;
 use crate::gitops::{
-    compile_target_tree_cached, discover_gitops_inventory, reconcile_rendered_tree, GitOpsCache, RenderIndex,
-    RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree, GitOpsCache,
+    RenderIndex, RenderIndexPublication, TreeCacheArgs,
 };
 use crate::{NylError, Result};
+
+use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
 /// Render, commit, and compare-and-swap publish one target revision.
 #[derive(Args, Debug)]
 pub struct PublishTreeArgs {
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+
+    #[command(flatten)]
+    pub progress: TreeProgressArgs,
 
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
@@ -42,7 +47,8 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     }
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
-    let compiled = compile_target_tree_cached(&inventory, &args.target, &cache).await?;
+    let mut progress = TreeProgressReporter::new(args.progress, None);
+    let compiled = compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut progress).await?;
     let publication_url = compiled
         .repository
         .publish_url

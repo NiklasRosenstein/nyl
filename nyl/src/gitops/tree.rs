@@ -37,6 +37,26 @@ pub struct CompiledTargetTree {
     pub inputs: BTreeSet<PathBuf>,
 }
 
+/// Stable source identity for one Release as it enters tree compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseProgress {
+    pub application_group: String,
+    pub name: Option<String>,
+    pub source_path: PathBuf,
+}
+
+/// Receives progress events from the sequential target-tree compiler.
+pub trait TreeRenderObserver {
+    fn started(&mut self, _total: usize) {}
+    fn release_started(&mut self, _current: usize, _total: usize, _release: &ReleaseProgress) {}
+    fn release_finished(&mut self, _completed: usize) {}
+    fn finished(&mut self) {}
+}
+
+struct NoTreeRenderObserver;
+
+impl TreeRenderObserver for NoTreeRenderObserver {}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct CachedTargetTree {
     compiled: CompiledTargetTree,
@@ -186,7 +206,7 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 // The orchestration stays linear so ownership and policy checks remain visibly ordered.
 #[allow(clippy::too_many_lines)]
 pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, None).await
+    compile_target_tree_inner(inventory, target_name, None, &mut NoTreeRenderObserver).await
 }
 
 /// Compile one target while reusing a verified content-addressed result when possible.
@@ -195,7 +215,17 @@ pub async fn compile_target_tree_cached(
     target_name: &str,
     cache: &GitOpsCache,
 ) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, Some(cache)).await
+    compile_target_tree_inner(inventory, target_name, Some(cache), &mut NoTreeRenderObserver).await
+}
+
+/// Compile one target with cache reuse and observable Release progress.
+pub async fn compile_target_tree_cached_with_observer(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: &GitOpsCache,
+    observer: &mut dyn TreeRenderObserver,
+) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, Some(cache), observer).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -203,6 +233,7 @@ async fn compile_target_tree_inner(
     inventory: &GitOpsInventory,
     target_name: &str,
     cache: Option<&GitOpsCache>,
+    observer: &mut dyn TreeRenderObserver,
 ) -> Result<CompiledTargetTree> {
     validate_gitops_inventory(inventory)?;
     let target_discovered = inventory
@@ -301,7 +332,10 @@ async fn compile_target_tree_inner(
         &base_input_paths,
         &prepared_groups,
     )?;
+    let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
+    observer.started(progress_total);
     if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+        observer.finished();
         return Ok(compiled);
     }
     let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
@@ -324,6 +358,7 @@ async fn compile_target_tree_inner(
     let mut pending_workloads = Vec::new();
     let mut namespace_scope_errors = Vec::new();
     let mut release_count = 0;
+    let mut progress_completed = 0;
     let mut helm_render_count = 0;
 
     for PreparedGroup {
@@ -358,15 +393,26 @@ async fn compile_target_tree_inner(
         let mut claimed_source_files = BTreeSet::new();
 
         for source_file in &source.files {
-            claimed_source_files.insert(manifest_path_identity(source_file));
+            claimed_source_files.insert(manifest_path_identity(&source_file.path));
             let input_path = if source.remote {
-                PathBuf::from("@remote").join(source_file.strip_prefix(&source.root).unwrap_or(source_file))
+                PathBuf::from("@remote").join(source_file.path.strip_prefix(&source.root).unwrap_or(&source_file.path))
             } else {
                 source_file
+                    .path
                     .strip_prefix(&inventory.project_root)
-                    .unwrap_or(source_file)
+                    .unwrap_or(&source_file.path)
                     .to_path_buf()
             };
+            let current = progress_completed + 1;
+            observer.release_started(
+                current,
+                progress_total,
+                &ReleaseProgress {
+                    application_group: group.metadata.name.clone(),
+                    name: source_file.name.clone(),
+                    source_path: input_path.clone(),
+                },
+            );
             inputs.insert(input_path);
             let provenance_root = if source.remote {
                 &source.root
@@ -374,8 +420,10 @@ async fn compile_target_tree_inner(
                 &inventory.project_root
             };
             let mut rendered = session
-                .render_release_file_with_provenance_root(source_file, provenance_root)
+                .render_release_file_with_provenance_root(&source_file.path, provenance_root)
                 .await?;
+            progress_completed += 1;
+            observer.release_finished(progress_completed);
             helm_render_count += rendered.helm_render_count;
             if let Some(probe) = &mut cache_probe {
                 probe
@@ -385,7 +433,7 @@ async fn compile_target_tree_inner(
             if !rendered.application_generators.is_empty() {
                 return Err(NylError::config(format!(
                     "ApplicationGenerator is not supported in rendered GitOps source {}",
-                    source_file.display()
+                    source_file.path.display()
                 )));
             }
             target_cacheable &= rendered.cacheable;
@@ -563,6 +611,7 @@ async fn compile_target_tree_inner(
         release_count,
         helm_render_count,
     )?;
+    observer.finished();
     Ok(compiled)
 }
 
@@ -1651,11 +1700,16 @@ fn render_effective_control(
 struct ResolvedGroupSource {
     root: PathBuf,
     candidate_files: Vec<PathBuf>,
-    files: Vec<PathBuf>,
+    files: Vec<StaticReleaseFile>,
     renderer_mode: RendererConfigMode,
     source_session: Option<RenderSession>,
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
+}
+
+struct StaticReleaseFile {
+    path: PathBuf,
+    name: Option<String>,
 }
 
 fn resolve_group_source(
@@ -1787,11 +1841,14 @@ fn build_group_source_session(
     })
 }
 
-fn static_release_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn static_release_files(files: &[PathBuf]) -> Result<Vec<StaticReleaseFile>> {
     let mut release_files = Vec::new();
     for path in files {
-        if crate::render::has_static_release(path)? {
-            release_files.push(path.clone());
+        if let Some(envelope) = crate::render::static_release_envelope(path)? {
+            release_files.push(StaticReleaseFile {
+                path: path.clone(),
+                name: envelope.name,
+            });
         }
     }
     Ok(release_files)
@@ -2185,7 +2242,10 @@ mod tests {
         let source = ResolvedGroupSource {
             root: temporary.path().to_path_buf(),
             candidate_files: vec![entry.clone(), included.clone(), ignored.clone()],
-            files: vec![entry.clone()],
+            files: vec![StaticReleaseFile {
+                path: entry.clone(),
+                name: Some("test".to_string()),
+            }],
             renderer_mode: RendererConfigMode::Central,
             source_session: None,
             remote: false,
