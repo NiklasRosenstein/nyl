@@ -17,9 +17,9 @@ use crate::helm::HelmChartResolver;
 use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
-    extract_all_kyverno_policies, extract_application_generators, extract_release, is_nyl_component,
-    is_remote_helm_chart_shortcut, ApplicationGenerator, Cluster, GitOpsTarget, HelmChart, KyvernoScope, Release,
-    RemoteManifest,
+    component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_release,
+    is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ApplicationGenerator, Cluster, GitOpsTarget,
+    HelmChart, KyvernoScope, Release,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -733,14 +733,13 @@ fn record_resource_directory_dependency(
 }
 
 fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig) -> Option<String> {
-    if RemoteManifest::is_remote_manifest(resource) {
-        return Some("RemoteManifest".to_string());
-    }
     if resource.get("apiVersion").and_then(Value::as_str) == Some(crate::constants::API_VERSION)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         return match serde_json::from_value::<HelmChart>(resource.clone()) {
-            Ok(chart) if chart.spec.chart.repository.is_some() => Some("remote Helm chart".to_string()),
+            Ok(chart) if chart.spec.chart.repository.is_some() && chart.spec.chart.version.is_none() => {
+                Some("unpinned remote Helm chart".to_string())
+            }
             Ok(_) => None,
             Err(_) => Some("invalid HelmChart dependency".to_string()),
         };
@@ -755,7 +754,14 @@ fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig)
         return Some("component without kind".to_string());
     };
     let effective = config.get_alias_target_for_kind(api_version, kind).unwrap_or(kind);
-    is_remote_helm_chart_shortcut(effective).then(|| "remote Helm chart".to_string())
+    if !is_remote_helm_chart_shortcut(effective) {
+        return None;
+    }
+    let chart_ref = component_kind_to_chart_ref(&parse_component_kind(effective));
+    chart_ref
+        .version
+        .is_none()
+        .then(|| "unpinned remote Helm chart".to_string())
 }
 
 fn resources_render_cache_bypass_reasons(resources: &[RenderResource], config: &ProjectConfig) -> BTreeSet<String> {
@@ -845,6 +851,38 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn only_unpinned_remote_charts_bypass_release_caching() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let pinned = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "https://charts.example.com/#workload@1.2.3",
+            "metadata": {"name": "workload"},
+            "spec": {}
+        });
+        let unpinned = serde_json::json!({
+            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "kind": "https://charts.example.com/#workload",
+            "metadata": {"name": "workload"},
+            "spec": {}
+        });
+        let remote_manifest = serde_json::json!({
+            "apiVersion": API_VERSION,
+            "kind": "RemoteManifest",
+            "metadata": {"name": "workload"},
+            "spec": {"url": "https://example.com/releases/v1.2.3/workload.yaml"}
+        });
+
+        assert_eq!(resource_render_cache_bypass_reason(&pinned, &config), None);
+        assert_eq!(
+            resource_render_cache_bypass_reason(&unpinned, &config),
+            Some("unpinned remote Helm chart".to_string())
+        );
+        assert_eq!(resource_render_cache_bypass_reason(&remote_manifest, &config), None);
     }
 
     fn write_strict_chart(root: &Path) {

@@ -226,14 +226,6 @@ impl HelmTemplateExecutor {
         if cache.mode() == CacheMode::Disabled {
             return Ok((None, None));
         }
-        if resolved.chart_ref.repository.is_some() {
-            cache.observe(
-                CacheLayer::Helm,
-                CacheOutcome::Bypassed,
-                &["remote Helm chart".to_string()],
-            );
-            return Ok((None, None));
-        }
         let key = format!(
             "{}\0{release_name}\0{}",
             resolved.path.display(),

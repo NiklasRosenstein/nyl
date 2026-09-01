@@ -86,16 +86,17 @@ the same rendered secret data as the publication tree and use private file
 permissions. CI caches should therefore have the same access restrictions as
 deployment artifacts.
 
-Normal commands revalidate mutable inputs. Git branches and tags are fetched,
-RemoteManifest URLs are requested again, and repository chart coordinates are
-pulled and identified by their resulting content. Immutable content trees and
-render results can then be reused.
+Normal commands reuse rendered Releases addressed by their declared inputs.
+This includes RemoteManifest URLs and remote Helm charts with an explicit
+version. An unversioned remote chart remains uncacheable because its coordinate
+does not identify stable content.
 
 Use `--refresh` on a rendering command to bypass render cache reads, retrieve
-sources, rerender, and replace successful cache records. Use `--no-cache` to
-perform no persistent cache reads or writes; temporary Git and chart storage is
-deleted with the command. The two options are mutually exclusive. Neither
-option changes rendered bytes, validation, or publication semantics.
+RemoteManifest URLs and remote charts again, rerender, and replace successful
+cache records. Use `--no-cache` to perform no persistent cache reads or writes;
+temporary Git and chart storage is deleted with the command. The two options
+are mutually exclusive. Neither option changes rendered bytes, validation, or
+publication semantics.
 
 Rendering commands print a cache summary on standard error. It separates hits,
 misses, invalidations, refreshes, stored results, and bypassed work by target,

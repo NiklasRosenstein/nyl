@@ -331,10 +331,6 @@ async fn compile_target_tree_inner(
                 )?;
             }
         }
-        if source.remote {
-            target_cacheable = false;
-            target_cache_bypass_reasons.insert("remote ApplicationGroup source".to_string());
-        }
         inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
             RendererConfigMode::Central if !source.remote => &central_session,
