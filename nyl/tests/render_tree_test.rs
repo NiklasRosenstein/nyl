@@ -201,11 +201,13 @@ fn renders_plain_directory_applications_and_owned_layout() {
             "--target",
             "production",
             "--output-dir",
-            output.to_str().unwrap(),
+            "deploy-worktree",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Rendered GitOps target production"))
+        .stdout(predicate::str::contains(
+            "GitOps target production ready at deploy-worktree/production",
+        ))
         .stderr(predicate::str::contains(
             "[1/1] Release workloads/api (applications/workloads/api.yaml)",
         ));
@@ -351,7 +353,7 @@ fn no_cache_render_leaves_no_persistent_cache() {
 }
 
 #[test]
-fn warm_target_cache_reports_the_rendering_work_it_skips() {
+fn warm_target_cache_reports_the_rendering_work_it_avoids() {
     let fixture = fixture();
     let chart = fixture.path().join("components/Test");
     fs::create_dir_all(chart.join("templates")).unwrap();
@@ -400,7 +402,7 @@ metadata:
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Cache:\n  Target: reused\n  Releases: 2 skipped\n  Helm: 1 skipped",
+            "Cache: reused target tree; avoided 2 Release renders and 1 Helm render",
         ));
 
     let api = fixture.path().join("applications/workloads/api.yaml");
@@ -417,8 +419,30 @@ metadata:
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Cache:\n  Target: rebuilt\n  Releases: 1 reused, 1 rebuilt\n  Helm: 1 skipped",
+            "Cache: rebuilt target tree; Release renders: 1 reused, 1 rebuilt; Helm renders: 1 avoided",
         ));
+}
+
+#[test]
+fn completion_can_colour_the_target_and_relative_output_path() {
+    let fixture = fixture();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            "deploy",
+            "--color",
+            "always",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{1b}[1;36mproduction\u{1b}[0m"))
+        .stdout(predicate::str::contains("\u{1b}[32mdeploy/production\u{1b}[0m"));
 }
 
 #[test]

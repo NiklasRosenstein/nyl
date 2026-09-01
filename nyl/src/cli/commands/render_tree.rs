@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use clap::Args;
+use colored::Colorize;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
@@ -44,6 +46,7 @@ pub struct RenderTreeArgs {
 }
 
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
+    let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None)?;
     let GitOpsResource::GitOpsTarget(target) = &initial
         .get(GitOpsResourceKind::GitOpsTarget, &args.target)
@@ -80,10 +83,11 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let compiled = compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut progress).await?;
     if args.check {
+        let target = args.target.as_str().cyan().bold();
         println!(
-            "✓ GitOps target {} renders {} file(s)",
-            args.target,
-            compiled.files.len()
+            "✓ GitOps target {target} is valid ({}, {})",
+            format_file_count(compiled.files.len()),
+            format_elapsed(started.elapsed())
         );
         return Ok(());
     }
@@ -114,13 +118,29 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
             force_owned: args.force,
         },
     )?;
+    let target = args.target.as_str().cyan().bold();
+    let output = crate::util::path_for_display(&output_root)
+        .display()
+        .to_string()
+        .green();
     println!(
-        "✓ Rendered GitOps target {} to {} ({} file(s))",
-        args.target,
-        output_root.display(),
-        compiled.files.len()
+        "✓ GitOps target {target} ready at {output} ({}, {})",
+        format_file_count(compiled.files.len()),
+        format_elapsed(started.elapsed())
     );
     Ok(())
+}
+
+fn format_file_count(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "file" } else { "files" })
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    if elapsed < Duration::from_secs(1) {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    }
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {

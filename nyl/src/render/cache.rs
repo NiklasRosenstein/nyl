@@ -77,7 +77,7 @@ pub enum CacheOutcome {
 pub struct CacheStats {
     layers: BTreeMap<CacheLayer, CacheLayerStats>,
     target_reuse: Option<TargetReuse>,
-    release_helm_renders_skipped: usize,
+    release_helm_renders_avoided: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -106,73 +106,132 @@ impl CacheStats {
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
+
+    fn has_reportable_work(&self) -> bool {
+        self.target_reuse.is_some() || self.layers.values().any(CacheLayerStats::has_reportable_work)
+    }
 }
 
 impl fmt::Display for CacheStats {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "Cache:")?;
-        if let Some(stats) = self.layers.get(&CacheLayer::Target) {
-            write!(
-                formatter,
-                "\n  Target: {}",
-                if self.target_reuse.is_some() {
-                    "reused"
-                } else {
-                    "rebuilt"
+        if let Some(reuse) = &self.target_reuse {
+            write!(formatter, " reused target tree")?;
+            match (reuse.releases, reuse.helm_renders) {
+                (0, 0) => {}
+                (releases, 0) => {
+                    write!(formatter, "; avoided ")?;
+                    write_counted(formatter, releases, "Release render", "Release renders")?;
                 }
-            )?;
-            write_bypass_reasons(formatter, stats)?;
+                (0, helm) => {
+                    write!(formatter, "; avoided ")?;
+                    write_counted(formatter, helm, "Helm render", "Helm renders")?;
+                }
+                (releases, helm) => {
+                    write!(formatter, "; avoided ")?;
+                    write_counted(formatter, releases, "Release render", "Release renders")?;
+                    write!(formatter, " and ")?;
+                    write_counted(formatter, helm, "Helm render", "Helm renders")?;
+                }
+            }
+            if let Some(stats) = self
+                .layers
+                .get(&CacheLayer::Source)
+                .filter(|stats| stats.has_reportable_work())
+            {
+                write!(formatter, "; Sources: ")?;
+                write_work_counts(
+                    formatter,
+                    &[
+                        (stats.count(CacheOutcome::Hit), "reused"),
+                        (stats.completed_work(), "retrieved"),
+                    ],
+                )?;
+                write_bypass_reasons(formatter, stats)?;
+            }
+            return Ok(());
         }
 
-        let target_skipped_releases = self.target_reuse.as_ref().map_or(0, |reuse| reuse.releases);
+        let mut wrote_clause = false;
+        if let Some(stats) = self.layers.get(&CacheLayer::Target) {
+            if stats.has_reportable_work() {
+                write_clause_separator(formatter, &mut wrote_clause)?;
+                write!(formatter, "rebuilt target tree")?;
+                write_bypass_reasons(formatter, stats)?;
+            }
+        }
+
         if let Some(stats) = self.layers.get(&CacheLayer::Release) {
-            write!(formatter, "\n  Releases: ")?;
-            write_work_counts(
-                formatter,
-                &[
-                    (target_skipped_releases, "skipped"),
-                    (stats.count(CacheOutcome::Hit), "reused"),
-                    (stats.completed_work(), "rebuilt"),
-                ],
-            )?;
-            write_bypass_reasons(formatter, stats)?;
-        } else if target_skipped_releases > 0 {
-            write!(formatter, "\n  Releases: {target_skipped_releases} skipped")?;
+            if stats.has_reportable_work() {
+                write_clause_separator(formatter, &mut wrote_clause)?;
+                write!(formatter, "Release renders: ")?;
+                write_work_counts(
+                    formatter,
+                    &[
+                        (stats.count(CacheOutcome::Hit), "reused"),
+                        (stats.completed_work(), "rebuilt"),
+                    ],
+                )?;
+                write_bypass_reasons(formatter, stats)?;
+            }
         }
 
-        let target_skipped_helm = self.target_reuse.as_ref().map_or(0, |reuse| reuse.helm_renders);
-        let skipped_helm = target_skipped_helm + self.release_helm_renders_skipped;
+        let avoided_helm = self.release_helm_renders_avoided;
         if let Some(stats) = self.layers.get(&CacheLayer::Helm) {
-            write!(formatter, "\n  Helm: ")?;
-            write_work_counts(
-                formatter,
-                &[
-                    (skipped_helm, "skipped"),
-                    (stats.count(CacheOutcome::Hit), "reused"),
-                    (stats.completed_work(), "rendered"),
-                ],
-            )?;
-            write_bypass_reasons(formatter, stats)?;
-        } else if skipped_helm > 0 {
-            write!(formatter, "\n  Helm: {skipped_helm} skipped")?;
+            if avoided_helm > 0 || stats.has_reportable_work() {
+                write_clause_separator(formatter, &mut wrote_clause)?;
+                write!(formatter, "Helm renders: ")?;
+                write_work_counts(
+                    formatter,
+                    &[
+                        (avoided_helm, "avoided"),
+                        (stats.count(CacheOutcome::Hit), "reused"),
+                        (stats.completed_work(), "rendered"),
+                    ],
+                )?;
+                write_bypass_reasons(formatter, stats)?;
+            }
+        } else if avoided_helm > 0 {
+            write_clause_separator(formatter, &mut wrote_clause)?;
+            write!(formatter, "Helm renders: {avoided_helm} avoided")?;
         }
 
         if let Some(stats) = self.layers.get(&CacheLayer::Source) {
-            write!(formatter, "\n  Sources: ")?;
-            write_work_counts(
-                formatter,
-                &[
-                    (stats.count(CacheOutcome::Hit), "reused"),
-                    (stats.completed_work(), "retrieved"),
-                ],
-            )?;
-            write_bypass_reasons(formatter, stats)?;
+            if stats.has_reportable_work() {
+                write_clause_separator(formatter, &mut wrote_clause)?;
+                write!(formatter, "Sources: ")?;
+                write_work_counts(
+                    formatter,
+                    &[
+                        (stats.count(CacheOutcome::Hit), "reused"),
+                        (stats.completed_work(), "retrieved"),
+                    ],
+                )?;
+                write_bypass_reasons(formatter, stats)?;
+            }
         }
         Ok(())
     }
 }
 
+fn write_clause_separator(formatter: &mut fmt::Formatter<'_>, wrote_clause: &mut bool) -> fmt::Result {
+    if *wrote_clause {
+        write!(formatter, "; ")
+    } else {
+        *wrote_clause = true;
+        write!(formatter, " ")
+    }
+}
+
+fn write_counted(formatter: &mut fmt::Formatter<'_>, count: usize, singular: &str, plural: &str) -> fmt::Result {
+    write!(formatter, "{count} {}", if count == 1 { singular } else { plural })
+}
+
 impl CacheLayerStats {
+    fn has_reportable_work(&self) -> bool {
+        self.count(CacheOutcome::Hit) > 0 || self.completed_work() > 0
+    }
+
     fn count(&self, outcome: CacheOutcome) -> usize {
         self.outcomes.get(&outcome).copied().unwrap_or_default()
     }
@@ -201,14 +260,14 @@ fn write_bypass_reasons(formatter: &mut fmt::Formatter<'_>, stats: &CacheLayerSt
     if stats.bypass_reasons.is_empty() {
         return Ok(());
     }
-    write!(formatter, "\n    Not cacheable: ")?;
+    write!(formatter, " (not cacheable: ")?;
     for (index, (reason, count)) in stats.bypass_reasons.iter().enumerate() {
         if index > 0 {
             write!(formatter, ", ")?;
         }
         write!(formatter, "{reason}: {count}")?;
     }
-    Ok(())
+    write!(formatter, ")")
 }
 
 impl CacheMode {
@@ -452,7 +511,7 @@ pub struct CacheReporter {
 impl Drop for CacheReporter {
     fn drop(&mut self) {
         let stats = self.cache.stats();
-        if !stats.is_empty() {
+        if stats.has_reportable_work() {
             eprintln!("{stats}");
         }
     }
@@ -534,7 +593,7 @@ impl RenderCache {
         );
         let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         stats.observe(CacheLayer::Release, CacheOutcome::Hit, &[]);
-        stats.release_helm_renders_skipped += helm_renders;
+        stats.release_helm_renders_avoided += helm_renders;
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -869,8 +928,8 @@ mod tests {
 
         assert_eq!(
             cache.stats().to_string(),
-            "Cache:\n  Target: rebuilt\n    Not cacheable: RemoteManifest: 1, remote Helm chart: 1\n  \
-             Releases: 2 reused\n  Helm: 1 rendered\n    Not cacheable: remote Helm chart: 1"
+            "Cache: rebuilt target tree (not cacheable: RemoteManifest: 1, remote Helm chart: 1); \
+             Release renders: 2 reused; Helm renders: 1 rendered (not cacheable: remote Helm chart: 1)"
         );
     }
 
@@ -883,12 +942,12 @@ mod tests {
 
         assert_eq!(
             cache.stats().to_string(),
-            "Cache:\n  Target: reused\n  Releases: 38 skipped\n  Helm: 65 skipped"
+            "Cache: reused target tree; avoided 38 Release renders and 65 Helm renders"
         );
     }
 
     #[test]
-    fn release_reuse_reports_its_skipped_helm_work() {
+    fn release_reuse_reports_its_avoided_helm_work() {
         let temp = tempfile::TempDir::new().unwrap();
         let cache = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
 
@@ -900,7 +959,7 @@ mod tests {
 
         assert_eq!(
             cache.stats().to_string(),
-            "Cache:\n  Releases: 3 reused, 1 rebuilt\n  Helm: 5 skipped"
+            "Cache: Release renders: 3 reused, 1 rebuilt; Helm renders: 5 avoided"
         );
     }
 
