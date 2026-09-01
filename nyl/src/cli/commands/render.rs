@@ -1654,6 +1654,11 @@ fn process_application_generator(
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     template_context: &TemplateContext,
 ) -> Result<Vec<serde_json::Value>> {
+    let target_name = template_context
+        .target
+        .as_ref()
+        .and_then(|target| target.pointer("/metadata/name"))
+        .and_then(serde_json::Value::as_str);
     let source_selectors = application_generator_source_selectors(generator);
     tracing::debug!(
         "Processing ApplicationGenerator {}: repoURL={}, targetRevision={}, selectors={}",
@@ -1701,7 +1706,8 @@ fn process_application_generator(
 
         if let Some(release) = release {
             // Generate ArgoCD Application
-            let mut app = create_argocd_application_from_generator(&release, &file_path, &source_root, generator)?;
+            let mut app =
+                create_argocd_application_from_generator(&release, &file_path, &source_root, generator, target_name)?;
 
             // If rendering or parsing failed, create a "husk" application: add error info and disable auto-sync
             if let Some(ref error_msg) = render_error {
@@ -2369,6 +2375,7 @@ fn create_argocd_application_from_generator(
     file_path: &Path,
     source_root: &Path,
     generator: &crate::resources::ApplicationGenerator,
+    target_name: Option<&str>,
 ) -> Result<serde_json::Value> {
     // Calculate subdirectory relative to repository root
     let rel_dir = file_path
@@ -2396,6 +2403,9 @@ fn create_argocd_application_from_generator(
         serde_json::json!({"name": "NYL_RELEASE_NAMESPACE", "value": release.metadata.namespace}),
         serde_json::json!({"name": "NYL_CMP_TEMPLATE_INPUT", "value": template_input}),
     ];
+    if let Some(target_name) = target_name {
+        plugin_env.push(serde_json::json!({"name": "NYL_CMP_TARGET", "value": target_name}));
+    }
     plugin_env.extend(
         generator
             .spec
@@ -3261,7 +3271,9 @@ metadata:
         };
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, Some("prod"))
+                .unwrap();
 
         assert_eq!(app["spec"]["source"]["path"], "clusters/default/addons");
         assert_eq!(app["spec"]["source"]["plugin"]["name"], "nyl-v2");
@@ -3273,6 +3285,12 @@ metadata:
             .and_then(|v| v["value"].as_str())
             .unwrap();
         assert_eq!(template_input, "nginx.yaml");
+        assert_eq!(
+            env.iter()
+                .find(|v| v["name"] == "NYL_CMP_TARGET")
+                .and_then(|v| v["value"].as_str()),
+            Some("prod")
+        );
         assert_eq!(
             env.iter()
                 .find(|v| v["name"] == "ENVIRONMENT")
@@ -3359,7 +3377,8 @@ metadata:
         }));
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert!(app["spec"]["syncPolicy"]["automated"]["prune"].is_null());
         let info = app["spec"]["info"].as_array().unwrap();
@@ -3390,7 +3409,8 @@ metadata:
         );
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(
             app["spec"]["syncPolicy"]["syncOptions"],
@@ -3418,7 +3438,8 @@ metadata:
         let generator = test_application_generator(None, None);
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert!(app["spec"]["syncPolicy"].is_null());
         let warning = app["spec"]["info"]
@@ -3444,7 +3465,8 @@ metadata:
         let generator = test_application_generator(None, None);
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert!(app["spec"]["syncPolicy"]["automated"].is_null());
         let warning = app["spec"]["info"]
@@ -3481,7 +3503,8 @@ metadata:
         }));
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(app["spec"]["ignoreDifferences"][0]["kind"], "Deployment");
         assert_eq!(app["spec"]["ignoreDifferences"][0]["jsonPointers"][0], "/spec/replicas");
@@ -3510,7 +3533,8 @@ metadata:
         let generator = make_test_generator(None);
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(app["spec"]["ignoreDifferences"][0]["group"], "apps");
         assert_eq!(app["spec"]["ignoreDifferences"][0]["kind"], "Deployment");
@@ -3538,7 +3562,8 @@ metadata:
         );
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(
             app["spec"]["syncPolicy"]["syncOptions"],
@@ -3567,7 +3592,8 @@ metadata:
         );
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(
             app["spec"]["syncPolicy"]["syncOptions"],
@@ -3602,7 +3628,8 @@ metadata:
         );
 
         let (_temp, source_root, file_path) = create_test_worktree_paths();
-        let app = create_argocd_application_from_generator(&release, &file_path, &source_root, &generator).unwrap();
+        let app =
+            create_argocd_application_from_generator(&release, &file_path, &source_root, &generator, None).unwrap();
 
         assert_eq!(
             app["spec"]["syncPolicy"]["syncOptions"],

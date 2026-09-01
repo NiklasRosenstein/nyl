@@ -91,6 +91,8 @@ fn emit_argocd_file_not_found_diagnostics(error: &NylError, render_input_path: &
         "ARGOCD_APP_REVISION",
         "ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT",
         "NYL_CMP_TEMPLATE_INPUT",
+        "ARGOCD_ENV_NYL_CMP_TARGET",
+        "NYL_CMP_TARGET",
     ] {
         match std::env::var(key) {
             Ok(value) => eprintln!("[nyl-debug] env.{key}={value}"),

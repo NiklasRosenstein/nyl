@@ -211,7 +211,7 @@ impl ApplicationGenerator {
             }
             if matches!(
                 name.as_str(),
-                "NYL_RELEASE_NAME" | "NYL_RELEASE_NAMESPACE" | "NYL_CMP_TEMPLATE_INPUT"
+                "NYL_RELEASE_NAME" | "NYL_RELEASE_NAMESPACE" | "NYL_CMP_TEMPLATE_INPUT" | "NYL_CMP_TARGET"
             ) {
                 return Err(NylError::Config(format!(
                     "spec.source.pluginEnv cannot override reserved variable {name}"
@@ -480,6 +480,16 @@ mod tests {
 
         let error = generator.validate().unwrap_err().to_string();
         assert!(error.contains("cannot override reserved variable NYL_CMP_TEMPLATE_INPUT"));
+
+        let mut generator = create_test_generator();
+        generator
+            .spec
+            .source
+            .plugin_env
+            .insert("NYL_CMP_TARGET".to_string(), "production".to_string());
+
+        let error = generator.validate().unwrap_err().to_string();
+        assert!(error.contains("cannot override reserved variable NYL_CMP_TARGET"));
     }
 
     #[test]

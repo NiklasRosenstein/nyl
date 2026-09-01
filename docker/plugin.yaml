@@ -91,7 +91,13 @@ spec:
             ;;
         esac
         NYL_STDERR_FILE="$(mktemp)"
-        nyl render "$TEMPLATE_INPUT" 2>"$NYL_STDERR_FILE"
+        CMP_TARGET="${ARGOCD_ENV_NYL_CMP_TARGET:-${NYL_CMP_TARGET:-}}"
+        set -- nyl render
+        if [ -n "$CMP_TARGET" ]; then
+          set -- "$@" --target "$CMP_TARGET"
+        fi
+        set -- "$@" "$TEMPLATE_INPUT"
+        "$@" 2>"$NYL_STDERR_FILE"
         STATUS=$?
         if [ "$STATUS" -eq 0 ]; then
           rm -f "$NYL_STDERR_FILE"

@@ -96,13 +96,23 @@ data:
         - |
           TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
           test -n "$TEMPLATE_INPUT" || { echo "NYL_CMP_TEMPLATE_INPUT is required" >&2; exit 1; }
-          nyl render "$TEMPLATE_INPUT"
+          CMP_TARGET="${ARGOCD_ENV_NYL_CMP_TARGET:-${NYL_CMP_TARGET:-}}"
+          if [ -n "$CMP_TARGET" ]; then
+            nyl render --target "$CMP_TARGET" "$TEMPLATE_INPUT"
+          else
+            nyl render "$TEMPLATE_INPUT"
+          fi
 ```
 
 `NYL_CMP_TEMPLATE_INPUT` path semantics:
 
 - Values that start with `/` are treated as repository-root-relative (for example: `/gitops/system/argocd.yaml`).
 - Values without a leading `/` are treated as relative to `spec.source.path` (recommended, usually just the file name).
+
+When an `ApplicationGenerator` is rendered with `--target`, the generated
+Application also receives the reserved `NYL_CMP_TARGET` variable. The plugin
+passes that target back to `nyl render`, so cluster capabilities and target
+values remain consistent when Argo CD renders the Application.
 
 ## Verification
 

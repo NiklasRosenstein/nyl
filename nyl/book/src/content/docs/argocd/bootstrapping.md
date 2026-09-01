@@ -125,10 +125,17 @@ spec:
                 - |
                   TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
                   test -n "$TEMPLATE_INPUT" || { echo "NYL_CMP_TEMPLATE_INPUT is required" >&2; exit 1; }
-                  nyl render "$TEMPLATE_INPUT"
+                  CMP_TARGET="${ARGOCD_ENV_NYL_CMP_TARGET:-${NYL_CMP_TARGET:-}}"
+                  if [ -n "$CMP_TARGET" ]; then
+                    nyl render --target "$CMP_TARGET" "$TEMPLATE_INPUT"
+                  else
+                    nyl render "$TEMPLATE_INPUT"
+                  fi
 ```
 
 `NYL_CMP_TEMPLATE_INPUT` should usually be source-path-relative (for example `apps.yaml` when `spec.source.path` points at that directory). A leading `/` marks a repository-root-relative path.
+Applications generated while rendering with `--target` also carry
+`NYL_CMP_TARGET`; the plugin uses it to select the same target during its render.
 
 ## Step 3: Create ApplicationGenerator
 
@@ -353,7 +360,7 @@ When you apply `bootstrap.yaml`:
 
 1. **ArgoCD Namespace Created**: The `argocd` namespace is created
 2. **ArgoCD Application Syncs**: ArgoCD installs itself via the Nyl plugin
-3. **Apps Application Syncs**: The "apps" Application runs `nyl render "$NYL_CMP_TEMPLATE_INPUT"` (for example `apps.yaml`)
+3. **Apps Application Syncs**: The "apps" Application renders its `NYL_CMP_TEMPLATE_INPUT` with the generated `NYL_CMP_TARGET` when a target was selected
 4. **ApplicationGenerator Processes**: Nyl finds `apps.yaml`, sees ApplicationGenerator
 5. **Directory Scanned**: Nyl scans `clusters/default/` for YAML files
 6. **Applications Generated**: For each Release found (nginx, redis), Nyl generates an ArgoCD Application
