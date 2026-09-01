@@ -1427,7 +1427,9 @@ metadata:
                 ))
                 .and(predicate::str::contains(
                     "Release \"coredns\" (1 issue)\n  Allowed namespaces: \"argocd\"\n  Unexpected namespace \"kube-system\" (1 resource):\n    - Deployment \"coredns\"",
-                )),
+                ))
+                .and(predicate::str::contains("rerun the command"))
+                .and(predicate::str::contains("nyl validate").not()),
         );
 }
 

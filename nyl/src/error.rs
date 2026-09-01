@@ -55,7 +55,7 @@ pub enum NylError {
     #[error("Process execution error: {0}\nHint: Ensure the required tool is installed and available in PATH. Check tool-specific documentation for installation.")]
     Process(String),
 
-    #[error("Validation error: {0}\nHint: Fix the validation issues listed above. Use 'nyl validate' to see detailed validation results.")]
+    #[error("Validation error: {0}\nHint: Fix the validation issues listed above and rerun the command.")]
     Validation(String),
 
     #[error("Resource validation error in {file}: {message}\nHint: {hint}")]

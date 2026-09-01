@@ -9,10 +9,12 @@ fn test_error_variants() {
     assert!(format!("{config_err}").contains("Hint:"));
 
     let helm_err = NylError::helm_chart("test helm error");
-    assert!(format!("{helm_err}").contains("helm version"));
+    assert!(format!("{helm_err}").contains("explicit Helm values"));
 
     let validation_err = NylError::validation("test validation");
-    assert!(format!("{validation_err}").contains("nyl validate"));
+    let validation_display = format!("{validation_err}");
+    assert!(validation_display.contains("rerun the command"));
+    assert!(!validation_display.contains("nyl validate"));
 
     let k8s_err = NylError::kubernetes("test k8s error");
     assert!(k8s_err.is_kubernetes_error());
