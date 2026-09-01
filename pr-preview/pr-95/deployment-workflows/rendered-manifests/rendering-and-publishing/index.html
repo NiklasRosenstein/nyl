@@ -123,15 +123,16 @@ project-local <code dir="auto">.nyl/cache/gitops/v1</code> directory is used. Ar
 the same rendered secret data as the publication tree and use private file
 permissions. CI caches should therefore have the same access restrictions as
 deployment artifacts.</p>
-<p>Normal commands revalidate mutable inputs. Git branches and tags are fetched,
-RemoteManifest URLs are requested again, and repository chart coordinates are
-pulled and identified by their resulting content. Immutable content trees and
-render results can then be reused.</p>
+<p>Normal commands reuse rendered Releases addressed by their declared inputs.
+This includes RemoteManifest URLs and remote Helm charts with an explicit
+version. An unversioned remote chart remains uncacheable because its coordinate
+does not identify stable content.</p>
 <p>Use <code dir="auto">--refresh</code> on a rendering command to bypass render cache reads, retrieve
-sources, rerender, and replace successful cache records. Use <code dir="auto">--no-cache</code> to
-perform no persistent cache reads or writes; temporary Git and chart storage is
-deleted with the command. The two options are mutually exclusive. Neither
-option changes rendered bytes, validation, or publication semantics.</p>
+RemoteManifest URLs and remote charts again, rerender, and replace successful
+cache records. Use <code dir="auto">--no-cache</code> to perform no persistent cache reads or writes;
+temporary Git and chart storage is deleted with the command. The two options
+are mutually exclusive. Neither option changes rendered bytes, validation, or
+publication semantics.</p>
 <p>Rendering commands print a cache summary on standard error. It separates hits,
 misses, invalidations, refreshes, stored results, and bypassed work by target,
 Release, Helm, and source layer. Bypassed work includes the reason that prevents
