@@ -7,6 +7,7 @@ pub mod reconcile;
 pub mod render;
 pub mod tree;
 
+pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
 pub use discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey};
 pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};

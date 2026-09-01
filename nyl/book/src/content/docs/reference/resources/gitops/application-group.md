@@ -135,7 +135,7 @@ attach additional relative files or glob matches to that release.
 | `spec.syncPolicy.automated.enabled` | No | `false` | Sets Argo CD automated sync enablement. |
 | `spec.syncPolicy.automated.prune` | No | `false` | Enables automated pruning. |
 | `spec.syncPolicy.automated.selfHeal` | No | `false` | Enables automated self-healing. |
-| `spec.syncPolicy.syncOptions` | No | `[]` | Additional Argo CD Application sync options. |
+| `spec.syncPolicy.syncOptions` | No | `[ApplyOutOfSyncOnly=true]` | Argo CD Application sync options. An explicit value with the same option key overrides the generated default. |
 | `spec.applicationDeletionPolicy` | No | `Foreground` | `Foreground`, `Background`, or `Orphan`. |
 | `spec.namespace.create` | No | `true` | Synthesizes missing destination and additional Namespaces. |
 | `spec.namespace.prunePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
@@ -178,8 +178,12 @@ the same resource instead of silently discarding an authored Namespace.
 lists applied to `Release.spec.argocd.applicationOverride`. `*` matches one
 path segment and `**` matches multiple segments. Deny wins.
 
+Every generated directory Application defaults to `ApplyOutOfSyncOnly=true`.
+Set `ApplyOutOfSyncOnly=false` in the ApplicationGroup sync options when every
+resource must participate in each sync.
+
 `spec.releaseCustomization.allowedSyncOptions` is an exact allow-list for sync
-options that a Release may append with `spec.syncPolicy.+syncOptions` in its
+options that a Release may merge with `spec.syncPolicy.+syncOptions` in its
 Application override:
 
 ```yaml
@@ -197,8 +201,10 @@ spec:
             - RespectIgnoreDifferences=false
 ```
 
-Every appended value must appear verbatim in `allowedSyncOptions`. Nyl removes
-duplicate values already supplied by the ApplicationGroup. A plain
+Every merged value must appear verbatim in `allowedSyncOptions`. Nyl replaces
+an existing option with the same key, so an approved
+`ApplyOutOfSyncOnly=false` value overrides the generated default without
+emitting conflicting entries. A plain
 `syncOptions` key attempts replacement and remains forbidden.
 
 Core identity, finalizers, project, sources, destination, and sync policy other

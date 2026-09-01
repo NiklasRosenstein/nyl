@@ -22,7 +22,10 @@
                 "enabled": true,
                 "prune": false,
                 "selfHeal": true
-              }
+              },
+              "syncOptions": [
+                "ApplyOutOfSyncOnly=true"
+              ]
             }
           }
         },
@@ -73,7 +76,10 @@
               "enabled": true,
               "prune": false,
               "selfHeal": true
-            }
+            },
+            "syncOptions": [
+              "ApplyOutOfSyncOnly=true"
+            ]
           }
         }
       },

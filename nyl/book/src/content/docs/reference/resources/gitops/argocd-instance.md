@@ -24,6 +24,8 @@ spec:
         enabled: true
         prune: false
         selfHeal: true
+      syncOptions:
+        - ApplyOutOfSyncOnly=true
     applicationDeletionPolicy: Foreground
     selfPrunePolicy: Confirm
 ```
@@ -40,8 +42,9 @@ Every target emits a parent Application named `<target>-catalog` unless
 syncs `<pathPrefix>/_nyl/catalog` and therefore manages the generated child
 Applications, AppProjects, and its own manifest.
 
-The defaults enable automated sync and self-healing but leave automated prune
-disabled. Foreground deletion cascades to catalog resources, and
+The defaults enable automated sync and self-healing, apply only out-of-sync
+resources, and leave automated prune disabled. Foreground deletion cascades to
+catalog resources, and
 `selfPrunePolicy: Confirm` annotates the parent with `Prune=confirm`. A target
 can override the name, project, sync policy, deletion policy, self-prune
 policy, labels, and annotations under `spec.catalogApplication`.

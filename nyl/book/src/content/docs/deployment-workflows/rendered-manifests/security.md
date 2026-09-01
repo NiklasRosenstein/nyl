@@ -27,7 +27,8 @@ source, destination, lifecycle, labels, and annotations. Use
 `releaseCustomization.allowedPaths` and `deniedPaths` to expose only deliberate
 per-release Application overrides. Deny wins when both lists match. Use
 `releaseCustomization.allowedSyncOptions` to approve exact sync-option values
-that Releases may append without delegating the rest of the sync policy.
+that Releases may merge without delegating the rest of the sync policy. Values
+with the same option key replace the generated or group-level value.
 
 AppProject source and destination policy remains an Argo CD enforcement layer
 even when an application source repository is compromised. An
@@ -43,7 +44,8 @@ but does not replace, Argo CD admission.
 
 The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
-to catalog resources, and pruning the parent itself requires confirmation.
+to catalog resources, applies only out-of-sync resources, and pruning the parent
+itself requires confirmation.
 Review and protect the publication path because the parent can create Argo CD
 Applications and AppProjects.
 

@@ -208,6 +208,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(application.contains("resources-finalizer.argocd.argoproj.io"));
     assert!(application.contains("environment: production"));
     assert!(application.contains("server: https://kubernetes.default.svc"));
+    assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert!(!fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -222,6 +223,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(catalog.contains("enabled: true"));
     assert!(catalog.contains("prune: false"));
     assert!(catalog.contains("selfHeal: true"));
+    assert_eq!(catalog.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
     assert_eq!(index["version"], 2);
     assert_eq!(index["target"], "production");
@@ -1234,6 +1236,42 @@ fn release_can_append_explicitly_allowed_sync_options() {
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert!(application.contains("- RespectIgnoreDifferences=false"));
     assert!(!application.contains("+syncOptions"));
+}
+
+#[test]
+fn release_can_replace_the_default_sync_option_with_an_allowed_value() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "{% if target.metadata.labels.environment == 'production' %}",
+        "  releaseCustomization:\n    allowedSyncOptions: [ApplyOutOfSyncOnly=false]\n{% if target.metadata.labels.environment == 'production' %}",
+    );
+    fs::write(group_path, group).unwrap();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "metadata:\n  name: api\n  namespace: api\n",
+        "metadata:\n  name: api\n  namespace: api\nspec:\n  argocd:\n    applicationOverride:\n      spec:\n        syncPolicy:\n          +syncOptions:\n            - ApplyOutOfSyncOnly=false\n",
+    );
+    fs::write(release_path, release).unwrap();
+    let output = fixture.path().join("deploy");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let application =
+        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+    assert_eq!(application.matches("- ApplyOutOfSyncOnly=false").count(), 1);
+    assert!(!application.contains("ApplyOutOfSyncOnly=true"));
 }
 
 #[test]

@@ -131,8 +131,10 @@ spec:
 Platform-owned source, destination, project, sync-policy, identity, and
 finalizer fields cannot be overridden in rendered GitOps. An ApplicationGroup
 may allow exact sync-option values through
-`spec.releaseCustomization.allowedSyncOptions`; a Release appends them with a
-`+syncOptions` key rather than replacing the group policy.
+`spec.releaseCustomization.allowedSyncOptions`; a Release merges them with a
+`+syncOptions` key rather than replacing the group policy. Nyl replaces an
+existing option with the same key, which permits an approved
+`ApplyOutOfSyncOnly=false` exception to the generated default.
 
 ## Direct commands and release history
 

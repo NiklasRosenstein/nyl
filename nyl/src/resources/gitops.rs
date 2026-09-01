@@ -1175,7 +1175,7 @@ fn default_catalog_sync_policy() -> GitOpsSyncPolicy {
             prune: false,
             self_heal: true,
         }),
-        sync_options: Vec::new(),
+        sync_options: vec!["ApplyOutOfSyncOnly=true".to_owned()],
     }
 }
 

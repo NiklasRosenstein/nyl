@@ -19,8 +19,8 @@ use crate::util::SourceContext;
 use crate::{NylError, Result};
 
 use super::{
-    build_directory_application, ensure_managed_namespace, render_manifest_layout, take_managed_namespace,
-    DirectoryApplicationInput, GitOpsInventory, RenderSession,
+    build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout,
+    take_managed_namespace, DirectoryApplicationInput, GitOpsInventory, RenderSession,
 };
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -1627,7 +1627,7 @@ fn apply_release_application_override(
         }
     }
     *application = crate::util::deep_merge_value(Some(application.clone()), Value::Object(override_value));
-    append_release_sync_options(application, sync_options)?;
+    merge_release_sync_options(application, sync_options)?;
     Ok(())
 }
 
@@ -1684,7 +1684,7 @@ fn take_release_sync_option_additions(
     Ok(additions)
 }
 
-fn append_release_sync_options(application: &mut Value, additions: Vec<String>) -> Result<()> {
+fn merge_release_sync_options(application: &mut Value, additions: Vec<String>) -> Result<()> {
     if additions.is_empty() {
         return Ok(());
     }
@@ -1702,11 +1702,17 @@ fn append_release_sync_options(application: &mut Value, additions: Vec<String>) 
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or_else(|| NylError::config("Generated Argo CD Application spec.syncPolicy.syncOptions is not an array"))?;
-    for option in additions {
-        if !sync_options.iter().any(|existing| existing.as_str() == Some(&option)) {
-            sync_options.push(Value::String(option));
-        }
-    }
+    let mut merged = sync_options
+        .iter()
+        .map(|option| {
+            option
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| NylError::config("Generated Argo CD Application sync option is not a string"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    merge_sync_options(&mut merged, additions);
+    *sync_options = merged.into_iter().map(Value::String).collect();
     Ok(())
 }
 
