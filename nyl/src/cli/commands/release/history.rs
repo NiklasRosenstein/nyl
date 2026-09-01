@@ -11,7 +11,7 @@ use crate::{
 /// Show revision history for a release
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
-    /// GitOps target whose cluster stores the release
+    /// deployment target whose cluster stores the release
     #[arg(long)]
     pub target: String,
 

@@ -7,7 +7,7 @@ Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based compo
 - Component-oriented workflow (Helm chart-backed resources)
 - `RemoteManifest` resources for HTTPS-hosted YAML/JSON
 - Jinja2-compatible templating (MiniJinja)
-- Kubernetes-shaped Cluster and GitOpsTarget configuration
+- Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
 - Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
 - ArgoCD integration via CMP container, Helm chart, and `ApplicationGenerator` resource

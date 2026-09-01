@@ -44,7 +44,7 @@ spec:
 Exactly one of `destination.server` and `destination.name` is required. Values
 such as region, architecture, storage class, and ingress implementation belong
 on the Cluster. Deployment intent such as `environment` belongs on a
-[`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/).
+[`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/).
 
 The capability fields can be absent while scaffolding and updating a Cluster,
 but target rendering requires `kubeVersion` and at least one `apiVersions`

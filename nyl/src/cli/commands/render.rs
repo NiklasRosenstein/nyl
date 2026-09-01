@@ -41,7 +41,7 @@ pub struct RenderOptions {
     #[arg(long, value_delimiter = ',', conflicts_with = "only_kind")]
     pub exclude_kind: Vec<String>,
 
-    /// GitOps target whose values and cluster capabilities are used
+    /// deployment target whose values and cluster capabilities are used
     #[arg(long)]
     pub target: Option<String>,
 

@@ -72,6 +72,52 @@
       },
       "type": "object"
     },
+    "DeploymentTargetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "applicationGroupSelector": {
+          "$ref": "#/$defs/LabelSelector",
+          "default": {}
+        },
+        "argocdRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalogApplication": {
+          "$ref": "#/$defs/CatalogApplicationOverrides",
+          "default": {
+            "enabled": true
+          }
+        },
+        "clusterRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "$ref": "#/$defs/GitPublication"
+        },
+        "values": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "publication"
+      ],
+      "type": "object"
+    },
     "GitOpsAutomatedSyncPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -131,52 +177,15 @@
       },
       "type": "object"
     },
-    "GitOpsTargetSpec": {
-      "additionalProperties": false,
-      "properties": {
-        "applicationGroupSelector": {
-          "$ref": "#/$defs/LabelSelector",
-          "default": {}
-        },
-        "argocdRef": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalReference"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "catalogApplication": {
-          "$ref": "#/$defs/CatalogApplicationOverrides",
-          "default": {
-            "enabled": true
-          }
-        },
-        "clusterRef": {
-          "$ref": "#/$defs/LocalReference"
-        },
-        "publication": {
-          "$ref": "#/$defs/GitPublication"
-        },
-        "values": {
-          "additionalProperties": true,
-          "type": "object"
-        }
-      },
-      "required": [
-        "clusterRef",
-        "publication"
-      ],
-      "type": "object"
-    },
     "GitPublication": {
       "additionalProperties": false,
       "description": "Git coordinates used as a rendered output and Argo CD source.",
       "properties": {
         "pathPrefix": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "repository": {
           "anyOf": [
@@ -267,14 +276,14 @@
       "type": "string"
     },
     "kind": {
-      "const": "GitOpsTarget",
+      "const": "DeploymentTarget",
       "type": "string"
     },
     "metadata": {
       "$ref": "#/$defs/GitOpsResourceMetadata"
     },
     "spec": {
-      "$ref": "#/$defs/GitOpsTargetSpec"
+      "$ref": "#/$defs/DeploymentTargetSpec"
     }
   },
   "required": [
@@ -283,6 +292,6 @@
     "metadata",
     "spec"
   ],
-  "title": "GitOpsTarget",
+  "title": "DeploymentTarget",
   "type": "object"
 }

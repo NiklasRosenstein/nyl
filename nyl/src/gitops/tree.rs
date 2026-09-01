@@ -1,4 +1,4 @@
-//! Compilation of one effective GitOps target into a rendered file tree.
+//! Compilation of one effective deployment target into a rendered file tree.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -14,8 +14,8 @@ use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
     ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster,
-    ClusterDestination, GitOpsResource, GitOpsResourceKind, GitOpsTarget, GitPublication, InlineGitRepository,
-    ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    ClusterDestination, DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, InlineGitRepository,
+    LocalReference, ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::TemplateEngine;
 use crate::util::SourceContext;
@@ -29,7 +29,7 @@ use super::{
 /// Pure output of compiling one target. Paths are relative to the target prefix.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CompiledTargetTree {
-    pub target: GitOpsTarget,
+    pub target: DeploymentTarget,
     pub cluster: Cluster,
     pub repository_name: Option<String>,
     pub repository: InlineGitRepository,
@@ -145,8 +145,8 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
         .count();
     for discovered in inventory.resources.values() {
         match discovered.resource.as_ref() {
-            Some(GitOpsResource::GitOpsTarget(target)) => {
-                resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+            Some(GitOpsResource::DeploymentTarget(target)) => {
+                resolve_cluster(inventory, target.cluster_name())?;
                 resolve_argocd_instance(inventory, target, instance_count)?;
                 let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
                 publications.push((
@@ -157,7 +157,7 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
                     ),
                     repository.repo_url,
                     normalize_branch_revision(&target.spec.publication.revision),
-                    target.spec.publication.path_prefix.as_str(),
+                    target.publication_path_prefix(),
                 ));
             }
             Some(GitOpsResource::ArgoCDInstance(instance)) => {
@@ -180,7 +180,7 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
         for right in &publications[index + 1..] {
             if (left.1 == right.1 || left.2 == right.2) && left.4 == right.4 && paths_overlap(left.5, right.5) {
                 return Err(NylError::config(format!(
-                    "GitOpsTarget {:?} and {:?} have overlapping publication path prefixes {:?} and {:?} on {}@{}",
+                    "DeploymentTarget {:?} and {:?} have overlapping publication path prefixes {:?} and {:?} on {}@{}",
                     left.0, right.0, left.5, right.5, left.3, left.4
                 )));
             }
@@ -237,17 +237,17 @@ async fn compile_target_tree_inner(
 ) -> Result<CompiledTargetTree> {
     validate_gitops_inventory(inventory)?;
     let target_discovered = inventory
-        .get(GitOpsResourceKind::GitOpsTarget, target_name)
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget {target_name:?} was not found")))?;
+        .get(GitOpsResourceKind::DeploymentTarget, target_name)
+        .ok_or_else(|| NylError::config(format!("DeploymentTarget {target_name:?} was not found")))?;
     let target = match &target_discovered
         .resource
         .as_ref()
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget {target_name:?} must be static")))?
+        .ok_or_else(|| NylError::config(format!("DeploymentTarget {target_name:?} must be static")))?
     {
-        GitOpsResource::GitOpsTarget(target) => target.clone(),
+        GitOpsResource::DeploymentTarget(target) => target.clone(),
         _ => unreachable!("inventory kind key and resource variant must agree"),
     };
-    let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+    let (cluster, cluster_path) = resolve_cluster(inventory, target.cluster_name())?;
     let instance_count = inventory
         .resources
         .values()
@@ -257,7 +257,7 @@ async fn compile_target_tree_inner(
     if argocd.source_path.is_none() {
         tracing::info!(
             target = %target.metadata.name,
-            cluster = %target.spec.cluster_ref.name,
+            cluster = %target.cluster_name(),
             "Using the implicit target-local ArgoCDInstance"
         );
     }
@@ -521,10 +521,7 @@ async fn compile_target_tree_inner(
             insert_file(&mut files, workload.release_directory.join(relative), bytes)?;
         }
 
-        let rendered_path = join_posix(
-            target.spec.publication.path_prefix.as_str(),
-            &workload.release_directory,
-        )?;
+        let rendered_path = join_posix(target.publication_path_prefix(), &workload.release_directory)?;
         let mut application = build_directory_application(&DirectoryApplicationInput {
             name: workload.application_name.clone(),
             application_namespace: workload.group.spec.application_namespace.clone(),
@@ -559,7 +556,7 @@ async fn compile_target_tree_inner(
         for (relative, bytes) in render_manifest_layout_with_provenance(&[owner.manifest], &provenance)? {
             insert_file(&mut files, namespace_directory.join(relative), bytes)?;
         }
-        let rendered_path = join_posix(target.spec.publication.path_prefix.as_str(), &namespace_directory)?;
+        let rendered_path = join_posix(target.publication_path_prefix(), &namespace_directory)?;
         let application = build_directory_application(&DirectoryApplicationInput {
             name: application_name.clone(),
             application_namespace: owner.application_namespace.clone(),
@@ -710,7 +707,7 @@ fn load_cached_target(
         tracing::debug!(
             target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key),
             changed_inputs = ?changed_inputs,
-            "Invalidating cached GitOps target tree"
+            "Invalidating cached deployment target tree"
         );
         cache.observe(CacheLayer::Target, CacheOutcome::Invalidated, &[]);
         return Ok(None);
@@ -718,7 +715,7 @@ fn load_cached_target(
     let cached: Option<CachedTargetTree> = cache.load_artifact("target", &record.artifact_digest)?;
     if let Some(cached) = cached {
         cache.observe_target_hit(cached.releases, cached.helm_renders);
-        tracing::debug!(target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key), "Reusing cached GitOps target tree");
+        tracing::debug!(target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key), "Reusing cached deployment target tree");
         Ok(Some(cached.compiled))
     } else {
         cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
@@ -1186,7 +1183,7 @@ fn register_namespace_owner(
     Ok(())
 }
 
-fn target_selects_group(target: &GitOpsTarget, group_labels: &BTreeMap<String, String>) -> bool {
+fn target_selects_group(target: &DeploymentTarget, group_labels: &BTreeMap<String, String>) -> bool {
     target
         .spec
         .application_group_selector
@@ -1197,17 +1194,17 @@ fn target_selects_group(target: &GitOpsTarget, group_labels: &BTreeMap<String, S
 
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
-    target: &GitOpsTarget,
+    target: &DeploymentTarget,
     instance_count: usize,
 ) -> Result<EffectiveArgoCDInstance> {
     if instance_count == 0 {
         if let Some(reference) = &target.spec.argocd_ref {
             return Err(NylError::config(format!(
-                "GitOpsTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
+                "DeploymentTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
                 target.metadata.name, reference.name
             )));
         }
-        let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+        let (cluster, cluster_path) = resolve_cluster(inventory, target.cluster_name())?;
         return Ok(EffectiveArgoCDInstance {
             identity: format!("implicit:{}", target.metadata.name),
             resource: ArgoCDInstance {
@@ -1218,7 +1215,9 @@ fn resolve_argocd_instance(
                     labels: BTreeMap::new(),
                 },
                 spec: ArgoCDInstanceSpec {
-                    cluster_ref: target.spec.cluster_ref.clone(),
+                    cluster_ref: LocalReference {
+                        name: target.cluster_name().to_owned(),
+                    },
                     namespace: "argocd".to_owned(),
                     catalog_application_defaults: CatalogApplicationDefaults::default(),
                 },
@@ -1231,7 +1230,7 @@ fn resolve_argocd_instance(
 
     let reference = target.spec.argocd_ref.as_ref().ok_or_else(|| {
         NylError::config(format!(
-            "GitOpsTarget {:?} must set spec.argocdRef because explicit ArgoCDInstance resources are defined",
+            "DeploymentTarget {:?} must set spec.argocdRef because explicit ArgoCDInstance resources are defined",
             target.metadata.name
         ))
     })?;
@@ -1255,7 +1254,7 @@ fn resolve_argocd_instance(
 }
 
 fn build_catalog_application(
-    target: &GitOpsTarget,
+    target: &DeploymentTarget,
     repository: &InlineGitRepository,
     argocd: &EffectiveArgoCDInstance,
 ) -> Result<(String, Value)> {
@@ -1279,7 +1278,7 @@ fn build_catalog_application(
     let mut annotations = defaults.annotations.clone();
     annotations.extend(overrides.annotations.clone());
     set_catalog_prune_option(&mut annotations, self_prune_policy);
-    let rendered_path = join_posix(&target.spec.publication.path_prefix, Path::new("_nyl/catalog"))?;
+    let rendered_path = join_posix(target.publication_path_prefix(), Path::new("_nyl/catalog"))?;
     let application = build_directory_application(&DirectoryApplicationInput {
         name: name.clone(),
         application_namespace: argocd.resource.spec.namespace.clone(),
@@ -1327,7 +1326,7 @@ fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instan
         .resources
         .values()
         .filter_map(|resource| match &resource.resource {
-            Some(GitOpsResource::GitOpsTarget(target)) => Some(target),
+            Some(GitOpsResource::DeploymentTarget(target)) => Some(target),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1356,12 +1355,12 @@ fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instan
             );
             if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
                 return Err(NylError::config(format!(
-                    "GitOpsTargets {previous:?} and {:?} generate the same catalog Application {}/{} on ArgoCDInstance {:?}; customize spec.catalogApplication.name",
+                    "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {}/{} on ArgoCDInstance {:?}; customize spec.catalogApplication.name",
                     target.metadata.name, argocd.resource.spec.namespace, parent_name, argocd.identity
                 )));
             }
         }
-        let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+        let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
         let session = RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?;
         for discovered in &groups {
             if !target_selects_group(target, &discovered.static_labels) {
@@ -1381,7 +1380,7 @@ fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instan
                 );
                 if let Some(previous) = default_application_owners.insert(key, target.metadata.name.clone()) {
                     return Err(NylError::config(format!(
-                        "GitOpsTargets {previous:?} and {:?} select ApplicationGroup {:?} on ArgoCDInstance {:?} while using the default Release Application names; set ApplicationGroup.spec.applicationNameTemplate, for example \"{{{{ target.metadata.name }}}}-{{{{ release.metadata.name }}}}\"",
+                        "DeploymentTargets {previous:?} and {:?} select ApplicationGroup {:?} on ArgoCDInstance {:?} while using the default Release Application names; set ApplicationGroup.spec.applicationNameTemplate, for example \"{{{{ target.metadata.name }}}}-{{{{ release.metadata.name }}}}\"",
                         target.metadata.name, group.metadata.name, argocd.identity
                     )));
                 }
@@ -1679,7 +1678,7 @@ fn render_effective_control(
         GitOpsResource::GitRepository(resource) => (GitOpsResourceKind::GitRepository, &resource.metadata.name),
         GitOpsResource::Cluster(resource) => (GitOpsResourceKind::Cluster, &resource.metadata.name),
         GitOpsResource::ArgoCDInstance(resource) => (GitOpsResourceKind::ArgoCDInstance, &resource.metadata.name),
-        GitOpsResource::GitOpsTarget(resource) => (GitOpsResourceKind::GitOpsTarget, &resource.metadata.name),
+        GitOpsResource::DeploymentTarget(resource) => (GitOpsResourceKind::DeploymentTarget, &resource.metadata.name),
         GitOpsResource::AppProjectDefinition(resource) => {
             (GitOpsResourceKind::AppProjectDefinition, &resource.metadata.name)
         }
@@ -1716,7 +1715,7 @@ fn resolve_group_source(
     inventory: &GitOpsInventory,
     group_resource_path: &Path,
     group: &ApplicationGroup,
-    target: &GitOpsTarget,
+    target: &DeploymentTarget,
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
 ) -> Result<ResolvedGroupSource> {
@@ -1814,7 +1813,7 @@ fn resolve_group_source(
 
 fn build_group_source_session(
     inventory: &GitOpsInventory,
-    target: &GitOpsTarget,
+    target: &DeploymentTarget,
     remote_root: Option<&Path>,
     source: &ApplicationGroupSource,
 ) -> Result<Option<RenderSession>> {
@@ -1825,11 +1824,11 @@ fn build_group_source_session(
                 source.renderer_config.project_path.as_deref().unwrap_or("."),
                 "ApplicationGroup source.rendererConfig.projectPath",
             )?;
-            let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+            let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
             Some(RenderSession::for_remote_target(&project_root, target, &cluster)?)
         }
         (Some(_), RendererConfigMode::Central) => {
-            let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+            let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
             Some(RenderSession::for_untrusted_source(
                 &inventory.project_root,
                 &inventory.project_config,

@@ -6,7 +6,7 @@ use crate::gitops::discover_gitops_inventory;
 use crate::resources::GitOpsResource;
 use crate::Result;
 
-/// Inspect rendered GitOps targets.
+/// Inspect rendered deployment targets.
 #[derive(Args, Debug)]
 pub struct TargetArgs {
     #[command(subcommand)]
@@ -15,7 +15,7 @@ pub struct TargetArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TargetSubcommand {
-    /// List all discovered GitOpsTarget resources.
+    /// List all discovered DeploymentTarget resources.
     List {
         /// Project directory or a path beneath it.
         #[arg(default_value = ".")]
@@ -33,7 +33,7 @@ fn list(path: &std::path::Path) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
     let mut count = 0;
     for discovered in inventory.resources.values() {
-        let Some(GitOpsResource::GitOpsTarget(target)) = &discovered.resource else {
+        let Some(GitOpsResource::DeploymentTarget(target)) = &discovered.resource else {
             continue;
         };
         let publication = target
@@ -54,16 +54,16 @@ fn list(path: &std::path::Path) -> Result<()> {
         println!(
             "{}\t{}\t{}@{}\t{}",
             target.metadata.name,
-            target.spec.cluster_ref.name,
+            target.cluster_name(),
             publication,
             target.spec.publication.revision,
-            target.spec.publication.path_prefix
+            target.publication_path_prefix()
         );
         count += 1;
     }
     if count == 0 {
         tracing::warn!(
-            "No GitOpsTarget resources found under {}",
+            "No DeploymentTarget resources found under {}",
             inventory.project_root.display()
         );
     }

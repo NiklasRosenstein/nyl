@@ -43,12 +43,12 @@ spec:
     revision: deploy/production
 ```
 
-Both GitOpsTarget publication and ApplicationGroup sources also accept inline
+Both DeploymentTarget publication and ApplicationGroup sources also accept inline
 `repository.repoURL` and `repository.publishURL` coordinates. A reference and
 an inline repository are mutually exclusive.
 
 ## See also
 
-- [GitOpsTarget](/nyl/reference/resources/gitops/gitops-target/)
+- [DeploymentTarget](/nyl/reference/resources/gitops/deployment-target/)
 - [ApplicationGroup](/nyl/reference/resources/gitops/application-group/)
 - [Trust and admission boundaries](/nyl/deployment-workflows/rendered-manifests/security/)

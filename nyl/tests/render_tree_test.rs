@@ -64,7 +64,7 @@ spec:
     fs::write(
         temp.path().join("config/targets/production.yaml"),
         r#"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: production
   labels:
@@ -206,7 +206,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "GitOps target production ready at deploy-worktree/production",
+            "deployment target production ready at deploy-worktree/production",
         ))
         .stderr(predicate::str::contains(
             "[1/1] Release workloads/api (applications/workloads/api.yaml)",
@@ -285,7 +285,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Reusing cached GitOps target tree"))
+        .stderr(predicate::str::contains("Reusing cached deployment target tree"))
         .stderr(predicate::str::contains("[1/1] Release").not());
 
     let cached_tree = read_tree(&root);
@@ -701,7 +701,7 @@ spec:
     fs::write(
         fixture.path().join("config/targets/staging.yaml"),
         r#"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: staging
   labels:
@@ -856,7 +856,7 @@ fn validation_rejects_overlapping_target_prefixes_on_one_revision() {
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
         r"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
@@ -896,7 +896,7 @@ spec:
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
         r"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
@@ -944,7 +944,7 @@ spec:
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
         r"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: overlap
 spec:
@@ -1851,7 +1851,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .args(["publish-tree", "--target", "production"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Published GitOps target production"));
+        .stdout(predicate::str::contains("Published deployment target production"));
 
     let destination_repository = Repository::open_bare(destination.path()).unwrap();
     let commit = destination_repository

@@ -12,7 +12,7 @@ use crate::{
 /// Roll back a release to a previously stored revision
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
-    /// GitOps target whose cluster stores the release
+    /// deployment target whose cluster stores the release
     #[arg(long)]
     pub target: String,
 

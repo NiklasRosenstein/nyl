@@ -18,7 +18,7 @@ simple-app/
 ```
 
 The `local` Cluster contains Kubernetes capabilities and cluster facts. Each
-GitOpsTarget references it and supplies deployment values such as environment,
+DeploymentTarget references it and supplies deployment values such as environment,
 namespace, image, replicas, and resources. Target values win over Cluster
 values at conflicting leaves.
 

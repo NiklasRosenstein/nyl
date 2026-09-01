@@ -16,7 +16,7 @@ cluster.
   CD destination and deterministic Kubernetes capabilities.
 - [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/) defines
   an Argo CD control plane and catalog defaults.
-- [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/) defines one
+- [`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/) defines one
   independently rendered and published deployment slice.
 - [`AppProjectDefinition`](/nyl/reference/resources/gitops/app-project-definition/)
   defines a local identity for a rendered or externally managed Argo CD

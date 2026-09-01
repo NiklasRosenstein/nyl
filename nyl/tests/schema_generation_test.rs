@@ -5,14 +5,14 @@ use predicates::prelude::*;
 
 #[test]
 fn resource_schema_cli_accepts_canonical_kind_and_alias() {
-    for kind in ["GitOpsTarget", "target"] {
+    for kind in ["DeploymentTarget", "target"] {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
         command
             .args(["generate", "schema", "resource", kind])
             .assert()
             .success()
             .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
-            .stdout(predicate::str::contains("\"const\": \"GitOpsTarget\""));
+            .stdout(predicate::str::contains("\"const\": \"DeploymentTarget\""));
     }
 }
 
@@ -68,7 +68,7 @@ fn all_schema_cli_writes_the_complete_set() {
         "nyl.schema.json",
         "git-repository.schema.json",
         "cluster.schema.json",
-        "gitops-target.schema.json",
+        "deployment-target.schema.json",
         "app-project-definition.schema.json",
         "application-group.schema.json",
         "release.schema.json",

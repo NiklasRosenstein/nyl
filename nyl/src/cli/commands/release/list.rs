@@ -11,7 +11,7 @@ use crate::{
 /// List all releases
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// GitOps target whose cluster stores the releases
+    /// deployment target whose cluster stores the releases
     #[arg(long)]
     pub target: String,
 

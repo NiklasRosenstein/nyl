@@ -199,7 +199,7 @@ kubectl exec -it deployment/argocd-repo-server -n argocd -- nyl --version
 
 ### Target Not Found
 
-If Nyl reports that a target cannot be found, verify the GitOpsTarget and its
+If Nyl reports that a target cannot be found, verify the DeploymentTarget and its
 referenced Cluster are Git-visible and have static `apiVersion`, `kind`, and
 `metadata.name` fields. Also verify `nyl.toml` is discoverable from the plugin
 working directory.

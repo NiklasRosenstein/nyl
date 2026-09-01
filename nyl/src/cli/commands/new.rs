@@ -124,7 +124,7 @@ pub async fn execute(args: NewArgs) -> Result<()> {
             NewGitopsSubcommand::ArgoCDInstance(args) => {
                 scaffold_alias_resource(GitOpsResourceKind::ArgoCDInstance, args)
             }
-            NewGitopsSubcommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::GitOpsTarget, args),
+            NewGitopsSubcommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::DeploymentTarget, args),
             NewGitopsSubcommand::Project(args) => {
                 scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args)
             }
@@ -257,7 +257,7 @@ fn scaffold_resource(
             GitOpsResourceKind::GitRepository => "repositories",
             GitOpsResourceKind::Cluster => "clusters",
             GitOpsResourceKind::ArgoCDInstance => "argocd-instances",
-            GitOpsResourceKind::GitOpsTarget => "targets",
+            GitOpsResourceKind::DeploymentTarget => "targets",
             GitOpsResourceKind::AppProjectDefinition => "projects",
             GitOpsResourceKind::ApplicationGroup => "application-groups",
         };
@@ -329,8 +329,8 @@ fn render_resource_scaffold(
         GitOpsResourceKind::ArgoCDInstance => format!(
             "apiVersion: gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  namespace: argocd\n"
         ),
-        GitOpsResourceKind::GitOpsTarget => format!(
-            "apiVersion: gitops.nyl/v1\nkind: GitOpsTarget\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  values:\n    environment: {name}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n    pathPrefix: {name}\n"
+        GitOpsResourceKind::DeploymentTarget => format!(
+            "apiVersion: gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n"
         ),
         GitOpsResourceKind::AppProjectDefinition => format!(
             "apiVersion: gitops.nyl/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
@@ -749,7 +749,7 @@ mod tests {
         .unwrap();
         scaffold_resource(
             ResourceScaffoldArgs {
-                kind: GitOpsResourceKind::GitOpsTarget,
+                kind: GitOpsResourceKind::DeploymentTarget,
                 name: "production".to_string(),
                 output: None,
                 source: None,
@@ -778,9 +778,10 @@ mod tests {
         assert!(cluster.contains("kind: Cluster"));
         assert!(cluster.contains("context: admin@production"));
         let target = fs::read_to_string(temp.path().join("config/targets/production.yaml")).unwrap();
-        assert!(target.contains("clusterRef:\n    name: production"));
+        assert!(target.contains("kind: DeploymentTarget"));
         assert!(target.contains("publication:"));
-        assert!(!target.contains("profile:"));
+        assert!(!target.contains("clusterRef:"));
+        assert!(!target.contains("pathPrefix:"));
         let instance = fs::read_to_string(temp.path().join("config/argocd-instances/central.yaml")).unwrap();
         assert!(instance.contains("kind: ArgoCDInstance"));
         assert!(instance.contains("namespace: argocd"));

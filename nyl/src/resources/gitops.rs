@@ -17,7 +17,7 @@ use crate::{NylError, Result};
 pub const KIND_GIT_REPOSITORY: &str = "GitRepository";
 pub const KIND_CLUSTER: &str = "Cluster";
 pub const KIND_ARGOCD_INSTANCE: &str = "ArgoCDInstance";
-pub const KIND_GITOPS_TARGET: &str = "GitOpsTarget";
+pub const KIND_DEPLOYMENT_TARGET: &str = "DeploymentTarget";
 pub const KIND_APP_PROJECT_DEFINITION: &str = "AppProjectDefinition";
 pub const KIND_APPLICATION_GROUP: &str = "ApplicationGroup";
 
@@ -154,19 +154,19 @@ impl Default for CatalogApplicationDefaults {
 /// A named, independently renderable and publishable deployment slice.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct GitOpsTarget {
+pub struct DeploymentTarget {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
     pub kind: String,
     pub metadata: GitOpsResourceMetadata,
-    pub spec: GitOpsTargetSpec,
+    pub spec: DeploymentTargetSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct GitOpsTargetSpec {
-    #[serde(rename = "clusterRef")]
-    pub cluster_ref: LocalReference,
+pub struct DeploymentTargetSpec {
+    #[serde(rename = "clusterRef", skip_serializing_if = "Option::is_none")]
+    pub cluster_ref: Option<LocalReference>,
     #[serde(rename = "argocdRef", skip_serializing_if = "Option::is_none")]
     pub argocd_ref: Option<LocalReference>,
     #[serde(rename = "applicationGroupSelector", default)]
@@ -223,8 +223,8 @@ pub struct GitPublication {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<InlineGitRepository>,
     pub revision: String,
-    #[serde(default, rename = "pathPrefix", skip_serializing_if = "String::is_empty")]
-    pub path_prefix: String,
+    #[serde(rename = "pathPrefix", skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -488,8 +488,8 @@ pub enum GitOpsResourceKind {
     Cluster,
     #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
     ArgoCDInstance,
-    #[value(name = "GitOpsTarget", alias = "gitops-target", alias = "target")]
-    GitOpsTarget,
+    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
+    DeploymentTarget,
     #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
     AppProjectDefinition,
     #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
@@ -502,7 +502,7 @@ impl GitOpsResourceKind {
             Self::GitRepository => KIND_GIT_REPOSITORY,
             Self::Cluster => KIND_CLUSTER,
             Self::ArgoCDInstance => KIND_ARGOCD_INSTANCE,
-            Self::GitOpsTarget => KIND_GITOPS_TARGET,
+            Self::DeploymentTarget => KIND_DEPLOYMENT_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
         }
@@ -513,7 +513,7 @@ impl GitOpsResourceKind {
             KIND_GIT_REPOSITORY => Some(Self::GitRepository),
             KIND_CLUSTER => Some(Self::Cluster),
             KIND_ARGOCD_INSTANCE => Some(Self::ArgoCDInstance),
-            KIND_GITOPS_TARGET => Some(Self::GitOpsTarget),
+            KIND_DEPLOYMENT_TARGET => Some(Self::DeploymentTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
             _ => None,
@@ -525,7 +525,7 @@ impl GitOpsResourceKind {
             Self::GitRepository => "git-repository.schema.json",
             Self::Cluster => "cluster.schema.json",
             Self::ArgoCDInstance => "argocd-instance.schema.json",
-            Self::GitOpsTarget => "gitops-target.schema.json",
+            Self::DeploymentTarget => "deployment-target.schema.json",
             Self::AppProjectDefinition => "app-project-definition.schema.json",
             Self::ApplicationGroup => "application-group.schema.json",
         }
@@ -536,7 +536,7 @@ impl GitOpsResourceKind {
             Self::GitRepository,
             Self::Cluster,
             Self::ArgoCDInstance,
-            Self::GitOpsTarget,
+            Self::DeploymentTarget,
             Self::AppProjectDefinition,
             Self::ApplicationGroup,
         ]
@@ -553,7 +553,7 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
         GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
         GitOpsResourceKind::ArgoCDInstance => serde_json::to_value(schema_for!(ArgoCDInstance)),
-        GitOpsResourceKind::GitOpsTarget => serde_json::to_value(schema_for!(GitOpsTarget)),
+        GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
     }
@@ -609,7 +609,7 @@ pub enum GitOpsResource {
     GitRepository(GitRepository),
     Cluster(Cluster),
     ArgoCDInstance(ArgoCDInstance),
-    GitOpsTarget(GitOpsTarget),
+    DeploymentTarget(DeploymentTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
 }
@@ -658,7 +658,11 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
         GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
         GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
         GitOpsResourceKind::ArgoCDInstance => GitOpsResource::ArgoCDInstance(parse_as(value, KIND_ARGOCD_INSTANCE)?),
-        GitOpsResourceKind::GitOpsTarget => GitOpsResource::GitOpsTarget(parse_as(value, KIND_GITOPS_TARGET)?),
+        GitOpsResourceKind::DeploymentTarget => {
+            let mut target: DeploymentTarget = parse_as(value, KIND_DEPLOYMENT_TARGET)?;
+            target.apply_defaults();
+            GitOpsResource::DeploymentTarget(target)
+        }
         GitOpsResourceKind::AppProjectDefinition => {
             GitOpsResource::AppProjectDefinition(parse_as(value, KIND_APP_PROJECT_DEFINITION)?)
         }
@@ -680,7 +684,7 @@ impl GitOpsResource {
             Self::GitRepository(resource) => resource.validate(),
             Self::Cluster(resource) => resource.validate(),
             Self::ArgoCDInstance(resource) => resource.validate(),
-            Self::GitOpsTarget(resource) => resource.validate(),
+            Self::DeploymentTarget(resource) => resource.validate(),
             Self::AppProjectDefinition(resource) => resource.validate(),
             Self::ApplicationGroup(resource) => resource.validate(),
         }
@@ -758,19 +762,52 @@ impl ArgoCDInstance {
     }
 }
 
-impl GitOpsTarget {
+impl DeploymentTarget {
+    /// Materialize target-relative defaults so downstream rendering and
+    /// templates observe the effective configuration.
+    pub fn apply_defaults(&mut self) {
+        self.spec.cluster_ref.get_or_insert_with(|| LocalReference {
+            name: self.metadata.name.clone(),
+        });
+        self.spec
+            .publication
+            .path_prefix
+            .get_or_insert_with(|| self.metadata.name.clone());
+    }
+
+    pub fn cluster_name(&self) -> &str {
+        self.spec
+            .cluster_ref
+            .as_ref()
+            .map_or(self.metadata.name.as_str(), |reference| reference.name.as_str())
+    }
+
+    pub fn publication_path_prefix(&self) -> &str {
+        self.spec
+            .publication
+            .path_prefix
+            .as_deref()
+            .unwrap_or(&self.metadata.name)
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_envelope(
             self.api_version.as_str(),
             self.kind.as_str(),
-            KIND_GITOPS_TARGET,
+            KIND_DEPLOYMENT_TARGET,
             &self.metadata,
         )?;
-        validate_static_required("spec.clusterRef.name", &self.spec.cluster_ref.name)?;
+        validate_static_required("spec.clusterRef.name", self.cluster_name())?;
         if let Some(reference) = &self.spec.argocd_ref {
             validate_static_required("spec.argocdRef.name", &reference.name)?;
         }
         self.spec.publication.validate()?;
+        validate_relative_path(
+            "spec.publication.pathPrefix",
+            self.publication_path_prefix(),
+            true,
+            false,
+        )?;
         if let Some(name) = &self.spec.catalog_application.name {
             validate_dns_subdomain("spec.catalogApplication.name", name)?;
         }
@@ -789,7 +826,10 @@ impl GitPublication {
             "spec.publication",
         )?;
         validate_static_required("spec.publication.revision", &self.revision)?;
-        validate_relative_path("spec.publication.pathPrefix", &self.path_prefix, true, false)
+        if let Some(path_prefix) = &self.path_prefix {
+            validate_relative_path("spec.publication.pathPrefix", path_prefix, true, false)?;
+        }
+        Ok(())
     }
 }
 
@@ -1195,7 +1235,7 @@ mod tests {
     fn target() -> serde_json::Value {
         json!({
             "apiVersion": API_VERSION_GITOPS,
-            "kind": KIND_GITOPS_TARGET,
+            "kind": KIND_DEPLOYMENT_TARGET,
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "kasoku"},
@@ -1253,13 +1293,25 @@ mod tests {
     #[test]
     fn parses_and_validates_target() {
         let parsed = parse_gitops_resource(&target()).unwrap().unwrap();
-        let GitOpsResource::GitOpsTarget(parsed) = parsed else {
+        let GitOpsResource::DeploymentTarget(parsed) = parsed else {
             panic!("expected target");
         };
         assert_eq!(parsed.metadata.name, "production");
-        assert_eq!(parsed.spec.cluster_ref.name, "kasoku");
+        assert_eq!(parsed.cluster_name(), "kasoku");
         assert_eq!(parsed.spec.values["replicas"], 3);
-        assert_eq!(parsed.spec.publication.path_prefix, "");
+        assert_eq!(parsed.publication_path_prefix(), "production");
+    }
+
+    #[test]
+    fn deployment_target_defaults_same_named_cluster_and_preserves_explicit_root_prefix() {
+        let mut value = target();
+        value["spec"].as_object_mut().unwrap().remove("clusterRef");
+        value["spec"]["publication"]["pathPrefix"] = json!("");
+        let GitOpsResource::DeploymentTarget(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected target");
+        };
+        assert_eq!(parsed.cluster_name(), "production");
+        assert_eq!(parsed.publication_path_prefix(), "");
     }
 
     #[test]
@@ -1357,7 +1409,7 @@ mod tests {
         assert_eq!(
             parse_gitops_resource_identity(&target()).unwrap().unwrap(),
             GitOpsResourceIdentity {
-                kind: GitOpsResourceKind::GitOpsTarget,
+                kind: GitOpsResourceKind::DeploymentTarget,
                 name: "production".to_owned()
             }
         );
@@ -1578,7 +1630,7 @@ mod tests {
             "spec": {"repoURL": "ssh://git@example/deploy.git"}
         });
         assert!(parse_gitops_resource(&repository).is_ok());
-        let schema = schemars::schema_for!(GitOpsTarget);
+        let schema = schemars::schema_for!(DeploymentTarget);
         assert!(serde_json::to_value(schema).unwrap().is_object());
     }
 
@@ -1610,7 +1662,7 @@ mod tests {
                 "git-repository.schema.json",
                 "cluster.schema.json",
                 "argocd-instance.schema.json",
-                "gitops-target.schema.json",
+                "deployment-target.schema.json",
                 "app-project-definition.schema.json",
                 "application-group.schema.json",
                 "release.schema.json"

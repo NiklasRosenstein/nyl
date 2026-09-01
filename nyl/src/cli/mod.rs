@@ -41,13 +41,13 @@ enum Commands {
     /// Render Kubernetes manifests to stdout
     Render(commands::render::RenderArgs),
 
-    /// Render a GitOps target into a deterministic manifest tree
+    /// Render a deployment target into a deterministic manifest tree
     RenderTree(commands::render_tree::RenderTreeArgs),
 
-    /// Render and compare-and-swap publish a GitOps target revision
+    /// Render and compare-and-swap publish a deployment target revision
     PublishTree(commands::publish_tree::PublishTreeArgs),
 
-    /// Inspect rendered GitOps targets
+    /// Inspect rendered deployment targets
     Target(commands::target::TargetArgs),
 
     /// Manage remote GitOps source locks
@@ -56,7 +56,7 @@ enum Commands {
     /// Show diff between rendered manifests and cluster state
     Diff(commands::diff::DiffArgs),
 
-    /// Diff a rendered GitOps target against published or source-derived state
+    /// Diff a rendered deployment target against published or source-derived state
     DiffTree(commands::diff_tree::DiffTreeArgs),
 
     /// Apply rendered manifests to the cluster

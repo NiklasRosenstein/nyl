@@ -80,8 +80,8 @@ pub enum SchemaResourceKind {
     GitRepository,
     #[value(name = "Cluster", alias = "cluster")]
     Cluster,
-    #[value(name = "GitOpsTarget", alias = "gitops-target", alias = "target")]
-    GitOpsTarget,
+    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
+    DeploymentTarget,
     #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
     AppProjectDefinition,
     #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
@@ -95,7 +95,7 @@ impl SchemaResourceKind {
         match self {
             Self::GitRepository => Some(GitOpsResourceKind::GitRepository),
             Self::Cluster => Some(GitOpsResourceKind::Cluster),
-            Self::GitOpsTarget => Some(GitOpsResourceKind::GitOpsTarget),
+            Self::DeploymentTarget => Some(GitOpsResourceKind::DeploymentTarget),
             Self::AppProjectDefinition => Some(GitOpsResourceKind::AppProjectDefinition),
             Self::ApplicationGroup => Some(GitOpsResourceKind::ApplicationGroup),
             Self::Release => None,

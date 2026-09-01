@@ -3,7 +3,7 @@ title: 'ArgoCDInstance'
 ---
 
 `ArgoCDInstance` models one Argo CD control plane independently from the
-workload clusters it manages. Several GitOpsTargets can reference the same
+workload clusters it manages. Several DeploymentTargets can reference the same
 instance while deploying to different Clusters.
 
 ## Example
@@ -31,14 +31,14 @@ spec:
 ```
 
 `spec.clusterRef` identifies the Cluster where Argo CD runs. This is distinct
-from a GitOpsTarget's workload `clusterRef`. `spec.namespace`, defaulting to
+from a DeploymentTarget's workload `clusterRef`. `spec.namespace`, defaulting to
 `argocd`, is the namespace containing generated AppProjects and the parent
 catalog Application. It is also that parent's destination namespace.
 
 ## Catalog defaults
 
 Every target emits a parent Application named `<target>-catalog` unless
-`GitOpsTarget.spec.catalogApplication.enabled` is false. The parent recursively
+`DeploymentTarget.spec.catalogApplication.enabled` is false. The parent recursively
 syncs `<pathPrefix>/_nyl/catalog` and therefore manages the generated child
 Applications, AppProjects, and its own manifest.
 

@@ -29,16 +29,16 @@ gitops_scaffold_path = "config"
   component path.
 
 Deployment values, Kubernetes capabilities, and kube contexts live in
-Kubernetes-shaped [Cluster and GitOpsTarget resources](/nyl/reference/resources/gitops/),
+Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/reference/resources/gitops/),
 not in `nyl.toml`.
 
 ## Render inputs
 
-A target-aware render resolves one `GitOpsTarget` and its referenced `Cluster`.
+A target-aware render resolves one `DeploymentTarget` and its referenced `Cluster`.
 Values merge recursively in this order:
 
 ```text
-Cluster.spec.values < GitOpsTarget.spec.values
+Cluster.spec.values < DeploymentTarget.spec.values
 ```
 
 Target values win at every conflicting leaf. Templates receive the merged map

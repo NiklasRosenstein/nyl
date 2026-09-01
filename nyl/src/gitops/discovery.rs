@@ -285,7 +285,7 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
         GitOpsResource::GitRepository(resource) => resource.metadata.labels.clone(),
         GitOpsResource::Cluster(resource) => resource.metadata.labels.clone(),
         GitOpsResource::ArgoCDInstance(resource) => resource.metadata.labels.clone(),
-        GitOpsResource::GitOpsTarget(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::DeploymentTarget(resource) => resource.metadata.labels.clone(),
         GitOpsResource::AppProjectDefinition(resource) => resource.metadata.labels.clone(),
         GitOpsResource::ApplicationGroup(resource) => resource.metadata.labels.clone(),
     }
@@ -558,7 +558,7 @@ mod tests {
     use crate::resources::{GitOpsResource, GitOpsResourceKind};
 
     const TARGET: &str = r"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: production
 spec:
@@ -601,10 +601,12 @@ spec:
                 PathBuf::from("config/targets/untracked.yml")
             ]
         );
-        let production = inventory.get(GitOpsResourceKind::GitOpsTarget, "production").unwrap();
+        let production = inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap();
         assert_eq!(production.source_path, Path::new("config/targets/tracked.yaml"));
-        assert!(matches!(production.resource, Some(GitOpsResource::GitOpsTarget(_))));
-        assert!(inventory.get(GitOpsResourceKind::GitOpsTarget, "staging").is_some());
+        assert!(matches!(production.resource, Some(GitOpsResource::DeploymentTarget(_))));
+        assert!(inventory.get(GitOpsResourceKind::DeploymentTarget, "staging").is_some());
     }
 
     #[test]
@@ -723,7 +725,7 @@ spec:
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field"));
-        assert!(error.contains("GitOpsTarget"));
+        assert!(error.contains("DeploymentTarget"));
     }
 
     #[test]
@@ -783,7 +785,7 @@ spec:
         let error = discover_gitops_inventory(temporary.path(), None)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Duplicate GitOps resource GitOpsTarget/production"));
+        assert!(error.contains("Duplicate GitOps resource DeploymentTarget/production"));
         assert!(error.contains("one.yaml"));
         assert!(error.contains("two.yaml"));
     }
@@ -798,7 +800,9 @@ spec:
         fs::write(temporary.path().join("resources.yaml"), content).unwrap();
 
         let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
-        let resource = inventory.get(GitOpsResourceKind::GitOpsTarget, "production").unwrap();
+        let resource = inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap();
         assert_eq!(resource.document_index, 2);
     }
 
@@ -810,7 +814,9 @@ spec:
 
         let inventory = discover_gitops_inventory(&temporary.path().join("nested/deep"), None).unwrap();
         assert_eq!(inventory.project_root, temporary.path().canonicalize().unwrap());
-        assert!(inventory.get(GitOpsResourceKind::GitOpsTarget, "production").is_some());
+        assert!(inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .is_some());
     }
 
     #[test]
@@ -824,7 +830,7 @@ spec:
         let rediscovered = inventory.rediscover(None).unwrap();
         assert_eq!(rediscovered.project_config, inventory.project_config);
         assert!(rediscovered
-            .get(GitOpsResourceKind::GitOpsTarget, "production")
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
             .is_some());
     }
 }

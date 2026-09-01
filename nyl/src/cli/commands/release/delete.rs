@@ -11,7 +11,7 @@ use crate::{
 /// Delete release(s)
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
-    /// GitOps target whose cluster stores the release
+    /// deployment target whose cluster stores the release
     #[arg(long)]
     pub target: String,
 

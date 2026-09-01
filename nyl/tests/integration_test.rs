@@ -30,7 +30,7 @@ spec:
     fs::write(
         temp.path().join("config/targets/production.yaml"),
         r#"apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: production
 spec:

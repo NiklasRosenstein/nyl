@@ -37,7 +37,7 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
         let target_names = inventory
             .resources
             .values()
-            .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::GitOpsTarget)
+            .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
             .map(|resource| resource.identity.name.clone())
             .collect::<Vec<_>>();
         for target in target_names {

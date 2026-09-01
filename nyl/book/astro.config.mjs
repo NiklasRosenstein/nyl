@@ -103,7 +103,7 @@ export default defineConfig({
                 "reference/resources/gitops",
                 "reference/resources/gitops/git-repository",
                 "reference/resources/gitops/cluster",
-                "reference/resources/gitops/gitops-target",
+                "reference/resources/gitops/deployment-target",
                 "reference/resources/gitops/app-project-definition",
                 "reference/resources/gitops/application-group",
                 "reference/resources/gitops/release",

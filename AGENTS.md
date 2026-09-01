@@ -241,10 +241,10 @@ fn test_operation() -> Result<()> {
 
 ### Rendered GitOps invariants
 
-- `GitOpsTarget.spec.applicationGroupSelector` matches literal
+- `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
   `ApplicationGroup.spec.enabled` is evaluated after selection.
-- An explicit `ArgoCDInstance` makes `GitOpsTarget.spec.argocdRef` mandatory for
+- An explicit `ArgoCDInstance` makes `DeploymentTarget.spec.argocdRef` mandatory for
   every target. With no explicit instances, each target receives an implicit
   target-local instance using its workload Cluster and the `argocd` namespace.
 - Every enabled catalog Application recursively sources `_nyl/catalog`. Its
@@ -283,7 +283,7 @@ src/
   static `apiVersion`, `kind`, and `metadata.name` envelope.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
-  A GitOpsTarget binds exactly one Cluster to one publication destination.
+  A DeploymentTarget binds exactly one Cluster to one publication destination.
 - Cluster values are merged recursively with target values; target values win.
   ApplicationGroups inherit the target Cluster destination.
 - ApplicationGroup and AppProjectDefinition specs are rendered after target

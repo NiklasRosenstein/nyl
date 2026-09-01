@@ -57,17 +57,17 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = Arc::new(CredentialProvider::new());
     if publication_is_current(&compiled, publication_url, &credentials, &cache)? {
-        println!("GitOps target {} is already published", args.target);
+        println!("deployment target {} is already published", args.target);
         return Ok(());
     }
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
 
-    let output_root = if compiled.target.spec.publication.path_prefix.is_empty() {
+    let output_root = if compiled.target.publication_path_prefix().is_empty() {
         temp.path().to_path_buf()
     } else {
-        temp.path().join(&compiled.target.spec.publication.path_prefix)
+        temp.path().join(compiled.target.publication_path_prefix())
     };
     let inputs = super::render_tree::hash_inputs(&inventory, &compiled)?;
     let repository_identity = compiled
@@ -83,7 +83,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             RenderIndexPublication {
                 repository: repository_identity,
                 revision: compiled.target.spec.publication.revision.clone(),
-                path_prefix: compiled.target.spec.publication.path_prefix.clone(),
+                path_prefix: compiled.target.publication_path_prefix().to_owned(),
             },
             source_commit,
             false,
@@ -96,7 +96,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         branch,
         args.message
             .as_deref()
-            .unwrap_or(&format!("Render GitOps target {}", args.target)),
+            .unwrap_or(&format!("Render deployment target {}", args.target)),
     )?;
     if !args.dry_run {
         fetch_branch(&repository, publication_url, branch, &credentials)?;
@@ -108,7 +108,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         }
     }
     let Some(commit) = commit else {
-        println!("GitOps target {} is already published", args.target);
+        println!("deployment target {} is already published", args.target);
         return Ok(());
     };
     if args.dry_run {
@@ -117,7 +117,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     }
 
     push_branch(&repository, publication_url, branch, expected, &credentials)?;
-    println!("✓ Published GitOps target {} as commit {commit}", args.target);
+    println!("✓ Published deployment target {} as commit {commit}", args.target);
     Ok(())
 }
 
@@ -140,7 +140,7 @@ fn publication_is_current(
                 return Ok(false);
             }
         };
-    let root = super::diff_tree::checked_published_root(&checkout, &compiled.target.spec.publication.path_prefix)?;
+    let root = super::diff_tree::checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
     let published = super::diff_tree::read_rendered_tree(&root)?;
     let Some(index) = published.index else {
         return Ok(false);
@@ -153,7 +153,7 @@ fn publication_is_current(
         || index.cluster != compiled.cluster.metadata.name
         || index.publication.repository != repository
         || index.publication.revision != compiled.target.spec.publication.revision
-        || index.publication.path_prefix != compiled.target.spec.publication.path_prefix
+        || index.publication.path_prefix != compiled.target.publication_path_prefix()
     {
         return Ok(false);
     }

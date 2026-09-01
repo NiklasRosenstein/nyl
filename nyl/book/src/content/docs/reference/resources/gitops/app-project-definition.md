@@ -68,4 +68,4 @@ the definition under platform-owner review; see
 ## See also
 
 - [ApplicationGroup](/nyl/reference/resources/gitops/application-group/)
-- [GitOpsTarget](/nyl/reference/resources/gitops/gitops-target/)
+- [DeploymentTarget](/nyl/reference/resources/gitops/deployment-target/)

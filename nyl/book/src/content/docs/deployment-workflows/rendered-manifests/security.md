@@ -15,7 +15,7 @@ ultimate admission boundary.
 - Kubernetes authentication, authorization, and admission control which
   resources may enter a cluster.
 
-Keep `Cluster`, `ArgoCDInstance`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`, CI
+Keep `Cluster`, `ArgoCDInstance`, `DeploymentTarget`, `AppProjectDefinition`, `ApplicationGroup`, CI
 definitions, and protected deployment revisions under platform-owner review.
 The forge and Argo CD must enforce that separation when application authors can
 change source repositories.

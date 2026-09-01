@@ -88,18 +88,18 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
         desired_files.insert(marker, publication_marker(&desired)?);
     }
     if tree_hashes(&base) == tree_hashes(&desired_files) {
-        println!("GitOps target {} has no rendered differences", args.target);
+        println!("deployment target {} has no rendered differences", args.target);
         return Ok(());
     }
     let diff = format_tree_diff(&base, &desired_files);
     if diff.is_empty() {
-        println!("GitOps target {} has no rendered differences", args.target);
+        println!("deployment target {} has no rendered differences", args.target);
         return Ok(());
     }
     print!("{diff}");
     if args.fail_on_diff {
         Err(NylError::validation(format!(
-            "GitOps target {:?} has rendered differences",
+            "deployment target {:?} has rendered differences",
             args.target
         )))
     } else {
@@ -119,7 +119,7 @@ fn published_tree(
             None,
         )
         .map_err(NylError::Git)?;
-    let root = checked_published_root(&checkout, &compiled.target.spec.publication.path_prefix)?;
+    let root = checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
     let published = read_rendered_tree(&root)?;
     if let Some(index) = published.index {
         let repository = compiled
@@ -130,7 +130,7 @@ fn published_tree(
             || index.cluster != compiled.cluster.metadata.name
             || index.publication.repository != repository
             || index.publication.revision != compiled.target.spec.publication.revision
-            || index.publication.path_prefix != compiled.target.spec.publication.path_prefix
+            || index.publication.path_prefix != compiled.target.publication_path_prefix()
         {
             return Err(NylError::config(format!(
                 "Published ownership index at {} belongs to a different target, cluster, or publication",
@@ -142,7 +142,7 @@ fn published_tree(
 }
 
 pub(super) fn checked_published_root(checkout: &Path, path_prefix: &str) -> Result<PathBuf> {
-    crate::resources::validate_relative_path("GitOpsTarget publication.pathPrefix", path_prefix, true, false)?;
+    crate::resources::validate_relative_path("DeploymentTarget publication.pathPrefix", path_prefix, true, false)?;
     let canonical_checkout = checkout.canonicalize().map_err(|error| {
         NylError::config(format!(
             "Failed to resolve published checkout {}: {error}",
@@ -219,7 +219,7 @@ fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Ve
         "repoURL": compiled.repository.repo_url,
         "publishURL": compiled.repository.publish_url,
         "revision": compiled.target.spec.publication.revision,
-        "pathPrefix": compiled.target.spec.publication.path_prefix,
+        "pathPrefix": compiled.target.publication_path_prefix(),
     }))?;
     bytes.push(b'\n');
     Ok(bytes)
@@ -331,7 +331,7 @@ fn format_tree_diff(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::{Cluster, GitOpsTarget, InlineGitRepository};
+    use crate::resources::{Cluster, DeploymentTarget, InlineGitRepository};
 
     #[test]
     fn formats_added_modified_and_removed_files() {
@@ -354,9 +354,9 @@ mod tests {
 
     #[test]
     fn publication_marker_changes_when_ownership_coordinates_change() {
-        let target: GitOpsTarget = serde_json::from_value(serde_json::json!({
+        let target: DeploymentTarget = serde_json::from_value(serde_json::json!({
             "apiVersion": crate::constants::API_VERSION_GITOPS,
-            "kind": "GitOpsTarget",
+            "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
                 "clusterRef": {"name": "kasoku"},
@@ -391,7 +391,7 @@ mod tests {
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;
-        desired.target.spec.publication.path_prefix = "new-prefix".to_string();
+        desired.target.spec.publication.path_prefix = Some("new-prefix".to_string());
         assert_ne!(baseline_marker, publication_marker(&desired).unwrap());
 
         let changed_publication_marker = publication_marker(&desired).unwrap();

@@ -1,5 +1,5 @@
 apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: prod
 spec:

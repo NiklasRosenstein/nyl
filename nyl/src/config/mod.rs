@@ -322,7 +322,7 @@ fn reject_removed_configuration(contents: &str) -> Result<()> {
         toml::from_str(contents).map_err(|error| NylError::Config(format!("Failed to parse TOML config: {error}")))?;
     if value.get("profile").is_some() {
         return Err(NylError::config(
-            "[profile.*] is no longer supported. Define Cluster and GitOpsTarget resources under config/ and select a target with --target.",
+            "[profile.*] is no longer supported. Define Cluster and DeploymentTarget resources under config/ and select a target with --target.",
         ));
     }
     if value

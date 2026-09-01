@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 
 use crate::gitops::discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::kubernetes::{KubeClient, KubeRsClient};
-use crate::resources::{Cluster, GitOpsResource, GitOpsResourceKind, GitOpsTarget};
+use crate::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
 #[derive(Args, Debug)]
@@ -42,7 +42,7 @@ struct ClusterInfo {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTargetCluster {
-    pub target: GitOpsTarget,
+    pub target: DeploymentTarget,
     pub cluster: Cluster,
 }
 
@@ -60,7 +60,7 @@ fn inventory(start_dir: &Path) -> Result<GitOpsInventory> {
 pub fn resolve_target_cluster(start_dir: &Path, target_name: &str) -> Result<ResolvedTargetCluster> {
     let inventory = inventory(start_dir)?;
     let target = get_target(&inventory, target_name)?.clone();
-    let cluster = get_cluster(&inventory, &target.spec.cluster_ref.name)?.clone();
+    let cluster = get_cluster(&inventory, target.cluster_name())?.clone();
     Ok(ResolvedTargetCluster { target, cluster })
 }
 
@@ -167,14 +167,14 @@ async fn fetch_cluster_info(cluster: &Cluster, context_override: Option<&str>) -
     })
 }
 
-fn get_target<'a>(inventory: &'a GitOpsInventory, name: &str) -> Result<&'a GitOpsTarget> {
+fn get_target<'a>(inventory: &'a GitOpsInventory, name: &str) -> Result<&'a DeploymentTarget> {
     let discovered = inventory
-        .get(GitOpsResourceKind::GitOpsTarget, name)
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget '{name}' not found")))?;
+        .get(GitOpsResourceKind::DeploymentTarget, name)
+        .ok_or_else(|| NylError::config(format!("DeploymentTarget '{name}' not found")))?;
     match discovered.resource.as_ref() {
-        Some(GitOpsResource::GitOpsTarget(target)) => Ok(target),
+        Some(GitOpsResource::DeploymentTarget(target)) => Ok(target),
         _ => Err(NylError::config(format!(
-            "GitOpsTarget '{name}' is not a static resource"
+            "DeploymentTarget '{name}' is not a static resource"
         ))),
     }
 }

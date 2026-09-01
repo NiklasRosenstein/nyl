@@ -27,7 +27,7 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - GitOpsTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
+- `--target <TARGET>` - DeploymentTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--refresh` - Bypass cached rendering results and replace successful entries.

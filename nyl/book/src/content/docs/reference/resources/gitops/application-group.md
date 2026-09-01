@@ -64,7 +64,7 @@ spec:
 | `spec.annotations` | No | `{}` | Annotations added to generated Applications. |
 | `spec.sharedNamespaces` | No | `{}` | Explicit ownership policy for namespaces consumed by more than one workload Application. |
 
-`GitOpsTarget.spec.applicationGroupSelector.matchLabels` matches the group's
+`DeploymentTarget.spec.applicationGroupSelector.matchLabels` matches the group's
 static metadata labels. An empty target selector matches every group. After
 selection, `spec.enabled` may be structurally templated per target.
 

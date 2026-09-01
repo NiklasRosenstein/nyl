@@ -6,7 +6,7 @@ deployment workflows.
 ## Simple app
 
 [`simple-app`](./simple-app/) demonstrates plain Kubernetes manifests,
-target-specific values, a concrete Cluster, and multiple GitOpsTargets that
+target-specific values, a concrete Cluster, and multiple DeploymentTargets that
 share the Cluster while publishing to disjoint prefixes.
 
 ```bash

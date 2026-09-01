@@ -1,8 +1,8 @@
 ---
-title: 'GitOpsTarget'
+title: 'DeploymentTarget'
 ---
 
-`GitOpsTarget` defines one independently rendered and published deployment
+`DeploymentTarget` defines one independently rendered and published deployment
 slice. It binds one concrete Cluster to deployment values and Git publication
 coordinates.
 
@@ -10,7 +10,7 @@ coordinates.
 
 ```yaml
 apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: production
 spec:
@@ -37,14 +37,14 @@ spec:
 | Field | Required | Description |
 | --- | --- | --- |
 | `metadata.name` | Yes | Target identity used by `--target`. |
-| `spec.clusterRef.name` | Yes | Local [`Cluster`](/nyl/reference/resources/gitops/cluster/) identity. |
+| `spec.clusterRef.name` | No | Local [`Cluster`](/nyl/reference/resources/gitops/cluster/) identity. Defaults to `metadata.name`. |
 | `spec.argocdRef.name` | Conditional | [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/) that manages this target. Required when any explicit instance exists. |
 | `spec.applicationGroupSelector.matchLabels` | No | Equal-match selector applied to static ApplicationGroup metadata labels. An empty selector matches all groups. |
 | `spec.values` | No | Deployment values recursively overlaid on Cluster values. |
 | `spec.publication.repositoryRef.name` | Conditional | Local [`GitRepository`](/nyl/reference/resources/gitops/git-repository/) identity. |
 | `spec.publication.repository` | Conditional | Inline `repoURL` and optional `publishURL`. |
 | `spec.publication.revision` | Yes | Git revision used for publication and generated Argo CD sources. |
-| `spec.publication.pathPrefix` | No | Normalized relative path containing this target's tree. Defaults to the repository root. |
+| `spec.publication.pathPrefix` | No | Normalized relative path containing this target's tree. Defaults to `metadata.name`; set it explicitly to `""` for the repository root. |
 | `spec.catalogApplication` | No | Parent catalog Application enablement and per-field overrides. |
 
 Exactly one of `publication.repositoryRef` and `publication.repository` is

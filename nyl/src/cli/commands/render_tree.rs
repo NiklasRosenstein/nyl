@@ -15,7 +15,7 @@ use crate::{NylError, Result};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
-/// Render one GitOps target into its owned manifest tree.
+/// Render one deployment target into its owned manifest tree.
 #[derive(Args, Debug)]
 pub struct RenderTreeArgs {
     #[command(flatten)]
@@ -28,7 +28,7 @@ pub struct RenderTreeArgs {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    /// Name of the GitOpsTarget to render.
+    /// Name of the DeploymentTarget to render.
     #[arg(long)]
     pub target: String,
 
@@ -48,20 +48,20 @@ pub struct RenderTreeArgs {
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None)?;
-    let GitOpsResource::GitOpsTarget(target) = &initial
-        .get(GitOpsResourceKind::GitOpsTarget, &args.target)
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget {:?} was not found", args.target)))?
+    let GitOpsResource::DeploymentTarget(target) = &initial
+        .get(GitOpsResourceKind::DeploymentTarget, &args.target)
+        .ok_or_else(|| NylError::config(format!("DeploymentTarget {:?} was not found", args.target)))?
         .resource
         .as_ref()
-        .ok_or_else(|| NylError::config(format!("GitOpsTarget {:?} must be static", args.target)))?
+        .ok_or_else(|| NylError::config(format!("DeploymentTarget {:?} must be static", args.target)))?
     else {
         unreachable!("inventory key and resource variant must agree");
     };
     let output_dir = absolute_path(&args.output_dir)?;
-    let output_root = if target.spec.publication.path_prefix.is_empty() {
+    let output_root = if target.publication_path_prefix().is_empty() {
         output_dir.clone()
     } else {
-        output_dir.join(&target.spec.publication.path_prefix)
+        output_dir.join(target.publication_path_prefix())
     };
     if output_root == initial.project_root {
         return Err(NylError::config(
@@ -85,7 +85,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     if args.check {
         let target = args.target.as_str().cyan().bold();
         println!(
-            "✓ GitOps target {target} is valid ({}, {})",
+            "✓ deployment target {target} is valid ({}, {})",
             format_file_count(compiled.files.len()),
             format_elapsed(started.elapsed())
         );
@@ -104,7 +104,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         RenderIndexPublication {
             repository: repository_identity,
             revision: compiled.target.spec.publication.revision.clone(),
-            path_prefix: compiled.target.spec.publication.path_prefix.clone(),
+            path_prefix: compiled.target.publication_path_prefix().to_owned(),
         },
         source_commit,
         dirty,
@@ -124,7 +124,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         .to_string()
         .green();
     println!(
-        "✓ GitOps target {target} ready at {output} ({}, {})",
+        "✓ deployment target {target} ready at {output} ({}, {})",
         format_file_count(compiled.files.len()),
         format_elapsed(started.elapsed())
     );

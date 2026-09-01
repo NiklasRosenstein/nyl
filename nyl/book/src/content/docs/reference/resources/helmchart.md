@@ -206,7 +206,7 @@ spec:
 
 ### Cluster and target values
 
-Cluster and GitOpsTarget values are Nyl template inputs. They are not passed to
+Cluster and DeploymentTarget values are Nyl template inputs. They are not passed to
 Helm implicitly. This keeps strict chart schemas effective and prevents an
 unrelated target value from overriding or extending a chart's values.
 
@@ -290,7 +290,7 @@ spec:
 
 ```yaml
 apiVersion: gitops.nyl/v1
-kind: GitOpsTarget
+kind: DeploymentTarget
 metadata:
   name: production
 spec:

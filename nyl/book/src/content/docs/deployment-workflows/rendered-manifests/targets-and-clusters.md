@@ -4,7 +4,7 @@ title: 'Targets and Cluster Variation'
 
 A [`Cluster`](/nyl/reference/resources/gitops/cluster/) models one concrete
 Kubernetes destination and its render-time capabilities. A
-[`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/) binds that
+[`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/) binds that
 Cluster to deployment intent and publication coordinates.
 
 ## Operational models
@@ -18,13 +18,13 @@ The same model supports:
 
 Multiple targets can reference one Cluster when they need different values,
 application selections, or publication cadences. A deployment slice for a
-different concrete cluster uses another Cluster and GitOpsTarget. Publication
+different concrete cluster uses another Cluster and DeploymentTarget. Publication
 prefixes may overlap only when the repository or revision differs.
 
 An ArgoCDInstance models the control plane separately. Several targets can
 deploy to separate workload Clusters while their generated catalogs are owned
 by the same Argo CD installation. Explicit instances require explicit
-`GitOpsTarget.spec.argocdRef` bindings.
+`DeploymentTarget.spec.argocdRef` bindings.
 
 ## Value overlays
 
@@ -32,7 +32,7 @@ Nyl merges Cluster values with target values recursively. Target values win at
 each conflicting leaf:
 
 ```text
-Cluster.spec.values < GitOpsTarget.spec.values
+Cluster.spec.values < DeploymentTarget.spec.values
 ```
 
 Cluster values describe facts such as region, architecture, storage class, and
@@ -52,7 +52,7 @@ data:
 
 ## Conditional applications and resources
 
-`GitOpsTarget.spec.applicationGroupSelector.matchLabels` selects groups using
+`DeploymentTarget.spec.applicationGroupSelector.matchLabels` selects groups using
 their static metadata labels. Nyl templating can omit individual workload resources, while the
 Release document remains structurally present for source discovery.
 Target-dependent structural templating in ApplicationGroup and
@@ -85,5 +85,5 @@ change because they can alter rendered output. See the
 ## Next steps
 
 - [Cluster reference](/nyl/reference/resources/gitops/cluster/)
-- [GitOpsTarget reference](/nyl/reference/resources/gitops/gitops-target/)
+- [DeploymentTarget reference](/nyl/reference/resources/gitops/deployment-target/)
 - [Rendering, diffing, and publishing](/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/)

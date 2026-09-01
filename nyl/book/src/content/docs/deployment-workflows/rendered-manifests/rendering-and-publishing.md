@@ -2,7 +2,7 @@
 title: 'Rendering, Diffing, and Publishing'
 ---
 
-Nyl renders one [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/)
+Nyl renders one [`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/)
 at a time into its configured publication prefix.
 
 ## Rendered layout

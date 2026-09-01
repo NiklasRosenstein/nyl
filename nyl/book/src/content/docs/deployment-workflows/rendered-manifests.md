@@ -15,7 +15,7 @@ Kubernetes-shaped configuration resources describe the deployment:
    credential-free read and write coordinates.
 2. A [`Cluster`](/nyl/reference/resources/gitops/cluster/) records one concrete
    destination and the Kubernetes capabilities used for offline rendering.
-3. A [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/) binds that
+3. A [`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/) binds that
    Cluster to deployment values and a publication repository, revision, and
    path prefix.
 4. An optional [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/)

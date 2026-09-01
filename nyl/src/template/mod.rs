@@ -52,7 +52,7 @@ pub struct TemplateContext {
     pub env: serde_json::Map<String, serde_json::Value>,
     /// Sanitized Cluster exposed as `cluster.*` during target rendering.
     pub cluster: Option<serde_json::Value>,
-    /// Sanitized GitOpsTarget exposed as `target.*` during target rendering.
+    /// Sanitized DeploymentTarget exposed as `target.*` during target rendering.
     pub target: Option<serde_json::Value>,
 }
 
@@ -75,7 +75,7 @@ impl TemplateContext {
         })
     }
 
-    /// Attach sanitized Cluster and GitOpsTarget resources to this context.
+    /// Attach sanitized Cluster and DeploymentTarget resources to this context.
     #[must_use]
     pub fn with_gitops_context(mut self, cluster: serde_json::Value, target: serde_json::Value) -> Self {
         self.cluster = Some(cluster);

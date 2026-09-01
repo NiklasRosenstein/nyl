@@ -18,8 +18,8 @@ use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
     component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_release,
-    is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ApplicationGenerator, Cluster, GitOpsTarget,
-    HelmChart, KyvernoScope, Release,
+    is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ApplicationGenerator, Cluster,
+    DeploymentTarget, HelmChart, KyvernoScope, Release,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -27,7 +27,7 @@ use crate::{NylError, Result};
 
 use super::cache::{CacheLayer, CacheMode, CacheOutcome, RenderCache};
 
-/// Immutable rendering state shared by every release in one GitOps target.
+/// Immutable rendering state shared by every release in one deployment target.
 pub struct RenderSession {
     project_root: PathBuf,
     project_config: ProjectConfig,
@@ -108,7 +108,7 @@ impl RenderSession {
     pub fn for_target(
         project_root: &Path,
         project_config: &ProjectConfig,
-        target: &GitOpsTarget,
+        target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
         Self::build(project_root, Some(project_config), target, cluster, true, false)
@@ -119,7 +119,7 @@ impl RenderSession {
     pub fn for_untrusted_source(
         project_root: &Path,
         project_config: &ProjectConfig,
-        target: &GitOpsTarget,
+        target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
         Self::build(project_root, Some(project_config), target, cluster, false, false)
@@ -127,7 +127,7 @@ impl RenderSession {
 
     /// Build a restricted remote-source session. Remote projects cannot load a
     /// secrets provider from their checkout.
-    pub fn for_remote_target(project_root: &Path, target: &GitOpsTarget, cluster: &Cluster) -> Result<Self> {
+    pub fn for_remote_target(project_root: &Path, target: &DeploymentTarget, cluster: &Cluster) -> Result<Self> {
         Self::build(project_root, None, target, cluster, false, true)
     }
 
@@ -135,7 +135,7 @@ impl RenderSession {
     fn build(
         project_root: &Path,
         project_config: Option<&ProjectConfig>,
-        target: &GitOpsTarget,
+        target: &DeploymentTarget,
         cluster: &Cluster,
         load_secrets: bool,
         restrict_checkout: bool,
@@ -251,7 +251,7 @@ impl RenderSession {
     pub async fn for_cli(
         project_root: &Path,
         project_config: &ProjectConfig,
-        target: Option<(&GitOpsTarget, &Cluster)>,
+        target: Option<(&DeploymentTarget, &Cluster)>,
         explicit_capabilities: Option<(String, Vec<String>)>,
         missing_capabilities_error: Option<String>,
     ) -> Result<Self> {
@@ -793,7 +793,9 @@ fn push_rendered_manifest(
     Ok(())
 }
 
-fn target_template_context(target: &GitOpsTarget, trusted_source: bool) -> Result<Value> {
+fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> Result<Value> {
+    let mut target = target.clone();
+    target.apply_defaults();
     let mut context = serde_json::to_value(target)?;
     if !trusted_source {
         let publication = context
@@ -801,7 +803,7 @@ fn target_template_context(target: &GitOpsTarget, trusted_source: bool) -> Resul
             .and_then(Value::as_object_mut)
             .and_then(|spec| spec.get_mut("publication"))
             .and_then(Value::as_object_mut)
-            .expect("serialized GitOpsTarget publication is an object");
+            .expect("serialized DeploymentTarget publication is an object");
         publication.remove("repository");
     }
     Ok(context)
@@ -832,10 +834,10 @@ mod tests {
     use super::*;
     use crate::constants::{API_VERSION, API_VERSION_GITOPS};
 
-    fn target() -> GitOpsTarget {
+    fn target() -> DeploymentTarget {
         serde_json::from_value(serde_json::json!({
             "apiVersion": API_VERSION_GITOPS,
-            "kind": "GitOpsTarget",
+            "kind": "DeploymentTarget",
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "kasoku"},
