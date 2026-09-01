@@ -45,6 +45,16 @@ nyl render-tree --target production --output-dir deploy-worktree
 the target's `pathPrefix`. Use `nyl render-tree --check` to render and validate
 without writing.
 
+If an indexed rendered file was deleted or edited locally, repair the worktree
+from the current render explicitly:
+
+```bash
+nyl render-tree --target production --output-dir deploy-worktree --force
+```
+
+Nyl warns for every repaired owned file. Unowned files, ownership boundaries,
+and symbolic-link protections remain enforced.
+
 ## Diff in pull-request CI
 
 Compare the desired tree with the currently published deployment revision:

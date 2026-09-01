@@ -15,6 +15,13 @@ pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
 const TRANSACTION_TEMP_PATH: &str = "_nyl/transaction.json.tmp";
 
+/// Controls how rendered files recorded in the ownership index are reconciled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileOptions {
+    /// Recreate missing owned files and replace owned files modified outside Nyl.
+    pub force_owned: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RenderTransaction {
@@ -86,7 +93,17 @@ pub fn sha256(bytes: &[u8]) -> String {
 pub fn reconcile_rendered_tree(
     output_root: &Path,
     desired: &BTreeMap<PathBuf, Vec<u8>>,
+    next_index: RenderIndex,
+) -> Result<RenderIndex> {
+    reconcile_rendered_tree_with_options(output_root, desired, next_index, ReconcileOptions::default())
+}
+
+/// Reconcile a complete desired target tree with explicit recovery options.
+pub fn reconcile_rendered_tree_with_options(
+    output_root: &Path,
+    desired: &BTreeMap<PathBuf, Vec<u8>>,
     mut next_index: RenderIndex,
+    options: ReconcileOptions,
 ) -> Result<RenderIndex> {
     validate_desired_paths(desired)?;
     let index_relative = Path::new(DEFAULT_INDEX_PATH);
@@ -123,7 +140,7 @@ pub fn reconcile_rendered_tree(
                 index_path.display()
             )));
         }
-        verify_owned_files(output_root, previous, desired, resumes_transaction)?;
+        verify_owned_files(output_root, previous, desired, resumes_transaction, options)?;
     }
 
     let previous_files = previous.as_ref().map(|index| &index.files).cloned().unwrap_or_default();
@@ -245,6 +262,7 @@ fn verify_owned_files(
     index: &RenderIndex,
     desired: &BTreeMap<PathBuf, Vec<u8>>,
     resumes_transaction: bool,
+    options: ReconcileOptions,
 ) -> Result<()> {
     for (relative, expected) in &index.files {
         crate::resources::validate_relative_path("owned rendered path", relative, false, false)?;
@@ -257,6 +275,10 @@ fn verify_owned_files(
             {
                 continue;
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && options.force_owned => {
+                tracing::warn!("Recreating missing owned rendered file {}", path.display());
+                continue;
+            }
             Err(error) => {
                 return Err(NylError::config(format!(
                     "Owned rendered file {} is missing or unreadable: {error}",
@@ -267,6 +289,10 @@ fn verify_owned_files(
         let actual_hash = sha256(&actual);
         let desired_hash = desired.get(Path::new(relative)).map(|bytes| sha256(bytes));
         if actual_hash != *expected && (!resumes_transaction || desired_hash.as_deref() != Some(&actual_hash)) {
+            if options.force_owned {
+                tracing::warn!("Replacing modified owned rendered file {}", path.display());
+                continue;
+            }
             return Err(NylError::config(format!(
                 "Owned rendered file {} was modified outside Nyl",
                 path.display()
@@ -388,6 +414,22 @@ mod tests {
         fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("modified outside Nyl"));
+    }
+
+    #[test]
+    fn force_recreates_missing_and_modified_owned_files() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        reconcile_rendered_tree(&root, &desired, index()).unwrap();
+
+        fs::remove_file(root.join("apps/a.yaml")).unwrap();
+        reconcile_rendered_tree_with_options(&root, &desired, index(), ReconcileOptions { force_owned: true }).unwrap();
+        assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"a\n");
+
+        fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
+        reconcile_rendered_tree_with_options(&root, &desired, index(), ReconcileOptions { force_owned: true }).unwrap();
+        assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"a\n");
     }
 
     #[test]

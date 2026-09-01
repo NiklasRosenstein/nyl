@@ -5,7 +5,8 @@ use clap::Args;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
-    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexPublication,
+    compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree_with_options, ReconcileOptions,
+    RenderIndex, RenderIndexPublication,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -28,6 +29,10 @@ pub struct RenderTreeArgs {
     /// Compile and validate without writing files.
     #[arg(long)]
     pub check: bool,
+
+    /// Recreate missing owned files and replace owned files modified outside Nyl.
+    #[arg(long, conflicts_with = "check")]
+    pub force: bool,
 }
 
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
@@ -90,7 +95,14 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         dirty,
         inputs,
     );
-    reconcile_rendered_tree(&output_root, &compiled.files, index)?;
+    reconcile_rendered_tree_with_options(
+        &output_root,
+        &compiled.files,
+        index,
+        ReconcileOptions {
+            force_owned: args.force,
+        },
+    )?;
     println!(
         "✓ Rendered GitOps target {} to {} ({} file(s))",
         args.target,

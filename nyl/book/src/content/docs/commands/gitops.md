@@ -19,9 +19,14 @@ to `--output-dir`.
 ```bash
 nyl render-tree --target production --output-dir deploy
 nyl render-tree --target production --output-dir deploy --check
+nyl render-tree --target production --output-dir deploy --force
 ```
 
 `--check` renders and validates without writing files.
+By default, reconciliation rejects indexed files that are missing or differ
+from their recorded digest. `--force` warns and recreates those owned files from
+the current render. It does not overwrite unowned paths, cross ownership
+boundaries, or permit symbolic-link traversal.
 
 ## `nyl diff-tree`
 

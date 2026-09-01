@@ -266,6 +266,56 @@ fn renders_plain_directory_applications_and_owned_layout() {
 }
 
 #[test]
+fn force_repairs_missing_and_modified_owned_files() {
+    let fixture = fixture();
+    let output = fixture.path().join("deploy-worktree");
+    let args = [
+        "render-tree",
+        ".",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+    ];
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success();
+
+    let resources = output.join("production/workloads/api/resources.yaml");
+    fs::remove_file(&resources).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is missing or unreadable"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .arg("--force")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Recreating missing owned rendered file"));
+    assert!(resources.is_file());
+
+    fs::write(&resources, "manual edit\n").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .arg("--force")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Replacing modified owned rendered file"));
+    assert!(!fs::read_to_string(resources).unwrap().contains("manual edit"));
+}
+
+#[test]
 fn lists_and_validates_targets() {
     let fixture = fixture();
     Command::cargo_bin("nyl")
