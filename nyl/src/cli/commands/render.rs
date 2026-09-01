@@ -2,6 +2,7 @@ use clap::Args;
 use glob::{glob, Pattern};
 use kube::Client;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -575,6 +576,12 @@ impl std::ops::Deref for RenderResource {
     }
 }
 
+impl RenderResource {
+    pub(crate) fn gitops_provenance_display(&self) -> Result<String> {
+        self.provenance.gitops_display()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RenderProvenance(Arc<RenderProvenanceNode>);
 
@@ -603,6 +610,33 @@ impl RenderProvenance {
             frame: RenderProvenanceFrame::Resource(render_resource_identity(value)),
             parent: Some(self.clone()),
         }))
+    }
+
+    fn gitops_display(&self) -> Result<String> {
+        let mut frames = Vec::new();
+        let mut current = Some(self);
+        while let Some(provenance) = current {
+            frames.push(&provenance.0.frame);
+            current = provenance.0.parent.as_ref();
+        }
+
+        let mut output = String::new();
+        for (index, frame) in frames.into_iter().rev().enumerate() {
+            if index > 0 {
+                output.push('\n');
+            }
+            match frame {
+                RenderProvenanceFrame::Source { path, document } => {
+                    let path = crate::resources::relative_path_to_posix("rendered provenance path", path)?;
+                    let _ = write!(output, "Source: {path} (document {document})");
+                }
+                RenderProvenanceFrame::Resource(identity) => {
+                    output.push_str("Resource: ");
+                    output.push_str(identity);
+                }
+            }
+        }
+        Ok(output)
     }
 }
 

@@ -1,6 +1,6 @@
 //! Deterministic on-disk layout for rendered Kubernetes manifests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value};
@@ -73,6 +73,13 @@ pub fn take_managed_namespace(
 /// Each v1 CRD is stored separately as `crd/<metadata.name>.yaml`. Paths are
 /// returned relative to the application directory and sorted lexicographically.
 pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    render_manifest_layout_with_provenance(resources, &HashMap::new())
+}
+
+pub(crate) fn render_manifest_layout_with_provenance(
+    resources: &[Value],
+    provenance: &HashMap<crate::kubernetes::ResourceKey, String>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut output = BTreeMap::new();
     let mut ordinary_resources = Vec::new();
     let mut crd_names = BTreeSet::new();
@@ -91,7 +98,7 @@ pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, V
             }
 
             let path = PathBuf::from("crd").join(format!("{name}.yaml"));
-            output.insert(path, serialize_documents(&[resource])?);
+            output.insert(path, serialize_documents(&[resource], provenance)?);
         } else {
             ordinary_resources.push(resource);
         }
@@ -119,7 +126,7 @@ pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, V
         let ordinary_resources = ordered.into_iter().map(|(_, resource)| resource).collect::<Vec<_>>();
         output.insert(
             PathBuf::from("resources.yaml"),
-            serialize_documents(&ordinary_resources)?,
+            serialize_documents(&ordinary_resources, provenance)?,
         );
     }
 
@@ -239,7 +246,10 @@ fn validate_safe_path_segment(field: &str, segment: &str) -> Result<()> {
     Ok(())
 }
 
-fn serialize_documents(resources: &[&Value]) -> Result<Vec<u8>> {
+fn serialize_documents(
+    resources: &[&Value],
+    provenance: &HashMap<crate::kubernetes::ResourceKey, String>,
+) -> Result<Vec<u8>> {
     let mut yaml = String::new();
     for (index, resource) in resources.iter().enumerate() {
         if index > 0 {
@@ -250,6 +260,14 @@ fn serialize_documents(resources: &[&Value]) -> Result<Vec<u8>> {
             yaml.push_str("# Source: ");
             yaml.push_str(&source);
             yaml.push('\n');
+        }
+        let key = crate::kubernetes::ResourceKey::from_json_value(&resource)?;
+        if let Some(provenance) = provenance.get(&key) {
+            for line in provenance.lines() {
+                yaml.push_str("# Nyl-Provenance: ");
+                yaml.push_str(line);
+                yaml.push('\n');
+            }
         }
         let document = crate::yaml::serialize_yaml_document(&resource)
             .map_err(|error| NylError::config(format!("Failed to serialize rendered manifest: {error}")))?;
@@ -403,7 +421,19 @@ mod tests {
             }),
         ];
 
-        let output = render_manifest_layout(&resources).unwrap();
+        let provenance = resources
+            .iter()
+            .map(|resource| {
+                (
+                    crate::kubernetes::ResourceKey::from_json_value(resource).unwrap(),
+                    format!(
+                        "Source: applications/api.yaml (document 2)\nResource: {}",
+                        resource["kind"].as_str().unwrap()
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let output = render_manifest_layout_with_provenance(&resources, &provenance).unwrap();
         let paths = output.keys().cloned().collect::<Vec<_>>();
         assert_eq!(
             paths,
@@ -414,11 +444,18 @@ mod tests {
             ]
         );
         let ordinary = String::from_utf8(output[&PathBuf::from("resources.yaml")].clone()).unwrap();
-        assert!(ordinary.contains("kind: Service"));
-        assert!(ordinary.contains("---\napiVersion: apps/v1"));
+        let service_offset = ordinary.find("kind: Service").unwrap();
+        let deployment_offset = ordinary.find("kind: Deployment").unwrap();
+        assert!(service_offset < deployment_offset);
+        assert!(ordinary.contains("---\n# Nyl-Provenance:"));
+        assert!(ordinary.contains("apiVersion: apps/v1"));
+        assert!(ordinary.contains("# Nyl-Provenance: Source: applications/api.yaml (document 2)"));
+        assert!(ordinary.contains("# Nyl-Provenance: Resource: Service"));
         assert!(!ordinary.contains("CustomResourceDefinition"));
         let widget = String::from_utf8(output[&PathBuf::from("crd/widgets.example.com.yaml")].clone()).unwrap();
-        assert!(widget.starts_with("# Source: widget/crds/widgets.yaml\n"));
+        assert!(widget.starts_with(
+            "# Source: widget/crds/widgets.yaml\n# Nyl-Provenance: Source: applications/api.yaml (document 2)\n# Nyl-Provenance: Resource: CustomResourceDefinition\n"
+        ));
         assert!(!widget.contains(crate::helm::HELM_SOURCE_ANNOTATION));
     }
 

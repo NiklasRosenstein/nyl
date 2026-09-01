@@ -197,6 +197,12 @@ fn renders_plain_directory_applications_and_owned_layout() {
     let resources = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
     assert!(resources.contains("kind: ConfigMap"));
     assert!(resources.contains("kind: Namespace"));
+    assert!(resources.contains(
+        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 2)\n# Nyl-Provenance: Resource: v1 ConfigMap api/api"
+    ));
+    assert!(resources.contains(
+        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)\n# Nyl-Provenance: Resource: gitops.nyl/v1 Release api/api\n# Nyl-Provenance: Generated: Namespace \"api\" for Release \"api\""
+    ));
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
 

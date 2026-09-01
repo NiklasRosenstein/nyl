@@ -20,7 +20,7 @@ use crate::util::SourceContext;
 use crate::{NylError, Result};
 
 use super::{
-    build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout,
+    build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout_with_provenance,
     take_managed_namespace, DirectoryApplicationInput, GitOpsInventory, RenderSession,
 };
 
@@ -38,6 +38,7 @@ pub struct CompiledTargetTree {
 #[derive(Debug, Clone, PartialEq)]
 struct ManagedNamespaceOwner {
     manifest: Value,
+    provenance: String,
     application_namespace: String,
     project: String,
     destination: ClusterDestination,
@@ -52,6 +53,8 @@ struct PendingWorkload {
     group: ApplicationGroup,
     release: crate::resources::Release,
     manifests: Vec<Value>,
+    manifest_provenance: HashMap<crate::kubernetes::ResourceKey, String>,
+    release_provenance: Option<String>,
     destination_namespace: String,
     argocd_project_name: String,
     release_directory: PathBuf,
@@ -324,6 +327,8 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 group: group.clone(),
                 release,
                 manifests: rendered.manifests,
+                manifest_provenance: rendered.manifest_provenance,
+                release_provenance: rendered.release_provenance,
                 destination_namespace,
                 argocd_project_name: argocd_project_name.clone(),
                 release_directory,
@@ -354,7 +359,9 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 )));
             }
         }
-        for (relative, bytes) in render_manifest_layout(&workload.manifests)? {
+        for (relative, bytes) in
+            render_manifest_layout_with_provenance(&workload.manifests, &workload.manifest_provenance)?
+        {
             insert_file(&mut files, workload.release_directory.join(relative), bytes)?;
         }
 
@@ -391,7 +398,9 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         let suffix = &digest[..20];
         let application_name = format!("nyl-namespace-{suffix}");
         let namespace_directory = PathBuf::from("_nyl/namespaces").join(suffix);
-        for (relative, bytes) in render_manifest_layout(&[owner.manifest])? {
+        let key = crate::kubernetes::ResourceKey::from_json_value(&owner.manifest)?;
+        let provenance = HashMap::from([(key, owner.provenance.clone())]);
+        for (relative, bytes) in render_manifest_layout_with_provenance(&[owner.manifest], &provenance)? {
             insert_file(&mut files, namespace_directory.join(relative), bytes)?;
         }
         let rendered_path = join_posix(target.spec.publication.path_prefix.as_str(), &namespace_directory)?;
@@ -512,6 +521,7 @@ fn resolve_namespace_ownership(
                     &workload.argocd_project_name,
                     &namespace,
                     manifest,
+                    generated_namespace_provenance(workload, &namespace),
                 )?;
             }
             Some(SharedNamespaceOwner::External) => {
@@ -628,7 +638,35 @@ fn resolve_group_namespace_owner(
 }
 
 fn manage_namespace_in_release(workload: &mut PendingWorkload, namespace: &str) -> Result<()> {
-    ensure_managed_namespace(&mut workload.manifests, namespace, &workload.group.spec.namespace)
+    let existed = workload_renders_namespace(workload, namespace);
+    ensure_managed_namespace(&mut workload.manifests, namespace, &workload.group.spec.namespace)?;
+    if !existed && workload_renders_namespace(workload, namespace) {
+        let manifest = workload
+            .manifests
+            .iter()
+            .find(|manifest| {
+                is_namespace(manifest) && manifest.pointer("/metadata/name").and_then(Value::as_str) == Some(namespace)
+            })
+            .expect("managed Namespace was added");
+        let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
+        workload
+            .manifest_provenance
+            .insert(key, generated_namespace_provenance(workload, namespace));
+    }
+    Ok(())
+}
+
+fn generated_namespace_provenance(workload: &PendingWorkload, namespace: &str) -> String {
+    let mut provenance = workload.release_provenance.clone().unwrap_or_default();
+    if !provenance.is_empty() {
+        provenance.push('\n');
+    }
+    let _ = write!(
+        provenance,
+        "Generated: Namespace {namespace:?} for Release {:?}",
+        workload.release.metadata.name
+    );
+    provenance
 }
 
 fn reject_namespace_manifests_from_non_owner(
@@ -810,10 +848,12 @@ fn register_namespace_owner(
     argocd_project_name: &str,
     namespace: &str,
     manifest: Value,
+    provenance: String,
 ) -> Result<()> {
     let key = (cluster.metadata.name.clone(), namespace.to_owned());
     let owner = ManagedNamespaceOwner {
         manifest,
+        provenance,
         application_namespace: group.spec.application_namespace.clone(),
         project: argocd_project_name.to_owned(),
         destination: cluster.spec.destination.clone(),

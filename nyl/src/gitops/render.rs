@@ -1,14 +1,16 @@
 //! Target-aware, offline rendering for rendered GitOps trees.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::cli::commands::render::{
     deduplicate_manifests, generate_render_resource, is_renderable_resource, load_release_bundle_with_root,
-    prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode,
+    prepare_manifests_for_output, resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
 use crate::config::ProjectConfig;
+use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
     extract_all_kyverno_policies, extract_application_generators, extract_release, Cluster, GitOpsTarget, KyvernoScope,
@@ -35,6 +37,10 @@ pub struct RenderedRelease {
     pub release: Option<Release>,
     /// Fully expanded, policy-processed and deduplicated Kubernetes manifests.
     pub manifests: Vec<Value>,
+    /// Per-resource Nyl expansion provenance, keyed by final Kubernetes identity.
+    pub manifest_provenance: HashMap<ResourceKey, String>,
+    /// Provenance of the Release declaration, used for Nyl-synthesized resources.
+    pub release_provenance: Option<String>,
     /// Entry and included files that contributed to this release.
     pub inputs: Vec<PathBuf>,
 }
@@ -226,6 +232,7 @@ impl RenderSession {
         };
 
         let mut manifests = Vec::new();
+        let mut manifest_provenance = HashMap::new();
         let mut pending = resources;
         for _ in 0..10 {
             let mut next = Vec::new();
@@ -244,7 +251,7 @@ impl RenderSession {
                     if is_renderable_resource(&manifest.value, &self.project_config) {
                         next.push(manifest);
                     } else {
-                        manifests.push(manifest.value);
+                        push_rendered_manifest(&mut manifests, &mut manifest_provenance, manifest)?;
                     }
                 }
             }
@@ -253,7 +260,15 @@ impl RenderSession {
                 break;
             }
         }
-        manifests.extend(pending.into_iter().map(|resource| resource.value));
+        for resource in pending {
+            push_rendered_manifest(&mut manifests, &mut manifest_provenance, resource)?;
+        }
+
+        let release_provenance = manifests
+            .iter()
+            .find(|manifest| Release::is_release(manifest))
+            .and_then(|manifest| ResourceKey::from_json_value(manifest).ok())
+            .and_then(|key| manifest_provenance.get(&key).cloned());
 
         let (release, manifests) = extract_release(&manifests)?;
         let strip_mode = resolve_strip_empty_metadata_labels_mode(
@@ -279,12 +294,37 @@ impl RenderSession {
         let (manifests, _) = deduplicate_manifests(manifests)?;
         let manifests = prepare_manifests_for_output(&manifests, strip_mode.should_strip(false));
 
+        for manifest in &manifests {
+            let key = ResourceKey::from_json_value(manifest)?;
+            manifest_provenance.entry(key).or_insert_with(|| {
+                let mut provenance = release_provenance.clone().unwrap_or_default();
+                if !provenance.is_empty() {
+                    provenance.push('\n');
+                }
+                provenance.push_str("Generated or transformed during Nyl rendering");
+                provenance
+            });
+        }
+
         Ok(RenderedRelease {
             release,
             manifests,
+            manifest_provenance,
+            release_provenance,
             inputs: bundle.inputs,
         })
     }
+}
+
+fn push_rendered_manifest(
+    manifests: &mut Vec<Value>,
+    provenance: &mut HashMap<ResourceKey, String>,
+    manifest: RenderResource,
+) -> Result<()> {
+    let key = ResourceKey::from_json_value(&manifest.value)?;
+    provenance.insert(key, manifest.gitops_provenance_display()?);
+    manifests.push(manifest.value);
+    Ok(())
 }
 
 fn target_template_context(target: &GitOpsTarget, trusted_source: bool) -> Result<Value> {
