@@ -1,6 +1,6 @@
 //! Versioned, content-addressed storage shared by manifest and tree rendering.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -192,6 +192,23 @@ pub struct DependencyRecord {
 impl DependencyRecord {
     pub fn same_inputs(&self, other: &Self) -> bool {
         self.version == other.version && self.action == other.action && self.dependencies == other.dependencies
+    }
+
+    /// Names the inputs that prevent this record from reusing another one.
+    pub fn changed_inputs(&self, other: &Self) -> Vec<String> {
+        let mut changed = BTreeSet::new();
+        if self.version != other.version {
+            changed.insert("record version".to_string());
+        }
+        if self.action != other.action {
+            changed.insert("action".to_string());
+        }
+        for name in self.dependencies.keys().chain(other.dependencies.keys()) {
+            if self.dependencies.get(name) != other.dependencies.get(name) {
+                changed.insert(name.clone());
+            }
+        }
+        changed.into_iter().collect()
     }
 }
 
@@ -778,5 +795,35 @@ mod tests {
             "Cache: target: 1 miss, 1 bypassed (RemoteManifest: 1, remote Helm chart: 1); \
              releases: 2 hits; Helm: 1 bypassed (remote Helm chart: 1)"
         );
+    }
+
+    #[test]
+    fn dependency_records_name_changed_added_and_removed_inputs() {
+        let dependency = |digest: &str| RecordedDependency {
+            kind: "value".to_string(),
+            digest: digest.to_string(),
+        };
+        let previous = DependencyRecord {
+            version: 1,
+            action: "render".to_string(),
+            dependencies: BTreeMap::from([
+                ("changed".to_string(), dependency("old")),
+                ("removed".to_string(), dependency("same")),
+                ("stable".to_string(), dependency("same")),
+            ]),
+            artifact_digest: "old-artifact".to_string(),
+        };
+        let current = DependencyRecord {
+            version: 1,
+            action: "render".to_string(),
+            dependencies: BTreeMap::from([
+                ("added".to_string(), dependency("new")),
+                ("changed".to_string(), dependency("new")),
+                ("stable".to_string(), dependency("same")),
+            ]),
+            artifact_digest: "new-artifact".to_string(),
+        };
+
+        assert_eq!(previous.changed_inputs(&current), ["added", "changed", "removed"]);
     }
 }

@@ -101,7 +101,9 @@ publication semantics.
 Rendering commands print a cache summary on standard error. It separates hits,
 misses, invalidations, refreshes, stored results, and bypassed work by target,
 Release, Helm, and source layer. Bypassed work includes the reason that prevents
-Nyl from safely revalidating it.
+Nyl from safely revalidating it. Debug logging names the dependencies that
+changed when an existing entry is invalidated; secret and environment values
+remain represented only by keyed fingerprints.
 
 The `_nyl/index.json` ownership index is always verified when reading a
 published tree. Its hashes are publication integrity and provenance data, not

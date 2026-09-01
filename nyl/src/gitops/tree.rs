@@ -637,6 +637,12 @@ fn load_cached_target(
     };
     let current = probe.recorder.clone().finish("target", String::new());
     if !record.same_inputs(&current) {
+        let changed_inputs = record.changed_inputs(&current);
+        tracing::debug!(
+            target = %probe.key.rsplit('\0').next().unwrap_or(&probe.key),
+            changed_inputs = ?changed_inputs,
+            "Invalidating cached GitOps target tree"
+        );
         cache.observe(CacheLayer::Target, CacheOutcome::Invalidated, &[]);
         return Ok(None);
     }

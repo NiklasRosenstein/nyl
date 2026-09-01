@@ -581,7 +581,13 @@ impl RenderSession {
                         dependencies: recorder.filesystem_dependencies(),
                     })
                 }
-                Some(_) => {
+                Some(previous) => {
+                    let changed_inputs = previous.changed_inputs(&current);
+                    tracing::debug!(
+                        path = %path.display(),
+                        changed_inputs = ?changed_inputs,
+                        "Invalidating cached rendered Release"
+                    );
                     cache.observe(CacheLayer::Release, CacheOutcome::Invalidated, &[]);
                     None
                 }

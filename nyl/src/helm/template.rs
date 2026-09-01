@@ -269,7 +269,14 @@ impl HelmTemplateExecutor {
                     );
                     cached
                 }
-                Some(_) => {
+                Some(previous) => {
+                    let changed_inputs = previous.changed_inputs(&current);
+                    tracing::debug!(
+                        chart = %resolved.path.display(),
+                        release = release_name,
+                        changed_inputs = ?changed_inputs,
+                        "Invalidating cached Helm output"
+                    );
                     cache.observe(CacheLayer::Helm, CacheOutcome::Invalidated, &[]);
                     None
                 }
