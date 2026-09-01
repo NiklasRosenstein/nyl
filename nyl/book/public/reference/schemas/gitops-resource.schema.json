@@ -9,6 +9,9 @@
       "$ref": "cluster.schema.json"
     },
     {
+      "$ref": "argocd-instance.schema.json"
+    },
+    {
       "$ref": "gitops-target.schema.json"
     },
     {

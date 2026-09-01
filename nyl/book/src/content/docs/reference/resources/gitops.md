@@ -14,13 +14,15 @@ cluster.
   reusable, credential-free repository identity.
 - [`Cluster`](/nyl/reference/resources/gitops/cluster/) defines a concrete Argo
   CD destination and deterministic Kubernetes capabilities.
+- [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/) defines
+  an Argo CD control plane and catalog defaults.
 - [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/) defines one
   independently rendered and published deployment slice.
 - [`AppProjectDefinition`](/nyl/reference/resources/gitops/app-project-definition/)
   defines a local identity for a rendered or externally managed Argo CD
   AppProject.
 - [`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/)
-  selects releases and targets and owns generated Application and Namespace
+  declares release sources and owns generated Application, AppProject, and Namespace
   policy.
 - [`Release`](/nyl/reference/resources/gitops/release/) defines one deployment
   unit, its namespace scope, included manifests, and approved Application

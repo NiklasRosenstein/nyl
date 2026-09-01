@@ -58,6 +58,9 @@ metadata:
 spec:
   clusterRef:
     name: kasoku
+  applicationGroupSelector:
+    matchLabels:
+      environment: production
   values:
     environment: production
   publication:
@@ -97,10 +100,9 @@ spec:
 kind: ApplicationGroup
 metadata:
   name: workloads
+  labels:
+    environment: production
 spec:
-  targetSelector:
-    matchLabels:
-      environment: production
   projectRef: workloads
   applicationNamespace: 'argocd-{{ target.metadata.labels.environment }}'
 {% if target.metadata.labels.environment == 'production' %}
@@ -212,6 +214,14 @@ fn renders_plain_directory_applications_and_owned_layout() {
         .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-")));
 
     assert!(root.join("_nyl/catalog/projects/workloads.yaml").is_file());
+    let catalog = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/production-catalog.yaml")).unwrap();
+    assert!(catalog.contains("project: default"));
+    assert!(catalog.contains("path: production/_nyl/catalog"));
+    assert!(catalog.contains("targetRevision: deploy/production"));
+    assert!(catalog.contains("Prune=confirm"));
+    assert!(catalog.contains("enabled: true"));
+    assert!(catalog.contains("prune: false"));
+    assert!(catalog.contains("selfHeal: true"));
     let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
     assert_eq!(index["version"], 2);
     assert_eq!(index["target"], "production");
@@ -263,6 +273,170 @@ fn renders_plain_directory_applications_and_owned_layout() {
         fs::read(root.join("_nyl/index.json")).unwrap(),
         index_before_live_context
     );
+}
+
+#[test]
+fn explicit_argocd_instances_are_strict_and_drive_the_catalog() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
+    fs::write(
+        fixture.path().join("config/argocd-instances/central.yaml"),
+        r#"apiVersion: gitops.nyl/v1
+kind: ArgoCDInstance
+metadata:
+  name: central
+spec:
+  clusterRef:
+    name: kasoku
+  namespace: gitops-system
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate", "gitops"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must set spec.argocdRef"));
+
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap().replace(
+        "  clusterRef:\n    name: kasoku\n",
+        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: central\n",
+    );
+    fs::write(target_path, target).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let catalog =
+        fs::read_to_string(output.join("production/_nyl/catalog/applications/gitops-system/production-catalog.yaml"))
+            .unwrap();
+    assert!(catalog.contains("namespace: gitops-system"));
+    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    assert!(project.contains("namespace: gitops-system"));
+}
+
+#[test]
+fn project_templates_generate_constrained_projects() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectTemplate:\n    destinationNamespaces:\n      - api\n      - shared-*\n",
+    );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    assert!(project.contains("sourceRepos:"));
+    assert!(project.contains("https://example.invalid/deploy.git"));
+    assert!(project.contains("sourceNamespaces:"));
+    assert!(project.contains("argocd-production"));
+    assert!(project.contains("namespace: api"));
+    assert!(project.contains("kind: Namespace"));
+    assert!(project.contains("name: api"));
+}
+
+#[test]
+fn project_templates_reject_release_namespace_expansion() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectTemplate:\n    destinationNamespaces:\n      - platform\n",
+    );
+    fs::write(group_path, group).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "outside ApplicationGroup.spec.projectTemplate",
+        ));
+}
+
+#[test]
+fn shared_argocd_instances_require_explicit_cross_target_names() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
+    fs::write(
+        fixture.path().join("config/argocd-instances/central.yaml"),
+        r#"apiVersion: gitops.nyl/v1
+kind: ArgoCDInstance
+metadata:
+  name: central
+spec:
+  clusterRef:
+    name: kasoku
+"#,
+    )
+    .unwrap();
+    let production_path = fixture.path().join("config/targets/production.yaml");
+    let production = fs::read_to_string(&production_path).unwrap().replace(
+        "  clusterRef:\n    name: kasoku\n",
+        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: central\n",
+    );
+    fs::write(production_path, production).unwrap();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        r#"apiVersion: gitops.nyl/v1
+kind: GitOpsTarget
+metadata:
+  name: staging
+  labels:
+    environment: production
+spec:
+  clusterRef:
+    name: kasoku
+  argocdRef:
+    name: central
+  publication:
+    repositoryRef:
+      name: deploy
+    revision: deploy/staging
+    pathPrefix: staging
+"#,
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate", "gitops"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("applicationNameTemplate"));
 }
 
 #[test]

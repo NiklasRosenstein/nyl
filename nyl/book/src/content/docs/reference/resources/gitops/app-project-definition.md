@@ -8,10 +8,10 @@ Applications use `spec.manifest.metadata.name` as their Argo CD project.
 
 The wrapper records Nyl-side ownership and policy that an ordinary AppProject
 does not carry: `Rendered` versus `External` management, a stable local
-`projectRef`, target-specific structural templating, and
-`GitOpsTarget.spec.projects` allow-listing. Argo CD still enforces the contained
-AppProject policy. A raw AppProject manifest does not satisfy an
-ApplicationGroup `projectRef`.
+`projectRef`, and target-specific structural templating. Argo CD still enforces
+the contained AppProject policy. A raw AppProject manifest does not satisfy an
+ApplicationGroup `projectRef`. Use `ApplicationGroup.spec.projectTemplate` when
+the constrained generated shape is sufficient.
 
 ## Rendered project example
 
@@ -40,13 +40,16 @@ spec:
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `metadata.name` | Yes | Project-local identity referenced by targets and groups. |
+| `metadata.name` | Yes | Project-local identity referenced by groups. |
 | `metadata.labels` | No | Labels for organization and tooling. |
 | `spec.management` | Yes | `Rendered` or `External`. |
 | `spec.manifest` | Yes | An `argoproj.io/v1alpha1` `AppProject` object with a valid name and object-valued `spec`. |
 
 `Rendered` writes the AppProject manifest to
 `_nyl/catalog/projects/<metadata.name>.yaml` when an applicable group uses it.
+Nyl sets the rendered object's namespace to the effective ArgoCDInstance
+namespace so the project and its Applications belong to the same control
+plane.
 `External` uses the manifest as a contract and project-name source but does not
 publish it. The external AppProject must already be managed through another
 administrator-approved path.

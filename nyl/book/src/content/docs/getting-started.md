@@ -131,6 +131,7 @@ platform/
 ├── applications/             # Application sources
 ├── config/
 │   ├── clusters/             # Concrete clusters and render capabilities
+│   ├── argocd-instances/     # Argo CD control planes and catalog defaults
 │   ├── targets/              # Cluster-to-publication bindings
 │   ├── repositories/         # Named Git coordinates
 │   ├── projects/             # Argo CD project policy

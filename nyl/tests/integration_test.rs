@@ -178,6 +178,19 @@ fn test_new_gitops_repository_requires_and_writes_repository_urls() {
 }
 
 #[test]
+fn test_new_gitops_argocd_instance_uses_documented_name() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    command
+        .current_dir(temp.path())
+        .args(["new", "gitops", "argocd-instance", "central"]);
+    command.assert().success();
+    let resource = fs::read_to_string(temp.path().join("config/argocd-instances/central.yaml")).unwrap();
+    assert!(resource.contains("kind: ArgoCDInstance"));
+}
+
+#[test]
 fn test_generate_schema_config_command() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("generate").arg("schema").arg("config");

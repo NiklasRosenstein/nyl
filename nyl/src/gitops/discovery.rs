@@ -45,6 +45,9 @@ pub struct DiscoveredGitOpsResource {
     /// Original document text, rendered again with the effective target before compilation.
     pub raw_document: String,
     pub identity: GitOpsResourceIdentity,
+    /// Literal labels from the static resource envelope. Selection never
+    /// depends on target rendering.
+    pub static_labels: BTreeMap<String, String>,
     /// Present when the source document is already a complete static resource.
     /// Templatable ApplicationGroup and AppProjectDefinition specs are parsed
     /// only after a target context is selected.
@@ -241,6 +244,7 @@ fn discover_file_resources(
                 relative_path.display()
             ))
         })?;
+        let scanned_labels = scan_static_metadata_labels(document)?;
         let templatable = matches!(
             identity.kind,
             GitOpsResourceKind::ApplicationGroup | GitOpsResourceKind::AppProjectDefinition
@@ -251,12 +255,14 @@ fn discover_file_resources(
             Err(_) if templatable && has_template => None,
             Err(error) => return Err(error),
         };
+        let static_labels = resource.as_ref().map_or(scanned_labels, resource_metadata_labels);
         let key = GitOpsInventoryKey::new(identity.kind, identity.name.clone());
         let discovered = DiscoveredGitOpsResource {
             source_path: relative_path.to_path_buf(),
             document_index: document_index + 1,
             raw_document: document.to_string(),
             identity,
+            static_labels,
             resource,
         };
         if let Some(previous) = resources.insert(key.clone(), discovered) {
@@ -272,6 +278,71 @@ fn discover_file_resources(
         }
     }
     Ok(())
+}
+
+fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, String> {
+    match resource {
+        GitOpsResource::GitRepository(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::Cluster(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::ArgoCDInstance(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::GitOpsTarget(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::AppProjectDefinition(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::ApplicationGroup(resource) => resource.metadata.labels.clone(),
+    }
+}
+
+fn scan_static_metadata_labels(document: &str) -> Result<BTreeMap<String, String>> {
+    let mut labels = BTreeMap::new();
+    let mut metadata_indent = None;
+    let mut labels_indent = None;
+    for line in document.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if indent == 0 {
+            metadata_indent = trimmed
+                .strip_prefix("metadata:")
+                .is_some_and(|tail| tail.trim().is_empty())
+                .then_some(indent);
+            labels_indent = None;
+            continue;
+        }
+        if metadata_indent.is_some_and(|parent| indent > parent) {
+            if labels_indent.is_none()
+                && trimmed
+                    .strip_prefix("labels:")
+                    .is_some_and(|tail| tail.trim().is_empty())
+            {
+                labels_indent = Some(indent);
+                continue;
+            }
+            if labels_indent.is_some_and(|parent| indent > parent) {
+                if let Some((key, value)) = trimmed.split_once(':') {
+                    let key = parse_static_scalar(key);
+                    let value = parse_static_scalar(value);
+                    if key.contains("{{")
+                        || value.contains("{{")
+                        || key.contains("{%")
+                        || value.contains("{%")
+                        || key.contains("{#")
+                        || value.contains("{#")
+                    {
+                        return Err(NylError::config(
+                            "GitOps resource metadata.labels must be static because targets select them before rendering",
+                        ));
+                    }
+                    if !key.is_empty() && !value.is_empty() {
+                        labels.insert(key.to_owned(), value.to_owned());
+                    }
+                }
+            } else if labels_indent.is_some() {
+                labels_indent = None;
+            }
+        }
+    }
+    Ok(labels)
 }
 
 fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<GitOpsResource> {

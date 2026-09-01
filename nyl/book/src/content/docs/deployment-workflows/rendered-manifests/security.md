@@ -15,7 +15,7 @@ ultimate admission boundary.
 - Kubernetes authentication, authorization, and admission control which
   resources may enter a cluster.
 
-Keep `Cluster`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`, CI
+Keep `Cluster`, `ArgoCDInstance`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`, CI
 definitions, and protected deployment revisions under platform-owner review.
 The forge and Argo CD must enforce that separation when application authors can
 change source repositories.
@@ -33,6 +33,19 @@ AppProject source and destination policy remains an Argo CD enforcement layer
 even when an application source repository is compromised. An
 `AppProjectDefinition` with `management: External` references an administrator-
 managed project without publishing its manifest.
+
+`ApplicationGroup.spec.projectTemplate` is a constrained alternative. Nyl fixes
+its source repository and destination cluster from the selected target, checks
+every Release namespace against its declared destination patterns, and only
+adds Namespace permissions when namespace creation is enabled. Other
+cluster-scoped permissions remain explicit. The generated policy complements,
+but does not replace, Argo CD admission.
+
+The generated parent catalog Application is platform configuration. Its default
+automated sync self-heals without automated prune, foreground deletion cascades
+to catalog resources, and pruning the parent itself requires confirmation.
+Review and protect the publication path because the parent can create Argo CD
+Applications and AppProjects.
 
 ## Namespace and deletion policy
 

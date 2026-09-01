@@ -10,8 +10,9 @@ use walkdir::WalkDir;
 use crate::git::GitManager;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
-    ApplicationGroup, ApplicationGroupSource, Cluster, ClusterDestination, GitOpsResource, GitOpsResourceKind,
-    GitOpsTarget, GitPublication, InlineGitRepository, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster,
+    ClusterDestination, GitOpsResource, GitOpsResourceKind, GitOpsTarget, GitPublication, InlineGitRepository,
+    ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::TemplateEngine;
 use crate::util::SourceContext;
@@ -56,17 +57,36 @@ struct PendingWorkload {
     application_name: String,
 }
 
+struct EffectiveProject {
+    catalog_id: String,
+    source_path: Option<PathBuf>,
+    name: String,
+    manifest: Option<Value>,
+    destination_namespaces: Option<Vec<String>>,
+}
+
+struct EffectiveArgoCDInstance {
+    identity: String,
+    resource: ArgoCDInstance,
+    source_path: Option<PathBuf>,
+    cluster: Cluster,
+    cluster_path: PathBuf,
+}
+
 /// Validate cross-resource references and target-prefix ownership without rendering releases.
 pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
     let mut publications = Vec::new();
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
     for discovered in inventory.resources.values() {
         match discovered.resource.as_ref() {
             Some(GitOpsResource::GitOpsTarget(target)) => {
                 resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+                resolve_argocd_instance(inventory, target, instance_count)?;
                 let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
-                for project in &target.spec.projects {
-                    resolve_project(inventory, project)?;
-                }
                 publications.push((
                     target.metadata.name.as_str(),
                     crate::git::normalize_git_url_for_equality(&repository.repo_url),
@@ -78,8 +98,13 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
                     target.spec.publication.path_prefix.as_str(),
                 ));
             }
+            Some(GitOpsResource::ArgoCDInstance(instance)) => {
+                resolve_cluster(inventory, &instance.spec.cluster_ref.name)?;
+            }
             Some(GitOpsResource::ApplicationGroup(group)) => {
-                resolve_project(inventory, &group.spec.project_ref)?;
+                if let Some(project_ref) = &group.spec.project_ref {
+                    resolve_project(inventory, project_ref)?;
+                }
                 if let Some(source) = &group.spec.source {
                     if source.is_remote() {
                         resolve_source_repository(inventory, source)?;
@@ -99,6 +124,7 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
             }
         }
     }
+    validate_same_instance_catalog_collisions(inventory, instance_count)?;
     Ok(())
 }
 
@@ -131,11 +157,31 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         _ => unreachable!("inventory kind key and resource variant must agree"),
     };
     let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, &target, instance_count)?;
+    if argocd.source_path.is_none() {
+        tracing::info!(
+            target = %target.metadata.name,
+            cluster = %target.spec.cluster_ref.name,
+            "Using the implicit target-local ArgoCDInstance"
+        );
+    }
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
     let central_session =
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?;
     let mut files = BTreeMap::new();
-    let mut inputs = BTreeSet::from([target_discovered.source_path.clone(), cluster_path]);
+    let mut inputs = BTreeSet::from([
+        target_discovered.source_path.clone(),
+        cluster_path,
+        argocd.cluster_path.clone(),
+    ]);
+    if let Some(path) = &argocd.source_path {
+        inputs.insert(path.clone());
+    }
     if let Some(repository_path) = repository_path {
         inputs.insert(repository_path);
     }
@@ -150,11 +196,14 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
         if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup {
             continue;
         }
+        if !target_selects_group(&target, &discovered.static_labels) {
+            continue;
+        }
         let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, &central_session)?
         else {
             continue;
         };
-        if group_applies(&group, &target) {
+        if group.spec.enabled {
             groups.push((discovered.source_path.clone(), *group));
         }
     }
@@ -162,16 +211,26 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
 
     for (group_resource_path, group) in groups {
         inputs.insert(group_resource_path.clone());
-        let (project_id, project_path, project) =
-            resolve_effective_project(inventory, &group.spec.project_ref, &central_session)?;
-        inputs.insert(project_path);
-        let argocd_project_name = app_project_name(&project)?;
-        if project.spec.management == AppProjectManagement::Rendered && emitted_projects.insert(project_id.clone()) {
-            insert_yaml(
-                &mut files,
-                PathBuf::from("_nyl/catalog/projects").join(format!("{project_id}.yaml")),
-                &project.spec.manifest,
-            )?;
+        let project = resolve_effective_group_project(
+            inventory,
+            &group,
+            &central_session,
+            &repository,
+            &cluster,
+            &argocd.resource,
+        )?;
+        if let Some(project_path) = project.source_path {
+            inputs.insert(project_path);
+        }
+        let argocd_project_name = project.name;
+        if let Some(manifest) = project.manifest {
+            if emitted_projects.insert(project.catalog_id.clone()) {
+                insert_yaml(
+                    &mut files,
+                    PathBuf::from("_nyl/catalog/projects").join(format!("{}.yaml", project.catalog_id)),
+                    &manifest,
+                )?;
+            }
         }
 
         let source = resolve_group_source(inventory, &group_resource_path, &group, &target, &mut git_manager)?;
@@ -218,6 +277,9 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
                 .clone()
                 .unwrap_or_else(|| release.metadata.namespace.clone());
             validate_release_namespace_scope(&rendered.manifests, &release, &destination_namespace)?;
+            if let Some(patterns) = &project.destination_namespaces {
+                validate_project_namespace_scope(&group, &release, &destination_namespace, patterns)?;
+            }
 
             let group_output = group.spec.output_path.as_deref().unwrap_or(&group.metadata.name);
             crate::resources::validate_relative_path("ApplicationGroup outputPath", group_output, false, false)?;
@@ -318,6 +380,17 @@ pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str)
             PathBuf::from("_nyl/catalog/applications")
                 .join(&owner.application_namespace)
                 .join(format!("{application_name}.yaml")),
+            &application,
+        )?;
+    }
+
+    if target.spec.catalog_application.enabled {
+        let (parent_name, application) = build_catalog_application(&target, &repository, &argocd)?;
+        insert_yaml(
+            &mut files,
+            PathBuf::from("_nyl/catalog/applications")
+                .join(&argocd.resource.spec.namespace)
+                .join(format!("{parent_name}.yaml")),
             &application,
         )?;
     }
@@ -646,15 +719,264 @@ fn register_namespace_owner(
     Ok(())
 }
 
-fn group_applies(group: &ApplicationGroup, target: &GitOpsTarget) -> bool {
-    group.spec.enabled
-        && (target.spec.projects.is_empty() || target.spec.projects.contains(&group.spec.project_ref))
-        && group.spec.target_selector.as_ref().is_none_or(|selector| {
-            selector
-                .match_labels
-                .iter()
-                .all(|(key, value)| target.metadata.labels.get(key) == Some(value))
+fn target_selects_group(target: &GitOpsTarget, group_labels: &BTreeMap<String, String>) -> bool {
+    target
+        .spec
+        .application_group_selector
+        .match_labels
+        .iter()
+        .all(|(key, value)| group_labels.get(key) == Some(value))
+}
+
+fn resolve_argocd_instance(
+    inventory: &GitOpsInventory,
+    target: &GitOpsTarget,
+    instance_count: usize,
+) -> Result<EffectiveArgoCDInstance> {
+    if instance_count == 0 {
+        if let Some(reference) = &target.spec.argocd_ref {
+            return Err(NylError::config(format!(
+                "GitOpsTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
+                target.metadata.name, reference.name
+            )));
+        }
+        let (cluster, cluster_path) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+        return Ok(EffectiveArgoCDInstance {
+            identity: format!("implicit:{}", target.metadata.name),
+            resource: ArgoCDInstance {
+                api_version: crate::constants::API_VERSION_GITOPS.to_owned(),
+                kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
+                metadata: crate::resources::GitOpsResourceMetadata {
+                    name: format!("{}-implicit", target.metadata.name),
+                    labels: BTreeMap::new(),
+                },
+                spec: ArgoCDInstanceSpec {
+                    cluster_ref: target.spec.cluster_ref.clone(),
+                    namespace: "argocd".to_owned(),
+                    catalog_application_defaults: CatalogApplicationDefaults::default(),
+                },
+            },
+            source_path: None,
+            cluster,
+            cluster_path,
+        });
+    }
+
+    let reference = target.spec.argocd_ref.as_ref().ok_or_else(|| {
+        NylError::config(format!(
+            "GitOpsTarget {:?} must set spec.argocdRef because explicit ArgoCDInstance resources are defined",
+            target.metadata.name
+        ))
+    })?;
+    let discovered = inventory
+        .get(GitOpsResourceKind::ArgoCDInstance, &reference.name)
+        .ok_or_else(|| NylError::config(format!("ArgoCDInstance {:?} was not found", reference.name)))?;
+    let Some(GitOpsResource::ArgoCDInstance(instance)) = &discovered.resource else {
+        return Err(NylError::config(format!(
+            "ArgoCDInstance {:?} must be static",
+            reference.name
+        )));
+    };
+    let (cluster, cluster_path) = resolve_cluster(inventory, &instance.spec.cluster_ref.name)?;
+    Ok(EffectiveArgoCDInstance {
+        identity: reference.name.clone(),
+        resource: instance.clone(),
+        source_path: Some(discovered.source_path.clone()),
+        cluster,
+        cluster_path,
+    })
+}
+
+fn build_catalog_application(
+    target: &GitOpsTarget,
+    repository: &InlineGitRepository,
+    argocd: &EffectiveArgoCDInstance,
+) -> Result<(String, Value)> {
+    let defaults = &argocd.resource.spec.catalog_application_defaults;
+    let overrides = &target.spec.catalog_application;
+    let name = overrides
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
+    let project = overrides.project.clone().unwrap_or_else(|| defaults.project.clone());
+    let sync_policy = overrides
+        .sync_policy
+        .clone()
+        .unwrap_or_else(|| defaults.sync_policy.clone());
+    let deletion_policy = overrides
+        .application_deletion_policy
+        .unwrap_or(defaults.application_deletion_policy);
+    let self_prune_policy = overrides.self_prune_policy.unwrap_or(defaults.self_prune_policy);
+    let mut labels = defaults.labels.clone();
+    labels.extend(overrides.labels.clone());
+    let mut annotations = defaults.annotations.clone();
+    annotations.extend(overrides.annotations.clone());
+    set_catalog_prune_option(&mut annotations, self_prune_policy);
+    let rendered_path = join_posix(&target.spec.publication.path_prefix, Path::new("_nyl/catalog"))?;
+    let application = build_directory_application(&DirectoryApplicationInput {
+        name: name.clone(),
+        application_namespace: argocd.resource.spec.namespace.clone(),
+        project,
+        repo_url: repository.repo_url.clone(),
+        revision: target.spec.publication.revision.clone(),
+        rendered_path,
+        destination: argocd.cluster.spec.destination.clone(),
+        destination_namespace: argocd.resource.spec.namespace.clone(),
+        sync_policy: Some(sync_policy),
+        deletion_policy,
+        labels,
+        annotations,
+    })?;
+    Ok((name, application))
+}
+
+fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: ManagedResourceDeletionPolicy) {
+    const KEY: &str = "argocd.argoproj.io/sync-options";
+    let mut options = annotations
+        .get(KEY)
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with("Prune="))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    match policy {
+        ManagedResourceDeletionPolicy::Automatic => {}
+        ManagedResourceDeletionPolicy::Confirm => options.push("Prune=confirm".to_owned()),
+        ManagedResourceDeletionPolicy::Retain => options.push("Prune=false".to_owned()),
+    }
+    if options.is_empty() {
+        annotations.remove(KEY);
+    } else {
+        annotations.insert(KEY.to_owned(), options.join(","));
+    }
+}
+
+// Keep the cross-target checks together so every generated Argo CD identity is
+// audited in one pass over each target's effective configuration.
+#[allow(clippy::too_many_lines)]
+fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instance_count: usize) -> Result<()> {
+    let targets = inventory
+        .resources
+        .values()
+        .filter_map(|resource| match &resource.resource {
+            Some(GitOpsResource::GitOpsTarget(target)) => Some(target),
+            _ => None,
         })
+        .collect::<Vec<_>>();
+    let groups = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ApplicationGroup)
+        .collect::<Vec<_>>();
+    let mut parent_owners = BTreeMap::<(String, String, String), String>::new();
+    let mut project_owners = BTreeMap::<(String, String, String), (String, String, bool, String)>::new();
+    let mut default_application_owners = BTreeMap::<(String, String, String), String>::new();
+
+    for target in targets {
+        let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+        if target.spec.catalog_application.enabled {
+            let parent_name = target
+                .spec
+                .catalog_application
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
+            let key = (
+                argocd.identity.clone(),
+                argocd.resource.spec.namespace.clone(),
+                parent_name.clone(),
+            );
+            if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
+                return Err(NylError::config(format!(
+                    "GitOpsTargets {previous:?} and {:?} generate the same catalog Application {}/{} on ArgoCDInstance {:?}; customize spec.catalogApplication.name",
+                    target.metadata.name, argocd.resource.spec.namespace, parent_name, argocd.identity
+                )));
+            }
+        }
+        let (cluster, _) = resolve_cluster(inventory, &target.spec.cluster_ref.name)?;
+        let session = RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?;
+        for discovered in &groups {
+            if !target_selects_group(target, &discovered.static_labels) {
+                continue;
+            }
+            let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, &session)? else {
+                continue;
+            };
+            if !group.spec.enabled {
+                continue;
+            }
+            if group.spec.application_name_template.is_none() {
+                let key = (
+                    argocd.identity.clone(),
+                    group.spec.application_namespace.clone(),
+                    group.metadata.name.clone(),
+                );
+                if let Some(previous) = default_application_owners.insert(key, target.metadata.name.clone()) {
+                    return Err(NylError::config(format!(
+                        "GitOpsTargets {previous:?} and {:?} select ApplicationGroup {:?} on ArgoCDInstance {:?} while using the default Release Application names; set ApplicationGroup.spec.applicationNameTemplate, for example \"{{{{ target.metadata.name }}}}-{{{{ release.metadata.name }}}}\"",
+                        target.metadata.name, group.metadata.name, argocd.identity
+                    )));
+                }
+            }
+            let (catalog_id, project_name, rendered, referenced) = if let Some(reference) = &group.spec.project_ref {
+                let (_, _, project) = resolve_effective_project(inventory, reference, &session)?;
+                (
+                    reference.clone(),
+                    app_project_name(&project)?,
+                    project.spec.management == AppProjectManagement::Rendered,
+                    true,
+                )
+            } else {
+                let template = group
+                    .spec
+                    .project_template
+                    .as_ref()
+                    .expect("validated project template");
+                (
+                    group.metadata.name.clone(),
+                    template.name.clone().unwrap_or_else(|| group.metadata.name.clone()),
+                    true,
+                    false,
+                )
+            };
+            if rendered {
+                let key = (
+                    argocd.identity.clone(),
+                    argocd.resource.spec.namespace.clone(),
+                    project_name.clone(),
+                );
+                let owner = (
+                    target.metadata.name.clone(),
+                    group.metadata.name.clone(),
+                    referenced,
+                    catalog_id.clone(),
+                );
+                if let Some(previous) = project_owners.get(&key) {
+                    if referenced && previous.2 && previous.0 == target.metadata.name && previous.3 == catalog_id {
+                        continue;
+                    }
+                    let field = if group.spec.project_template.is_some() {
+                        "ApplicationGroup.spec.projectTemplate.name"
+                    } else {
+                        "a target-specific AppProjectDefinition name or management: External"
+                    };
+                    return Err(NylError::config(format!(
+                        "{}/{} and {}/{} generate the same AppProject {}/{} on ArgoCDInstance {:?} (catalog id {catalog_id:?}); customize {field}",
+                        previous.0,
+                        previous.1,
+                        target.metadata.name,
+                        group.metadata.name,
+                        argocd.resource.spec.namespace,
+                        project_name,
+                        argocd.identity
+                    )));
+                }
+                project_owners.insert(key, owner);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_git_publication(
@@ -718,6 +1040,137 @@ fn resolve_effective_project(
     Ok((project_ref.to_string(), discovered.source_path.clone(), project))
 }
 
+fn resolve_effective_group_project(
+    inventory: &GitOpsInventory,
+    group: &ApplicationGroup,
+    session: &RenderSession,
+    publication_repository: &InlineGitRepository,
+    target_cluster: &Cluster,
+    argocd: &ArgoCDInstance,
+) -> Result<EffectiveProject> {
+    if let Some(project_ref) = &group.spec.project_ref {
+        let (project_id, project_path, project) = resolve_effective_project(inventory, project_ref, session)?;
+        let name = app_project_name(&project)?;
+        let manifest = if project.spec.management == AppProjectManagement::Rendered {
+            let mut manifest = project.spec.manifest;
+            manifest["metadata"]["namespace"] = argocd.spec.namespace.clone().into();
+            Some(manifest)
+        } else {
+            None
+        };
+        return Ok(EffectiveProject {
+            catalog_id: project_id,
+            source_path: Some(project_path),
+            name,
+            manifest,
+            destination_namespaces: None,
+        });
+    }
+
+    let template = group
+        .spec
+        .project_template
+        .as_ref()
+        .expect("ApplicationGroup validation requires a projectRef or projectTemplate");
+    let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
+    let mut destination_namespaces = template.destination_namespaces.clone();
+    if let Some(namespace) = &group.spec.destination_namespace {
+        if !namespace_matches_any(namespace, &destination_namespaces) {
+            destination_namespaces.push(namespace.clone());
+        }
+    }
+    if group.spec.destination_namespace.is_none() && destination_namespaces.is_empty() {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} projectTemplate requires destinationNamespaces when spec.destinationNamespace is absent",
+            group.metadata.name
+        )));
+    }
+    destination_namespaces.sort();
+    destination_namespaces.dedup();
+
+    let mut cluster_resources = template
+        .cluster_resource_whitelist
+        .iter()
+        .map(|pattern| {
+            let mut value = serde_json::Map::from_iter([
+                ("group".to_owned(), pattern.group.clone().into()),
+                ("kind".to_owned(), pattern.kind.clone().into()),
+            ]);
+            if let Some(name) = &pattern.name {
+                value.insert("name".to_owned(), name.clone().into());
+            }
+            Value::Object(value)
+        })
+        .collect::<Vec<_>>();
+    if group.spec.namespace.create {
+        for namespace in &destination_namespaces {
+            let permission = serde_json::json!({"group": "", "kind": "Namespace", "name": namespace});
+            if !cluster_resources.contains(&permission) {
+                cluster_resources.push(permission);
+            }
+        }
+    }
+
+    let destinations = destination_namespaces
+        .iter()
+        .map(|namespace| {
+            let mut destination = serde_json::Map::from_iter([("namespace".to_owned(), namespace.clone().into())]);
+            if let Some(server) = &target_cluster.spec.destination.server {
+                destination.insert("server".to_owned(), server.clone().into());
+            }
+            if let Some(cluster_name) = &target_cluster.spec.destination.name {
+                destination.insert("name".to_owned(), cluster_name.clone().into());
+            }
+            Value::Object(destination)
+        })
+        .collect::<Vec<_>>();
+    let manifest = serde_json::json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "AppProject",
+        "metadata": {"name": name, "namespace": argocd.spec.namespace},
+        "spec": {
+            "sourceRepos": [publication_repository.repo_url],
+            "sourceNamespaces": [group.spec.application_namespace],
+            "destinations": destinations,
+            "clusterResourceWhitelist": cluster_resources,
+        }
+    });
+    Ok(EffectiveProject {
+        catalog_id: group.metadata.name.clone(),
+        source_path: None,
+        name,
+        manifest: Some(manifest),
+        destination_namespaces: Some(destination_namespaces),
+    })
+}
+
+fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(namespace)))
+}
+
+fn validate_project_namespace_scope(
+    group: &ApplicationGroup,
+    release: &crate::resources::Release,
+    destination_namespace: &str,
+    patterns: &[String],
+) -> Result<()> {
+    for namespace in
+        std::iter::once(destination_namespace).chain(release.spec.additional_namespaces.iter().map(String::as_str))
+    {
+        if !namespace_matches_any(namespace, patterns) {
+            return Err(NylError::config(format!(
+                "Release {}/{} uses namespace {namespace:?}, which is outside ApplicationGroup.spec.projectTemplate.destinationNamespaces [{}]",
+                group.metadata.name,
+                release.metadata.name,
+                patterns.iter().map(|value| format!("{value:?}")).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn app_project_name(project: &AppProjectDefinition) -> Result<String> {
     project
         .spec
@@ -758,6 +1211,7 @@ fn render_effective_control(
     let effective_identity = match &effective {
         GitOpsResource::GitRepository(resource) => (GitOpsResourceKind::GitRepository, &resource.metadata.name),
         GitOpsResource::Cluster(resource) => (GitOpsResourceKind::Cluster, &resource.metadata.name),
+        GitOpsResource::ArgoCDInstance(resource) => (GitOpsResourceKind::ArgoCDInstance, &resource.metadata.name),
         GitOpsResource::GitOpsTarget(resource) => (GitOpsResourceKind::GitOpsTarget, &resource.metadata.name),
         GitOpsResource::AppProjectDefinition(resource) => {
             (GitOpsResourceKind::AppProjectDefinition, &resource.metadata.name)

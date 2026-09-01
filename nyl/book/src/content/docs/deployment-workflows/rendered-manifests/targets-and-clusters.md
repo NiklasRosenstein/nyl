@@ -21,6 +21,11 @@ application selections, or publication cadences. A deployment slice for a
 different concrete cluster uses another Cluster and GitOpsTarget. Publication
 prefixes may overlap only when the repository or revision differs.
 
+An ArgoCDInstance models the control plane separately. Several targets can
+deploy to separate workload Clusters while their generated catalogs are owned
+by the same Argo CD installation. Explicit instances require explicit
+`GitOpsTarget.spec.argocdRef` bindings.
+
 ## Value overlays
 
 Nyl merges Cluster values with target values recursively. Target values win at
@@ -47,8 +52,8 @@ data:
 
 ## Conditional applications and resources
 
-`ApplicationGroup.spec.targetSelector.matchLabels` can omit a whole group for
-a target. Nyl templating can omit individual workload resources, while the
+`GitOpsTarget.spec.applicationGroupSelector.matchLabels` selects groups using
+their static metadata labels. Nyl templating can omit individual workload resources, while the
 Release document remains structurally present for source discovery.
 Target-dependent structural templating in ApplicationGroup and
 AppProjectDefinition specs can vary policy and project content while their

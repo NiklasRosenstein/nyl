@@ -99,6 +99,8 @@ struct RepositoryScaffoldArgs {
 enum NewGitopsSubcommand {
     Repository(RepositoryScaffoldArgs),
     Cluster(ClusterScaffoldArgs),
+    #[command(name = "argocd-instance", alias = "argocd")]
+    ArgoCDInstance(AliasScaffoldArgs),
     Target(AliasScaffoldArgs),
     Project(AliasScaffoldArgs),
     ApplicationGroup(AliasScaffoldArgs),
@@ -112,6 +114,9 @@ pub async fn execute(args: NewArgs) -> Result<()> {
         NewSubcommand::Gitops { command } => match command {
             NewGitopsSubcommand::Cluster(args) => scaffold_cluster(args).await,
             NewGitopsSubcommand::Repository(args) => scaffold_repository(args),
+            NewGitopsSubcommand::ArgoCDInstance(args) => {
+                scaffold_alias_resource(GitOpsResourceKind::ArgoCDInstance, args)
+            }
             NewGitopsSubcommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::GitOpsTarget, args),
             NewGitopsSubcommand::Project(args) => {
                 scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args)
@@ -244,6 +249,7 @@ fn scaffold_resource(
         let directory = match args.kind {
             GitOpsResourceKind::GitRepository => "repositories",
             GitOpsResourceKind::Cluster => "clusters",
+            GitOpsResourceKind::ArgoCDInstance => "argocd-instances",
             GitOpsResourceKind::GitOpsTarget => "targets",
             GitOpsResourceKind::AppProjectDefinition => "projects",
             GitOpsResourceKind::ApplicationGroup => "application-groups",
@@ -317,6 +323,9 @@ fn render_resource_scaffold(
                 "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl cluster update {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
             )
         }
+        GitOpsResourceKind::ArgoCDInstance => format!(
+            "apiVersion: gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  namespace: argocd\n"
+        ),
         GitOpsResourceKind::GitOpsTarget => format!(
             "apiVersion: gitops.nyl/v1\nkind: GitOpsTarget\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  values:\n    environment: {name}\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n    pathPrefix: {name}\n"
         ),
@@ -381,6 +390,7 @@ fn create_project(project_path: &Path) -> Result<()> {
         project_path.join("applications"),
         project_path.join("config/repositories"),
         project_path.join("config/clusters"),
+        project_path.join("config/argocd-instances"),
         project_path.join("config/targets"),
         project_path.join("config/projects"),
         project_path.join("config/application-groups"),
@@ -650,6 +660,7 @@ mod tests {
         assert!(project_dir.join("applications").exists());
         assert!(project_dir.join("config/repositories").exists());
         assert!(project_dir.join("config/clusters").exists());
+        assert!(project_dir.join("config/argocd-instances").exists());
         assert!(project_dir.join("config/targets").exists());
         assert!(project_dir.join("config/projects").exists());
         assert!(project_dir.join("config/application-groups").exists());
@@ -764,6 +775,19 @@ mod tests {
             None,
         )
         .unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::ArgoCDInstance,
+                name: "central".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .unwrap();
 
         let cluster = fs::read_to_string(temp.path().join("config/clusters/production.yaml")).unwrap();
         assert!(cluster.contains("kind: Cluster"));
@@ -772,6 +796,9 @@ mod tests {
         assert!(target.contains("clusterRef:\n    name: production"));
         assert!(target.contains("publication:"));
         assert!(!target.contains("profile:"));
+        let instance = fs::read_to_string(temp.path().join("config/argocd-instances/central.yaml")).unwrap();
+        assert!(instance.contains("kind: ArgoCDInstance"));
+        assert!(instance.contains("namespace: argocd"));
     }
 
     #[test]

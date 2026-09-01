@@ -20,6 +20,7 @@ Each scaffolded resource points at its kind-specific schema:
 
 - [`git-repository.schema.json`](/nyl/reference/schemas/git-repository.schema.json)
 - [`cluster.schema.json`](/nyl/reference/schemas/cluster.schema.json)
+- [`argocd-instance.schema.json`](/nyl/reference/schemas/argocd-instance.schema.json)
 - [`gitops-target.schema.json`](/nyl/reference/schemas/gitops-target.schema.json)
 - [`app-project-definition.schema.json`](/nyl/reference/schemas/app-project-definition.schema.json)
 - [`application-group.schema.json`](/nyl/reference/schemas/application-group.schema.json)

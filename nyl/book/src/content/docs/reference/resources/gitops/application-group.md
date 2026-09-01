@@ -2,7 +2,7 @@
 title: 'ApplicationGroup'
 ---
 
-`ApplicationGroup` selects targets and `Release` sources, assigns an Argo CD
+`ApplicationGroup` labels participate in target selection, selects `Release` sources, assigns an Argo CD
 project, and defines platform-owned Application and Namespace policy.
 
 ## Example
@@ -12,11 +12,12 @@ apiVersion: gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: workloads
+  labels:
+    environment: production
 spec:
-  targetSelector:
-    matchLabels:
-      environment: production
-  projectRef: workloads
+  projectTemplate:
+    destinationNamespaces:
+      - workloads
   applicationNamespace: argocd
   source:
     path: applications/workloads
@@ -53,8 +54,8 @@ spec:
 | `metadata.name` | Yes | — | Group identity and default output directory. |
 | `metadata.labels` | No | `{}` | Labels for the control resource itself. |
 | `spec.enabled` | No | `true` | Enables the group. May be structurally templated per target. |
-| `spec.targetSelector.matchLabels` | No | `{}` | Requires equal target metadata labels. |
-| `spec.projectRef` | Yes | — | Local AppProjectDefinition identity. |
+| `spec.projectRef` | Conditional | — | Local AppProjectDefinition identity. |
+| `spec.projectTemplate` | Conditional | — | Constrained AppProject generated for this group and target. Exactly one project source is required. |
 | `spec.applicationNamespace` | Yes | — | Namespace containing generated Argo CD Applications. |
 | `spec.destinationNamespace` | No | Release namespace | Destination namespace for generated Applications. |
 | `spec.outputPath` | No | Group name | Relative directory below the target prefix. |
@@ -63,8 +64,40 @@ spec:
 | `spec.annotations` | No | `{}` | Annotations added to generated Applications. |
 | `spec.sharedNamespaces` | No | `{}` | Explicit ownership policy for namespaces consumed by more than one workload Application. |
 
-The group applies only when it is enabled, its project is permitted by the
-target's `projects` list, and its target selector matches.
+`GitOpsTarget.spec.applicationGroupSelector.matchLabels` matches the group's
+static metadata labels. An empty target selector matches every group. After
+selection, `spec.enabled` may be structurally templated per target.
+
+## Project assignment
+
+`projectRef` retains a reusable AppProjectDefinition contract. A `Rendered`
+definition is copied into the target catalog once; an `External` definition
+only supplies the project name.
+
+`projectTemplate` generates a least-privilege AppProject without the reusable
+definition boilerplate:
+
+```yaml
+projectTemplate:
+  name: workloads
+  destinationNamespaces:
+    - workloads
+    - 'preview-*'
+  clusterResourceWhitelist:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+```
+
+The name defaults to the ApplicationGroup name. Nyl fixes `sourceRepos` to the
+target publication repository, `sourceNamespaces` to `applicationNamespace`,
+and destinations to the target workload Cluster. A fixed
+`destinationNamespace` is automatically added. Without one, at least one
+destination namespace pattern is required. Every effective Release destination
+and `additionalNamespaces` entry must match the declared policy.
+
+When namespace creation is enabled, Nyl adds Namespace permissions for the
+approved destination patterns. Other cluster-scoped permissions remain
+explicit. Argo CD's AppProject admission remains the authorization boundary.
 
 ## Source selection
 

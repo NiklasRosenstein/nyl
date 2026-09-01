@@ -10,7 +10,7 @@ Create projects, components, and rendered GitOps control resources.
 nyl new project <dir>
 nyl new component <api-version> <kind>
 nyl new resource <KIND> <name>
-nyl new gitops <repository|cluster|target|project|application-group> <name> [options]
+nyl new gitops <repository|cluster|argocd-instance|target|project|application-group> <name> [options]
 ```
 
 ## `nyl new project`
@@ -25,6 +25,7 @@ Creates:
 └── config/
     ├── repositories/
     ├── clusters/
+    ├── argocd-instances/
     ├── targets/
     ├── projects/
     └── application-groups/
@@ -60,6 +61,7 @@ nyl new resource GitRepository deploy
 nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
 nyl new resource Cluster primary
 nyl new gitops cluster primary --context admin@primary
+nyl new gitops argocd-instance central
 ```
 
 Every file includes its published YAML language server schema URL. Use

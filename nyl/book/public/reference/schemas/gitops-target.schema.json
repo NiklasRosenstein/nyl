@@ -1,5 +1,95 @@
 {
   "$defs": {
+    "ApplicationDeletionPolicy": {
+      "enum": [
+        "Foreground",
+        "Background",
+        "Orphan"
+      ],
+      "type": "string"
+    },
+    "CatalogApplicationOverrides": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selfPrunePolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedResourceDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "syncPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsAutomatedSyncPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "prune": {
+          "default": false,
+          "type": "boolean"
+        },
+        "selfHeal": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "GitOpsResourceMetadata": {
       "additionalProperties": false,
       "description": "Metadata shared by local GitOps compiler resources.",
@@ -19,17 +109,53 @@
       ],
       "type": "object"
     },
-    "GitOpsTargetSpec": {
+    "GitOpsSyncPolicy": {
       "additionalProperties": false,
       "properties": {
-        "clusterRef": {
-          "$ref": "#/$defs/LocalReference"
+        "automated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsAutomatedSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "projects": {
+        "syncOptions": {
           "items": {
             "type": "string"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsTargetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "applicationGroupSelector": {
+          "$ref": "#/$defs/LabelSelector",
+          "default": {}
+        },
+        "argocdRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalogApplication": {
+          "$ref": "#/$defs/CatalogApplicationOverrides",
+          "default": {
+            "enabled": true
+          }
+        },
+        "clusterRef": {
+          "$ref": "#/$defs/LocalReference"
         },
         "publication": {
           "$ref": "#/$defs/GitPublication"
@@ -99,6 +225,18 @@
       ],
       "type": "object"
     },
+    "LabelSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "LocalReference": {
       "additionalProperties": false,
       "properties": {
@@ -110,6 +248,14 @@
         "name"
       ],
       "type": "object"
+    },
+    "ManagedResourceDeletionPolicy": {
+      "enum": [
+        "Automatic",
+        "Confirm",
+        "Retain"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

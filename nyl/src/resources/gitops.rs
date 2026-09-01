@@ -16,6 +16,7 @@ use crate::{NylError, Result};
 
 pub const KIND_GIT_REPOSITORY: &str = "GitRepository";
 pub const KIND_CLUSTER: &str = "Cluster";
+pub const KIND_ARGOCD_INSTANCE: &str = "ArgoCDInstance";
 pub const KIND_GITOPS_TARGET: &str = "GitOpsTarget";
 pub const KIND_APP_PROJECT_DEFINITION: &str = "AppProjectDefinition";
 pub const KIND_APPLICATION_GROUP: &str = "ApplicationGroup";
@@ -98,6 +99,58 @@ pub struct ClusterLiveConfiguration {
     pub context: String,
 }
 
+/// One Argo CD control plane that manages one or more deployment targets.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCDInstance {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: GitOpsResourceMetadata,
+    pub spec: ArgoCDInstanceSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgoCDInstanceSpec {
+    #[serde(rename = "clusterRef")]
+    pub cluster_ref: LocalReference,
+    #[serde(default = "default_argocd_namespace")]
+    pub namespace: String,
+    #[serde(rename = "catalogApplicationDefaults", default)]
+    pub catalog_application_defaults: CatalogApplicationDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogApplicationDefaults {
+    #[serde(default = "default_argocd_project")]
+    pub project: String,
+    #[serde(rename = "syncPolicy", default = "default_catalog_sync_policy")]
+    pub sync_policy: GitOpsSyncPolicy,
+    #[serde(rename = "applicationDeletionPolicy", default)]
+    pub application_deletion_policy: ApplicationDeletionPolicy,
+    #[serde(rename = "selfPrunePolicy", default)]
+    pub self_prune_policy: ManagedResourceDeletionPolicy,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl Default for CatalogApplicationDefaults {
+    fn default() -> Self {
+        Self {
+            project: default_argocd_project(),
+            sync_policy: default_catalog_sync_policy(),
+            application_deletion_policy: ApplicationDeletionPolicy::Foreground,
+            self_prune_policy: ManagedResourceDeletionPolicy::Confirm,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        }
+    }
+}
+
 /// A named, independently renderable and publishable deployment slice.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -114,11 +167,51 @@ pub struct GitOpsTarget {
 pub struct GitOpsTargetSpec {
     #[serde(rename = "clusterRef")]
     pub cluster_ref: LocalReference,
+    #[serde(rename = "argocdRef", skip_serializing_if = "Option::is_none")]
+    pub argocd_ref: Option<LocalReference>,
+    #[serde(rename = "applicationGroupSelector", default)]
+    pub application_group_selector: LabelSelector,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
     pub publication: GitPublication,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub projects: Vec<String>,
+    #[serde(rename = "catalogApplication", default)]
+    pub catalog_application: CatalogApplicationOverrides,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogApplicationOverrides {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(rename = "syncPolicy", skip_serializing_if = "Option::is_none")]
+    pub sync_policy: Option<GitOpsSyncPolicy>,
+    #[serde(rename = "applicationDeletionPolicy", skip_serializing_if = "Option::is_none")]
+    pub application_deletion_policy: Option<ApplicationDeletionPolicy>,
+    #[serde(rename = "selfPrunePolicy", skip_serializing_if = "Option::is_none")]
+    pub self_prune_policy: Option<ManagedResourceDeletionPolicy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl Default for CatalogApplicationOverrides {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            name: None,
+            project: None,
+            sync_policy: None,
+            application_deletion_policy: None,
+            self_prune_policy: None,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        }
+    }
 }
 
 /// Git coordinates used as a rendered output and Argo CD source.
@@ -187,14 +280,14 @@ pub struct ApplicationGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationGroupSpec {
-    #[serde(rename = "targetSelector", skip_serializing_if = "Option::is_none")]
-    pub target_selector: Option<TargetSelector>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<ApplicationGroupSource>,
-    #[serde(rename = "projectRef")]
-    pub project_ref: String,
+    #[serde(rename = "projectRef", skip_serializing_if = "Option::is_none")]
+    pub project_ref: Option<String>,
+    #[serde(rename = "projectTemplate", skip_serializing_if = "Option::is_none")]
+    pub project_template: Option<AppProjectTemplate>,
     #[serde(rename = "applicationNamespace")]
     pub application_namespace: String,
     #[serde(rename = "destinationNamespace", skip_serializing_if = "Option::is_none")]
@@ -221,9 +314,30 @@ pub struct ApplicationGroupSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct TargetSelector {
+pub struct LabelSelector {
     #[serde(default, rename = "matchLabels", skip_serializing_if = "BTreeMap::is_empty")]
     pub match_labels: BTreeMap<String, String>,
+}
+
+/// A constrained AppProject generated for one ApplicationGroup and target.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectTemplate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, rename = "destinationNamespaces", skip_serializing_if = "Vec::is_empty")]
+    pub destination_namespaces: Vec<String>,
+    #[serde(default, rename = "clusterResourceWhitelist", skip_serializing_if = "Vec::is_empty")]
+    pub cluster_resource_whitelist: Vec<AppProjectResourcePattern>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectResourcePattern {
+    pub group: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A local source when no repository is given, otherwise an immutable remote source.
@@ -372,6 +486,8 @@ pub enum GitOpsResourceKind {
     GitRepository,
     #[value(name = "Cluster", alias = "cluster")]
     Cluster,
+    #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
+    ArgoCDInstance,
     #[value(name = "GitOpsTarget", alias = "gitops-target", alias = "target")]
     GitOpsTarget,
     #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
@@ -385,6 +501,7 @@ impl GitOpsResourceKind {
         match self {
             Self::GitRepository => KIND_GIT_REPOSITORY,
             Self::Cluster => KIND_CLUSTER,
+            Self::ArgoCDInstance => KIND_ARGOCD_INSTANCE,
             Self::GitOpsTarget => KIND_GITOPS_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
@@ -395,6 +512,7 @@ impl GitOpsResourceKind {
         match value {
             KIND_GIT_REPOSITORY => Some(Self::GitRepository),
             KIND_CLUSTER => Some(Self::Cluster),
+            KIND_ARGOCD_INSTANCE => Some(Self::ArgoCDInstance),
             KIND_GITOPS_TARGET => Some(Self::GitOpsTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
@@ -406,16 +524,18 @@ impl GitOpsResourceKind {
         match self {
             Self::GitRepository => "git-repository.schema.json",
             Self::Cluster => "cluster.schema.json",
+            Self::ArgoCDInstance => "argocd-instance.schema.json",
             Self::GitOpsTarget => "gitops-target.schema.json",
             Self::AppProjectDefinition => "app-project-definition.schema.json",
             Self::ApplicationGroup => "application-group.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 5] {
+    pub const fn all() -> [Self; 6] {
         [
             Self::GitRepository,
             Self::Cluster,
+            Self::ArgoCDInstance,
             Self::GitOpsTarget,
             Self::AppProjectDefinition,
             Self::ApplicationGroup,
@@ -432,6 +552,7 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
     let schema = match kind {
         GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
         GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
+        GitOpsResourceKind::ArgoCDInstance => serde_json::to_value(schema_for!(ArgoCDInstance)),
         GitOpsResourceKind::GitOpsTarget => serde_json::to_value(schema_for!(GitOpsTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
@@ -487,6 +608,7 @@ pub struct GitOpsResourceIdentity {
 pub enum GitOpsResource {
     GitRepository(GitRepository),
     Cluster(Cluster),
+    ArgoCDInstance(ArgoCDInstance),
     GitOpsTarget(GitOpsTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
@@ -535,6 +657,7 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     let resource = match identity.kind {
         GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
         GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
+        GitOpsResourceKind::ArgoCDInstance => GitOpsResource::ArgoCDInstance(parse_as(value, KIND_ARGOCD_INSTANCE)?),
         GitOpsResourceKind::GitOpsTarget => GitOpsResource::GitOpsTarget(parse_as(value, KIND_GITOPS_TARGET)?),
         GitOpsResourceKind::AppProjectDefinition => {
             GitOpsResource::AppProjectDefinition(parse_as(value, KIND_APP_PROJECT_DEFINITION)?)
@@ -556,6 +679,7 @@ impl GitOpsResource {
         match self {
             Self::GitRepository(resource) => resource.validate(),
             Self::Cluster(resource) => resource.validate(),
+            Self::ArgoCDInstance(resource) => resource.validate(),
             Self::GitOpsTarget(resource) => resource.validate(),
             Self::AppProjectDefinition(resource) => resource.validate(),
             Self::ApplicationGroup(resource) => resource.validate(),
@@ -616,6 +740,24 @@ impl ClusterKubernetesCapabilities {
     }
 }
 
+impl ArgoCDInstance {
+    pub fn validate(&self) -> Result<()> {
+        validate_envelope(
+            self.api_version.as_str(),
+            self.kind.as_str(),
+            KIND_ARGOCD_INSTANCE,
+            &self.metadata,
+        )?;
+        validate_static_required("spec.clusterRef.name", &self.spec.cluster_ref.name)?;
+        super::release::validate_namespace_name("spec.namespace", &self.spec.namespace)?;
+        validate_static_required(
+            "spec.catalogApplicationDefaults.project",
+            &self.spec.catalog_application_defaults.project,
+        )?;
+        Ok(())
+    }
+}
+
 impl GitOpsTarget {
     pub fn validate(&self) -> Result<()> {
         validate_envelope(
@@ -625,8 +767,17 @@ impl GitOpsTarget {
             &self.metadata,
         )?;
         validate_static_required("spec.clusterRef.name", &self.spec.cluster_ref.name)?;
+        if let Some(reference) = &self.spec.argocd_ref {
+            validate_static_required("spec.argocdRef.name", &reference.name)?;
+        }
         self.spec.publication.validate()?;
-        validate_unique_static_names("spec.projects", &self.spec.projects)
+        if let Some(name) = &self.spec.catalog_application.name {
+            validate_dns_subdomain("spec.catalogApplication.name", name)?;
+        }
+        if let Some(project) = &self.spec.catalog_application.project {
+            validate_static_required("spec.catalogApplication.project", project)?;
+        }
+        Ok(())
     }
 }
 
@@ -684,7 +835,20 @@ impl ApplicationGroup {
             KIND_APPLICATION_GROUP,
             &self.metadata,
         )?;
-        validate_static_required("spec.projectRef", &self.spec.project_ref)?;
+        match (&self.spec.project_ref, &self.spec.project_template) {
+            (Some(reference), None) => validate_static_required("spec.projectRef", reference)?,
+            (None, Some(template)) => template.validate()?,
+            (Some(_), Some(_)) => {
+                return Err(NylError::config(
+                    "spec.projectRef and spec.projectTemplate are mutually exclusive",
+                ))
+            }
+            (None, None) => {
+                return Err(NylError::config(
+                    "Exactly one of spec.projectRef or spec.projectTemplate is required",
+                ))
+            }
+        }
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
         if let Some(namespace) = &self.spec.destination_namespace {
             super::release::validate_namespace_name("spec.destinationNamespace", namespace)?;
@@ -724,6 +888,28 @@ impl ApplicationGroup {
             "spec.releaseCustomization.allowedSyncOptions",
             &self.spec.release_customization.allowed_sync_options,
         )?;
+        Ok(())
+    }
+}
+
+impl AppProjectTemplate {
+    fn validate(&self) -> Result<()> {
+        if let Some(name) = &self.name {
+            validate_dns_subdomain("spec.projectTemplate.name", name)?;
+        }
+        validate_unique_static_names(
+            "spec.projectTemplate.destinationNamespaces",
+            &self.destination_namespaces,
+        )?;
+        for namespace in &self.destination_namespaces {
+            validate_namespace_pattern("spec.projectTemplate.destinationNamespaces", namespace)?;
+        }
+        for pattern in &self.cluster_resource_whitelist {
+            validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].kind", &pattern.kind)?;
+            if let Some(name) = &pattern.name {
+                validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].name", name)?;
+            }
+        }
         Ok(())
     }
 }
@@ -824,6 +1010,18 @@ fn validate_dns_subdomain(field: &str, value: &str) -> Result<()> {
     } else {
         Err(NylError::config(format!("{field} must be a Kubernetes DNS subdomain")))
     }
+}
+
+fn validate_namespace_pattern(field: &str, value: &str) -> Result<()> {
+    validate_static_required(field, value)?;
+    if value.contains('/') || value.len() > 253 {
+        return Err(NylError::config(format!(
+            "{field} must be an Argo CD namespace glob without slashes"
+        )));
+    }
+    glob::Pattern::new(value)
+        .map(|_| ())
+        .map_err(|error| NylError::config(format!("Invalid {field} glob {value:?}: {error}")))
 }
 
 fn validate_repository_choice(
@@ -962,6 +1160,25 @@ fn default_true() -> bool {
     true
 }
 
+fn default_argocd_namespace() -> String {
+    "argocd".to_owned()
+}
+
+fn default_argocd_project() -> String {
+    "default".to_owned()
+}
+
+fn default_catalog_sync_policy() -> GitOpsSyncPolicy {
+    GitOpsSyncPolicy {
+        automated: Some(GitOpsAutomatedSyncPolicy {
+            enabled: true,
+            prune: false,
+            self_heal: true,
+        }),
+        sync_options: Vec::new(),
+    }
+}
+
 fn default_source_include() -> Vec<String> {
     vec!["*.yaml".to_owned(), "*.yml".to_owned()]
 }
@@ -986,8 +1203,7 @@ mod tests {
                 "publication": {
                     "repositoryRef": {"name": "deploy"},
                     "revision": "deploy/production"
-                },
-                "projects": ["platform"]
+                }
             }
         })
     }
@@ -1009,13 +1225,21 @@ mod tests {
         })
     }
 
+    fn argocd_instance() -> serde_json::Value {
+        json!({
+            "apiVersion": API_VERSION_GITOPS,
+            "kind": KIND_ARGOCD_INSTANCE,
+            "metadata": {"name": "central"},
+            "spec": {"clusterRef": {"name": "kasoku"}}
+        })
+    }
+
     fn application_group() -> serde_json::Value {
         json!({
             "apiVersion": API_VERSION_GITOPS,
             "kind": KIND_APPLICATION_GROUP,
             "metadata": {"name": "cloud"},
             "spec": {
-                "targetSelector": {"matchLabels": {"environment": "production"}},
                 "projectRef": "applications",
                 "applicationNamespace": "argocd-applications",
                 "source": {"path": "applications/cloud"},
@@ -1064,6 +1288,41 @@ mod tests {
         };
         assert!(parsed.spec.kubernetes.kube_version.is_none());
         assert!(parsed.spec.kubernetes.api_versions.is_empty());
+    }
+
+    #[test]
+    fn parses_argocd_instance_security_defaults() {
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&argocd_instance()).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        assert_eq!(parsed.spec.namespace, "argocd");
+        let defaults = parsed.spec.catalog_application_defaults;
+        assert_eq!(defaults.project, "default");
+        assert_eq!(
+            defaults.application_deletion_policy,
+            ApplicationDeletionPolicy::Foreground
+        );
+        assert_eq!(defaults.self_prune_policy, ManagedResourceDeletionPolicy::Confirm);
+        let automated = defaults.sync_policy.automated.unwrap();
+        assert!(automated.enabled);
+        assert!(!automated.prune);
+    }
+
+    #[test]
+    fn application_group_requires_exactly_one_project_source() {
+        let mut value = application_group();
+        value["spec"]["projectTemplate"] = json!({"destinationNamespaces": ["cloud"]});
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive"));
+        value["spec"].as_object_mut().unwrap().remove("projectRef");
+        assert!(parse_gitops_resource(&value).is_ok());
+        value["spec"].as_object_mut().unwrap().remove("projectTemplate");
+        assert!(parse_gitops_resource(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("Exactly one"));
     }
 
     #[test]
@@ -1350,6 +1609,7 @@ mod tests {
             vec![
                 "git-repository.schema.json",
                 "cluster.schema.json",
+                "argocd-instance.schema.json",
                 "gitops-target.schema.json",
                 "app-project-definition.schema.json",
                 "application-group.schema.json",

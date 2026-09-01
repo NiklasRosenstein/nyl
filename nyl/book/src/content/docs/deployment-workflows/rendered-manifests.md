@@ -9,7 +9,7 @@ need the Nyl CMP.
 
 ## How the model fits together
 
-Five Kubernetes-shaped configuration resources describe the deployment:
+Kubernetes-shaped configuration resources describe the deployment:
 
 1. A [`GitRepository`](/nyl/reference/resources/gitops/git-repository/) names
    credential-free read and write coordinates.
@@ -18,11 +18,12 @@ Five Kubernetes-shaped configuration resources describe the deployment:
 3. A [`GitOpsTarget`](/nyl/reference/resources/gitops/gitops-target/) binds that
    Cluster to deployment values and a publication repository, revision, and
    path prefix.
-4. An [`AppProjectDefinition`](/nyl/reference/resources/gitops/app-project-definition/)
-   provides the Argo CD project contract.
+4. An optional [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/)
+   separates the Argo CD control plane from workload destinations and owns
+   parent-catalog defaults.
 5. An [`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/)
-   selects targets and source releases, then defines the generated Application
-   and Namespace policy.
+   declares source releases and generated Application and Namespace policy. It
+   references an AppProjectDefinition or uses `projectTemplate` to generate one.
 
 These resources are compiler inputs. They are not installed in Kubernetes.
 `nyl render-tree` produces workload manifests, managed Namespaces, Argo CD
@@ -37,6 +38,7 @@ Create a project and the control resources:
 nyl new project platform
 nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
 nyl new gitops cluster primary --context admin@primary
+nyl new gitops argocd-instance central
 nyl new gitops target production
 nyl new gitops project workloads
 nyl new gitops application-group workloads
@@ -50,9 +52,9 @@ nyl target list
 nyl render-tree --target production --output-dir deploy-worktree
 ```
 
-Argo CD points at the generated catalog and workload directories on the
-target's publication revision. Generated Applications use ordinary Git
-directory sources with recursive discovery enabled.
+Seed the generated `<target>-catalog` Application once after the first publish.
+It then recursively manages the generated catalog, including itself. Generated
+Applications use ordinary Git directory sources with recursive discovery.
 
 ## Guides
 

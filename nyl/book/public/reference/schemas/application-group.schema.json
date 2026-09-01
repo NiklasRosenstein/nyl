@@ -1,5 +1,52 @@
 {
   "$defs": {
+    "AppProjectResourcePattern": {
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "group",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "AppProjectTemplate": {
+      "additionalProperties": false,
+      "description": "A constrained AppProject generated for one ApplicationGroup and target.",
+      "properties": {
+        "clusterResourceWhitelist": {
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": "array"
+        },
+        "destinationNamespaces": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ApplicationDeletionPolicy": {
       "enum": [
         "Foreground",
@@ -132,7 +179,20 @@
           ]
         },
         "projectRef": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectTemplate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AppProjectTemplate"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "releaseCustomization": {
           "$ref": "#/$defs/GitOpsReleaseCustomization",
@@ -163,20 +223,9 @@
               "type": "null"
             }
           ]
-        },
-        "targetSelector": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TargetSelector"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
-        "projectRef",
         "applicationNamespace"
       ],
       "type": "object"
@@ -409,18 +458,6 @@
       "required": [
         "owner"
       ],
-      "type": "object"
-    },
-    "TargetSelector": {
-      "additionalProperties": false,
-      "properties": {
-        "matchLabels": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object"
-        }
-      },
       "type": "object"
     }
   },

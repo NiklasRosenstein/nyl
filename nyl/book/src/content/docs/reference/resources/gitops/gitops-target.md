@@ -13,11 +13,14 @@ apiVersion: gitops.nyl/v1
 kind: GitOpsTarget
 metadata:
   name: production
-  labels:
-    environment: production
 spec:
   clusterRef:
     name: primary
+  argocdRef:
+    name: central
+  applicationGroupSelector:
+    matchLabels:
+      environment: production
   values:
     environment: production
   publication:
@@ -25,8 +28,8 @@ spec:
       name: deploy
     revision: deploy/production
     pathPrefix: production
-  projects:
-    - workloads
+  catalogApplication:
+    name: production-catalog
 ```
 
 ## Fields
@@ -34,14 +37,15 @@ spec:
 | Field | Required | Description |
 | --- | --- | --- |
 | `metadata.name` | Yes | Target identity used by `--target`. |
-| `metadata.labels` | No | Labels matched by ApplicationGroup target selectors. |
 | `spec.clusterRef.name` | Yes | Local [`Cluster`](/nyl/reference/resources/gitops/cluster/) identity. |
+| `spec.argocdRef.name` | Conditional | [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/) that manages this target. Required when any explicit instance exists. |
+| `spec.applicationGroupSelector.matchLabels` | No | Equal-match selector applied to static ApplicationGroup metadata labels. An empty selector matches all groups. |
 | `spec.values` | No | Deployment values recursively overlaid on Cluster values. |
 | `spec.publication.repositoryRef.name` | Conditional | Local [`GitRepository`](/nyl/reference/resources/gitops/git-repository/) identity. |
 | `spec.publication.repository` | Conditional | Inline `repoURL` and optional `publishURL`. |
 | `spec.publication.revision` | Yes | Git revision used for publication and generated Argo CD sources. |
 | `spec.publication.pathPrefix` | No | Normalized relative path containing this target's tree. Defaults to the repository root. |
-| `spec.projects` | No | Local AppProjectDefinition identities allowed for this target. An empty list permits all projects. |
+| `spec.catalogApplication` | No | Parent catalog Application enablement and per-field overrides. |
 
 Exactly one of `publication.repositoryRef` and `publication.repository` is
 required. The path prefix cannot be absolute, contain traversal, or use
@@ -49,13 +53,19 @@ backslashes.
 
 ## Selection behavior
 
-An ApplicationGroup applies when it is enabled, its project is permitted by
-`spec.projects`, and its `targetSelector.matchLabels` matches the target's
-metadata labels. An empty `projects` list does not restrict groups.
+The target selects ApplicationGroups whose static `metadata.labels` satisfy
+`spec.applicationGroupSelector.matchLabels`. Selection happens before target
+templating; `ApplicationGroup.spec.enabled` can then omit a selected group for
+the effective target.
 
 The target's Cluster supplies the generated Argo CD destination. Cluster and
 target values merge recursively, with target values winning at conflicting
 leaves.
+
+By default, Nyl emits `<target>-catalog` beneath
+`_nyl/catalog/applications/<argocd-namespace>/`. It recursively syncs the
+target's `_nyl/catalog` directory. Set `catalogApplication.enabled: false` only
+when another trusted mechanism applies generated catalog resources.
 
 ## Publication models
 

@@ -16,6 +16,8 @@ config/
     workloads.yaml
   clusters/
     primary.yaml
+  argocd-instances/
+    central.yaml
   targets/
     production.yaml
   projects/
@@ -38,6 +40,7 @@ Create resources individually with:
 ```bash
 nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
 nyl new gitops cluster primary --context admin@primary
+nyl new gitops argocd-instance central
 nyl new gitops target production
 nyl new gitops project workloads
 nyl new gitops application-group workloads

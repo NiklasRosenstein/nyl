@@ -223,6 +223,24 @@ fn test_operation() -> Result<()> {
 - **Trait Composition:** Define traits for testability and extensibility
 - **Immutability:** Prefer immutable data structures where possible
 
+### Rendered GitOps invariants
+
+- `GitOpsTarget.spec.applicationGroupSelector` matches literal
+  `ApplicationGroup.metadata.labels` before target rendering. Effective
+  `ApplicationGroup.spec.enabled` is evaluated after selection.
+- An explicit `ArgoCDInstance` makes `GitOpsTarget.spec.argocdRef` mandatory for
+  every target. With no explicit instances, each target receives an implicit
+  target-local instance using its workload Cluster and the `argocd` namespace.
+- Every enabled catalog Application recursively sources `_nyl/catalog`. Its
+  defaults enable automated self-heal without automated prune, cascade
+  deletion in the foreground, and require confirmation before self-pruning.
+- An ApplicationGroup has exactly one of `projectRef` and `projectTemplate`.
+  Releases may narrow their resource content but never expand a generated
+  project's namespace or cluster-resource policy.
+- Names generated into one ArgoCDInstance namespace must be unambiguous across
+  targets. Require explicit target-qualified templates instead of silently
+  rewriting user-facing Application or AppProject names.
+
 ### Module Organization
 ```
 src/

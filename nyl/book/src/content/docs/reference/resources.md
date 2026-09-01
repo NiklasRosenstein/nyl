@@ -21,6 +21,7 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 - **[Release](/nyl/reference/resources/gitops/release/)**: Defines one rendered deployment unit and its namespace scope
 - **[GitRepository](/nyl/reference/resources/gitops/git-repository/)**: Names credential-free Git read and publication coordinates
 - **[Cluster](/nyl/reference/resources/gitops/cluster/)**: Defines a concrete destination and deterministic Kubernetes capabilities
+- **[ArgoCDInstance](/nyl/reference/resources/gitops/argocd-instance/)**: Models an Argo CD control plane and parent catalog defaults
 - **[GitOpsTarget](/nyl/reference/resources/gitops/gitops-target/)**: Binds a Cluster to values and publication coordinates
 - **[AppProjectDefinition](/nyl/reference/resources/gitops/app-project-definition/)**: Defines a rendered or external Argo CD AppProject contract
 - **[ApplicationGroup](/nyl/reference/resources/gitops/application-group/)**: Selects releases and owns generated Application and Namespace policy
@@ -47,7 +48,7 @@ spec:
 
 - `nyl.niklasrosenstein.github.com/v1`: Core rendering resources (`HelmChart`, `RemoteManifest`)
 - `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
-- `gitops.nyl/v1`: Release metadata and rendered GitOps control resources (`Release`, `GitRepository`, `Cluster`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`)
+- `gitops.nyl/v1`: Release metadata and rendered GitOps control resources (`Release`, `GitRepository`, `Cluster`, `ArgoCDInstance`, `GitOpsTarget`, `AppProjectDefinition`, `ApplicationGroup`)
 - `components.nyl.niklasrosenstein.github.com/v1`: Component resources (dynamic `kind` path/shortcut)
 
 ## Processing Behavior
