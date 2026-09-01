@@ -655,7 +655,8 @@ impl std::fmt::Display for RenderProvenance {
             }
             match frame {
                 RenderProvenanceFrame::Source { path, document } => {
-                    write!(formatter, "Source: {} (document {document})", path.display())?;
+                    let path = path.display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+                    write!(formatter, "Source: {path} (document {document})")?;
                 }
                 RenderProvenanceFrame::Resource(identity) => write!(formatter, "Resource: {identity}")?,
             }
