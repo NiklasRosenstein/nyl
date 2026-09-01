@@ -314,4 +314,4 @@ nyl render --target production app.yaml
 
 - [Git Integration](/nyl/git-integration/) - Git repository management
 - [Configuration](/nyl/configuration/) - Search paths and settings
-- [Release](/nyl/reference/resources/release/) - Release metadata
+- [Release](/nyl/reference/resources/gitops/release/) - Release metadata

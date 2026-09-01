@@ -8,7 +8,6 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 
 ### Core Resources
 
-- **[Release](/nyl/reference/resources/release/)**: Defines release metadata (name, namespace) for deployments
 - **[Component](/nyl/reference/resources/component/)**: Compact chart-backed resource using dynamic `kind` lookup
 - **[HelmChart](/nyl/reference/resources/helmchart/)**: Declarative Helm chart deployment with templating support
 - **[RemoteManifest](/nyl/reference/resources/remote-manifest/)**: Fetch and include manifests from a remote HTTPS URL
@@ -19,6 +18,7 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 
 ### Rendered GitOps Resources
 
+- **[Release](/nyl/reference/resources/gitops/release/)**: Defines one rendered deployment unit and its namespace scope
 - **[GitRepository](/nyl/reference/resources/gitops/git-repository/)**: Names credential-free Git read and publication coordinates
 - **[Cluster](/nyl/reference/resources/gitops/cluster/)**: Defines a concrete destination and deterministic Kubernetes capabilities
 - **[GitOpsTarget](/nyl/reference/resources/gitops/gitops-target/)**: Binds a Cluster to values and publication coordinates

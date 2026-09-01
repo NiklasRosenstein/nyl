@@ -6,6 +6,8 @@ title: 'Release'
 multiple manifest files into one render unit. It is removed from rendered
 output.
 
+[View the `Release` JSON schema](/nyl/reference/schemas/release.schema.json).
+
 ```yaml
 apiVersion: gitops.nyl/v1
 kind: Release

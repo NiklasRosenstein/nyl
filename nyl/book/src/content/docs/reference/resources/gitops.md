@@ -22,6 +22,9 @@ cluster.
 - [`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/)
   selects releases and targets and owns generated Application and Namespace
   policy.
+- [`Release`](/nyl/reference/resources/gitops/release/) defines one deployment
+  unit, its namespace scope, included manifests, and approved Application
+  customization.
 
 ## Common envelope
 
@@ -52,7 +55,7 @@ nyl validate gitops
 ```
 
 Kind-specific JSON schemas are available from the
-[schema reference](/nyl/reference/schemas/). Scaffolded resources include the
+[Nyl Resource Schemas](/nyl/extras/nyl-resource-schemas/). Scaffolded resources include the
 appropriate YAML language-server schema URL.
 
 See the [Rendered Manifest Pattern](/nyl/deployment-workflows/rendered-manifests/)

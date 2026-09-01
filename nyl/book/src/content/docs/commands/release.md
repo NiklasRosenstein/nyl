@@ -107,4 +107,4 @@ resources they created.
 ## See Also
 
 - [`apply`](/nyl/commands/apply/) - Apply manifests and record release revisions
-- [Release resource](/nyl/reference/resources/release/) - Release metadata
+- [Release resource](/nyl/reference/resources/gitops/release/) - Release metadata
