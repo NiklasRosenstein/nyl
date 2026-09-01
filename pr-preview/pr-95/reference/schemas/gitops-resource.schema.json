@@ -12,7 +12,7 @@
       "$ref": "argocd-instance.schema.json"
     },
     {
-      "$ref": "gitops-target.schema.json"
+      "$ref": "deployment-target.schema.json"
     },
     {
       "$ref": "app-project-definition.schema.json"
