@@ -104,7 +104,7 @@ attach additional relative files or glob matches to that release.
 | `spec.syncPolicy.automated.selfHeal` | No | `false` | Enables automated self-healing. |
 | `spec.syncPolicy.syncOptions` | No | `[]` | Additional Argo CD Application sync options. |
 | `spec.applicationDeletionPolicy` | No | `Foreground` | `Foreground`, `Background`, or `Orphan`. |
-| `spec.namespace.create` | No | `true` | Synthesizes a missing destination Namespace. |
+| `spec.namespace.create` | No | `true` | Synthesizes missing destination and additional Namespaces. |
 | `spec.namespace.prunePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
 | `spec.namespace.deletePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
 
@@ -115,9 +115,8 @@ adds no restriction.
 
 For a namespace consumed by one workload Application, the Namespace object is
 part of that Application's rendered resources. Nyl synthesizes a missing
-destination Namespace when `spec.namespace.create` is enabled. An additional
-namespace is never synthesized from `Release.spec.additionalNamespaces`; it is
-managed only when the Release renders the Namespace object.
+destination Namespace and every Namespace listed in
+`Release.spec.additionalNamespaces` when `spec.namespace.create` is enabled.
 
 Every namespace consumed by more than one workload Application must have an
 identical `spec.sharedNamespaces.<namespace>.owner` declaration in every
@@ -125,7 +124,7 @@ contributing ApplicationGroup. The owner kinds are:
 
 | Owner kind | Required fields | Behavior |
 | --- | --- | --- |
-| `Release` | `applicationGroup`, `release` | The selected workload Application owns the Namespace object. Nyl synthesizes it when it is that Release's destination namespace and namespace creation is enabled. |
+| `Release` | `applicationGroup`, `release` | The selected workload Application owns the Namespace object. Nyl synthesizes it when it is that Release's destination or additional namespace and namespace creation is enabled. |
 | `Dedicated` | `applicationGroup` | Nyl synthesizes the Namespace in a separate generated Application using the selected group's project, destination, metadata, sync, and lifecycle policy. |
 | `External` | — | Nyl emits no Namespace object. Use this for namespaces managed outside the rendered tree, such as `kube-system`. |
 

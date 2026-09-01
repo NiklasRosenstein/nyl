@@ -347,6 +347,9 @@ fn resolve_namespace_ownership(
             .entry(workload.destination_namespace.clone())
             .or_default()
             .insert(index);
+        for namespace in &workload.release.spec.additional_namespaces {
+            consumers.entry(namespace.clone()).or_default().insert(index);
+        }
         for manifest in &workload.manifests {
             if let Some(namespace) = manifest.pointer("/metadata/namespace").and_then(Value::as_str) {
                 if !namespace.is_empty() {
@@ -511,9 +514,7 @@ fn resolve_group_namespace_owner(
 }
 
 fn manage_namespace_in_release(workload: &mut PendingWorkload, namespace: &str) -> Result<()> {
-    let mut policy = workload.group.spec.namespace.clone();
-    policy.create &= namespace == workload.destination_namespace;
-    ensure_managed_namespace(&mut workload.manifests, namespace, &policy)
+    ensure_managed_namespace(&mut workload.manifests, namespace, &workload.group.spec.namespace)
 }
 
 fn reject_namespace_manifests_from_non_owner(

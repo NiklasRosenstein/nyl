@@ -1049,7 +1049,7 @@ metadata:
 }
 
 #[test]
-fn additional_namespace_is_not_synthesized() {
+fn additional_namespace_is_synthesized_when_missing() {
     let fixture = fixture();
     let release_path = fixture.path().join("applications/workloads/api.yaml");
     let release = fs::read_to_string(&release_path).unwrap().replace(
@@ -1074,7 +1074,10 @@ fn additional_namespace_is_not_synthesized() {
 
     let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
     assert!(workload.contains("name: api"));
-    assert!(!workload.contains("name: monitoring"));
+    assert!(workload.contains("name: monitoring"));
+    assert_eq!(workload.matches("kind: Namespace").count(), 2);
+    assert_eq!(workload.matches("Prune=confirm").count(), 2);
+    assert_eq!(workload.matches("Delete=confirm").count(), 2);
     assert!(!output.join("production/_nyl/namespaces").exists());
 }
 

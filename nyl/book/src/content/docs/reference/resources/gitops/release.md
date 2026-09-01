@@ -31,7 +31,7 @@ spec:
 | `metadata.name` | Yes | — | Release and generated Application name. |
 | `metadata.namespace` | Yes | — | Default destination namespace. |
 | `spec.include` | No | `[]` | Additional manifest paths or glob patterns relative to this file. |
-| `spec.additionalNamespaces` | No | `[]` | Extra namespaces that rendered resources may explicitly target. |
+| `spec.additionalNamespaces` | No | `[]` | Extra namespaces managed by this Release and available to its rendered resources. |
 | `spec.stripEmptyMetadataLabels` | No | Project setting | Controls empty `metadata.labels` removal. |
 | `spec.argocd.applicationOverride` | No | — | Partial generated Application override, subject to the group or generator customization policy. |
 
@@ -95,10 +95,10 @@ For rendered GitOps, Nyl validates every explicit resource
 set is the effective ApplicationGroup destination namespace plus
 `spec.additionalNamespaces`.
 
-An approved additional Namespace remains part of the workload Application when
-the Release renders that Namespace object. Listing a namespace does not
-synthesize it. The effective destination Namespace is synthesized in the same
-workload Application when `ApplicationGroup.spec.namespace.create` is enabled.
+An approved additional Namespace remains part of the workload Application.
+When `ApplicationGroup.spec.namespace.create` is enabled, Nyl synthesizes any
+listed Namespace that the Release does not render itself, using the same
+namespace lifecycle policy as the effective destination Namespace.
 
 When multiple workload Applications consume one namespace,
 `ApplicationGroup.spec.sharedNamespaces` must select one Release, a dedicated
