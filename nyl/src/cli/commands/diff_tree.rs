@@ -6,7 +6,7 @@ use git2::Repository;
 use similar::TextDiff;
 
 use crate::git::GitManager;
-use crate::gitops::{compile_target_tree, discover_gitops_inventory, RenderIndex};
+use crate::gitops::{compile_target_tree, discover_gitops_inventory, RenderIndex, TreeCacheArgs};
 use crate::{NylError, Result};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -20,6 +20,9 @@ pub enum DiffTreeBase {
 /// Diff a target without modifying its publication tree.
 #[derive(Args, Debug)]
 pub struct DiffTreeArgs {
+    #[command(flatten)]
+    pub cache: TreeCacheArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,

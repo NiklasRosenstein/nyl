@@ -6,7 +6,7 @@ use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
     compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree_with_options, ReconcileOptions,
-    RenderIndex, RenderIndexPublication,
+    RenderIndex, RenderIndexPublication, TreeCacheArgs,
 };
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -14,6 +14,9 @@ use crate::{NylError, Result};
 /// Render one GitOps target into its owned manifest tree.
 #[derive(Args, Debug)]
 pub struct RenderTreeArgs {
+    #[command(flatten)]
+    pub cache: TreeCacheArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,

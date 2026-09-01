@@ -160,6 +160,10 @@ pub fn reconcile_rendered_tree_with_options(
         }
     }
 
+    if is_unchanged(previous.as_ref(), transaction.as_ref(), &next_index, options) {
+        return unchanged_result(output_root, next_index);
+    }
+
     let parent = output_root.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let staged = tempfile::Builder::new().prefix(".nyl-render-").tempdir_in(parent)?;
@@ -209,6 +213,20 @@ pub fn reconcile_rendered_tree_with_options(
     }
 
     Ok(next_index)
+}
+
+fn is_unchanged(
+    previous: Option<&RenderIndex>,
+    transaction: Option<&RenderTransaction>,
+    next: &RenderIndex,
+    options: ReconcileOptions,
+) -> bool {
+    !options.force_owned && transaction.is_none() && previous == Some(next)
+}
+
+fn unchanged_result(output_root: &Path, index: RenderIndex) -> Result<RenderIndex> {
+    tracing::debug!(root = %output_root.display(), "Rendered tree is unchanged; skipping reconciliation writes");
+    Ok(index)
 }
 
 fn load_transaction(path: &Path) -> Result<Option<RenderTransaction>> {
@@ -403,6 +421,23 @@ mod tests {
         let reconciled = reconcile_rendered_tree(&root, &desired, second).unwrap();
         assert_eq!(reconciled.source_commit.as_deref(), Some("first"));
         assert!(!reconciled.dirty);
+    }
+
+    #[test]
+    fn unchanged_reconciliation_preserves_owned_file_mtime() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        reconcile_rendered_tree(&root, &desired, index()).unwrap();
+        let before = fs::metadata(root.join("apps/a.yaml")).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        reconcile_rendered_tree(&root, &desired, index()).unwrap();
+
+        assert_eq!(
+            fs::metadata(root.join("apps/a.yaml")).unwrap().modified().unwrap(),
+            before
+        );
     }
 
     #[test]

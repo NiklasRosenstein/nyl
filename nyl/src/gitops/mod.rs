@@ -1,6 +1,7 @@
 //! Project discovery and compilation support for rendered GitOps workflows.
 
 pub mod argocd;
+pub mod cache;
 pub mod discovery;
 pub mod layout;
 pub mod reconcile;
@@ -9,6 +10,7 @@ pub mod tree;
 
 pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
+pub use cache::{CacheMode, GitOpsCache, TreeCacheArgs};
 pub use discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey};
 pub(crate) use layout::render_manifest_layout_with_provenance;
 pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};

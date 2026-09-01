@@ -7,12 +7,16 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, Sta
 use crate::git::CredentialProvider;
 use crate::gitops::{
     compile_target_tree, discover_gitops_inventory, reconcile_rendered_tree, RenderIndex, RenderIndexPublication,
+    TreeCacheArgs,
 };
 use crate::{NylError, Result};
 
 /// Render, commit, and compare-and-swap publish one target revision.
 #[derive(Args, Debug)]
 pub struct PublishTreeArgs {
+    #[command(flatten)]
+    pub cache: TreeCacheArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
