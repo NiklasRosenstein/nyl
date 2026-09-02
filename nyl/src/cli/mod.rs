@@ -10,7 +10,7 @@ use crate::Result;
 /// When to use colored output
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ColorChoice {
-    /// Automatically detect if colors should be used (based on TTY detection)
+    /// Use colors for terminals and conventional CI environments.
     #[default]
     Auto,
     /// Always use colors
@@ -116,8 +116,7 @@ impl ColorChoice {
     pub fn apply(&self) {
         match self {
             ColorChoice::Auto => {
-                // Use default TTY detection from colored crate
-                colored::control::unset_override();
+                colored::control::set_override(auto_color_enabled());
             }
             ColorChoice::Always => {
                 colored::control::set_override(true);
@@ -132,14 +131,25 @@ impl ColorChoice {
     /// This is used for tracing_subscriber configuration
     pub fn should_use_ansi(&self) -> bool {
         match self {
-            ColorChoice::Auto => {
-                // Check if stderr is a TTY (tracing writes to stderr)
-                std::io::IsTerminal::is_terminal(&std::io::stderr())
-            }
+            ColorChoice::Auto => auto_color_enabled(),
             ColorChoice::Always => true,
             ColorChoice::Never => false,
         }
     }
+}
+
+fn auto_color_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some()
+        || std::env::var("CLICOLOR").is_ok_and(|value| value == "0")
+        || std::env::var("TERM").is_ok_and(|value| value == "dumb")
+    {
+        return false;
+    }
+    if std::env::var("CLICOLOR_FORCE").is_ok_and(|value| !value.is_empty() && value != "0") {
+        return true;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+        || std::env::var("CI").is_ok_and(|value| !value.is_empty() && value != "0" && value != "false")
 }
 
 #[cfg(test)]

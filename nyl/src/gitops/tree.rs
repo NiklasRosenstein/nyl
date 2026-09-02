@@ -1884,15 +1884,16 @@ fn resolve_group_source(
             if let Some(repository_path) = repository_path {
                 provenance_inputs.push(repository_path);
             }
-            let manager = match git_manager {
-                Some(manager) => manager,
-                None => git_manager.insert(
-                    if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
-                        GitManager::with_cache_dir(cache_root)
-                    } else {
-                        GitManager::new().map_err(NylError::Git)?
-                    },
-                ),
+            let manager = if let Some(manager) = git_manager {
+                manager
+            } else {
+                let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
+                    GitManager::with_cache_dir(cache_root)
+                } else {
+                    GitManager::new().map_err(NylError::Git)?
+                }
+                .with_render_cache(cache.cloned());
+                git_manager.insert(manager)
             };
             let commit = source.commit.as_deref().expect("validated remote source has commit");
             let checkout = manager

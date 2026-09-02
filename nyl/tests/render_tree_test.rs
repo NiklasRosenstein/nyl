@@ -482,6 +482,8 @@ metadata:
         "--output-dir",
         output.to_str().unwrap(),
         "--check",
+        "--color",
+        "never",
     ];
 
     Command::cargo_bin("nyl")
@@ -497,7 +499,7 @@ metadata:
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Cache: reused target tree; avoided 2 Release renders and 1 Helm render",
+            "Render statistics\n  Cache\n    Target tree         reused\n    Release renders     2 avoided\n    Helm renders        1 avoided",
         ));
 
     let api = fixture.path().join("applications/workloads/api.yaml");
@@ -514,7 +516,7 @@ metadata:
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Cache: rebuilt target tree; Release renders: 1 reused, 1 rebuilt; Helm renders: 1 avoided",
+            "Render statistics\n  Cache\n    Target tree         rebuilt\n    Release renders     1 reused · 1 rendered\n    Helm renders        1 avoided",
         ));
 }
 
@@ -529,6 +531,8 @@ fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
         "production",
         "--output-dir",
         output.to_str().unwrap(),
+        "--color",
+        "never",
     ];
 
     Command::cargo_bin("nyl")
@@ -548,7 +552,7 @@ fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
         .args(args)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cache: reused target tree"));
+        .stderr(predicate::str::contains("Target tree         reused"));
     let comment_index: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("production/_nyl/index.json")).unwrap()).unwrap();
     assert_ne!(
@@ -571,7 +575,7 @@ fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
         .args(args)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cache: reused target tree"));
+        .stderr(predicate::str::contains("Target tree         reused"));
 
     let moved = fixture.path().join("repository-gitops.yaml");
     fs::rename(&gitops, &moved).unwrap();
@@ -582,8 +586,8 @@ fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
         .args(args)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cache: rebuilt target tree"))
-        .stderr(predicate::str::contains("Release renders: 1 reused"));
+        .stderr(predicate::str::contains("Target tree         rebuilt"))
+        .stderr(predicate::str::contains("Release renders     1 reused"));
     let moved_index: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("production/_nyl/index.json")).unwrap()).unwrap();
     assert!(moved_index["inputs"].get("repository-gitops.yaml").is_some());
@@ -604,8 +608,8 @@ fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
         .args(args)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cache: rebuilt target tree"))
-        .stderr(predicate::str::contains("Release renders: 1 reused"));
+        .stderr(predicate::str::contains("Target tree         rebuilt"))
+        .stderr(predicate::str::contains("Release renders     1 reused"));
 }
 
 #[test]
@@ -628,6 +632,46 @@ fn completion_can_colour_the_target_and_relative_output_path() {
         .success()
         .stdout(predicate::str::contains("\u{1b}[1;36mproduction\u{1b}[0m"))
         .stdout(predicate::str::contains("\u{1b}[32mdeploy/production\u{1b}[0m"));
+}
+
+#[test]
+fn test_automatic_colour_is_retained_in_ci_and_respects_no_color() {
+    let fixture = fixture();
+    let args = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        "deploy",
+        "--check",
+        "--progress",
+        "off",
+    ];
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("CI", "true")
+        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .args(args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{1b}[1;36mproduction\u{1b}[0m"))
+        .stderr(predicate::str::contains("\u{1b}[1mRender statistics\u{1b}[0m"));
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("CI", "true")
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1")
+        .args(args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{1b}[").not())
+        .stderr(predicate::str::contains("\u{1b}[").not());
 }
 
 #[test]

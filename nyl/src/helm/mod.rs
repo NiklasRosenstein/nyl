@@ -66,6 +66,8 @@ pub struct HelmChartResolver {
     cache_dir: Option<PathBuf>,
 
     credential_provider: Option<Arc<CredentialProvider>>,
+
+    render_cache: Option<crate::render::cache::RenderCache>,
 }
 
 impl HelmChartResolver {
@@ -99,7 +101,14 @@ impl HelmChartResolver {
             working_dir,
             cache_dir,
             credential_provider,
+            render_cache: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_render_cache(mut self, cache: Option<crate::render::cache::RenderCache>) -> Self {
+        self.render_cache = cache;
+        self
     }
 
     /// Resolve a chart reference to an absolute path
@@ -234,7 +243,8 @@ impl HelmChartResolver {
             OciChartPuller::with_cache_dir(cache_dir)
         } else {
             OciChartPuller::new()?
-        };
+        }
+        .with_render_cache(self.render_cache.clone());
         let chart_path = puller.pull(repository, version, chart_ref.name.as_deref())?;
 
         Ok(ResolvedChart {
@@ -249,7 +259,8 @@ impl HelmChartResolver {
             crate::git::GitManager::with_cache_dir_and_provider(cache_dir, self.credential_provider.clone())
         } else {
             crate::git::GitManager::with_credential_provider(self.credential_provider.clone())?
-        };
+        }
+        .with_render_cache(self.render_cache.clone());
 
         // Use 'name' field as subpath for Git repos
         let subpath = chart_ref.name.as_deref();
@@ -287,6 +298,7 @@ impl std::fmt::Debug for HelmChartResolver {
                 "credential_provider",
                 &self.credential_provider.as_ref().map(|_| "<redacted>"),
             )
+            .field("render_cache", &self.render_cache.as_ref().map(|_| "<attached>"))
             .finish()
     }
 }

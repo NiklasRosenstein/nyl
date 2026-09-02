@@ -258,6 +258,7 @@ pub struct GitManager {
     cache: CacheLayout,
     bare_repos: HashMap<String, Arc<Mutex<BareRepository>>>,
     credential_provider: Option<Arc<CredentialProvider>>,
+    render_cache: Option<crate::render::cache::RenderCache>,
 }
 
 impl GitManager {
@@ -267,6 +268,7 @@ impl GitManager {
             cache: CacheLayout::new()?,
             bare_repos: HashMap::new(),
             credential_provider: None,
+            render_cache: None,
         })
     }
 
@@ -283,6 +285,7 @@ impl GitManager {
             cache: CacheLayout::new()?,
             bare_repos: HashMap::new(),
             credential_provider,
+            render_cache: None,
         })
     }
 
@@ -294,7 +297,14 @@ impl GitManager {
             cache: CacheLayout::with_path(cache_dir),
             bare_repos: HashMap::new(),
             credential_provider,
+            render_cache: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_render_cache(mut self, cache: Option<crate::render::cache::RenderCache>) -> Self {
+        self.render_cache = cache;
+        self
     }
 
     /// Create a Git manager with Kubernetes client for ArgoCD credential discovery
@@ -308,6 +318,7 @@ impl GitManager {
             cache: CacheLayout::new()?,
             bare_repos: HashMap::new(),
             credential_provider: Some(Arc::new(provider)),
+            render_cache: None,
         })
     }
 
@@ -365,6 +376,7 @@ impl GitManager {
         let git_ref = git_ref.unwrap_or("HEAD");
         if !require_fresh {
             if let Some(path) = try_resolve_ref_from_argocd_env(url, git_ref, subpath) {
+                self.observe_source(crate::render::cache::SourceOperation::GitWorktreeReuse);
                 return Ok(path);
             }
         }
@@ -383,6 +395,7 @@ impl GitManager {
                 tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
                 Some(e)
             } else {
+                self.observe_source(crate::render::cache::SourceOperation::GitRefRefresh);
                 None
             }
         };
@@ -431,7 +444,13 @@ impl GitManager {
         };
 
         let worktree_path = self.cache.worktree_path(url, git_ref);
+        let worktree_exists = worktree_path.exists();
         let worktree_path = WorktreeManager::get_or_create_worktree(&bare_repo_path, git_ref, oid, &worktree_path)?;
+        self.observe_source(if worktree_exists {
+            crate::render::cache::SourceOperation::GitWorktreeReuse
+        } else {
+            crate::render::cache::SourceOperation::GitWorktreeCreate
+        });
 
         // Add subpath if specified
         if let Some(sub) = subpath {
@@ -447,17 +466,30 @@ impl GitManager {
         let url_key = url.to_string();
 
         if let Some(repo) = self.bare_repos.get(&url_key) {
+            self.observe_source(crate::render::cache::SourceOperation::GitRepositoryReuse);
             return Ok(Arc::clone(repo));
         }
 
         // Create or open the bare repository
         let bare_repo_path = self.cache.bare_repo_path(url);
+        let repository_exists = bare_repo_path.exists();
         let bare_repo = BareRepository::get_or_create(url, &bare_repo_path, self.credential_provider.clone())?;
+        self.observe_source(if repository_exists {
+            crate::render::cache::SourceOperation::GitRepositoryReuse
+        } else {
+            crate::render::cache::SourceOperation::GitRepositoryClone
+        });
 
         let bare_repo = Arc::new(Mutex::new(bare_repo));
         self.bare_repos.insert(url_key, Arc::clone(&bare_repo));
 
         Ok(bare_repo)
+    }
+
+    fn observe_source(&self, operation: crate::render::cache::SourceOperation) {
+        if let Some(cache) = &self.render_cache {
+            cache.observe_source(operation);
+        }
     }
 }
 

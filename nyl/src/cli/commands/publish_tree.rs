@@ -207,7 +207,8 @@ fn publication_current_commit(
         GitManager::with_cache_dir_and_provider(cache_root, Some(Arc::clone(credentials)))
     } else {
         GitManager::with_credential_provider(Some(Arc::clone(credentials))).map_err(NylError::Git)?
-    };
+    }
+    .with_render_cache(Some(cache.clone()));
     let checkout =
         match manager.resolve_ref_fresh(publication_url, Some(&compiled.target.spec.publication.revision), None) {
             Ok(checkout) => checkout,

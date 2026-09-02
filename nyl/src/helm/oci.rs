@@ -18,6 +18,7 @@ use std::process::Command;
 /// Pulls Helm charts from OCI registries and caches them locally
 pub struct OciChartPuller {
     cache_dir: PathBuf,
+    render_cache: Option<crate::render::cache::RenderCache>,
 }
 
 impl OciChartPuller {
@@ -34,6 +35,7 @@ impl OciChartPuller {
 
         Ok(Self {
             cache_dir: root.join("helm").join("oci"),
+            render_cache: None,
         })
     }
 
@@ -41,7 +43,14 @@ impl OciChartPuller {
     pub fn with_cache_dir(cache_dir: impl Into<PathBuf>) -> Self {
         Self {
             cache_dir: cache_dir.into().join("helm").join("oci"),
+            render_cache: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_render_cache(mut self, cache: Option<crate::render::cache::RenderCache>) -> Self {
+        self.render_cache = cache;
+        self
     }
 
     /// Pull a chart from an OCI or traditional Helm repository
@@ -104,6 +113,9 @@ impl OciChartPuller {
                 "helm pull failed for {}@{}: {}",
                 repository, version, stderr
             )));
+        }
+        if let Some(cache) = &self.render_cache {
+            cache.observe_source(crate::render::cache::SourceOperation::HelmChartPull);
         }
 
         tracing::debug!("Helm chart pulled successfully");

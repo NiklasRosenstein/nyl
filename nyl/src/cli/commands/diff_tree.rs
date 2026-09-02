@@ -715,9 +715,11 @@ fn publication_path(compiled: &crate::gitops::CompiledTargetTree) -> &str {
 
 fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
     if let Some(cache_root) = cache.external_cache_root() {
-        Ok(GitManager::with_cache_dir(cache_root))
+        Ok(GitManager::with_cache_dir(cache_root).with_render_cache(Some(cache.clone())))
     } else {
-        GitManager::new().map_err(NylError::Git)
+        GitManager::new()
+            .map(|manager| manager.with_render_cache(Some(cache.clone())))
+            .map_err(NylError::Git)
     }
 }
 

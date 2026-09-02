@@ -879,7 +879,7 @@ metadata:
             },
         };
 
-        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        let resolved = resolve_application_generator_source_path(&generator, None, None).unwrap();
         assert_eq!(resolved, temp.path());
 
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
@@ -898,7 +898,7 @@ metadata:
 
         let generator = create_test_application_generator("git@gitlab.com:NiklasRosenstein/config.git", "HEAD");
 
-        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        let resolved = resolve_application_generator_source_path(&generator, None, None).unwrap();
         assert_eq!(
             resolved.canonicalize().unwrap(),
             repo_dir.path().canonicalize().unwrap()
@@ -918,7 +918,7 @@ metadata:
 
         let generator = create_test_application_generator("ssh://git@github.com/example/repo", "main");
 
-        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        let resolved = resolve_application_generator_source_path(&generator, None, None).unwrap();
         assert_eq!(
             resolved.canonicalize().unwrap(),
             repo_dir.path().canonicalize().unwrap()
@@ -1044,7 +1044,7 @@ metadata:
             },
         };
 
-        let err = resolve_application_generator_source_path(&generator, None).unwrap_err();
+        let err = resolve_application_generator_source_path(&generator, None, None).unwrap_err();
         assert!(err.to_string().contains("NYL_APPGEN_REPO_PATH_OVERRIDE"));
 
         std::env::remove_var("NYL_APPGEN_REPO_PATH_OVERRIDE");
@@ -1093,7 +1093,7 @@ metadata:
             },
         };
 
-        let source_root = resolve_application_generator_source_path(&generator, None).unwrap();
+        let source_root = resolve_application_generator_source_path(&generator, None, None).unwrap();
         let selectors = application_generator_source_selectors(&generator);
         let err = find_yaml_files_filtered(
             &source_root,
@@ -1170,7 +1170,7 @@ metadata:
             },
         };
 
-        let resolved = resolve_application_generator_source_path(&generator, None).unwrap();
+        let resolved = resolve_application_generator_source_path(&generator, None, None).unwrap();
         assert!(resolved.exists());
         assert!(resolved.join("clusters/default/example.yaml").exists());
     }

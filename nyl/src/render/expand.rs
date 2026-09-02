@@ -316,7 +316,7 @@ pub(crate) async fn generate_resource(
     } else if kind == Some("RemoteManifest") && api_version == Some(API_VERSION) {
         let remote_manifest = RemoteManifest::from_value(resource)?;
         remote_manifest.validate()?;
-        let manifests = fetch_remote_manifest_documents(&remote_manifest).await?;
+        let manifests = fetch_remote_manifest_documents(&remote_manifest, gitops_cache).await?;
         Ok(apply_parent_tracking_annotations(
             manifests,
             track_parent,
@@ -461,7 +461,10 @@ pub(crate) async fn generate_resource(
     }
 }
 
-async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Result<Vec<serde_json::Value>> {
+async fn fetch_remote_manifest_documents(
+    remote_manifest: &RemoteManifest,
+    render_cache: Option<&RenderCache>,
+) -> Result<Vec<serde_json::Value>> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
@@ -482,7 +485,7 @@ async fn fetch_remote_manifest_documents(remote_manifest: &RemoteManifest) -> Re
 
     fetch_remote_manifest_documents_with_fetcher(remote_manifest, |url| {
         let client = &client;
-        async move { fetch_single_remote_url(client, remote_manifest, &url).await }
+        async move { fetch_single_remote_url(client, remote_manifest, &url, render_cache).await }
     })
     .await
 }
@@ -511,6 +514,7 @@ async fn fetch_single_remote_url(
     client: &reqwest::Client,
     remote_manifest: &RemoteManifest,
     url: &str,
+    render_cache: Option<&RenderCache>,
 ) -> Result<Vec<serde_json::Value>> {
     let sanitized_url = crate::util::sanitize_url(url);
     let mut response = client.get(url).send().await.map_err(|e| {
@@ -565,6 +569,9 @@ async fn fetch_single_remote_url(
             remote_manifest.metadata.name, sanitized_url, e
         ))
     })?;
+    if let Some(cache) = render_cache {
+        cache.observe_source(crate::render::cache::SourceOperation::RemoteManifestDownload);
+    }
     let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{sanitized_url}")));
     source_ctx.parse_yaml_documents(&body)
 }
@@ -668,7 +675,8 @@ fn render_helm_chart(
             .and_then(RenderCache::external_cache_root)
             .map(Path::to_path_buf),
         credential_provider,
-    );
+    )
+    .with_render_cache(gitops_cache.cloned());
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
     let executor = HelmTemplateExecutor::new()

@@ -248,8 +248,9 @@ fn test_operation() -> Result<()> {
   every target. With no explicit instances, each target receives an implicit
   target-local instance using its workload Cluster and the `argocd` namespace.
 - Every enabled catalog Application recursively sources `_nyl/catalog`. Its
-  defaults enable automated self-heal without automated prune, cascade
-  deletion in the foreground, and require confirmation before self-pruning.
+  defaults require manual sync with apply-only-out-of-sync and server-side
+  apply options, cascade deletion in the foreground, and require confirmation
+  before self-pruning.
 - An ApplicationGroup has exactly one of `projectRef` and `projectTemplate`.
   Releases may narrow their resource content but never expand a generated
   project's namespace or cluster-resource policy.

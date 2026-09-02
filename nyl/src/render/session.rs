@@ -439,6 +439,7 @@ impl RenderSession {
                     source_path_text,
                     self.credential_provider.clone(),
                     &self.template_context,
+                    self.cache.as_ref(),
                 )?);
             }
         }

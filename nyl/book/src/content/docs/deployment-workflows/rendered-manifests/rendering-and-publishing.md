@@ -106,27 +106,47 @@ temporary Git and chart storage is deleted with the command. The two options
 are mutually exclusive. Neither option changes rendered bytes, validation, or
 publication semantics.
 
-Rendering commands print a compact cache summary on standard error. It reports
-work as reused, rebuilt, rendered, or avoided. Avoided work was not consulted
-because a higher-level artifact supplied the result. Inputs that cannot be
-cached retain their reason next to the affected layer. Debug logging records the
-underlying miss, invalidation, refresh and store events and names changed
-dependencies; secret and environment values remain represented only by keyed
-fingerprints.
+Rendering commands print rendering statistics on standard error. The Cache
+section reports work as reused, rebuilt, rendered, or avoided. Avoided work was
+not consulted because a higher-level artifact supplied the result. The Sources
+section reports external operations that the invocation actually reached,
+including manifest downloads, chart pulls, and Git repository, ref, and
+worktree operations. Inputs that cannot be cached retain their reason next to
+the affected layer. Debug logging records the underlying miss, invalidation,
+refresh and store events and names changed dependencies; secret and environment
+values remain represented only by keyed fingerprints.
 
 A complete target reuse reports the work that it short-circuits instead of
 claiming reuse at lower-level caches that were never consulted:
 
 ```text
-Cache: reused target tree; avoided 38 Release renders and 65 Helm renders
+Render statistics
+  Cache
+    Target tree         reused
+    Release renders     38 avoided
+    Helm renders        65 avoided
 ```
 
 A partial rebuild attributes lower-level work to the Release artifacts that
 short-circuited it:
 
 ```text
-Cache: rebuilt target tree; Release renders: 37 reused, 1 rebuilt; Helm renders: 65 avoided
+Render statistics
+  Cache
+    Target tree         rebuilt
+    Release renders     37 reused · 1 rendered
+    Helm renders        65 avoided
+  Sources
+    Remote manifests    2 downloaded
+    Helm charts         3 pulled
+    Git repositories    2 reused · 2 refs refreshed
+    Git worktrees       2 reused
 ```
+
+Zero-valued rows and the empty Sources section are omitted. Automatic color is
+enabled for terminals and conventional CI environments. `NO_COLOR`,
+`CLICOLOR=0`, `TERM=dumb`, and `--color never` disable styling; `--color always`
+and a non-zero `CLICOLOR_FORCE` enable it explicitly.
 
 The `_nyl/index.json` ownership index is always verified when reading a
 published tree. Its hashes are publication integrity and provenance data, not
