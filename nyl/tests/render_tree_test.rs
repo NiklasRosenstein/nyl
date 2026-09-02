@@ -2033,7 +2033,10 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     source_config
         .set_str("user.email", "nyl-tests@example.invalid")
         .unwrap();
+    source.remote("origin", "https://example.invalid/source.git").unwrap();
     commit_all(&source, "Source");
+    let source_commit = source.head().unwrap().peel_to_commit().unwrap().id();
+    let source_commit_string = source_commit.to_string();
 
     Command::cargo_bin("nyl")
         .unwrap()
@@ -2041,7 +2044,10 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .args(["publish-tree", "--target", "production"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Published deployment target production"));
+        .stdout(predicate::str::contains("Published deployment target production"))
+        .stdout(predicate::str::contains("  Repository: "))
+        .stdout(predicate::str::contains("  Branch: deploy/production"))
+        .stdout(predicate::str::contains("  Commit: "));
 
     let destination_repository = Repository::open_bare(destination.path()).unwrap();
     let commit = destination_repository
@@ -2049,6 +2055,12 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .unwrap()
         .peel_to_commit()
         .unwrap();
+    let message = commit.message().unwrap();
+    assert!(message.starts_with("Render deployment target production\n\n"));
+    assert!(message.contains("Nyl-Source-Repository: https://example.invalid/source.git"));
+    assert!(message.contains(&format!("Nyl-Source-Commit: {source_commit}")));
+    assert!(message.contains("Nyl-Deployment-Target: production"));
+    assert!(message.contains("Nyl-Cluster: kasoku"));
     let tree = commit.tree().unwrap();
     assert!(tree
         .get_path(std::path::Path::new("production/workloads/api/resources.yaml"))
@@ -2068,7 +2080,9 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .args(["publish-tree", "--target", "production"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("is already published"));
+        .stdout(predicate::str::contains("is already published"))
+        .stdout(predicate::str::contains("  Branch: deploy/production"))
+        .stdout(predicate::str::contains(format!("  Commit: {}", commit.id())));
 
     Command::cargo_bin("nyl")
         .unwrap()
@@ -2076,7 +2090,61 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .args(["diff-tree", "--target", "production", "--against", "published"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("has no rendered differences"));
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Comparing rendered deployment target production",
+        ))
+        .stderr(predicate::str::contains("View: entire rendered tree"))
+        .stderr(predicate::str::contains(format!(
+            "Desired source: repository=https://example.invalid/source.git commit={source_commit} state=clean"
+        )))
+        .stderr(predicate::str::contains("Baseline: published repository="))
+        .stderr(predicate::str::contains("revision=deploy/production"))
+        .stderr(predicate::str::contains(format!("commit={}", commit.id())))
+        .stderr(predicate::str::contains("path=production"))
+        .stderr(predicate::str::contains("Output: stdout"))
+        .stderr(predicate::str::contains("has no rendered differences"));
+
+    let empty_diff = fixture.path().join("artifacts/no-differences.diff");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--output",
+            empty_diff.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(format!("Output: {}", empty_diff.display())))
+        .stderr(predicate::str::contains("has no rendered differences"));
+    assert_eq!(fs::metadata(&empty_diff).unwrap().len(), 0);
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "source",
+            "--source-ref",
+            &source_commit_string,
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Baseline source: repository="))
+        .stderr(predicate::str::contains(format!("revision={source_commit}")))
+        .stderr(predicate::str::contains(format!("commit={source_commit}")))
+        .stderr(predicate::str::contains("Desired publication: repository="))
+        .stderr(predicate::str::contains("Baseline publication: repository="));
 
     let application_source = fixture.path().join("applications/workloads/api.yaml");
     let changed = fs::read_to_string(&application_source)
@@ -2089,5 +2157,102 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .args(["diff-tree", "--target", "production", "--against", "published"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("+  environment: changed"));
+        .stdout(predicate::str::contains("+  environment: changed"))
+        .stderr(predicate::str::contains("state=dirty"))
+        .stderr(predicate::str::contains("Rendered differences: 1 file(s)"));
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["diff-tree", "--target", "production", "--catalog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("View: Argo CD catalog"))
+        .stderr(predicate::str::contains("has no rendered differences"));
+
+    let application_diff = fixture.path().join("artifacts/api.diff");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--application",
+            "argocd-production/api",
+            "--output",
+            application_diff.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("View: Applications argocd-production/api"))
+        .stderr(predicate::str::contains("Wrote rendered diff"));
+    let application_diff_contents = fs::read_to_string(&application_diff).unwrap();
+    assert!(application_diff_contents.contains("workloads/api/resources.yaml"));
+    assert!(application_diff_contents.contains("+  environment: changed"));
+    assert!(!application_diff_contents.contains("_nyl/catalog/projects"));
+
+    let failing_diff = fixture.path().join("artifacts/failing.diff");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--application",
+            "argocd-production/api",
+            "--output",
+            failing_diff.to_str().unwrap(),
+            "--fail-on-diff",
+        ])
+        .assert()
+        .failure();
+    assert!(fs::read_to_string(&failing_diff)
+        .unwrap()
+        .contains("+  environment: changed"));
+
+    let preserved_diff = fixture.path().join("artifacts/preserved.diff");
+    fs::write(&preserved_diff, "preserve me\n").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--application",
+            "missing/application",
+            "--output",
+            preserved_diff.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exists on neither side of the comparison"));
+    assert_eq!(fs::read_to_string(preserved_diff).unwrap(), "preserve me\n");
+
+    let project_source = fixture.path().join("config/projects/workloads.yaml");
+    let changed_project = fs::read_to_string(&project_source)
+        .unwrap()
+        .replace("namespace: '*'", "namespace: api");
+    fs::write(project_source, changed_project).unwrap();
+    let catalog_diff = fixture.path().join("artifacts/catalog.diff");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--catalog",
+            "--output",
+            catalog_diff.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let catalog_diff_contents = fs::read_to_string(catalog_diff).unwrap();
+    assert!(catalog_diff_contents.contains("_nyl/catalog/projects/workloads.yaml"));
+    assert!(!catalog_diff_contents.contains("workloads/api/resources.yaml"));
 }

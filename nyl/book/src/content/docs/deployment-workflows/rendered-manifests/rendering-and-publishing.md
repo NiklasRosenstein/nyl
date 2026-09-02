@@ -137,7 +137,10 @@ a complete render cache key.
 Compare the desired tree with the currently published deployment revision:
 
 ```bash
-nyl diff-tree --target production --against published > rendered.diff
+nyl diff-tree \
+  --target production \
+  --against published \
+  --output rendered.diff
 ```
 
 Compare instead with the tree generated from the source default branch:
@@ -146,12 +149,22 @@ Compare instead with the tree generated from the source default branch:
 nyl diff-tree \
   --target production \
   --against source \
-  --source-ref main > rendered.diff
+  --source-ref main \
+  --output rendered.diff
 ```
 
 The source-derived form remains accurate when a publication job has not yet
 updated the deployment revision. `--fail-on-diff` returns a non-zero status
-while preserving the unified diff on stdout.
+after writing the complete diff. Comparison coordinates and human status are
+written to stderr, including the desired source commit and the resolved
+published or source baseline commit. Stdout and `--output` contain only unified
+diff bytes; no differences produce zero bytes.
+
+Use `--catalog` for generated Applications and AppProjects, `--applications`
+for every workload Application and payload, or repeat
+`--application <namespace>/<name>` for a focused review. Application views are
+derived from each generated Application's plain-directory source path, so they
+follow customized rendered layouts without changing `_nyl/index.json`.
 
 Forge-specific CI can post the diff to a pull or merge request and update a
 marker comment on later pipelines. Comment ownership and forge API calls remain
@@ -166,7 +179,9 @@ nyl publish-tree --target production
 The source worktree must be clean and committed. Nyl clones the destination
 revision, reconciles only indexed files, creates one commit, refreshes the
 remote revision, and performs a compare-and-swap push. It refuses to push when
-the remote tip changes concurrently.
+the remote tip changes concurrently. The result identifies the destination
+repository, branch, and commit. The commit message records the source
+repository and commit plus the deployment target and cluster as Git trailers.
 
 An interrupted local reconciliation can resume when installed files match the
 intended generation. Unrelated modifications and symbolic-link ancestors fail

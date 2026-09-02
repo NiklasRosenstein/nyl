@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -38,6 +39,24 @@ pub struct PublishTreeArgs {
     pub dry_run: bool,
 }
 
+struct PublicationProvenance<'a> {
+    source_repository: Option<&'a str>,
+    source_commit: &'a str,
+    target: &'a str,
+    cluster: &'a str,
+}
+
+struct CommitRenderedTreeInput<'a> {
+    inventory: &'a crate::gitops::GitOpsInventory,
+    compiled: &'a crate::gitops::CompiledTargetTree,
+    target_name: &'a str,
+    source_commit: &'a str,
+    branch: &'a str,
+    repository: &'a Repository,
+    output_root: &'a Path,
+    subject: Option<&'a str>,
+}
+
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
@@ -47,6 +66,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             "publish-tree requires a clean source worktree at a committed revision",
         ));
     }
+    let source_commit = source_commit.expect("a clean committed worktree has a source commit");
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
@@ -58,8 +78,13 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         .unwrap_or(&compiled.repository.repo_url);
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = Arc::new(CredentialProvider::new());
-    if publication_is_current(&compiled, publication_url, &credentials, &cache)? {
-        println!("deployment target {target_name} is already published");
+    if let Some(commit) = publication_current_commit(&compiled, publication_url, &credentials, &cache)? {
+        print_publication_result(
+            &format!("Deployment target {target_name} is already published"),
+            publication_url,
+            branch,
+            commit,
+        );
         return Ok(());
     }
     let temp = tempfile::TempDir::new()?;
@@ -71,39 +96,16 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     } else {
         temp.path().join(compiled.target.publication_path_prefix())
     };
-    let inputs = super::render_tree::hash_inputs(&inventory, &compiled)?;
-    let repository_identity = compiled
-        .repository_name
-        .clone()
-        .unwrap_or_else(|| compiled.repository.repo_url.clone());
-    reconcile_rendered_tree(
-        &output_root,
-        &compiled.files,
-        RenderIndex::new(
-            target_name.clone(),
-            compiled.cluster.metadata.name.clone(),
-            RenderIndexPublication {
-                repository: repository_identity,
-                revision: compiled.target.spec.publication.revision.clone(),
-                path_prefix: compiled.target.publication_path_prefix().to_owned(),
-            },
-            source_commit,
-            false,
-            inputs,
-        ),
-    )?;
-
-    let author_repository = Repository::discover(&inventory.project_root)
-        .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;
-    let commit = commit_worktree(
-        &repository,
-        &author_repository,
+    let commit = commit_rendered_tree(&CommitRenderedTreeInput {
+        inventory: &inventory,
+        compiled: &compiled,
+        target_name: &target_name,
+        source_commit: &source_commit,
         branch,
-        &output_root,
-        args.message
-            .as_deref()
-            .unwrap_or(&format!("Render deployment target {target_name}")),
-    )?;
+        repository: &repository,
+        output_root: &output_root,
+        subject: args.message.as_deref(),
+    })?;
     if !args.dry_run {
         fetch_branch(&repository, publication_url, branch, &credentials)?;
         let actual = remote_branch_oid(&repository, branch);
@@ -114,25 +116,93 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         }
     }
     let Some(commit) = commit else {
-        println!("deployment target {target_name} is already published");
+        let commit = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .map_err(crate::git::GitError::from)?
+            .id();
+        print_publication_result(
+            &format!("Deployment target {target_name} is already published"),
+            publication_url,
+            branch,
+            commit,
+        );
         return Ok(());
     };
     if args.dry_run {
-        println!("✓ Prepared rendered commit {commit} for {target_name} (not pushed)");
+        print_publication_result(
+            &format!("Prepared publication for deployment target {target_name} without pushing"),
+            publication_url,
+            branch,
+            commit,
+        );
         return Ok(());
     }
 
     push_branch(&repository, publication_url, branch, expected, &credentials)?;
-    println!("✓ Published deployment target {target_name} as commit {commit}");
+    print_publication_result(
+        &format!("Published deployment target {target_name}"),
+        publication_url,
+        branch,
+        commit,
+    );
     Ok(())
 }
 
-fn publication_is_current(
+fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<git2::Oid>> {
+    let inputs = super::render_tree::hash_inputs(input.inventory, input.compiled)?;
+    let repository_identity = input
+        .compiled
+        .repository_name
+        .clone()
+        .unwrap_or_else(|| input.compiled.repository.repo_url.clone());
+    reconcile_rendered_tree(
+        input.output_root,
+        &input.compiled.files,
+        RenderIndex::new(
+            input.target_name.to_owned(),
+            input.compiled.cluster.metadata.name.clone(),
+            RenderIndexPublication {
+                repository: repository_identity,
+                revision: input.compiled.target.spec.publication.revision.clone(),
+                path_prefix: input.compiled.target.publication_path_prefix().to_owned(),
+            },
+            Some(input.source_commit.to_owned()),
+            false,
+            inputs,
+        ),
+    )?;
+    let author_repository = Repository::discover(&input.inventory.project_root)
+        .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;
+    let subject = input.subject.map_or_else(
+        || format!("Render deployment target {}", input.target_name),
+        ToOwned::to_owned,
+    );
+    let source_repository = source_repository_url(&author_repository);
+    let message = publication_commit_message(
+        &subject,
+        &PublicationProvenance {
+            source_repository: source_repository.as_deref(),
+            source_commit: input.source_commit,
+            target: input.target_name,
+            cluster: &input.compiled.cluster.metadata.name,
+        },
+    );
+    commit_worktree(
+        input.repository,
+        &author_repository,
+        input.branch,
+        input.output_root,
+        &message,
+    )
+}
+
+fn publication_current_commit(
     compiled: &crate::gitops::CompiledTargetTree,
     publication_url: &str,
     credentials: &Arc<CredentialProvider>,
     cache: &GitOpsCache,
-) -> Result<bool> {
+) -> Result<Option<git2::Oid>> {
     let mut manager = if let Some(cache_root) = cache.external_cache_root() {
         GitManager::with_cache_dir_and_provider(cache_root, Some(Arc::clone(credentials)))
     } else {
@@ -143,13 +213,19 @@ fn publication_is_current(
             Ok(checkout) => checkout,
             Err(error) => {
                 tracing::debug!(%error, "Published revision is unavailable for preflight comparison");
-                return Ok(false);
+                return Ok(None);
             }
         };
+    let published_repository = Repository::open(&checkout).map_err(crate::git::GitError::from)?;
+    let published_commit = published_repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .map_err(crate::git::GitError::from)?
+        .id();
     let root = super::diff_tree::checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
     let published = super::diff_tree::read_rendered_tree(&root)?;
     let Some(index) = published.index else {
-        return Ok(false);
+        return Ok(None);
     };
     let repository = compiled
         .repository_name
@@ -161,7 +237,7 @@ fn publication_is_current(
         || index.publication.revision != compiled.target.spec.publication.revision
         || index.publication.path_prefix != compiled.target.publication_path_prefix()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let desired = compiled
         .files
@@ -171,7 +247,33 @@ fn publication_is_current(
                 .map(|path| (path, crate::gitops::reconcile::sha256(bytes)))
         })
         .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
-    Ok(index.files == desired)
+    Ok((index.files == desired).then_some(published_commit))
+}
+
+fn source_repository_url(repository: &Repository) -> Option<String> {
+    repository
+        .find_remote("origin")
+        .ok()
+        .and_then(|remote| remote.url().map(crate::util::sanitize_url))
+}
+
+fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<'_>) -> String {
+    let mut message = subject.trim_end().to_owned();
+    message.push_str("\n\n");
+    if let Some(source_repository) = provenance.source_repository {
+        writeln!(message, "Nyl-Source-Repository: {source_repository}").expect("writing to a String cannot fail");
+    }
+    writeln!(message, "Nyl-Source-Commit: {}", provenance.source_commit).expect("writing to a String cannot fail");
+    writeln!(message, "Nyl-Deployment-Target: {}", provenance.target).expect("writing to a String cannot fail");
+    write!(message, "Nyl-Cluster: {}", provenance.cluster).expect("writing to a String cannot fail");
+    message
+}
+
+fn print_publication_result(status: &str, repository: &str, branch: &str, commit: git2::Oid) {
+    println!("✓ {status}");
+    println!("  Repository: {}", crate::util::sanitize_url(repository));
+    println!("  Branch: {branch}");
+    println!("  Commit: {commit}");
 }
 
 fn writable_branch_name(revision: &str) -> Result<&str> {
@@ -398,6 +500,24 @@ mod tests {
         assert_eq!(writable_branch_name("deploy/main").unwrap(), "deploy/main");
         assert_eq!(writable_branch_name("refs/heads/deploy/main").unwrap(), "deploy/main");
         assert!(writable_branch_name("refs/tags/v1").is_err());
+    }
+
+    #[test]
+    fn custom_publication_subject_keeps_provenance_trailers() {
+        let message = publication_commit_message(
+            "Custom rendered update\n",
+            &PublicationProvenance {
+                source_repository: Some("https://example.invalid/source.git"),
+                source_commit: "0123456789abcdef",
+                target: "production",
+                cluster: "kasoku",
+            },
+        );
+
+        assert_eq!(
+            message,
+            "Custom rendered update\n\nNyl-Source-Repository: https://example.invalid/source.git\nNyl-Source-Commit: 0123456789abcdef\nNyl-Deployment-Target: production\nNyl-Cluster: kasoku"
+        );
     }
 
     #[test]

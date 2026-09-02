@@ -70,11 +70,43 @@ nyl diff-tree \
   --source-ref origin/main
 ```
 
-The command writes a multi-file unified diff to stdout. Source-derived diffs
-also compare the cluster, repository, revision, and path prefix through a synthetic
-`_nyl/publication.json` diff entry. `--fail-on-diff` gives CI a non-zero result
-while retaining the diff output. Mutable comparison refs must refresh
-successfully; cached refs are not accepted as current state.
+The command identifies the desired source commit and exact baseline repository,
+revision, resolved commit, path, selected view, and output destination on
+stderr. Stdout contains only multi-file unified diff bytes; a comparison with
+no differences produces no stdout. Use `--output` to write the same bytes
+atomically to a file instead:
+
+```bash
+nyl diff-tree --target production --output rendered.diff
+nyl diff-tree --target production --output rendered.diff --fail-on-diff
+```
+
+A successful comparison with no differences creates an empty output file.
+Errors leave an existing output file untouched, and `--fail-on-diff` writes the
+complete diff before returning a non-zero status.
+
+Limit the comparison to the generated catalog, all workload Applications, or
+specific Argo CD Application identities:
+
+```bash
+nyl diff-tree --target production --catalog
+nyl diff-tree --target production --applications
+nyl diff-tree --target production \
+  --application argocd/rise \
+  --application argocd/loki
+```
+
+An Application view contains the generated Application manifest and its plain
+directory payload. Nyl derives these views from the generated Applications, so
+custom `ApplicationGroup.spec.outputPath` values remain supported without
+additional ownership-index metadata. The parent catalog Application is omitted
+from `--applications` but can be selected explicitly. `--catalog` conflicts
+with the Application filters.
+
+Source-derived whole-tree diffs also compare the cluster, repository, revision,
+and path prefix through a synthetic `_nyl/publication.json` diff entry. Scoped
+views leave those coordinates in the stderr summary. Mutable comparison refs
+must refresh successfully; cached refs are not accepted as current state.
 
 ## `nyl source update`
 
@@ -104,6 +136,10 @@ branch into a clean checkout, reconciles indexed files, stages only the selected
 target prefix, commits the result, fetches the branch again, and refuses to push
 when its remote tip changed. A publication branch that does not exist starts as
 an empty branch rather than inheriting the repository's default branch.
+The completion summary names the destination repository, branch, and resulting
+commit. Publication commit messages carry `Nyl-Source-Repository`,
+`Nyl-Source-Commit`, `Nyl-Deployment-Target`, and `Nyl-Cluster` provenance
+trailers. `--message` replaces the subject while retaining those trailers.
 
 Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
