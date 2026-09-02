@@ -2173,6 +2173,8 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
             "production",
             "--output",
             empty_diff.to_str().unwrap(),
+            "--color",
+            "never",
         ])
         .assert()
         .success()
