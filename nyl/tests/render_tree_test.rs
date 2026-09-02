@@ -198,14 +198,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args([
-            "render-tree",
-            ".",
-            "--target",
-            "production",
-            "--output-dir",
-            "deploy-worktree",
-        ])
+        .args(["render-tree", ".", "--output-dir", "deploy-worktree"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -334,6 +327,54 @@ fn renders_plain_directory_applications_and_owned_layout() {
         fs::read(root.join("_nyl/index.json")).unwrap(),
         index_before_live_context
     );
+}
+
+#[test]
+fn requires_target_selection_when_multiple_targets_are_configured() {
+    let fixture = fixture();
+    let production = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        production.replacen("name: production", "name: staging", 1),
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", ".", "--output-dir", "deploy-worktree"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--target is required because multiple DeploymentTargets are configured: production, staging",
+        ));
+}
+
+#[test]
+fn rejects_foreign_ownership_index_before_rendering_releases() {
+    let fixture = fixture();
+    let output = fixture.path().join("deploy-worktree");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", ".", "--output-dir", "deploy-worktree"])
+        .assert()
+        .success();
+
+    let index_path = output.join("production/_nyl/index.json");
+    let mut index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    index["target"] = serde_json::Value::String("another-target".to_owned());
+    fs::write(&index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", ".", "--output-dir", "deploy-worktree", "--refresh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("belongs to target \"another-target\""))
+        .stderr(predicate::str::contains("expected target \"production\""))
+        .stderr(predicate::str::contains("Release workloads/api").not());
 }
 
 #[test]

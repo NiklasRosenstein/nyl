@@ -8,9 +8,10 @@ use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
     compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree_with_options,
-    GitOpsCache, ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache, ReconcileOptions, RenderIndex,
+    RenderIndexPublication, TreeCacheArgs,
 };
-use crate::resources::{GitOpsResource, GitOpsResourceKind};
+use crate::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
@@ -28,9 +29,9 @@ pub struct RenderTreeArgs {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    /// Name of the DeploymentTarget to render.
+    /// DeploymentTarget to render. Defaults to the sole configured target.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Root of the publication Git worktree.
     #[arg(long)]
@@ -48,15 +49,17 @@ pub struct RenderTreeArgs {
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None)?;
-    let GitOpsResource::DeploymentTarget(target) = &initial
-        .get(GitOpsResourceKind::DeploymentTarget, &args.target)
-        .ok_or_else(|| NylError::config(format!("DeploymentTarget {:?} was not found", args.target)))?
+    let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
+    let target = initial
+        .get(GitOpsResourceKind::DeploymentTarget, &target_name)
+        .expect("resolved DeploymentTarget exists")
         .resource
         .as_ref()
-        .ok_or_else(|| NylError::config(format!("DeploymentTarget {:?} must be static", args.target)))?
-    else {
-        unreachable!("inventory key and resource variant must agree");
-    };
+        .and_then(|resource| match resource {
+            GitOpsResource::DeploymentTarget(target) => Some(target.clone()),
+            _ => None,
+        })
+        .expect("inventory kind key and resource variant must agree");
     let output_dir = absolute_path(&args.output_dir)?;
     let output_root = if target.publication_path_prefix().is_empty() {
         output_dir.clone()
@@ -78,12 +81,16 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         initial
     };
 
+    if !args.check {
+        validate_rendered_tree_owner(&output_root, &render_index_owner(&target_name, &target))?;
+    }
+
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
-    let compiled = compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut progress).await?;
+    let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
     if args.check {
-        let target = args.target.as_str().cyan().bold();
+        let target = target_name.as_str().cyan().bold();
         println!(
             "✓ deployment target {target} is valid ({}, {})",
             format_file_count(compiled.files.len()),
@@ -99,7 +106,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| compiled.repository.repo_url.clone());
     let index = RenderIndex::new(
-        args.target.clone(),
+        target_name.clone(),
         compiled.cluster.metadata.name.clone(),
         RenderIndexPublication {
             repository: repository_identity,
@@ -118,7 +125,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
             force_owned: args.force,
         },
     )?;
-    let target = args.target.as_str().cyan().bold();
+    let target = target_name.as_str().cyan().bold();
     let output = crate::util::path_for_display(&output_root)
         .display()
         .to_string()
@@ -129,6 +136,36 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         format_elapsed(started.elapsed())
     );
     Ok(())
+}
+
+fn render_index_owner(target_name: &str, target: &DeploymentTarget) -> RenderIndex {
+    let repository = target
+        .spec
+        .publication
+        .repository_ref
+        .as_ref()
+        .map(|reference| reference.name.clone())
+        .or_else(|| {
+            target
+                .spec
+                .publication
+                .repository
+                .as_ref()
+                .map(|repository| repository.repo_url.clone())
+        })
+        .expect("validated DeploymentTarget has a publication repository");
+    RenderIndex::new(
+        target_name.to_owned(),
+        target.cluster_name().to_owned(),
+        RenderIndexPublication {
+            repository,
+            revision: target.spec.publication.revision.clone(),
+            path_prefix: target.publication_path_prefix().to_owned(),
+        },
+        None,
+        false,
+        BTreeMap::new(),
+    )
 }
 
 fn format_file_count(count: usize) -> String {

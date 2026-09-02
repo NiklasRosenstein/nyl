@@ -10,12 +10,15 @@ pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCach
 pub use crate::render::{RenderSession, RenderedBundle};
 pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
-pub use discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey};
+pub use discovery::{
+    discover_gitops_inventory, resolve_deployment_target_name, DiscoveredGitOpsResource, GitOpsInventory,
+    GitOpsInventoryKey,
+};
 pub(crate) use layout::render_manifest_layout_with_provenance;
 pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};
 pub use reconcile::{
-    reconcile_rendered_tree, reconcile_rendered_tree_with_options, ReconcileOptions, RenderIndex,
-    RenderIndexPublication,
+    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, ReconcileOptions,
+    RenderIndex, RenderIndexPublication,
 };
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,

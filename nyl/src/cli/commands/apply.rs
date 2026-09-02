@@ -48,9 +48,6 @@ pub struct ApplyArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
-    if args.common.target.is_none() {
-        return Err(NylError::config("nyl apply requires --target"));
-    }
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,

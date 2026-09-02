@@ -98,6 +98,20 @@ pub fn reconcile_rendered_tree(
     reconcile_rendered_tree_with_options(output_root, desired, next_index, ReconcileOptions::default())
 }
 
+/// Reject an existing rendered tree owned by another target or publication.
+///
+/// This preflight uses only control-resource data, so callers can run it before
+/// rendering any Releases or Helm charts.
+pub fn validate_rendered_tree_owner(output_root: &Path, expected: &RenderIndex) -> Result<()> {
+    let index_path = output_root.join(DEFAULT_INDEX_PATH);
+    reject_symlink_components(output_root, output_root)?;
+    reject_symlink_components(output_root, &index_path)?;
+    if let Some(previous) = load_index(&index_path)? {
+        ensure_same_owner(&index_path, &previous, expected)?;
+    }
+    Ok(())
+}
+
 /// Reconcile a complete desired target tree with explicit recovery options.
 pub fn reconcile_rendered_tree_with_options(
     output_root: &Path,
@@ -134,12 +148,7 @@ pub fn reconcile_rendered_tree_with_options(
         .is_some_and(|transaction| transaction.index == next_index);
 
     if let Some(previous) = &previous {
-        if !previous.same_owner(&next_index) {
-            return Err(NylError::config(format!(
-                "Rendered ownership index {} belongs to a different target, cluster, or publication",
-                index_path.display()
-            )));
-        }
+        ensure_same_owner(&index_path, previous, &next_index)?;
         verify_owned_files(output_root, previous, desired, resumes_transaction, options)?;
     }
 
@@ -213,6 +222,26 @@ pub fn reconcile_rendered_tree_with_options(
     }
 
     Ok(next_index)
+}
+
+fn ensure_same_owner(path: &Path, actual: &RenderIndex, expected: &RenderIndex) -> Result<()> {
+    if actual.same_owner(expected) {
+        return Ok(());
+    }
+    Err(NylError::config(format!(
+        "Rendered ownership index {} belongs to target {:?}, cluster {:?}, publication {:?}@{} path {:?}; expected target {:?}, cluster {:?}, publication {:?}@{} path {:?}",
+        path.display(),
+        actual.target,
+        actual.cluster,
+        actual.publication.repository,
+        actual.publication.revision,
+        actual.publication.path_prefix,
+        expected.target,
+        expected.cluster,
+        expected.publication.repository,
+        expected.publication.revision,
+        expected.publication.path_prefix,
+    )))
 }
 
 fn is_unchanged(

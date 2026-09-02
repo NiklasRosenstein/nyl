@@ -78,6 +78,36 @@ impl GitOpsInventory {
     }
 }
 
+/// Resolve an explicitly selected DeploymentTarget, or infer the sole target.
+pub fn resolve_deployment_target_name(inventory: &GitOpsInventory, requested: Option<&str>) -> Result<String> {
+    if let Some(name) = requested {
+        let discovered = inventory
+            .get(GitOpsResourceKind::DeploymentTarget, name)
+            .ok_or_else(|| NylError::config(format!("DeploymentTarget {name:?} was not found")))?;
+        if discovered.resource.is_none() {
+            return Err(NylError::config(format!("DeploymentTarget {name:?} must be static")));
+        }
+        return Ok(name.to_owned());
+    }
+
+    let names = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::DeploymentTarget)
+        .map(|resource| resource.identity.name.as_str())
+        .collect::<Vec<_>>();
+    match names.as_slice() {
+        [] => Err(NylError::config(
+            "This operation requires a DeploymentTarget, but none are configured",
+        )),
+        [name] => Ok((*name).to_owned()),
+        _ => Err(NylError::config(format!(
+            "--target is required because multiple DeploymentTargets are configured: {}",
+            names.join(", ")
+        ))),
+    }
+}
+
 /// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources.
 ///
 /// A relative `output_subtree` is resolved beneath the project root. The

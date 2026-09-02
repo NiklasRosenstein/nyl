@@ -64,9 +64,6 @@ pub struct DiffArgs {
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
-    if args.common.target.is_none() {
-        return Err(NylError::config("nyl diff requires --target"));
-    }
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,

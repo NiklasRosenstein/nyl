@@ -320,6 +320,7 @@ data:
 #[test]
 fn test_apply_with_new_flags() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
 
     // Create minimal project structure
     fs::write(
@@ -341,7 +342,7 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // Command should parse flags, then enforce explicit target selection for live operations.
+    // Command should parse flags, then require a configured target for live operations.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
@@ -352,9 +353,9 @@ helm_chart_search_paths = ["."]
         .arg("--no-release")
         .arg("test-resource.yaml");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("nyl apply requires --target"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "requires a DeploymentTarget, but none are configured",
+    ));
 }
 
 #[test]
@@ -402,6 +403,7 @@ fn test_apply_no_release_conflicts_with_namespace() {
 #[test]
 fn test_diff_with_new_flags() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
 
     // Create minimal project structure
     fs::write(
@@ -423,7 +425,7 @@ helm_chart_search_paths = ["."]
     )
     .unwrap();
 
-    // Command should parse flags, then enforce explicit target selection for live operations.
+    // Command should parse flags, then require a configured target for live operations.
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.env("KUBECONFIG", temp.path().join("does-not-exist-kubeconfig"));
@@ -433,7 +435,7 @@ helm_chart_search_paths = ["."]
         .arg("--track-parent")
         .arg("test-resource.yaml");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("nyl diff requires --target"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "requires a DeploymentTarget, but none are configured",
+    ));
 }

@@ -7,7 +7,7 @@ Show the difference between rendered manifests and the current cluster state.
 ## Synopsis
 
 ```bash
-nyl diff --target <TARGET> [OPTIONS] <FILE>
+nyl diff [--target <TARGET>] [OPTIONS] <FILE>
 ```
 
 ## Description
@@ -27,7 +27,7 @@ For shared rendering behavior and namespace resolution details, see
 - `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - Required DeploymentTarget. Its Cluster supplies values, capabilities, destination identity, and the default kube context.
+- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 

@@ -360,9 +360,10 @@ data:
 }
 
 #[test]
-fn test_diff_command_requires_target() {
+fn test_diff_command_reports_missing_configured_target() {
     let temp = TempDir::new().unwrap();
 
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
@@ -380,15 +381,16 @@ metadata:
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("diff").arg("test-resource.yaml");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("nyl diff requires --target"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "requires a DeploymentTarget, but none are configured",
+    ));
 }
 
 #[test]
-fn test_apply_command_requires_target() {
+fn test_apply_command_reports_missing_configured_target() {
     let temp = TempDir::new().unwrap();
 
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     // Create a simple resource file
@@ -406,9 +408,9 @@ metadata:
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
     cmd.arg("apply").arg("test-resource.yaml");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("nyl apply requires --target"));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "requires a DeploymentTarget, but none are configured",
+    ));
 }
 
 #[test]

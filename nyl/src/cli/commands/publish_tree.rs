@@ -8,8 +8,8 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, Sta
 use crate::git::CredentialProvider;
 use crate::git::GitManager;
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree, GitOpsCache,
-    RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree,
+    resolve_deployment_target_name, GitOpsCache, RenderIndex, RenderIndexPublication, TreeCacheArgs,
 };
 use crate::{NylError, Result};
 
@@ -27,8 +27,9 @@ pub struct PublishTreeArgs {
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// DeploymentTarget to publish. Defaults to the sole configured target.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
     /// Commit message for a changed rendered tree.
     #[arg(long)]
     pub message: Option<String>,
@@ -39,6 +40,7 @@ pub struct PublishTreeArgs {
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
+    let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
     if dirty || source_commit.is_none() {
         return Err(NylError::config(
@@ -48,7 +50,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
-    let compiled = compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut progress).await?;
+    let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
     let publication_url = compiled
         .repository
         .publish_url
@@ -57,7 +59,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = Arc::new(CredentialProvider::new());
     if publication_is_current(&compiled, publication_url, &credentials, &cache)? {
-        println!("deployment target {} is already published", args.target);
+        println!("deployment target {target_name} is already published");
         return Ok(());
     }
     let temp = tempfile::TempDir::new()?;
@@ -78,7 +80,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         &output_root,
         &compiled.files,
         RenderIndex::new(
-            args.target.clone(),
+            target_name.clone(),
             compiled.cluster.metadata.name.clone(),
             RenderIndexPublication {
                 repository: repository_identity,
@@ -96,7 +98,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         branch,
         args.message
             .as_deref()
-            .unwrap_or(&format!("Render deployment target {}", args.target)),
+            .unwrap_or(&format!("Render deployment target {target_name}")),
     )?;
     if !args.dry_run {
         fetch_branch(&repository, publication_url, branch, &credentials)?;
@@ -108,16 +110,16 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         }
     }
     let Some(commit) = commit else {
-        println!("deployment target {} is already published", args.target);
+        println!("deployment target {target_name} is already published");
         return Ok(());
     };
     if args.dry_run {
-        println!("✓ Prepared rendered commit {commit} for {} (not pushed)", args.target);
+        println!("✓ Prepared rendered commit {commit} for {target_name} (not pushed)");
         return Ok(());
     }
 
     push_branch(&repository, publication_url, branch, expected, &credentials)?;
-    println!("✓ Published deployment target {} as commit {commit}", args.target);
+    println!("✓ Published deployment target {target_name} as commit {commit}");
     Ok(())
 }
 

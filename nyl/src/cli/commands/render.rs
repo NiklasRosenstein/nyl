@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster, ResolvedTargetCluster},
+    cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster},
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     config::ProjectConfig,
     git::is_argocd_env,
+    gitops::{discover_gitops_inventory, resolve_deployment_target_name},
     kubernetes::{KubeRsClient, ResourceKey},
     render::{cache, prepare_manifests_for_output, RenderPathMode, RenderRequest, RenderSession},
     resources::Release,
@@ -41,7 +42,7 @@ pub struct RenderOptions {
     #[arg(long, value_delimiter = ',', conflicts_with = "only_kind")]
     pub exclude_kind: Vec<String>,
 
-    /// deployment target whose values and cluster capabilities are used
+    /// Deployment target whose values and cluster capabilities are used. Diff and apply infer the sole configured target.
     #[arg(long)]
     pub target: Option<String>,
 
@@ -120,19 +121,27 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
-    let project_config = ProjectConfig::load_with_warning(None)?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let project_root = project_config
-        .file
-        .as_deref()
-        .and_then(Path::parent)
-        .unwrap_or(&current_dir);
-    let resolved_target = options
-        .common
-        .target
-        .as_deref()
-        .map(|name| resolve_target_cluster(project_root, name))
-        .transpose()?;
+    let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
+    let (project_config, project_root, resolved_target) = if options.common.target.is_some() || target_required {
+        let inventory = discover_gitops_inventory(&current_dir, None)?;
+        let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
+        let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
+        (
+            inventory.project_config.clone(),
+            inventory.project_root.clone(),
+            Some(resolved_target),
+        )
+    } else {
+        let project_config = ProjectConfig::load_with_warning(None)?;
+        let project_root = project_config
+            .file
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(&current_dir)
+            .to_path_buf();
+        (project_config, project_root, None)
+    };
 
     if resolved_target.is_some() && (options.kube_version.is_some() || !options.kube_api_versions.is_empty()) {
         return Err(NylError::config(
@@ -154,7 +163,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         )
     };
     let mut session = RenderSession::for_cli(
-        project_root,
+        &project_root,
         &project_config,
         resolved_target
             .as_ref()
@@ -163,7 +172,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         missing_capabilities_error,
     )
     .await?;
-    let render_cache = cache::RenderCache::new(project_root, options.common.cache.mode())?;
+    let render_cache = cache::RenderCache::new(&project_root, options.common.cache.mode())?;
     let _cache_reporter = render_cache.reporter();
     session.set_cache(Some(render_cache));
     let path = Path::new(&options.common.path);

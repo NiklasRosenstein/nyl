@@ -59,8 +59,15 @@ fn inventory(start_dir: &Path) -> Result<GitOpsInventory> {
 
 pub fn resolve_target_cluster(start_dir: &Path, target_name: &str) -> Result<ResolvedTargetCluster> {
     let inventory = inventory(start_dir)?;
-    let target = get_target(&inventory, target_name)?.clone();
-    let cluster = get_cluster(&inventory, target.cluster_name())?.clone();
+    resolve_target_cluster_from_inventory(&inventory, target_name)
+}
+
+pub fn resolve_target_cluster_from_inventory(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+) -> Result<ResolvedTargetCluster> {
+    let target = get_target(inventory, target_name)?.clone();
+    let cluster = get_cluster(inventory, target.cluster_name())?.clone();
     Ok(ResolvedTargetCluster { target, cluster })
 }
 

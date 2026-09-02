@@ -7,7 +7,8 @@ use similar::TextDiff;
 
 use crate::git::GitManager;
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, GitOpsCache, RenderIndex, TreeCacheArgs,
+    compile_target_tree_cached_with_observer, discover_gitops_inventory, resolve_deployment_target_name, GitOpsCache,
+    RenderIndex, TreeCacheArgs,
 };
 use crate::{NylError, Result};
 
@@ -33,8 +34,9 @@ pub struct DiffTreeArgs {
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// DeploymentTarget to diff. Defaults to the sole configured target.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
     #[arg(long, value_enum, default_value = "published")]
     pub against: DiffTreeBase,
     /// Source revision used by --against source.
@@ -56,12 +58,13 @@ pub(super) struct PublishedRenderedTree {
 
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
+    let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let desired_phase = matches!(args.against, DiffTreeBase::Source).then(|| "Desired".to_string());
     let mut desired_progress = TreeProgressReporter::new(args.progress, desired_phase);
     let desired =
-        compile_target_tree_cached_with_observer(&inventory, &args.target, &cache, &mut desired_progress).await?;
+        compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut desired_progress).await?;
     let (mut base, source_baseline) = match args.against {
         DiffTreeBase::Published => (published_tree(&desired, &cache)?, None),
         DiffTreeBase::Source => {
@@ -73,7 +76,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
                 &inventory.project_root,
                 args.source_repository.as_deref(),
                 source_ref,
-                &args.target,
+                &target_name,
                 &cache,
                 args.progress,
             )
@@ -88,19 +91,19 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
         desired_files.insert(marker, publication_marker(&desired)?);
     }
     if tree_hashes(&base) == tree_hashes(&desired_files) {
-        println!("deployment target {} has no rendered differences", args.target);
+        println!("deployment target {target_name} has no rendered differences");
         return Ok(());
     }
     let diff = format_tree_diff(&base, &desired_files);
     if diff.is_empty() {
-        println!("deployment target {} has no rendered differences", args.target);
+        println!("deployment target {target_name} has no rendered differences");
         return Ok(());
     }
     print!("{diff}");
     if args.fail_on_diff {
         Err(NylError::validation(format!(
             "deployment target {:?} has rendered differences",
-            args.target
+            target_name
         )))
     } else {
         Ok(())

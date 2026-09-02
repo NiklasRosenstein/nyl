@@ -24,11 +24,17 @@ nyl render-tree --target production --output-dir deploy --refresh
 nyl render-tree --target production --output-dir deploy --no-cache
 ```
 
+`--target` may be omitted when exactly one DeploymentTarget is configured. With
+multiple targets, Nyl requires an explicit selection and lists the available
+names. The same rule applies to `diff-tree` and `publish-tree`.
+
 `--check` renders and validates without writing files.
 By default, reconciliation rejects indexed files that are missing or differ
 from their recorded digest. `--force` warns and recreates those owned files from
 the current render. It does not overwrite unowned paths, cross ownership
 boundaries, or permit symbolic-link traversal.
+An existing ownership index is checked against the selected target before Nyl
+renders any Releases or Helm charts.
 
 `--refresh` bypasses render cache reads and repopulates successful entries.
 `--no-cache` uses ephemeral source storage and performs no persistent cache
