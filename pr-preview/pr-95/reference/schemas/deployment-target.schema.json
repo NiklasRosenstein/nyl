@@ -121,10 +121,6 @@
     "GitOpsAutomatedSyncPolicy": {
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "default": false,
-          "type": "boolean"
-        },
         "prune": {
           "default": false,
           "type": "boolean"
