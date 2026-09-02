@@ -84,7 +84,12 @@ impl TreeProgressReporter {
             || release.application_group.clone(),
             |name| format!("{}/{}", release.application_group, name),
         );
-        format!("{identity} ({})", release.source_path.display())
+        let source_path = release
+            .source_path
+            .display()
+            .to_string()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        format!("{identity} ({source_path})")
     }
 }
 
