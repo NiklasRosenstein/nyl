@@ -7,15 +7,16 @@ This file provides guidelines for AI assistants (Claude, GitHub Copilot) working
 Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Jinja2-compatible templating with MiniJinja
 - Helm chart integration
-- Multi-environment configurations (profiles)
+- Cluster- and target-aware rendered GitOps configuration
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
 - ArgoCD Application generation
+- Target-aware rendered GitOps trees, diffs, and publication
 
 **Primary Language:** Rust 1.93.0+  
 **Build System:** Cargo  
 **Task Runner:** mise  
-**Documentation:** mdbook  
+**Documentation:** Astro/Starlight
 
 ## Repository Structure
 
@@ -25,7 +26,7 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 │   ├── src/          # Source code
 │   ├── tests/        # Integration tests
 │   ├── benches/      # Benchmarks
-│   ├── book/         # mdbook documentation
+│   ├── book/         # Astro/Starlight documentation
 │   └── examples/     # Example projects
 ├── docker/           # Docker image for ArgoCD CMP
 ├── chart/            # Helm chart for ArgoCD
@@ -121,6 +122,22 @@ Current status:
 - 34 integration tests  
 - 90%+ code coverage
 
+### High-value assertions
+
+- Every test and assertion must protect a user-visible behavior, a durable
+  invariant, or an integration boundary. Be able to name the failure it would
+  catch and why that failure matters.
+- Test shared behavior once at the layer that owns it. Command integration
+  tests should cover command-specific composition instead of repeating generic
+  error-formatting assertions already covered by the error type.
+- Prefer positive assertions that define the current contract. Do not assert
+  that obsolete wording or an implementation detail is absent merely because
+  it appeared in a previous version. A negative assertion is appropriate when
+  absence is itself a durable safety, security, or compatibility invariant.
+- Regression tests should describe a reachable failure mode and its lasting
+  expected behavior. Do not accumulate assertions whose only purpose is to
+  memorialize the individual symptom of a completed change.
+
 Run tests with coverage:
 ```bash
 mise run coverage  # Generates HTML report in nyl/coverage/
@@ -178,7 +195,7 @@ fn test_operation() -> Result<()> {
 - **Functions and methods:** `snake_case` (e.g., `render_manifest`, `get_config`)
 - **Types and structs:** `PascalCase` (e.g., `HelmChart`, `GitManager`)
 - **Constants:** `SCREAMING_SNAKE_CASE` (e.g., `DEFAULT_CACHE_DIR`, `MAX_RETRIES`)
-- **Test functions:** `test_<function>_<scenario>` (e.g., `test_render_with_profile`, `test_git_clone_fails`)
+- **Test functions:** `test_<function>_<scenario>` (e.g., `test_render_with_target`, `test_git_clone_fails`)
 - **Modules:** `snake_case` (e.g., `helm_resolver`, `template_engine`)
 - **Trait names:** Descriptive nouns or adjectives in `PascalCase` (e.g., `Resolver`, `Renderable`)
 
@@ -222,6 +239,28 @@ fn test_operation() -> Result<()> {
 - **Trait Composition:** Define traits for testability and extensibility
 - **Immutability:** Prefer immutable data structures where possible
 
+### Rendered GitOps invariants
+
+- `DeploymentTarget.spec.applicationGroupSelector` matches literal
+  `ApplicationGroup.metadata.labels` before target rendering. Effective
+  `ApplicationGroup.spec.enabled` is evaluated after selection.
+- An explicit `ArgoCDInstance` makes `DeploymentTarget.spec.argocdRef` mandatory for
+  every target. With no explicit instances, each target receives an implicit
+  target-local instance using its workload Cluster and the `argocd` namespace.
+- Every enabled catalog Application recursively sources `_nyl/catalog`. Its
+  defaults require manual sync with apply-only-out-of-sync and server-side
+  apply options, cascade deletion in the foreground, and require confirmation
+  before self-pruning.
+- An ApplicationGroup has exactly one of `projectRef` and `projectTemplate`.
+  Releases may narrow their resource content but never expand a generated
+  project's namespace or cluster-resource policy.
+- Kubernetes bootstrap namespaces are externally owned unless an explicit
+  `sharedNamespaces` policy delegates ownership. Authorization to render into
+  one does not imply ownership of its Namespace object.
+- Names generated into one ArgoCDInstance namespace must be unambiguous across
+  targets. Require explicit target-qualified templates instead of silently
+  rewriting user-facing Application or AppProject names.
+
 ### Module Organization
 ```
 src/
@@ -232,12 +271,41 @@ src/
 ├── kubernetes/   # Kubernetes client (kube-rs)
 ├── resources/    # HelmChart, Component resources
 ├── git/          # Git repository management
+├── gitops/       # Rendered GitOps discovery, compilation, layout, and ownership
 ├── helm/         # Helm chart processing
 ├── components/   # Component discovery and registry
-├── profiles/     # Profile management
 ├── secrets/      # Secrets provider framework
 └── util/         # Shared utilities
 ```
+
+### Rendered GitOps invariants
+
+- Control resources use `gitops.nyl/v1` with a
+  static `apiVersion`, `kind`, and `metadata.name` envelope.
+- A Cluster describes one concrete Argo CD destination, its deterministic
+  Kubernetes capabilities, cluster-fact values, and an optional local context.
+  A DeploymentTarget binds exactly one Cluster to one publication destination.
+- Cluster values are merged recursively with target values; target values win.
+  ApplicationGroups inherit the target Cluster destination.
+- ApplicationGroup and AppProjectDefinition specs are rendered after target
+  selection, so structural templating is valid beneath the static envelope.
+- Discovery follows Git visibility across the whole project. The `config/` and
+  `applications/` paths are scaffold conventions, not lookup restrictions.
+- One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
+  repository revision must have disjoint prefixes.
+- Rendered reconciliation removes only files recorded in `_nyl/index.json` and
+  fails when owned files were modified outside Nyl. It accepts bytes from an
+  interrupted intended generation so the next run can converge, and rejects
+  symlink traversal inside the output tree.
+- Destination and additional Namespaces belong to their owning workload
+  Application by default. Shared namespace policy may instead select one
+  workload Release, a dedicated generated Application, or external ownership.
+  Workload resources may have only one Application owner per destination
+  cluster.
+- Remote source sessions expose neither secrets nor process environment and
+  reject checkout symlinks and search paths outside the remote project root.
+- Generated Argo CD Applications use ordinary recursive directory sources. CMP
+  ApplicationGenerator behavior remains a separate compatibility path.
 
 ## Common Tasks
 
@@ -291,6 +359,23 @@ src/
 - **Parallel processing:** Use `rayon` for data-parallel operations
 - **Caching:** Cache expensive operations (Git clones, Helm downloads)
 - **Profile before optimizing:** Use `cargo bench` to measure performance
+
+### Rendered GitOps cache invariants
+
+- Every value that can affect rendered bytes must enter the shared dependency
+  recorder at the layer that consumes it. This includes file content and
+  directory membership, effective target context, admitted environment and
+  secrets, resolved source identities, Kubernetes capabilities, and external
+  tool fingerprints.
+- Treat an input as non-cacheable when it cannot be observed or revalidated
+  completely. A cache hit must never depend on an assumed input.
+- Sensitive context uses the cache-local keyed fingerprint and never appears
+  raw or as a directly guessable digest in dependency records. Cache artifacts
+  can contain rendered secrets and must retain private filesystem permissions.
+- The rendered ownership index describes published ownership and provenance;
+  it is not a complete render-cache key.
+- Corrupt, incomplete, or unavailable cache state is a cache miss. It must not
+  change output semantics or turn a valid uncached render into a failure.
 
 See `BENCHMARKS.md` for detailed performance analysis.
 

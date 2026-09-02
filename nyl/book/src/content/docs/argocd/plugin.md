@@ -4,7 +4,7 @@ title: 'Plugin Installation'
 
 The Nyl ArgoCD plugin enables ArgoCD to render Nyl manifests directly from Git repositories. This guide covers plugin installation and configuration.
 
-If you do not need ArgoCD to render Nyl inputs at sync time, consider the simpler [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) workflow first. It lets ArgoCD sync ordinary YAML without installing a CMP sidecar.
+If you do not need ArgoCD to render Nyl inputs at sync time, consider the simpler [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) first. It lets ArgoCD sync ordinary YAML without installing a CMP sidecar.
 
 ## Prerequisites
 
@@ -96,13 +96,23 @@ data:
         - |
           TEMPLATE_INPUT="${ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT:-${NYL_CMP_TEMPLATE_INPUT:-}}"
           test -n "$TEMPLATE_INPUT" || { echo "NYL_CMP_TEMPLATE_INPUT is required" >&2; exit 1; }
-          nyl render "$TEMPLATE_INPUT"
+          CMP_TARGET="${ARGOCD_ENV_NYL_CMP_TARGET:-${NYL_CMP_TARGET:-}}"
+          if [ -n "$CMP_TARGET" ]; then
+            nyl render --target "$CMP_TARGET" "$TEMPLATE_INPUT"
+          else
+            nyl render "$TEMPLATE_INPUT"
+          fi
 ```
 
 `NYL_CMP_TEMPLATE_INPUT` path semantics:
 
 - Values that start with `/` are treated as repository-root-relative (for example: `/gitops/system/argocd.yaml`).
 - Values without a leading `/` are treated as relative to `spec.source.path` (recommended, usually just the file name).
+
+When an `ApplicationGenerator` is rendered with `--target`, the generated
+Application also receives the reserved `NYL_CMP_TARGET` variable. The plugin
+passes that target back to `nyl render`, so cluster capabilities and target
+values remain consistent when Argo CD renders the Application.
 
 ## Verification
 
@@ -187,13 +197,12 @@ If the plugin fails with "nyl: command not found":
 kubectl exec -it deployment/argocd-repo-server -n argocd -- nyl --version
 ```
 
-### Profile Not Found
+### Target Not Found
 
-If Nyl reports "Profile 'default' not found":
-
-1. Ensure your repository defines `[profile.default.values]` in `nyl.toml`
-2. Check the profile name matches what you're referencing
-3. Verify `nyl.toml` is in the repository root or search path
+If Nyl reports that a target cannot be found, verify the DeploymentTarget and its
+referenced Cluster are Git-visible and have static `apiVersion`, `kind`, and
+`metadata.name` fields. Also verify `nyl.toml` is discoverable from the plugin
+working directory.
 
 ## Next Steps
 

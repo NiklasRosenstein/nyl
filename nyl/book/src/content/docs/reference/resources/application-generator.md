@@ -38,7 +38,7 @@ spec:
       - spec.syncPolicy.automated.prune
 ```
 
-The ApplicationGenerator resource enables automatic generation of ArgoCD Applications from NylRelease files in a directory.
+The ApplicationGenerator resource enables automatic generation of ArgoCD Applications from Release files in a directory.
 
 Key behavior:
 - `source.path` and `source.paths` are mutually exclusive.
@@ -46,7 +46,7 @@ Key behavior:
 - Use glob selectors in `path`/`paths` when you want recursive discovery.
 - `include`/`exclude` patterns are matched against file paths relative to the repository root.
 - Source resolution can reuse a matching current local Git checkout before falling back to ArgoCD checkout reuse or Nyl's Git cache/worktree flow.
-- `NylRelease.spec.argocd.applicationOverride` is always evaluated against `allowedPaths`/`deniedPaths`.
+- `Release.spec.argocd.applicationOverride` is always evaluated against `allowedPaths`/`deniedPaths`.
 - `allowedPaths`/`deniedPaths` use dotted globs where `*` matches one segment and `**` matches multiple segments.
 - If both allow and deny match, deny wins. Ignored fields are reported in generated `Application.spec.info`.
 

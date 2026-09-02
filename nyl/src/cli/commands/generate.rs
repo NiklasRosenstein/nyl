@@ -1,8 +1,14 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::{resources::extract_nyl_release, NylError, Result};
+use crate::{
+    resources::{
+        extract_release, generate_gitops_aggregate_schema, generate_gitops_resource_schema, generate_release_schema,
+        GitOpsResourceKind, RELEASE_SCHEMA_FILENAME,
+    },
+    NylError, Result,
+};
 
 /// Generate configurations (ArgoCD Applications, etc.)
 #[derive(Args, Debug)]
@@ -51,6 +57,50 @@ pub enum GenerateSubcommand {
 pub enum SchemaSubcommand {
     /// Generate JSON schema for nyl.toml project configuration
     Config,
+
+    /// Generate JSON schema for one GitOps resource kind
+    Resource {
+        #[arg(value_enum)]
+        kind: SchemaResourceKind,
+    },
+
+    /// Generate the aggregate schema for all GitOps resource kinds
+    Gitops,
+
+    /// Write all project and GitOps schemas to a directory
+    All {
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SchemaResourceKind {
+    #[value(name = "GitRepository", alias = "git-repository", alias = "repository")]
+    GitRepository,
+    #[value(name = "Cluster", alias = "cluster")]
+    Cluster,
+    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
+    DeploymentTarget,
+    #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
+    AppProjectDefinition,
+    #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
+    ApplicationGroup,
+    #[value(name = "Release", alias = "release")]
+    Release,
+}
+
+impl SchemaResourceKind {
+    fn gitops_kind(self) -> Option<GitOpsResourceKind> {
+        match self {
+            Self::GitRepository => Some(GitOpsResourceKind::GitRepository),
+            Self::Cluster => Some(GitOpsResourceKind::Cluster),
+            Self::DeploymentTarget => Some(GitOpsResourceKind::DeploymentTarget),
+            Self::AppProjectDefinition => Some(GitOpsResourceKind::AppProjectDefinition),
+            Self::ApplicationGroup => Some(GitOpsResourceKind::ApplicationGroup),
+            Self::Release => None,
+        }
+    }
 }
 
 pub fn execute(args: GenerateArgs) -> Result<()> {
@@ -70,16 +120,61 @@ pub fn execute(args: GenerateArgs) -> Result<()> {
             &project,
             output.as_deref(),
         ),
-        GenerateSubcommand::Schema {
-            command: SchemaSubcommand::Config,
-        } => {
-            let schema = crate::config::schema::generate_project_config_schema();
-            let output = serde_json::to_string_pretty(&schema)
-                .map_err(|e| NylError::Config(format!("Failed to serialize schema JSON: {}", e)))?;
-            println!("{}", output);
-            Ok(())
-        }
+        GenerateSubcommand::Schema { command } => execute_schema(command),
     }
+}
+
+fn execute_schema(command: SchemaSubcommand) -> Result<()> {
+    match command {
+        SchemaSubcommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
+        SchemaSubcommand::Resource { kind } => print_schema(&match kind.gitops_kind() {
+            Some(kind) => generate_gitops_resource_schema(kind),
+            None => generate_release_schema(),
+        }),
+        SchemaSubcommand::Gitops => print_schema(&generate_gitops_aggregate_schema()),
+        SchemaSubcommand::All { output_dir } => write_all_schemas(&output_dir),
+    }
+}
+
+fn print_schema(schema: &serde_json::Value) -> Result<()> {
+    let output = serialize_schema(schema)?;
+    print!("{output}");
+    Ok(())
+}
+
+fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
+    serde_json::to_string_pretty(schema)
+        .map(|mut output| {
+            output.push('\n');
+            output
+        })
+        .map_err(|error| NylError::Config(format!("Failed to serialize schema JSON: {error}")))
+}
+
+fn write_all_schemas(output_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(output_dir)?;
+    write_schema(
+        &output_dir.join("nyl.schema.json"),
+        &crate::config::schema::generate_project_config_schema(),
+    )?;
+    for kind in GitOpsResourceKind::all() {
+        write_schema(
+            &output_dir.join(kind.schema_filename()),
+            &generate_gitops_resource_schema(kind),
+        )?;
+    }
+    write_schema(&output_dir.join(RELEASE_SCHEMA_FILENAME), &generate_release_schema())?;
+    write_schema(
+        &output_dir.join("gitops-resource.schema.json"),
+        &generate_gitops_aggregate_schema(),
+    )?;
+    Ok(())
+}
+
+fn write_schema(path: &Path, schema: &serde_json::Value) -> Result<()> {
+    std::fs::write(path, serialize_schema(schema)?)?;
+    println!("Generated {}", path.display());
+    Ok(())
 }
 
 fn generate_argocd_applications(
@@ -122,10 +217,10 @@ fn generate_argocd_applications(
             }
         };
 
-        // Extract NylRelease metadata
-        let (nyl_release, _) = extract_nyl_release(&manifests)?;
+        // Extract Release metadata
+        let (release, _) = extract_release(&manifests)?;
 
-        if let Some(release) = nyl_release {
+        if let Some(release) = release {
             // Generate ArgoCD Application
             let app = create_argocd_application(
                 &release,
@@ -140,14 +235,14 @@ fn generate_argocd_applications(
             applications.push(app);
         } else {
             skipped += 1;
-            tracing::warn!("Skipping {} - no NylRelease resource found", file_path.display());
+            tracing::warn!("Skipping {} - no Release resource found", file_path.display());
         }
     }
 
     if applications.is_empty() {
         tracing::warn!("No ArgoCD Applications generated");
-        tracing::info!("Files must contain a NylRelease resource to generate Applications");
-        return Err(NylError::Config("No valid NylRelease resources found".to_string()));
+        tracing::info!("Files must contain a Release resource to generate Applications");
+        return Err(NylError::Config("No valid Release resources found".to_string()));
     }
 
     // Output applications
@@ -184,9 +279,9 @@ fn generate_argocd_applications(
     Ok(())
 }
 
-/// Create an ArgoCD Application manifest from a NylRelease
+/// Create an ArgoCD Application manifest from a Release
 fn create_argocd_application(
-    release: &crate::resources::NylRelease,
+    release: &crate::resources::Release,
     file_path: &Path,
     base_dir: &str,
     repo_url: &str,
@@ -310,8 +405,8 @@ mod tests {
     #[test]
     fn test_parse_yaml_documents() {
         let yaml = r"
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: test
   namespace: default
@@ -324,23 +419,23 @@ metadata:
         let source_ctx = crate::util::SourceContext::new(std::path::PathBuf::from("test.yaml"));
         let docs = source_ctx.parse_yaml_documents(yaml).unwrap();
         assert_eq!(docs.len(), 2);
-        assert_eq!(docs[0]["kind"], "NylRelease");
+        assert_eq!(docs[0]["kind"], "Release");
         assert_eq!(docs[1]["kind"], "ConfigMap");
     }
 
     #[test]
     fn test_create_argocd_application() {
-        use crate::resources::{NylRelease, NylReleaseMetadata, NylReleaseSpec};
+        use crate::resources::{Release, ReleaseMetadata, ReleaseSpec};
         use std::env;
 
-        let release = NylRelease {
-            api_version: "nyl.niklasrosenstein.github.com/v1".to_string(),
-            kind: "NylRelease".to_string(),
-            metadata: NylReleaseMetadata {
+        let release = Release {
+            api_version: crate::constants::API_VERSION_GITOPS.to_string(),
+            kind: "Release".to_string(),
+            metadata: ReleaseMetadata {
                 name: "myapp".to_string(),
                 namespace: "production".to_string(),
             },
-            spec: NylReleaseSpec::default(),
+            spec: ReleaseSpec::default(),
         };
 
         // Create a temporary test file for the test

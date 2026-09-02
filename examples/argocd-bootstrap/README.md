@@ -22,12 +22,13 @@ export NYL_IMAGE_TAG="sha-abc1234"
 export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
 export NYL_TARGET_REVISION="HEAD"
 
-nyl apply examples/argocd-bootstrap/bootstrap.yaml
+cd examples/argocd-bootstrap
+nyl apply --target minikube bootstrap.yaml
 ```
 
 ## What Gets Deployed
 
-1. **NylRelease** – declares the `argocd` release in the `argocd` namespace.
+1. **Release** – declares the `argocd` release in the `argocd` namespace.
 2. **HelmChart** – pulls the Nyl chart from the OCI registry and renders it.
 3. **ApplicationGenerator** – creates an ArgoCD `Application` that syncs this
    directory, enabling self-management.

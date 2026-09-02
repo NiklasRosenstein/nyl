@@ -15,3 +15,9 @@ id = "f6751c05-94dd-4e42-b3a8-23c9dbe3fffd"
 type = "breaking change"
 description = "Remove the unused `nyl-profiles.yaml` profile system (including the unwired SSH kubeconfig and SSH tunnel stubs); profiles are configured through `nyl.toml`"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "177306ad-7542-4b3d-875d-f4127d14a470"
+type = "feature"
+description = "Add an exact source cache and project-wide `nyl vendor` workflow for reproducible, network-free rendered GitOps inputs"
+author = "@NiklasRosenstein"

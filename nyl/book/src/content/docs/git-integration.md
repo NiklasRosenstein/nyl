@@ -187,7 +187,7 @@ When rendered, Nyl will:
 2. Use the `main` revision
 3. Navigate to the `apps/` directory
 4. Scan for YAML files matching the include/exclude patterns
-5. Generate ArgoCD Application manifests for each NylRelease found
+5. Generate ArgoCD Application manifests for each Release found
 
 ### ApplicationGenerator Resolution Order
 

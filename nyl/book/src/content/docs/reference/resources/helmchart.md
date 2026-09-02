@@ -39,7 +39,7 @@ spec:
     # - Helm: plain HTTPS URL (e.g., "https://charts.example.com")
     # - Local: no repository, name is filesystem path
 
-  values: object            # Chart values (merged with profile values)
+  values: object            # Chart-specific values (overlaid by render values)
 ```
 
 ## Chart Reference Methods
@@ -204,20 +204,22 @@ spec:
       type: LoadBalancer
 ```
 
-### Profile Values
+### Cluster and target values
 
-Values from the active profile are automatically merged:
+Cluster and DeploymentTarget values are Nyl template inputs. They are not passed to
+Helm implicitly. This keeps strict chart schemas effective and prevents an
+unrelated target value from overriding or extending a chart's values.
 
-```toml
-[profile.production.values]
-replicas = 5
+Pass a target-aware value explicitly from the Nyl template context:
 
-[profile.production.values.resources.requests]
-cpu = "500m"
-memory = "512Mi"
+```yaml
+spec:
+  values:
+    environment: "{{ values.environment }}"
 ```
 
-Inline values take precedence over profile values.
+Helm receives only `HelmChart.spec.values`. Component resources follow the same
+rule and pass only their `spec` payload to Helm.
 
 ### Templating in Values
 
@@ -228,14 +230,14 @@ spec:
   values:
     image:
       tag: "{{ env.NYL_IMAGE_TAG }}"
-    environment: "{{ profile }}"
+    environment: "{{ values.environment }}"
 ```
 
 ## Complete Example
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: myapp
   namespace: production
@@ -286,32 +288,35 @@ spec:
     # Base values here
 ```
 
-```toml
-[profile.development.values]
-replicas = 1
-environment = "development"
-
-[profile.development.values.image]
-tag = "latest"
-
-[profile.production.values]
-replicas = 5
-environment = "production"
-
-[profile.production.values.image]
-tag = "v2.1.0"
-
-[profile.production.values.resources.requests]
-cpu = "1000m"
+```yaml
+apiVersion: gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: production
+spec:
+  clusterRef:
+    name: primary
+  values:
+    replicas: 5
+    environment: production
+    image:
+      tag: v2.1.0
+    resources:
+      requests:
+        cpu: 1000m
+  publication:
+    repository:
+      repoURL: https://git.example.com/platform/deploy.git
+    revision: deploy/production
 ```
 
 Render for specific environment:
 ```bash
-nyl render --profile production app.yaml
+nyl render --target production app.yaml
 ```
 
 ## See Also
 
 - [Git Integration](/nyl/git-integration/) - Git repository management
 - [Configuration](/nyl/configuration/) - Search paths and settings
-- [NylRelease](/nyl/reference/resources/nyl-release/) - Release metadata
+- [Release](/nyl/reference/resources/gitops/release/) - Release metadata

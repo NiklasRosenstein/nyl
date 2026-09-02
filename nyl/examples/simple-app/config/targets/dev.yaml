@@ -1,0 +1,23 @@
+apiVersion: gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  clusterRef:
+    name: local
+  values:
+    environment: dev
+    namespace: development
+    imageTag: dev-latest
+    replicas: 1
+    debug: true
+    tracing: false
+    logLevel: debug
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  publication:
+    repository:
+      repoURL: https://example.invalid/simple-app-deploy.git
+    revision: deploy/main
+    pathPrefix: dev

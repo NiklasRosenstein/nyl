@@ -1,143 +1,79 @@
 ---
-title: 'Rendered Manifest GitOps'
+title: 'Rendered Manifest Pattern'
 ---
 
-The rendered manifest pattern keeps Nyl in CI and keeps the runtime GitOps controller simple. Nyl renders your source manifests into ordinary Kubernetes YAML, and ArgoCD, Flux, or another reconciler syncs that rendered output.
+The rendered manifest pattern is the recommended Nyl deployment model. Nyl
+compiles trusted source configuration into ordinary Kubernetes YAML in a
+deployment Git revision. Argo CD reads plain recursive directories and does not
+need the Nyl CMP.
 
-## When to Use It
+## How the model fits together
 
-Use this workflow when you want:
+Kubernetes-shaped configuration resources describe the deployment:
 
-- A plain-YAML contract between generation and deployment.
-- ArgoCD or Flux to run without a custom plugin sidecar.
-- Rendered output that can be reviewed, diffed, signed, or promoted between environments.
-- A low-friction path for teams that already sync directories of Kubernetes manifests.
+1. A [`GitRepository`](/nyl/reference/resources/gitops/git-repository/) names
+   credential-free read and write coordinates.
+2. A [`Cluster`](/nyl/reference/resources/gitops/cluster/) records one concrete
+   destination and the Kubernetes capabilities used for offline rendering.
+3. A [`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/) binds that
+   Cluster to deployment values and a publication repository, revision, and
+   path prefix.
+4. An optional [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/)
+   separates the Argo CD control plane from workload destinations and owns
+   parent-catalog defaults.
+5. An [`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/)
+   declares source releases and generated Application and Namespace policy. It
+   references an AppProjectDefinition or uses `projectTemplate` to generate one.
 
-Use the [ArgoCD CMP integration](/nyl/argocd/overview/) instead when ArgoCD must render directly from Nyl inputs, discover ArgoCD repository secrets, or use `ApplicationGenerator` at sync time.
+These resources are compiler inputs. They are not installed in Kubernetes.
+`nyl render-tree` produces workload manifests, managed Namespaces, Argo CD
+AppProjects and Applications, and an ownership index. `nyl publish-tree` can
+commit that tree to the target revision.
 
-## Repository Shape
+## Quick start
 
-Keep source and rendered output separate:
-
-```text
-platform/
-├── nyl.toml
-├── apps/
-│   └── web.yaml
-├── components/
-└── rendered/
-    ├── dev/
-    │   └── web.yaml
-    └── prod/
-        └── web.yaml
-```
-
-The `apps/` directory contains the Nyl input. The `rendered/` directory contains generated Kubernetes manifests that a GitOps controller can sync with its normal directory support.
-
-## Render in CI
-
-`nyl render` writes YAML to stdout, so the CI job should redirect output to the rendered manifest location:
+Initialize a Git repository with one cluster, deployment target, AppProject, and
+ApplicationGroup:
 
 ```bash
-nyl validate --strict
-mkdir -p rendered/prod
-nyl render -p prod apps/web.yaml > rendered/prod/web.yaml
+mkdir platform && cd platform
+git init
+git remote add origin https://git.example.com/platform/deploy.git
+nyl init gitops --cluster-name production --context admin@production
 ```
 
-For CI jobs that should not talk to a cluster, use offline rendering:
+The wizard detects the Git remote and current kube context, writes a compact
+`gitops.yaml`, creates a minimal `nyl.toml` when needed, and creates the
+`applications/` source directory. See [`nyl init gitops`](/nyl/commands/init/)
+for fully non-interactive flags and stdout mode.
 
-```toml
-[project.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
-
-[profile.prod.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
-```
-
-With that metadata committed, CI can render without talking to the cluster:
+Then validate and render one target:
 
 ```bash
-nyl render --profile prod --offline apps/web.yaml > rendered/prod/web.yaml
+nyl validate gitops
+nyl target list
+nyl render-tree --target production --output-dir deploy-worktree
 ```
 
-You can still pass the values on the CLI when they are not committed:
+Seed the generated `<target>-catalog` Application once after the first publish.
+It then recursively manages the generated catalog, including itself. Generated
+Applications use ordinary Git directory sources with recursive discovery.
 
-```bash
-nyl render \
-  --profile prod \
-  --offline \
-  --kube-version 1.30.0 \
-  --kube-api-versions v1,apps/v1,batch/v1,networking.k8s.io/v1 \
-  apps/web.yaml > rendered/prod/web.yaml
-```
+## Guides
 
-You can capture the Kubernetes version and API versions from a representative cluster with Nyl:
+- [Project structure and discovery](/nyl/deployment-workflows/rendered-manifests/project-structure/)
+  explains the conventional layout, colocated groups, and remote sources.
+- [Targets and cluster variation](/nyl/deployment-workflows/rendered-manifests/targets-and-clusters/)
+  covers multiple environments, clusters, publication models, values, and
+  conditional rendering.
+- [Rendering, diffing, and publishing](/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/)
+  describes the generated tree and CI commands.
+- [Trust and admission boundaries](/nyl/deployment-workflows/rendered-manifests/security/)
+  identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
+  must enforce.
+- [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
+  documents every configuration field by resource kind.
 
-```bash
-nyl cluster-info --output csv
-```
-
-The first line is `kube_version`; the second line is the comma-separated `api_versions` value. You can also capture API versions directly with `kubectl`:
-
-```bash
-kubectl api-versions | paste -sd, -
-```
-
-That produces the comma-separated value expected by `--kube-api-versions`. In CI, either run this against the target cluster before rendering or store a checked-in value for each supported cluster version:
-
-```bash
-KUBE_API_VERSIONS="$(kubectl api-versions | paste -sd, -)"
-
-nyl render \
-  --profile prod \
-  --offline \
-  --kube-version 1.30.0 \
-  --kube-api-versions "$KUBE_API_VERSIONS" \
-  apps/web.yaml > rendered/prod/web.yaml
-```
-
-Prefer sourcing this list from Kubernetes discovery when possible, because it includes CRDs and aggregated APIs installed in the cluster. A dedicated Nyl utility command would mostly wrap this discovery step; until Nyl has one, `kubectl api-versions` is the most direct source of truth.
-
-Nyl renders one input file per command. For multiple applications, use an explicit script, Makefile target, or CI matrix so each input has a predictable output path.
-
-## Sync Rendered Output
-
-Point ArgoCD, Flux, or another reconciler at the rendered directory. With ArgoCD this is a standard directory Application, not the Nyl CMP:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: web-prod
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/example/platform.git
-    targetRevision: main
-    path: rendered/prod
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: web
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-```
-
-If you want ArgoCD to render Nyl source files directly during sync instead, use the [Nyl CMP integration](/nyl/argocd/overview/). The CMP path is useful when you need controller-side rendering, ArgoCD repository credential reuse, or `ApplicationGenerator` to run inside ArgoCD.
-
-`ApplicationGenerator` can also be run by `nyl render` outside of ArgoCD, so it is possible to generate ArgoCD `Application` manifests in CI and commit the result. Today those generated Applications are designed for the Nyl CMP workflow. To use `ApplicationGenerator` cleanly with rendered manifest GitOps, Nyl would need an option to generate standard directory Applications that point at rendered output instead of CMP-backed Nyl source files.
-
-## Review and Promotion
-
-The rendered output can be handled like any other generated artifact:
-
-- Commit rendered files back to the same repository.
-- Publish rendered files to a deployment repository.
-- Upload rendered files as CI artifacts for a separate promotion job.
-- Run policy checks, signing, or drift checks against the rendered YAML.
-
-The important boundary is that the cluster reconciler consumes rendered Kubernetes manifests. Nyl stays in the build path where failures are easier to debug and roll back.
+For direct cluster operations and debugging, see
+[CLI-first workflows](/nyl/deployment-workflows/cli-workflows/). For runtime
+rendering inside Argo CD, see the [Argo CD CMP integration](/nyl/argocd/plugin/).

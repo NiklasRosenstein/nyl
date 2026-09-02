@@ -9,26 +9,26 @@ The CLI workflow is useful when you want direct feedback from Nyl before involvi
 Render an input file locally:
 
 ```bash
-nyl render -p dev apps/web.yaml
+nyl render --target dev apps/web.yaml
 ```
 
 Filter the rendered output when you only need part of the result:
 
 ```bash
-nyl render -p dev --only-kind Deployment,Service apps/web.yaml
+nyl render --target dev --only-kind Deployment,Service apps/web.yaml
 ```
 
-Use offline mode when you want repeatable rendering without Kubernetes discovery. If `nyl.toml` defines `[project.kubernetes]` or `[profile.<name>.kubernetes]`, Nyl uses those values automatically:
+Use the target Cluster's committed capabilities for repeatable rendering
+without Kubernetes discovery:
 
 ```bash
-nyl render --profile dev --offline apps/web.yaml
+nyl render --target dev --offline apps/web.yaml
 ```
 
-You can also pass the target metadata directly on the CLI:
+For a targetless base render, pass the capabilities explicitly:
 
 ```bash
 nyl render \
-  --profile dev \
   --offline \
   --kube-version 1.30.0 \
   --kube-api-versions v1,apps/v1 \
@@ -40,13 +40,13 @@ nyl render \
 Use `nyl diff` to compare rendered manifests with live cluster state:
 
 ```bash
-nyl diff -p dev apps/web.yaml
+nyl diff --target dev apps/web.yaml
 ```
 
 For a shorter signal in automation:
 
 ```bash
-nyl diff -p dev --summary apps/web.yaml
+nyl diff --target dev --summary apps/web.yaml
 ```
 
 ## Apply Directly
@@ -54,7 +54,7 @@ nyl diff -p dev --summary apps/web.yaml
 Use `nyl apply` when direct application is intentional, such as during bootstrap or test-cluster setup:
 
 ```bash
-nyl apply -p dev apps/web.yaml
+nyl apply --target dev apps/web.yaml
 ```
 
 `nyl apply` tracks release state in Kubernetes Secrets unless `--no-release` is used. That release state allows Nyl to understand what it previously applied and helps with pruning.

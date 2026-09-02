@@ -1,10 +1,22 @@
 use clap::{Args, Subcommand};
+use dialoguer::Confirm;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
+use crate::cli::commands::cluster::{self, ClusterUpdateArgs};
 use crate::config::ProjectConfig;
+use crate::resources::GitOpsResourceKind;
+use crate::util::path_for_display;
 use crate::{NylError, Result};
+
+fn display_path(path: &Path) -> String {
+    path_for_display(path)
+        .display()
+        .to_string()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
 
 /// Create a new nyl project or component
 #[derive(Args, Debug)]
@@ -29,12 +41,324 @@ enum NewSubcommand {
         /// Component kind (e.g., MyApp)
         kind: String,
     },
+    /// Create a Kubernetes-shaped rendered GitOps configuration resource.
+    Resource(ResourceScaffoldArgs),
+    /// Create rendered GitOps configuration resources using kind-specific aliases.
+    Gitops {
+        #[command(subcommand)]
+        command: NewGitopsSubcommand,
+    },
 }
 
-pub fn execute(args: NewArgs) -> Result<()> {
+#[derive(Args, Debug, Clone)]
+struct ResourceScaffoldArgs {
+    /// Resource kind.
+    #[arg(value_enum)]
+    kind: GitOpsResourceKind,
+    /// Local resource name.
+    name: String,
+    /// Exact output file path.
+    #[arg(long, conflicts_with = "colocate")]
+    output: Option<PathBuf>,
+    /// ApplicationGroup source directory.
+    #[arg(long)]
+    source: Option<PathBuf>,
+    /// Place an ApplicationGroup in SOURCE/_application-group.yaml.
+    #[arg(long, requires = "source", conflicts_with = "output")]
+    colocate: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct AliasScaffoldArgs {
+    name: String,
+    #[arg(long, conflicts_with = "colocate")]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    source: Option<PathBuf>,
+    #[arg(long, requires = "source", conflicts_with = "output")]
+    colocate: bool,
+}
+
+#[derive(Args, Debug)]
+struct ClusterScaffoldArgs {
+    name: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Local kubeconfig context. Defaults to the Cluster name.
+    #[arg(long)]
+    context: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct RepositoryScaffoldArgs {
+    name: String,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Credential-free URL used for reads and generated Argo CD Applications.
+    #[arg(long)]
+    repo_url: String,
+    /// Optional distinct URL used for publication writes.
+    #[arg(long)]
+    publish_url: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum NewGitopsSubcommand {
+    Repository(RepositoryScaffoldArgs),
+    Cluster(ClusterScaffoldArgs),
+    #[command(name = "argocd-instance", alias = "argocd")]
+    ArgoCDInstance(AliasScaffoldArgs),
+    Target(AliasScaffoldArgs),
+    Project(AliasScaffoldArgs),
+    ApplicationGroup(AliasScaffoldArgs),
+}
+
+pub async fn execute(args: NewArgs) -> Result<()> {
     match args.command {
         NewSubcommand::Project { dir } => create_project(&dir),
         NewSubcommand::Component { api_version, kind } => create_component(&api_version, &kind),
+        NewSubcommand::Resource(args) => scaffold_resource(args, None, None, None).map(|_| ()),
+        NewSubcommand::Gitops { command } => match command {
+            NewGitopsSubcommand::Cluster(args) => scaffold_cluster(args).await,
+            NewGitopsSubcommand::Repository(args) => scaffold_repository(args),
+            NewGitopsSubcommand::ArgoCDInstance(args) => {
+                scaffold_alias_resource(GitOpsResourceKind::ArgoCDInstance, args)
+            }
+            NewGitopsSubcommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::DeploymentTarget, args),
+            NewGitopsSubcommand::Project(args) => {
+                scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args)
+            }
+            NewGitopsSubcommand::ApplicationGroup(args) => {
+                scaffold_alias_resource(GitOpsResourceKind::ApplicationGroup, args)
+            }
+        },
+    }
+}
+
+fn scaffold_alias_resource(kind: GitOpsResourceKind, args: AliasScaffoldArgs) -> Result<()> {
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind,
+            name: args.name,
+            output: args.output,
+            source: args.source,
+            colocate: args.colocate,
+        },
+        None,
+        None,
+        None,
+    )
+    .map(|_| ())
+}
+
+fn scaffold_repository(args: RepositoryScaffoldArgs) -> Result<()> {
+    crate::resources::validate_repository_coordinates(&args.repo_url, args.publish_url.as_deref())?;
+    let repository_urls = (args.repo_url.as_str(), args.publish_url.as_deref());
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::GitRepository,
+            name: args.name,
+            output: args.output,
+            source: None,
+            colocate: false,
+        },
+        None,
+        None,
+        Some(repository_urls),
+    )
+    .map(|_| ())
+}
+
+async fn scaffold_cluster(args: ClusterScaffoldArgs) -> Result<()> {
+    let context_was_explicit = args.context.is_some();
+    let context = args.context.unwrap_or_else(|| args.name.clone());
+    if context.trim().is_empty() {
+        return Err(NylError::config("--context must not be empty"));
+    }
+    let name = args.name;
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::Cluster,
+            name: name.clone(),
+            output: args.output,
+            source: None,
+            colocate: false,
+        },
+        None,
+        Some(&context),
+        None,
+    )?;
+
+    let kubeconfig = match kube::config::Kubeconfig::read() {
+        Ok(kubeconfig) => kubeconfig,
+        Err(error) => {
+            eprintln!("⚠ Could not inspect kubeconfig for context {context:?}: {error}");
+            return Ok(());
+        }
+    };
+    if !kubeconfig_has_context(&kubeconfig, &context) {
+        if context_was_explicit {
+            eprintln!("⚠ Kubernetes context {context:?} specified by --context was not found");
+        } else {
+            eprintln!(
+                "⚠ Kubernetes context {context:?} implied by the Cluster name was not found; use --context to select another context"
+            );
+        }
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    let confirmed = Confirm::new()
+        .with_prompt(format!(
+            "Update Cluster {name:?} capabilities from context {context:?} now?"
+        ))
+        .default(true)
+        .interact()
+        .map_err(|error| NylError::Other(format!("Confirmation prompt failed: {error}")))?;
+    if confirmed {
+        cluster::update(ClusterUpdateArgs {
+            name,
+            context: Some(context),
+            check: false,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+fn kubeconfig_has_context(kubeconfig: &kube::config::Kubeconfig, name: &str) -> bool {
+    kubeconfig.contexts.iter().any(|context| context.name == name)
+}
+
+fn scaffold_resource(
+    args: ResourceScaffoldArgs,
+    project_dir: Option<&Path>,
+    cluster_context: Option<&str>,
+    repository_urls: Option<(&str, Option<&str>)>,
+) -> Result<PathBuf> {
+    validate_resource_name(&args.name)?;
+    if args.kind != GitOpsResourceKind::ApplicationGroup && (args.source.is_some() || args.colocate) {
+        return Err(NylError::config(
+            "--source and --colocate are only valid for ApplicationGroup",
+        ));
+    }
+    let config = ProjectConfig::load_from_dir(None, project_dir)?;
+    let output = if let Some(output) = args.output {
+        output
+    } else if args.colocate {
+        args.source
+            .as_ref()
+            .expect("clap requires --source with --colocate")
+            .join("_application-group.yaml")
+    } else {
+        let directory = match args.kind {
+            GitOpsResourceKind::GitRepository => "repositories",
+            GitOpsResourceKind::Cluster => "clusters",
+            GitOpsResourceKind::ArgoCDInstance => "argocd-instances",
+            GitOpsResourceKind::DeploymentTarget => "targets",
+            GitOpsResourceKind::AppProjectDefinition => "projects",
+            GitOpsResourceKind::ApplicationGroup => "application-groups",
+        };
+        config
+            .get_gitops_scaffold_path()
+            .join(directory)
+            .join(format!("{}.yaml", args.name))
+    };
+    if output.exists() {
+        return Err(NylError::config(format!(
+            "Refusing to overwrite existing resource: {}",
+            display_path(&output)
+        )));
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let source = if args.colocate {
+        None
+    } else {
+        args.source.as_deref().map(|path| path.to_string_lossy())
+    };
+    let yaml = render_resource_scaffold(
+        args.kind,
+        &args.name,
+        source.as_deref(),
+        cluster_context,
+        repository_urls,
+    );
+    fs::write(&output, yaml)?;
+    println!("✓ Created {}: {}", args.kind.as_str(), display_path(&output));
+    Ok(output)
+}
+
+fn render_resource_scaffold(
+    kind: GitOpsResourceKind,
+    name: &str,
+    source: Option<&str>,
+    cluster_context: Option<&str>,
+    repository_urls: Option<(&str, Option<&str>)>,
+) -> String {
+    let schema = format!(
+        "https://niklasrosenstein.github.io/nyl/reference/schemas/{}",
+        kind.schema_filename()
+    );
+    let body = match kind {
+        GitOpsResourceKind::GitRepository => {
+            let (repo_url, publish_url) = repository_urls.map_or_else(
+                || (format!("https://example.invalid/{name}.git"), None),
+                |(repo_url, publish_url)| (repo_url.to_owned(), publish_url.map(ToOwned::to_owned)),
+            );
+            let repo_url = serde_json::to_string(&repo_url).expect("string serialization cannot fail");
+            let publish_url = publish_url.map_or_else(String::new, |publish_url| {
+                format!(
+                    "  publishURL: {}\n",
+                    serde_json::to_string(&publish_url).expect("string serialization cannot fail")
+                )
+            });
+            format!(
+                "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: {name}\nspec:\n  repoURL: {repo_url}\n{publish_url}"
+            )
+        }
+        GitOpsResourceKind::Cluster => {
+            let context = cluster_context.unwrap_or(name);
+            format!(
+                "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl cluster update {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
+            )
+        }
+        GitOpsResourceKind::ArgoCDInstance => format!(
+            "apiVersion: gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: {name}\n  namespace: argocd\n"
+        ),
+        GitOpsResourceKind::DeploymentTarget => format!(
+            "apiVersion: gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/{name}\n"
+        ),
+        GitOpsResourceKind::AppProjectDefinition => format!(
+            "apiVersion: gitops.nyl/v1\nkind: AppProjectDefinition\nmetadata:\n  name: {name}\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: {name}\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n"
+        ),
+        GitOpsResourceKind::ApplicationGroup => {
+            let source = source.map_or_else(String::new, |source| format!("  source:\n    path: {source}\n"));
+            format!(
+                "apiVersion: gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {name}\n  applicationNamespace: argocd\n{source}  destinationNamespace: default\n"
+            )
+        }
+    };
+    format!("# yaml-language-server: $schema={schema}\n{body}")
+}
+
+fn validate_resource_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && name.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(())
+    } else {
+        Err(NylError::config(format!(
+            "Resource name {name:?} must be a Kubernetes DNS subdomain"
+        )))
     }
 }
 
@@ -49,44 +373,47 @@ fn create_project(project_path: &Path) -> Result<()> {
         if toml_config.exists() {
             return Err(NylError::Config(format!(
                 "Project already exists at: {}",
-                project_path.display()
+                display_path(project_path)
             )));
         }
-        println!("✓ Using existing directory: {}", project_path.display());
+        println!("✓ Using existing directory: {}", display_path(project_path));
     } else {
         fs::create_dir_all(project_path)?;
-        println!("✓ Created project directory: {}", project_path.display());
+        println!("✓ Created project directory: {}", display_path(project_path));
     }
 
-    // Create components directory
-    let components_dir = project_path.join("components");
-    fs::create_dir(&components_dir)?;
-    println!("✓ Created components directory: {}", components_dir.display());
+    let project_directories = [
+        project_path.join("components"),
+        project_path.join("applications"),
+        project_path.join("config/repositories"),
+        project_path.join("config/clusters"),
+        project_path.join("config/argocd-instances"),
+        project_path.join("config/targets"),
+        project_path.join("config/projects"),
+        project_path.join("config/application-groups"),
+    ];
+    for directory in project_directories {
+        fs::create_dir_all(&directory)?;
+        println!("✓ Created directory: {}", display_path(&directory));
+    }
 
     let config_content = r#"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
 
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
+gitops_scaffold_path = "config"
 "#;
     let config_path = project_path.join("nyl.toml");
     fs::write(&config_path, config_content)?;
-    println!("✓ Created configuration file: {}", config_path.display());
+    println!("✓ Created configuration file: {}", display_path(&config_path));
 
-    println!("\n✓ Project created successfully at: {}", project_path.display());
+    println!("\n✓ Project created successfully at: {}", display_path(project_path));
     println!("\nNext steps:");
 
-    // Show relative path if possible, otherwise absolute path
-    if let Ok(current_dir) = std::env::current_dir() {
-        if let Ok(relative) = project_path.strip_prefix(&current_dir) {
-            if relative.as_os_str() != "." {
-                println!("  cd {}", relative.display());
-            }
-        } else {
-            println!("  cd {}", project_path.display());
-        }
-    } else {
-        println!("  cd {}", project_path.display());
+    let project_display = path_for_display(project_path);
+    if project_display != Path::new(".") {
+        println!("  cd {}", display_path(project_path));
     }
 
     println!("  nyl new component <api-version> <kind>");
@@ -115,12 +442,12 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
     if component_dir.exists() {
         return Err(NylError::Config(format!(
             "Component already exists: {}",
-            component_dir.display()
+            display_path(&component_dir)
         )));
     }
 
     fs::create_dir_all(&component_dir)?;
-    println!("✓ Created component directory: {}", component_dir.display());
+    println!("✓ Created component directory: {}", display_path(&component_dir));
 
     // Create Chart.yaml
     create_chart_yaml(&component_dir, kind)?;
@@ -136,14 +463,17 @@ fn create_component_in_dir(api_version: &str, kind: &str, project_dir: Option<&P
 
     println!("\n✓ Component '{}/{}' created successfully!", api_version, kind);
     println!("\nNext steps:");
-    println!("  Edit {}/Chart.yaml to customize metadata", component_dir.display());
+    println!(
+        "  Edit {}/Chart.yaml to customize metadata",
+        display_path(&component_dir)
+    );
     println!(
         "  Edit {}/values.yaml to define component values",
-        component_dir.display()
+        display_path(&component_dir)
     );
     println!(
         "  Edit {}/templates/deployment.yaml to customize Kubernetes resources",
-        component_dir.display()
+        display_path(&component_dir)
     );
 
     Ok(())
@@ -165,7 +495,7 @@ appVersion: "1.0"
     );
 
     fs::write(&chart_path, chart_content)?;
-    println!("✓ Created Chart.yaml: {}", chart_path.display());
+    println!("✓ Created Chart.yaml: {}", display_path(&chart_path));
     Ok(())
 }
 
@@ -194,7 +524,7 @@ resources:
 "#;
 
     fs::write(&values_path, values_content)?;
-    println!("✓ Created values.yaml: {}", values_path.display());
+    println!("✓ Created values.yaml: {}", display_path(&values_path));
     Ok(())
 }
 
@@ -243,7 +573,7 @@ fn create_values_schema(component_dir: &Path) -> Result<()> {
 "#;
 
     fs::write(&schema_path, schema_content)?;
-    println!("✓ Created values.schema.json: {}", schema_path.display());
+    println!("✓ Created values.schema.json: {}", display_path(&schema_path));
     Ok(())
 }
 
@@ -290,7 +620,10 @@ spec:
     );
 
     fs::write(&deployment_path, deployment_content)?;
-    println!("✓ Created templates/deployment.yaml: {}", deployment_path.display());
+    println!(
+        "✓ Created templates/deployment.yaml: {}",
+        display_path(&deployment_path)
+    );
     Ok(())
 }
 
@@ -309,6 +642,13 @@ mod tests {
 
         assert!(project_dir.exists());
         assert!(project_dir.join("components").exists());
+        assert!(project_dir.join("applications").exists());
+        assert!(project_dir.join("config/repositories").exists());
+        assert!(project_dir.join("config/clusters").exists());
+        assert!(project_dir.join("config/argocd-instances").exists());
+        assert!(project_dir.join("config/targets").exists());
+        assert!(project_dir.join("config/projects").exists());
+        assert!(project_dir.join("config/application-groups").exists());
         assert!(project_dir.join("nyl.toml").exists());
 
         let config_content = fs::read_to_string(project_dir.join("nyl.toml")).unwrap();
@@ -316,6 +656,7 @@ mod tests {
             .contains("#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json"));
         assert!(config_content.contains(r#"components_search_paths = ["components"]"#));
         assert!(config_content.contains(r#"helm_chart_search_paths = ["."]"#));
+        assert!(config_content.contains(r#"gitops_scaffold_path = "config""#));
     }
 
     #[test]
@@ -368,5 +709,122 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_scaffold_gitops_resources_and_refuse_overwrite() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        let args = ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::GitRepository,
+            name: "deploy".to_string(),
+            output: None,
+            source: None,
+            colocate: false,
+        };
+        scaffold_resource(args.clone(), Some(temp.path()), None, None).unwrap();
+        let path = temp.path().join("config/repositories/deploy.yaml");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("git-repository.schema.json"));
+        assert!(content.contains("kind: GitRepository"));
+        assert!(scaffold_resource(args, Some(temp.path()), None, None).is_err());
+    }
+
+    #[test]
+    fn test_scaffold_cluster_and_target_use_cluster_model() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::Cluster,
+                name: "production".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+            Some("admin@production"),
+            None,
+        )
+        .unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::DeploymentTarget,
+                name: "production".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::ArgoCDInstance,
+                name: "central".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let cluster = fs::read_to_string(temp.path().join("config/clusters/production.yaml")).unwrap();
+        assert!(cluster.contains("kind: Cluster"));
+        assert!(cluster.contains("context: admin@production"));
+        let target = fs::read_to_string(temp.path().join("config/targets/production.yaml")).unwrap();
+        assert!(target.contains("kind: DeploymentTarget"));
+        assert!(target.contains("publication:"));
+        assert!(!target.contains("clusterRef:"));
+        assert!(!target.contains("pathPrefix:"));
+        let instance = fs::read_to_string(temp.path().join("config/argocd-instances/central.yaml")).unwrap();
+        assert!(instance.contains("kind: ArgoCDInstance"));
+        assert!(instance.contains("namespace: argocd"));
+    }
+
+    #[test]
+    fn test_scaffold_colocated_application_group() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        let source = temp.path().join("applications/platform");
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::ApplicationGroup,
+                name: "platform".to_string(),
+                output: None,
+                source: Some(source.clone()),
+                colocate: true,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(source.join("_application-group.yaml").is_file());
+    }
+
+    #[test]
+    fn test_resource_name_rejects_path_traversal() {
+        assert!(validate_resource_name("../deploy").is_err());
+        assert!(validate_resource_name("Production").is_err());
+        assert!(validate_resource_name("production").is_ok());
+    }
+
+    #[test]
+    fn kubeconfig_context_lookup_is_exact() {
+        let kubeconfig = kube::config::Kubeconfig {
+            contexts: vec![kube::config::NamedContext {
+                name: "admin@production".to_string(),
+                context: None,
+            }],
+            ..Default::default()
+        };
+        assert!(kubeconfig_has_context(&kubeconfig, "admin@production"));
+        assert!(!kubeconfig_has_context(&kubeconfig, "production"));
     }
 }

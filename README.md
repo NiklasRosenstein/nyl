@@ -1,13 +1,13 @@
 # Nyl
 
-Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, profile-aware rendering, and ArgoCD integration.
+Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, cluster-aware rendering, and ArgoCD integration.
 
 ## Highlights
 
 - Component-oriented workflow (Helm chart-backed resources)
 - `RemoteManifest` resources for HTTPS-hosted YAML/JSON
 - Jinja2-compatible templating (MiniJinja)
-- Profile-based environment config (for example: `dev`, `staging`, `prod`)
+- Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
 - Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
 - ArgoCD integration via CMP container, Helm chart, and `ApplicationGenerator` resource
@@ -26,7 +26,9 @@ version_prefix = "v"
 mise install
 nyl new project platform
 cd platform
-nyl render --profile dev  # profile name is project-defined; "dev" is only an example
+nyl new gitops cluster local --context kind-kind
+nyl new gitops target dev
+nyl render --target dev apps.yaml
 ```
 
 ## Feature Examples

@@ -1,8 +1,15 @@
 pub mod apply;
-pub mod cluster_info;
+pub mod cluster;
 pub mod diff;
+pub mod diff_tree;
 pub mod generate;
+pub mod init;
 pub mod new;
+pub mod publish_tree;
 pub mod release;
 pub mod render;
+pub mod render_tree;
+pub mod source;
+pub mod target;
 pub mod validate;
+pub mod vendor;

@@ -147,6 +147,29 @@ fn test_git_manager_resolve_ref_main_branch() {
 }
 
 #[test]
+fn test_git_manager_reports_source_cache_operations() {
+    setup_test_env();
+
+    let temp_repo = TempDir::new().unwrap();
+    create_test_git_repo(temp_repo.path());
+    let git_cache_dir = TempDir::new().unwrap();
+    let render_cache_dir = TempDir::new().unwrap();
+    let render_cache =
+        nyl::render::cache::RenderCache::with_root(render_cache_dir.path(), nyl::render::cache::CacheMode::Default)
+            .unwrap();
+    let mut manager = GitManager::with_cache_dir(git_cache_dir.path()).with_render_cache(Some(render_cache.clone()));
+    let repository = path_to_file_url(temp_repo.path());
+
+    manager.resolve_ref(&repository, Some("main"), None).unwrap();
+    manager.resolve_ref(&repository, Some("main"), None).unwrap();
+
+    assert_eq!(
+        render_cache.stats().to_string(),
+        "Render statistics\n  Sources\n    Git repositories    1 cloned · 1 reused · 2 refs refreshed\n    Git worktrees       1 created · 1 reused"
+    );
+}
+
+#[test]
 fn test_git_manager_resolve_ref_with_subpath() {
     setup_test_env();
 

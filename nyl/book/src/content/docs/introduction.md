@@ -2,7 +2,7 @@
 title: 'Introduction'
 ---
 
-**Nyl** is a fast Kubernetes manifest generator for teams that want Helm integration, reusable components, profile-aware configuration, and plain Kubernetes YAML as an output.
+**Nyl** is a fast Kubernetes manifest generator for teams that want Helm integration, reusable components, cluster-aware configuration, and plain Kubernetes YAML as output.
 
 Nyl can fit into several deployment workflows:
 
@@ -15,15 +15,15 @@ Nyl can fit into several deployment workflows:
 - **Helm-backed resources** through `HelmChart` and component shortcuts.
 - **Reusable local components** with chart lookup and schema validation.
 - **Jinja2-compatible templating** via MiniJinja.
-- **Profiles** for environment-specific configuration.
+- **Clusters and targets** for deterministic capabilities, deployment values, and publication coordinates.
 - **Remote manifests** for including HTTPS-hosted YAML and JSON.
-- **Release metadata and revision tracking** through `NylRelease`.
+- **Release metadata and revision tracking** through `Release`.
 - **Render, diff, and apply commands** for local and CI workflows.
 - **ArgoCD helpers** including a CMP image, Helm chart, repository secret discovery, and `ApplicationGenerator`.
 
 ## Choosing a Workflow
 
-Start with [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) if you want the cluster-side reconciler to consume ordinary Kubernetes manifests and keep Nyl out of the runtime path.
+Start with the [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) if you want the cluster-side reconciler to consume ordinary Kubernetes manifests and keep Nyl out of the runtime path.
 
 Use [CLI-first workflows](/nyl/deployment-workflows/cli-workflows/) when you need fast local feedback, bootstrap a cluster before GitOps is available, or test a change before committing rendered output.
 

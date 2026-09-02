@@ -3,7 +3,12 @@ use nyl::cli::Cli;
 use nyl::NylError;
 use rustls::crypto::aws_lc_rs;
 use std::path::{Path, PathBuf};
-use tracing_subscriber::EnvFilter;
+use tracing_indicatif::filter::{hide_indicatif_span_fields, IndicatifFilter};
+use tracing_indicatif::IndicatifLayer;
+use tracing_subscriber::fmt::format::DefaultFields;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 #[tokio::main]
 async fn main() {
@@ -24,10 +29,17 @@ async fn main() {
         "nyl=info,kube_client::client::builder=off,warn"
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))
-        .with_writer(std::io::stderr)
-        .with_ansi(cli.color.should_use_ansi())
+    let indicatif_layer =
+        IndicatifLayer::new().with_span_field_formatter(hide_indicatif_span_fields(DefaultFields::new()));
+    let stderr_writer = indicatif_layer.get_stderr_writer();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(stderr_writer)
+                .with_ansi(cli.color.should_use_ansi())
+                .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))),
+        )
+        .with(indicatif_layer.with_filter(IndicatifFilter::new(false)))
         .init();
 
     // Execute command
@@ -91,6 +103,8 @@ fn emit_argocd_file_not_found_diagnostics(error: &NylError, render_input_path: &
         "ARGOCD_APP_REVISION",
         "ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT",
         "NYL_CMP_TEMPLATE_INPUT",
+        "ARGOCD_ENV_NYL_CMP_TARGET",
+        "NYL_CMP_TARGET",
     ] {
         match std::env::var(key) {
             Ok(value) => eprintln!("[nyl-debug] env.{key}={value}"),

@@ -49,6 +49,18 @@ Generate JSON Schema for `nyl.toml` to stdout.
 nyl generate schema config
 ```
 
+### GitOps schemas
+
+Generate one resource schema, the aggregate resource schema, or every published
+schema:
+
+```bash
+nyl generate schema resource DeploymentTarget
+nyl generate schema resource Cluster
+nyl generate schema gitops
+nyl generate schema all --output-dir book/public/reference/schemas
+```
+
 ## Relation to ApplicationGenerator
 
 The `nyl generate argocd` command is a **manual CLI tool** for one-time generation of ArgoCD Applications from a directory of Nyl releases. It's useful for:
@@ -57,23 +69,25 @@ The `nyl generate argocd` command is a **manual CLI tool** for one-time generati
 - One-off Application generation
 - CI/CD pipelines that don't use ApplicationGenerator
 
-The **ApplicationGenerator resource** is the **recommended approach** for ongoing management. It provides:
+Rendered manifest GitOps is the recommended approach for ongoing management.
+It provides:
 
-- Automatic discovery and generation during `nyl render`
-- Integration with ArgoCD plugin for GitOps
-- Declarative configuration
-- Self-hosting bootstrap pattern
+- Target-aware rendering and deterministic output ownership
+- Ordinary Argo CD directory Applications without a runtime plugin
+- Reviewable diffs and protected deployment revisions
 
 **When to use each:**
 
 | Use Case | Tool | Why |
 |----------|------|-----|
-| Bootstrap ArgoCD | ApplicationGenerator | Declarative, self-hosting |
-| Ongoing management | ApplicationGenerator | Automatic, GitOps-native |
+| Bootstrap ArgoCD | ApplicationGenerator | CMP-compatible bootstrap |
+| Ongoing management | `render-tree` | Plain rendered manifests |
 | One-time bootstrap | `nyl generate argocd` | Manual control |
 | CI/CD generation | `nyl generate argocd` | Explicit generation step |
 
-**Recommendation**: Use ApplicationGenerator for most use cases. It's processed during `nyl render` and integrates seamlessly with ArgoCD.
+See the [Rendered Manifest Pattern](/nyl/deployment-workflows/rendered-manifests/)
+for the recommended workflow. ApplicationGenerator remains available for CMP
+installations.
 
 ## See Also
 

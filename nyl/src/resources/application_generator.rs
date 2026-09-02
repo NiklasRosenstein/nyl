@@ -2,7 +2,7 @@
 ///
 /// This resource enables ArgoCD to automatically generate Application manifests
 /// from Nyl YAML files by scanning directories and creating Applications for
-/// each discovered NylRelease.
+/// each discovered Release.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -60,7 +60,7 @@ pub struct ApplicationGeneratorSpec {
     pub release_customization: Option<ReleaseCustomizationPolicy>,
 }
 
-/// Policy for project-controlled Application customization via NylRelease.
+/// Policy for project-controlled Application customization via Release.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseCustomizationPolicy {
@@ -211,7 +211,7 @@ impl ApplicationGenerator {
             }
             if matches!(
                 name.as_str(),
-                "NYL_RELEASE_NAME" | "NYL_RELEASE_NAMESPACE" | "NYL_CMP_TEMPLATE_INPUT"
+                "NYL_RELEASE_NAME" | "NYL_RELEASE_NAMESPACE" | "NYL_CMP_TEMPLATE_INPUT" | "NYL_CMP_TARGET"
             ) {
                 return Err(NylError::Config(format!(
                     "spec.source.pluginEnv cannot override reserved variable {name}"
@@ -480,6 +480,16 @@ mod tests {
 
         let error = generator.validate().unwrap_err().to_string();
         assert!(error.contains("cannot override reserved variable NYL_CMP_TEMPLATE_INPUT"));
+
+        let mut generator = create_test_generator();
+        generator
+            .spec
+            .source
+            .plugin_env
+            .insert("NYL_CMP_TARGET".to_string(), "production".to_string());
+
+        let error = generator.validate().unwrap_err().to_string();
+        assert!(error.contains("cannot override reserved variable NYL_CMP_TARGET"));
     }
 
     #[test]

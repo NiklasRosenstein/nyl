@@ -2,14 +2,19 @@ use clap::Args;
 use comfy_table::Cell;
 
 use crate::{
+    cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat, SortBy},
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
+    kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     Result,
 };
 
 /// List all releases
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// deployment target whose cluster stores the releases
+    #[arg(long)]
+    pub target: String,
+
     /// Filter by namespace (default: all namespaces)
     #[arg(short, long)]
     pub namespace: Option<String>,
@@ -37,7 +42,7 @@ pub struct ListArgs {
 
 pub async fn execute(args: ListArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);

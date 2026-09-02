@@ -1,4 +1,4 @@
-use git2::{ErrorCode, FetchOptions, Oid, Repository};
+use git2::{ErrorCode, FetchOptions, FetchPrune, Oid, Repository};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,6 +52,13 @@ impl BareRepository {
             tracing::debug!("Creating bare repository cache for {} at {}", url, path.display());
             Self::clone_bare(url, path, credential_provider.as_deref())?
         };
+
+        // Cached checkouts preserve repository bytes so ownership hashes and
+        // rendered diffs are identical on every host platform.
+        let mut config = repo.config()?;
+        config.set_bool("core.autocrlf", false)?;
+        config.set_str("core.eol", "lf")?;
+        drop(config);
 
         Ok(Self {
             repo,
@@ -113,6 +120,7 @@ impl BareRepository {
 
         let mut fetch_options = FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
+        fetch_options.prune(FetchPrune::On);
 
         let mut remote = repo.find_remote("origin").map_err(GitError::Repository)?;
         remote
@@ -254,8 +262,45 @@ mod tests {
             .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
             .unwrap();
 
-        // This test would require a real Git repository to clone from
-        // For now, just test that the structure is correct
-        assert!(!repo_path.exists());
+        let url = source_dir.path().to_string_lossy();
+        BareRepository::get_or_create(&url, &repo_path, None).unwrap();
+
+        let config = Repository::open_bare(&repo_path)
+            .unwrap()
+            .config()
+            .unwrap()
+            .snapshot()
+            .unwrap();
+        assert!(!config.get_bool("core.autocrlf").unwrap());
+        assert_eq!(config.get_str("core.eol").unwrap(), "lf");
+    }
+
+    #[test]
+    fn refreshing_refs_prunes_deleted_remote_branches() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = source_repo.index().unwrap().write_tree().unwrap();
+        let tree = source_repo.find_tree(tree_id).unwrap();
+        let commit_id = source_repo
+            .commit(Some("HEAD"), &signature, &signature, "Initial commit", &tree, &[])
+            .unwrap();
+        let commit = source_repo.find_commit(commit_id).unwrap();
+        source_repo.branch("temporary", &commit, false).unwrap();
+        drop(commit);
+        drop(tree);
+
+        let cache_dir = TempDir::new().unwrap();
+        let url = source_dir.path().to_string_lossy();
+        let bare = BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git"), None).unwrap();
+        assert_eq!(bare.resolve_ref("temporary").unwrap(), commit_id);
+
+        source_repo
+            .find_branch("temporary", git2::BranchType::Local)
+            .unwrap()
+            .delete()
+            .unwrap();
+        bare.fetch_refs().unwrap();
+        assert!(bare.resolve_ref("temporary").is_err());
     }
 }

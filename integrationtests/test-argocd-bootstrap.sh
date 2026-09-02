@@ -143,7 +143,7 @@ cd "${PROJECT_ROOT}/examples/argocd-bootstrap"
 echo "======================================="
 echo "Phase 1: Applying CRDs only"
 echo "======================================="
-nyl apply bootstrap.yaml --only-kind=CustomResourceDefinition
+nyl apply --target minikube bootstrap.yaml --only-kind=CustomResourceDefinition
 
 echo "✓ CRDs applied"
 echo ""
@@ -167,7 +167,7 @@ echo ""
 echo "======================================="
 echo "Phase 2: Applying remaining resources"
 echo "======================================="
-nyl apply bootstrap.yaml \
+nyl apply --target minikube bootstrap.yaml \
     --exclude-kind=CustomResourceDefinition \
     --append-release
 
@@ -342,17 +342,32 @@ fi
 echo "✓ Self-managed application 'argocd' found"
 echo ""
 
-echo "Syncing ArgoCD application..."
-if ! argocd app sync argocd --async; then
-    echo "ERROR: Failed to request sync"
-    echo ""
-    argocd app get argocd --show-operation
-    exit 1
+SYNC_PHASE=$(kubectl get application argocd -n "${NAMESPACE}" \
+    -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+if [ "${SYNC_PHASE}" = "Running" ]; then
+    echo "An ArgoCD sync operation is already running; waiting for it..."
+else
+    echo "Syncing ArgoCD application..."
+    if SYNC_OUTPUT=$(argocd app sync argocd --async 2>&1); then
+        printf '%s\n' "${SYNC_OUTPUT}"
+    else
+        printf '%s\n' "${SYNC_OUTPUT}" >&2
+        case "${SYNC_OUTPUT}" in
+            *"another operation is already in progress"*)
+                echo "An ArgoCD sync operation started concurrently; waiting for it..."
+                ;;
+            *)
+                echo "ERROR: Failed to request sync"
+                echo ""
+                argocd app get argocd --show-operation
+                exit 1
+                ;;
+        esac
+    fi
 fi
 
 echo "Waiting for the sync operation through the Kubernetes API..."
 SYNC_START=${SECONDS}
-SYNC_PHASE=""
 while (( SECONDS - SYNC_START < SYNC_TIMEOUT )); do
     SYNC_PHASE=$(kubectl get application argocd -n "${NAMESPACE}" \
         -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)

@@ -1,0 +1,23 @@
+apiVersion: gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: prod
+spec:
+  clusterRef:
+    name: local
+  values:
+    environment: prod
+    namespace: production
+    imageTag: v1.0.0
+    replicas: 3
+    debug: false
+    tracing: true
+    logLevel: info
+    resources:
+      requests: {cpu: 500m, memory: 512Mi}
+      limits: {cpu: 2000m, memory: 1Gi}
+  publication:
+    repository:
+      repoURL: https://example.invalid/simple-app-deploy.git
+    revision: deploy/main
+    pathPrefix: prod
