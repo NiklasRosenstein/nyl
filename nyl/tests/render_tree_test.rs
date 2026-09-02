@@ -217,7 +217,14 @@ fn renders_plain_directory_applications_and_owned_layout() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["render-tree", ".", "--output-dir", "deploy-worktree"])
+        .args([
+            "render-tree",
+            ".",
+            "--output-dir",
+            "deploy-worktree",
+            "--color",
+            "never",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
