@@ -679,6 +679,7 @@ impl ArtifactResolver {
             .map_err(|error| NylError::Process(format!("Failed to initialize Git archive compression: {error}")))?;
         let mut archive = tar::Builder::new(encoder);
         archive.mode(tar::HeaderMode::Deterministic);
+        archive.follow_symlinks(false);
         for entry in walkdir::WalkDir::new(source).follow_links(false).sort_by_file_name() {
             let entry = entry.map_err(|error| NylError::config(format!("Failed to inspect Git source: {error}")))?;
             let relative = entry
@@ -694,12 +695,9 @@ impl ArtifactResolver {
                 continue;
             }
             if entry.file_type().is_symlink() {
-                return Err(NylError::config(format!(
-                    "Vendored Git sources do not support symbolic links: {}",
-                    entry.path().display()
-                )));
-            }
-            if entry.file_type().is_dir() {
+                validate_internal_symlink(relative, entry.path())?;
+                archive.append_path_with_name(entry.path(), relative)?;
+            } else if entry.file_type().is_dir() {
                 archive.append_dir(relative, entry.path())?;
             } else if entry.file_type().is_file() {
                 archive.append_path_with_name(entry.path(), relative)?;
@@ -751,6 +749,31 @@ impl ArtifactResolver {
             cache.observe_artifact(request.clone(), artifact.clone());
         }
     }
+}
+
+fn validate_internal_symlink(archive_path: &Path, source_path: &Path) -> Result<()> {
+    let target = fs::read_link(source_path).map_err(|error| {
+        NylError::config(format!(
+            "Failed to read Git source symlink {}: {error}",
+            source_path.display()
+        ))
+    })?;
+    let mut depth = archive_path.parent().map_or(0, |parent| parent.components().count());
+    for component in target.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(NylError::config(format!(
+                    "Git source symlink {} points outside the archived tree: {}",
+                    source_path.display(),
+                    target.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn checked_relative_path(root: &Path, relative: &Path, label: &str) -> Result<PathBuf> {
@@ -1019,5 +1042,58 @@ mod tests {
             .to_string();
 
         assert!(error.contains("not present in the required vendor lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_archive_preserves_internal_relative_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        fs::write(source.path().join("CLAUDE.md"), "shared instructions\n").unwrap();
+        fs::create_dir(source.path().join(".github")).unwrap();
+        symlink("../CLAUDE.md", source.path().join(".github/copilot-instructions.md")).unwrap();
+
+        ArtifactResolver::archive_git_tree(source.path(), archive.path()).unwrap();
+        let bytes = fs::read(archive.path()).unwrap();
+        let artifact = ResolvedArtifact {
+            path: archive.path().to_path_buf(),
+            digest: sha256(&bytes),
+            format: ArtifactFormat::GitArchive,
+            resolved_ref: None,
+            origin: ArtifactOrigin::Remote,
+        };
+        let config = project_config(project.path(), "disabled");
+        let resolver = ArtifactResolver::new(project.path(), &config, None).unwrap();
+        let materialized = resolver.materialize_git(&artifact).unwrap();
+
+        assert_eq!(
+            fs::read_link(materialized.join(".github/copilot-instructions.md")).unwrap(),
+            Path::new("../CLAUDE.md")
+        );
+        assert_eq!(
+            fs::read_to_string(materialized.join(".github/copilot-instructions.md")).unwrap(),
+            "shared instructions\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_archive_rejects_symlinks_that_escape_the_source_tree() {
+        use std::os::unix::fs::symlink;
+
+        let source = TempDir::new().unwrap();
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        symlink("../../outside", source.path().join("nested/link")).unwrap();
+
+        let error = ArtifactResolver::archive_git_tree(source.path(), archive.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("points outside the archived tree"));
+        assert!(error.contains("../../outside"));
     }
 }
