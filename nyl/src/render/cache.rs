@@ -1000,6 +1000,24 @@ fn set_private_file_permissions(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn plain_stats(stats: &CacheStats) -> String {
+        let rendered = stats.to_string();
+        let mut plain = String::with_capacity(rendered.len());
+        let mut characters = rendered.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\u{1b}' && characters.next_if_eq(&'[').is_some() {
+                for control in characters.by_ref() {
+                    if ('@'..='~').contains(&control) {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(character);
+            }
+        }
+        plain
+    }
+
     #[test]
     fn artifact_corruption_is_a_safe_cache_miss() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -1062,7 +1080,7 @@ mod tests {
         );
 
         assert_eq!(
-            cache.stats().to_string(),
+            plain_stats(&cache.stats()),
             "Render statistics\n  Cache\n    Target tree         rebuilt (not cacheable: RemoteManifest: 1, remote Helm chart: 1)\n    \
              Release renders     2 reused\n    Helm renders        1 rendered (not cacheable: remote Helm chart: 1)"
         );
@@ -1076,7 +1094,7 @@ mod tests {
         cache.observe_target_hit(38, 65);
 
         assert_eq!(
-            cache.stats().to_string(),
+            plain_stats(&cache.stats()),
             "Render statistics\n  Cache\n    Target tree         reused\n    Release renders     38 avoided\n    Helm renders        65 avoided"
         );
     }
@@ -1093,7 +1111,7 @@ mod tests {
         cache.observe(CacheLayer::Release, CacheOutcome::Stored, &[]);
 
         assert_eq!(
-            cache.stats().to_string(),
+            plain_stats(&cache.stats()),
             "Render statistics\n  Cache\n    Release renders     3 reused · 1 rendered\n    Helm renders        5 avoided"
         );
     }
@@ -1115,7 +1133,7 @@ mod tests {
         }
 
         assert_eq!(
-            cache.stats().to_string(),
+            plain_stats(&cache.stats()),
             "Render statistics\n  Sources\n    Remote manifests    1 downloaded\n    Helm charts         1 pulled\n    Git repositories    2 reused · 1 ref refreshed\n    Git worktrees       1 reused"
         );
     }

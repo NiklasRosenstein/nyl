@@ -167,42 +167,8 @@ mod tests {
     }
 
     #[test]
-    fn test_color_choice_apply_always() {
-        // Save current state
-        let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-
-        ColorChoice::Always.apply();
-        // When set to always, colored output should be enabled
-        assert!(colored::control::SHOULD_COLORIZE.should_colorize());
-
-        // Restore to auto to avoid interfering with other tests
-        colored::control::unset_override();
-
-        // Best effort restoration - may not be exact if initial was based on TTY
-        let _ = initial;
-    }
-
-    #[test]
-    fn test_color_choice_apply_never() {
-        // Save current state
-        let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-
-        ColorChoice::Never.apply();
-        // When set to never, colored output should be disabled
-        assert!(!colored::control::SHOULD_COLORIZE.should_colorize());
-
-        // Restore to auto to avoid interfering with other tests
-        colored::control::unset_override();
-
-        // Best effort restoration - may not be exact if initial was based on TTY
-        let _ = initial;
-    }
-
-    #[test]
-    fn test_color_choice_apply_auto() {
-        ColorChoice::Auto.apply();
-        // When set to auto, the result depends on TTY detection
-        // We just verify it doesn't panic and respects the default behavior
-        let _ = colored::control::SHOULD_COLORIZE.should_colorize();
+    fn explicit_color_choices_have_deterministic_ansi_policy() {
+        assert!(ColorChoice::Always.should_use_ansi());
+        assert!(!ColorChoice::Never.should_use_ansi());
     }
 }
