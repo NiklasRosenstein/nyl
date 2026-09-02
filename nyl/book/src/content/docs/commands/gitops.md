@@ -100,8 +100,14 @@ nyl publish-tree --target production --no-cache
 ```
 
 The source worktree must be clean and committed. Nyl clones the destination
-branch, reconciles indexed files, commits the result, fetches the branch again,
-and refuses to push when its remote tip changed.
+branch into a clean checkout, reconciles indexed files, stages only the selected
+target prefix, commits the result, fetches the branch again, and refuses to push
+when its remote tip changed. A publication branch that does not exist starts as
+an empty branch rather than inheriting the repository's default branch.
+
+Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
+`GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
+`NYL_GIT_AUTHOR_NAME` and `NYL_GIT_AUTHOR_EMAIL` for a Nyl-specific override.
 
 See [Rendering, diffing, and publishing](/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/)
 for CI patterns and rendered layout. The

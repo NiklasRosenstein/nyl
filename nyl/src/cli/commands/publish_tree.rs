@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
-use git2::build::RepoBuilder;
-use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, Signature, StatusOptions};
+use git2::build::{CheckoutBuilder, RepoBuilder};
+use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Signature, StatusOptions};
 
 use crate::git::CredentialProvider;
 use crate::git::GitManager;
@@ -93,9 +93,13 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         ),
     )?;
 
+    let author_repository = Repository::discover(&inventory.project_root)
+        .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;
     let commit = commit_worktree(
         &repository,
+        &author_repository,
         branch,
+        &output_root,
         args.message
             .as_deref()
             .unwrap_or(&format!("Render deployment target {target_name}")),
@@ -188,22 +192,30 @@ fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialPr
         .fetch_options(fetch)
         .clone(url, path)
         .map_err(|error| NylError::config(format!("Failed to clone {url}: {error}")))?;
-    let commit = if let Some(oid) = remote_branch_oid(&repository, branch) {
-        repository.find_commit(oid).map_err(crate::git::GitError::from)?
+    if let Some(oid) = remote_branch_oid(&repository, branch) {
+        let commit = repository.find_commit(oid).map_err(crate::git::GitError::from)?;
+        repository
+            .branch(branch, &commit, true)
+            .map_err(crate::git::GitError::from)?;
+        repository
+            .set_head(&format!("refs/heads/{branch}"))
+            .map_err(crate::git::GitError::from)?;
+        repository
+            .reset(commit.as_object(), ResetType::Hard, None)
+            .map_err(crate::git::GitError::from)?;
     } else {
         repository
-            .head()
-            .and_then(|head| head.peel_to_commit())
-            .map_err(crate::git::GitError::from)?
-    };
-    repository
-        .branch(branch, &commit, true)
-        .map_err(crate::git::GitError::from)?;
-    repository
-        .set_head(&format!("refs/heads/{branch}"))
-        .map_err(crate::git::GitError::from)?;
-    repository.checkout_head(None).map_err(crate::git::GitError::from)?;
-    drop(commit);
+            .set_head(&format!("refs/heads/{branch}"))
+            .map_err(crate::git::GitError::from)?;
+        let mut index = repository.index().map_err(crate::git::GitError::from)?;
+        index.clear().map_err(crate::git::GitError::from)?;
+        index.write().map_err(crate::git::GitError::from)?;
+        let mut checkout = CheckoutBuilder::new();
+        checkout.force().remove_untracked(true).remove_ignored(true);
+        repository
+            .checkout_index(Some(&mut index), Some(&mut checkout))
+            .map_err(crate::git::GitError::from)?;
+    }
     Ok(repository)
 }
 
@@ -214,9 +226,30 @@ fn remote_branch_oid(repository: &Repository, branch: &str) -> Option<git2::Oid>
         .and_then(|reference| reference.target())
 }
 
-fn commit_worktree(repository: &Repository, branch: &str, message: &str) -> Result<Option<git2::Oid>> {
+fn commit_worktree(
+    repository: &Repository,
+    author_repository: &Repository,
+    branch: &str,
+    output_root: &Path,
+    message: &str,
+) -> Result<Option<git2::Oid>> {
+    let worktree = repository
+        .workdir()
+        .ok_or_else(|| NylError::config("Publication repository has no worktree"))?;
+    let canonical_worktree = worktree.canonicalize()?;
+    let canonical_output_root = output_root.canonicalize()?;
+    let output_pathspec = canonical_output_root.strip_prefix(&canonical_worktree).map_err(|_| {
+        NylError::config(format!(
+            "Rendered output {} is outside publication worktree {}",
+            output_root.display(),
+            worktree.display()
+        ))
+    })?;
     let mut status_options = StatusOptions::new();
     status_options.include_untracked(true).recurse_untracked_dirs(true);
+    if !output_pathspec.as_os_str().is_empty() {
+        status_options.pathspec(output_pathspec);
+    }
     let statuses = repository
         .statuses(Some(&mut status_options))
         .map_err(|error| NylError::config(format!("Failed to inspect rendered worktree: {error}")))?;
@@ -224,22 +257,25 @@ fn commit_worktree(repository: &Repository, branch: &str, message: &str) -> Resu
         return Ok(None);
     }
     let mut index = repository.index().map_err(crate::git::GitError::from)?;
-    index
-        .add_all(["*"], IndexAddOption::DEFAULT, None)
-        .map_err(crate::git::GitError::from)?;
-    index.update_all(["*"], None).map_err(crate::git::GitError::from)?;
+    if output_pathspec.as_os_str().is_empty() {
+        index
+            .add_all(["*"], IndexAddOption::DEFAULT, None)
+            .map_err(crate::git::GitError::from)?;
+        index.update_all(["*"], None).map_err(crate::git::GitError::from)?;
+    } else {
+        index
+            .add_all([output_pathspec], IndexAddOption::DEFAULT, None)
+            .map_err(crate::git::GitError::from)?;
+        index
+            .update_all([output_pathspec], None)
+            .map_err(crate::git::GitError::from)?;
+    }
     index.write().map_err(crate::git::GitError::from)?;
     let tree_id = index.write_tree().map_err(crate::git::GitError::from)?;
     let tree = repository.find_tree(tree_id).map_err(crate::git::GitError::from)?;
-    let parent = repository
-        .head()
-        .and_then(|head| head.peel_to_commit())
-        .map_err(crate::git::GitError::from)?;
-    let signature = Signature::now(
-        &std::env::var("NYL_GIT_AUTHOR_NAME").unwrap_or_else(|_| "Nyl GitOps".to_string()),
-        &std::env::var("NYL_GIT_AUTHOR_EMAIL").unwrap_or_else(|_| "nyl@localhost".to_string()),
-    )
-    .map_err(crate::git::GitError::from)?;
+    let parent = repository.head().ok().and_then(|head| head.peel_to_commit().ok());
+    let parents = parent.iter().collect::<Vec<_>>();
+    let signature = publication_signature(author_repository)?;
     let oid = repository
         .commit(
             Some(&format!("refs/heads/{branch}")),
@@ -247,10 +283,57 @@ fn commit_worktree(repository: &Repository, branch: &str, message: &str) -> Resu
             &signature,
             message,
             &tree,
-            &[&parent],
+            &parents,
         )
         .map_err(crate::git::GitError::from)?;
     Ok(Some(oid))
+}
+
+fn publication_signature(repository: &Repository) -> Result<Signature<'static>> {
+    configured_publication_signature(
+        repository,
+        std::env::var("NYL_GIT_AUTHOR_NAME").ok().as_deref(),
+        std::env::var("NYL_GIT_AUTHOR_EMAIL").ok().as_deref(),
+        std::env::var("GIT_AUTHOR_NAME").ok().as_deref(),
+        std::env::var("GIT_AUTHOR_EMAIL").ok().as_deref(),
+    )
+}
+
+fn configured_publication_signature(
+    repository: &Repository,
+    nyl_name: Option<&str>,
+    nyl_email: Option<&str>,
+    git_name: Option<&str>,
+    git_email: Option<&str>,
+) -> Result<Signature<'static>> {
+    let configured = repository.signature().ok();
+    let name = nyl_name
+        .or(git_name)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            configured
+                .as_ref()
+                .and_then(|signature| signature.name().map(ToOwned::to_owned))
+        })
+        .ok_or_else(|| {
+            NylError::config(
+                "Git author name is not configured; set user.name, GIT_AUTHOR_NAME, or NYL_GIT_AUTHOR_NAME",
+            )
+        })?;
+    let email = nyl_email
+        .or(git_email)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            configured
+                .as_ref()
+                .and_then(|signature| signature.email().map(ToOwned::to_owned))
+        })
+        .ok_or_else(|| {
+            NylError::config(
+                "Git author email is not configured; set user.email, GIT_AUTHOR_EMAIL, or NYL_GIT_AUTHOR_EMAIL",
+            )
+        })?;
+    Ok(Signature::now(&name, &email).map_err(crate::git::GitError::from)?)
 }
 
 fn fetch_branch(repository: &Repository, url: &str, branch: &str, credentials: &CredentialProvider) -> Result<()> {
@@ -299,10 +382,120 @@ fn push_branch(
 mod tests {
     use super::*;
 
+    fn commit_initial(repository: &Repository) -> git2::Oid {
+        let mut index = repository.index().unwrap();
+        index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let signature = Signature::now("Initial", "initial@example.invalid").unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "Initial", &tree, &[])
+            .unwrap()
+    }
+
     #[test]
     fn accepts_only_branch_revisions() {
         assert_eq!(writable_branch_name("deploy/main").unwrap(), "deploy/main");
         assert_eq!(writable_branch_name("refs/heads/deploy/main").unwrap(), "deploy/main");
         assert!(writable_branch_name("refs/tags/v1").is_err());
+    }
+
+    #[test]
+    fn publication_checkout_and_commit_are_scoped_to_the_rendered_tree() {
+        let source = tempfile::TempDir::new().unwrap();
+        let source_repository = Repository::init(source.path()).unwrap();
+        let mut source_config = source_repository.config().unwrap();
+        source_config.set_str("user.name", "Configured Author").unwrap();
+        source_config.set_str("user.email", "author@example.invalid").unwrap();
+        std::fs::write(source.path().join("source.txt"), "source branch\n").unwrap();
+        let initial = commit_initial(&source_repository);
+
+        std::fs::remove_file(source.path().join("source.txt")).unwrap();
+        std::fs::create_dir_all(source.path().join("deploy")).unwrap();
+        std::fs::write(source.path().join("deploy/old.yaml"), "old\n").unwrap();
+        let mut index = source_repository.index().unwrap();
+        index.clear().unwrap();
+        index.add_path(Path::new("deploy/old.yaml")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = source_repository.find_tree(tree_id).unwrap();
+        let signature = Signature::now("Initial", "initial@example.invalid").unwrap();
+        source_repository
+            .commit(
+                Some("refs/heads/deploy/main"),
+                &signature,
+                &signature,
+                "Deploy",
+                &tree,
+                &[&source_repository.find_commit(initial).unwrap()],
+            )
+            .unwrap();
+
+        let checkout = tempfile::TempDir::new().unwrap();
+        let repository = clone_branch(
+            source.path().to_str().unwrap(),
+            "deploy/main",
+            checkout.path(),
+            &CredentialProvider::new(),
+        )
+        .unwrap();
+        assert!(!checkout.path().join("source.txt").exists());
+        assert!(checkout.path().join("deploy/old.yaml").is_file());
+        assert!(repository.statuses(None).unwrap().is_empty());
+
+        std::fs::write(checkout.path().join("unrelated.txt"), "do not stage\n").unwrap();
+        std::fs::write(checkout.path().join("deploy/new.yaml"), "new\n").unwrap();
+        let commit = commit_worktree(
+            &repository,
+            &source_repository,
+            "deploy/main",
+            &checkout.path().join("deploy"),
+            "Render",
+        )
+        .unwrap()
+        .unwrap();
+        let commit = repository.find_commit(commit).unwrap();
+        assert_eq!(commit.author().name(), Some("Configured Author"));
+        assert_eq!(commit.author().email(), Some("author@example.invalid"));
+        assert!(commit.tree().unwrap().get_path(Path::new("deploy/new.yaml")).is_ok());
+        assert!(commit.tree().unwrap().get_path(Path::new("unrelated.txt")).is_err());
+    }
+
+    #[test]
+    fn absent_publication_branch_starts_with_an_empty_worktree() {
+        let source = tempfile::TempDir::new().unwrap();
+        let source_repository = Repository::init(source.path()).unwrap();
+        std::fs::write(source.path().join("source.txt"), "source branch\n").unwrap();
+        commit_initial(&source_repository);
+
+        let checkout = tempfile::TempDir::new().unwrap();
+        let repository = clone_branch(
+            source.path().to_str().unwrap(),
+            "deploy/new",
+            checkout.path(),
+            &CredentialProvider::new(),
+        )
+        .unwrap();
+        assert!(!checkout.path().join("source.txt").exists());
+        assert!(repository.statuses(None).unwrap().is_empty());
+        assert!(repository.head().is_err());
+    }
+
+    #[test]
+    fn nyl_author_override_takes_precedence_over_git_identity() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let repository = Repository::init(temporary.path()).unwrap();
+        let mut config = repository.config().unwrap();
+        config.set_str("user.name", "Configured Author").unwrap();
+        config.set_str("user.email", "author@example.invalid").unwrap();
+        let signature = configured_publication_signature(
+            &repository,
+            Some("Nyl Override"),
+            Some("nyl@example.invalid"),
+            Some("Git Environment"),
+            Some("git@example.invalid"),
+        )
+        .unwrap();
+        assert_eq!(signature.name(), Some("Nyl Override"));
+        assert_eq!(signature.email(), Some("nyl@example.invalid"));
     }
 }
