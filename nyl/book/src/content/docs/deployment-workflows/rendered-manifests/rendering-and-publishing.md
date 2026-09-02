@@ -117,7 +117,7 @@ refresh it explicitly with `nyl vendor sync --refresh`.
 Projects can commit every remote renderer input needed by one or more targets.
 This includes RemoteManifest response bytes, packaged Helm repository and OCI
 charts, and deterministic Git snapshots used by Git charts, remote
-ApplicationGroups, and ApplicationGenerators. Configure the project-wide
+ApplicationGroups. Configure the project-wide
 policy in [`nyl.toml`](/nyl/configuration/#remote-artifact-vendoring), then run:
 
 ```bash

@@ -151,8 +151,6 @@ examples/
 - `CloneFailed`: Network and credentials check
 - `RefNotFound`: Git ls-remote suggestion
 - `AuthenticationFailed`: SSH/HTTPS specific guidance
-- `CredentialNotFound`: ArgoCD secret creation help
-- `ArgoCDSecretQueryFailed`: RBAC permission hints
 
 **Helper Methods**:
 - `is_config_error()` - Check if configuration-related
@@ -174,7 +172,7 @@ NylError::kubernetes("message")
 
 **Test Statistics**:
 - **Unit Tests**: 227 tests
-- **Integration Tests**: 20 tests (error handling, util, git, argocd)
+- **Integration Tests**: Error handling, utilities, Git, rendering, and CLI behavior
 - **Total**: 247+ tests
 - **Coverage**: Estimated >85%
 

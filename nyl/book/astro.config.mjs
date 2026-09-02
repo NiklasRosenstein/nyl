@@ -38,7 +38,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Nyl",
-      description: "A fast Kubernetes manifest generator for rendered manifest GitOps, CLI workflows, and ArgoCD CMP integration.",
+      description: "A fast Kubernetes manifest generator for rendered manifest GitOps and CLI workflows.",
       social: [
         {
           icon: "github",
@@ -114,24 +114,12 @@ export default defineConfig({
           ],
         },
         {
-          label: "ArgoCD Integration",
-          items: [
-            "argocd/overview",
-            "argocd/plugin",
-            "argocd/bootstrapping",
-            "argocd/application-generator",
-            "argocd/repository-secrets",
-            "argocd/best-practices",
-          ],
-        },
-        {
           label: "Reference",
           items: [
             "reference/resources",
             "reference/resources/component",
             "reference/resources/helmchart",
             "reference/resources/remote-manifest",
-            "reference/resources/application-generator",
             "reference/kyverno-policies",
           ],
         },

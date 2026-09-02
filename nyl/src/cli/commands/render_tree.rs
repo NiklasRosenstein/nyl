@@ -7,9 +7,9 @@ use colored::Colorize;
 use git2::{Repository, StatusOptions};
 
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree_with_options,
-    resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache, ReconcileOptions, RenderIndex,
-    RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
+    reconcile_rendered_tree_with_options, resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache,
+    ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -44,6 +44,10 @@ pub struct RenderTreeArgs {
     /// Recreate missing owned files and replace owned files modified outside Nyl.
     #[arg(long, conflicts_with = "check")]
     pub force: bool,
+
+    /// Allow project secrets and NYL_* environment variables to affect rendered output.
+    #[arg(long)]
+    pub allow_secret_inputs: bool,
 }
 
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
@@ -88,7 +92,16 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
-    let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
+    let compiled = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut progress,
+        TreeRenderOptions {
+            allow_secret_inputs: args.allow_secret_inputs,
+        },
+    )
+    .await?;
     if args.check {
         let target = target_name.as_str().cyan().bold();
         println!(

@@ -10,7 +10,6 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 - Cluster- and target-aware rendered GitOps configuration
 - Git repository support with authentication
 - Kubernetes client integration (kubectl diff/apply)
-- ArgoCD Application generation
 - Target-aware rendered GitOps trees, diffs, and publication
 
 **Primary Language:** Rust 1.93.0+  
@@ -28,8 +27,7 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 │   ├── benches/      # Benchmarks
 │   ├── book/         # Astro/Starlight documentation
 │   └── examples/     # Example projects
-├── docker/           # Docker image for ArgoCD CMP
-├── chart/            # Helm chart for ArgoCD
+├── docker/           # CI rendering image with Nyl and supporting tools
 ├── examples/         # Top-level examples
 └── .github/          # CI/CD workflows
 ```
@@ -307,8 +305,10 @@ src/
   cluster.
 - Remote source sessions expose neither secrets nor process environment and
   reject checkout symlinks and search paths outside the remote project root.
-- Generated Argo CD Applications use ordinary recursive directory sources. CMP
-  ApplicationGenerator behavior remains a separate compatibility path.
+- Tree commands exclude project secrets and process environment unless the
+  invocation explicitly allows secret inputs. Remote source sessions remain
+  restricted when that option is enabled.
+- Generated Argo CD Applications use ordinary recursive directory sources.
 
 ## Common Tasks
 

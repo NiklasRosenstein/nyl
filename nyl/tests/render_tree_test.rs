@@ -2069,7 +2069,7 @@ fn additional_namespace_is_synthesized_when_missing() {
 }
 
 #[test]
-fn release_include_adds_plain_manifest_to_rendered_tree() {
+fn release_include_preserves_explicit_secret_manifest() {
     let fixture = fixture();
     let release_path = fixture.path().join("applications/workloads/api.yaml");
     let release = fs::read_to_string(&release_path).unwrap().replace(
@@ -2099,6 +2099,7 @@ fn release_include_adds_plain_manifest_to_rendered_tree() {
         .success();
 
     let resources = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    assert!(resources.contains("kind: Secret"));
     assert!(resources.contains("name: included"));
 }
 

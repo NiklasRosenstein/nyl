@@ -33,7 +33,7 @@ spec:
 | `spec.include` | No | `[]` | Additional manifest paths or glob patterns relative to this file. |
 | `spec.additionalNamespaces` | No | `[]` | Extra namespaces available to rendered resources. Ownership follows ApplicationGroup namespace policy. |
 | `spec.stripEmptyMetadataLabels` | No | Project setting | Controls empty `metadata.labels` removal. |
-| `spec.argocd.applicationOverride` | No | — | Partial generated Application override, subject to the group or generator customization policy. |
+| `spec.argocd.applicationOverride` | No | — | Partial generated Application override, subject to the ApplicationGroup customization policy. |
 
 Namespace names must be valid Kubernetes namespace names and entries in
 `additionalNamespaces` must be unique.
@@ -54,8 +54,8 @@ Release file. Patterns may select nested files with wildcards such as
 
 Included files use the normal rendering pipeline and may contain Kubernetes
 resources, Components, HelmCharts, RemoteManifests, or render-time policies.
-The same bundle behavior is used by `render`, `apply`, `diff`, the Argo CD CMP,
-and rendered-tree compilation.
+The same bundle behavior is used by `render`, `apply`, `diff`, and rendered-tree
+compilation.
 
 ```text
 applications/api/
@@ -115,7 +115,7 @@ the runtime authorization boundary.
 ## Argo CD customization
 
 `spec.argocd.applicationOverride` is applied only to fields permitted by the
-ApplicationGroup or ApplicationGenerator release-customization policy. Plain
+ApplicationGroup release-customization policy. Plain
 keys replace values. A `+` prefix appends to supported list-valued fields while
 policy checks use the canonical field name.
 
@@ -147,5 +147,4 @@ when their command-specific name and namespace inputs are supplied.
 See also:
 
 - [ApplicationGroup](/nyl/reference/resources/gitops/application-group/)
-- [ApplicationGenerator](/nyl/reference/resources/application-generator/)
 - [`nyl release`](/nyl/commands/release/)

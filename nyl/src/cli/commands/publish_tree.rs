@@ -9,9 +9,9 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Sig
 use crate::git::CredentialProvider;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, reconcile_rendered_tree,
     resolve_deployment_target_name, CompiledTargetTree, GitOpsCache, GitOpsInventory, RenderIndex,
-    RenderIndexPublication, TreeCacheArgs, TreeRenderObserver,
+    RenderIndexPublication, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
 };
 use crate::{NylError, Result};
 
@@ -39,13 +39,23 @@ pub struct PublishTreeArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    #[command(flatten)]
+    source: PublishTreeSourceArgs,
+}
+
+#[derive(Args, Debug)]
+struct PublishTreeSourceArgs {
     /// Publish the working-tree render even when it differs from the committed revision.
     #[arg(long, conflicts_with = "require_clean")]
-    pub allow_dirty: bool,
+    allow_dirty: bool,
 
     /// Require the entire source worktree to be clean before rendering.
     #[arg(long, conflicts_with = "allow_dirty")]
-    pub require_clean: bool,
+    require_clean: bool,
+
+    /// Allow project secrets and NYL_* environment variables to affect rendered output.
+    #[arg(long)]
+    allow_secret_inputs: bool,
 }
 
 struct PublicationProvenance<'a> {
@@ -143,7 +153,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             "publish-tree requires the source worktree to have a committed revision",
         ));
     };
-    if dirty && args.require_clean {
+    if dirty && args.source.require_clean {
         return Err(NylError::config(
             "publish-tree --require-clean requires a clean source worktree",
         ));
@@ -151,9 +161,29 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
-    let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
-    let clean = if dirty && !args.allow_dirty {
-        Some(compile_clean_head(&inventory, &compiled, &target_name, &source_commit, &cache).await?)
+    let render_options = TreeRenderOptions {
+        allow_secret_inputs: args.source.allow_secret_inputs,
+    };
+    let compiled = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut progress,
+        render_options,
+    )
+    .await?;
+    let clean = if dirty && !args.source.allow_dirty {
+        Some(
+            compile_clean_head(
+                &inventory,
+                &compiled,
+                &target_name,
+                &source_commit,
+                &cache,
+                render_options,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -279,6 +309,7 @@ async fn compile_clean_head(
     target_name: &str,
     source_commit: &str,
     cache: &GitOpsCache,
+    render_options: TreeRenderOptions,
 ) -> Result<CleanHeadCompilation> {
     let (worktree, project_root) = CleanHeadWorktree::create(&working_inventory.project_root, source_commit)?;
     let inventory = discover_gitops_inventory(&project_root, None).map_err(|error| {
@@ -296,15 +327,21 @@ async fn compile_clean_head(
         )
     })?;
     let mut observer = SilentTreeRenderObserver;
-    let compiled = compile_target_tree_cached_with_observer(&inventory, target_name, cache, &mut observer)
-        .await
-        .map_err(|error| {
-            dirty_verification_failure(
-                target_name,
-                source_commit,
-                format!("could not render the committed target: {error}"),
-            )
-        })?;
+    let compiled = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        target_name,
+        cache,
+        &mut observer,
+        render_options,
+    )
+    .await
+    .map_err(|error| {
+        dirty_verification_failure(
+            target_name,
+            source_commit,
+            format!("could not render the committed target: {error}"),
+        )
+    })?;
     let differences = compilation_differences(working, &compiled)?;
     if !differences.is_empty() {
         return Err(NylError::config(format!(

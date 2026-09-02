@@ -28,77 +28,6 @@ Each test is a standalone bash script that:
 
 ```bash
 ./test-kind-filtering-append-release.sh
-./test-argocd-bootstrap.sh
-./test-argocd-credential-lookup-local.sh
-```
-
-### Run ArgoCD credential lookup test (opt-in)
-
-This test validates in-cluster ArgoCD repository secret discovery and requires
-access to a private repository.
-
-```bash
-TEST_REPO_URL="https://github.com/your-org/your-private-repo.git" \
-TEST_REPO_USERNAME="your-username" \
-TEST_REPO_PASSWORD="your-token" \
-./test-argocd-credential-lookup-local.sh
-```
-
-By default, the test uses `debian:bookworm-slim` as runner pod image and
-uses a statically linked musl `nyl` binary (no libc runtime packages required).
-
-The `nyl` binary is auto-detected from cargo target directories (newest of):
-- `target/x86_64-unknown-linux-musl/debug/nyl`
-- `target/x86_64-unknown-linux-musl/release/nyl`
-- `nyl/target/x86_64-unknown-linux-musl/debug/nyl`
-- `nyl/target/x86_64-unknown-linux-musl/release/nyl`
-- `target/debug/nyl`
-- `target/release/nyl`
-- `nyl/target/debug/nyl`
-- `nyl/target/release/nyl`
-
-Override with `NYL_BIN=/path/to/nyl` or `RUNNER_IMAGE=...` if needed.
-By default, the test now runs:
-
-```bash
-cargo build -p nyl --target x86_64-unknown-linux-musl
-```
-
-The script automatically:
-- ensures rust target `x86_64-unknown-linux-musl` is installed (`rustup target add ...`)
-- sets linker env vars:
-  - `CC_x86_64_unknown_linux_musl`
-  - `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER`
-  using `musl-gcc` (or `x86_64-linux-musl-gcc`)
-
-If no musl linker is found, it exits with install instructions (e.g. `musl-tools` on Debian/Ubuntu).
-
-Set `NYL_SKIP_BUILD=true` to skip this automatic build step, or set
-`NYL_BIN=/path/to/nyl` to use a specific binary.
-
-CA certificates in the pod are controlled via `INSTALL_CA_CERTS`:
-- `auto` (default): installs CA certs when `TEST_REPO_URL` starts with `https://`
-- `true`: always install CA certs
-- `false`: never install CA certs
-
-The runner pod defaults to namespace `argocd` (same namespace used for ArgoCD
-secret discovery). Override with `RUNNER_NAMESPACE=...` if needed.
-
-Strict private-repo validation is enabled by default:
-- `REQUIRE_PRIVATE_REPO=true` (default)
-
-In this mode, the test fails if Case A succeeds without a secret.
-Set `REQUIRE_PRIVATE_REPO=false` only if you intentionally want to run against
-publicly readable repositories.
-
-To include it in `run-all.sh`:
-
-```bash
-RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST=true \
-TEST_REPO_URL="https://github.com/your-org/your-private-repo.git" \
-TEST_REPO_USERNAME="your-username" \
-TEST_REPO_PASSWORD="your-token" \
-./run-all.sh
 ```
 
 ### Run with fresh cluster (recommended for CI)
@@ -129,39 +58,6 @@ Tests phased deployment with kind filtering and append-release mode:
 
 **Duration:** ~30 seconds
 **Resources:** 1 namespace, 1 CRD, 1 ConfigMap, 1 Deployment
-
-### test-argocd-bootstrap.sh
-
-Tests ArgoCD deployment using the Nyl Helm chart OCI image with staged deployment:
-- **Phase 1:** Applies CRDs only with `--only-kind=CustomResourceDefinition`
-- Waits for CRDs to be established
-- **Phase 2:** Applies remaining resources with `--exclude-kind=CustomResourceDefinition --append-release`
-- Waits for ArgoCD deployments (server, repo-server, application-controller)
-- Verifies Nyl CMP sidecar is running in the repo-server pod
-- Installs ArgoCD CLI
-- Logs into ArgoCD and verifies self-managed Application
-- Syncs the Application and validates health
-- Verifies CRDs were not pruned during Phase 2
-
-**Duration:** ~5-10 minutes (includes ArgoCD installation)
-**Resources:** ArgoCD namespace with full ArgoCD installation (~10 deployments/statefulsets)
-**Prerequisites:** Helm CLI installed
-**Optional:** `GITHUB_TOKEN` and `GITHUB_ACTOR` environment variables for OCI registry authentication
-
-### test-argocd-credential-lookup-local.sh
-
-Tests ArgoCD repository secret discovery in a live cluster:
-- Runs local `nyl` binary inside a pod (in-cluster mode)
-- Creates an `ApplicationGenerator` that points to a private Git repository
-- Verifies render fails without ArgoCD repository secret
-- Creates `argocd.argoproj.io/secret-type=repository` secret
-- Verifies render succeeds with discovered credentials
-
-**Duration:** ~30-90 seconds (excluding network clone latency)
-**Resources:** 1 temporary test namespace + RBAC/Secret in `argocd`
-**Required:** `TEST_REPO_URL`, `TEST_REPO_USERNAME`, `TEST_REPO_PASSWORD`
-**Optional:** `NYL_BIN`, `NYL_SKIP_BUILD`, `RUNNER_IMAGE` (default: `debian:bookworm-slim`), `INSTALL_CA_CERTS` (default: `auto`), `RUNNER_NAMESPACE` (default: `argocd`), `REQUIRE_PRIVATE_REPO` (default: `true`)
-**Default behavior:** skipped by `run-all.sh` unless `RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST=true`
 
 ## Writing New Tests
 
@@ -216,7 +112,7 @@ echo "✅ TEST PASSED: ${TEST_NAME}"
 
 ## CI Integration
 
-Tests run automatically in the Integration CI workflow (`.github/workflows/ci-integration.yaml`).
+Tests run automatically in the Minikube job in `.github/workflows/ci.yaml`.
 
 The CI workflow:
 1. Sets up Minikube with Kubernetes v1.29.0
