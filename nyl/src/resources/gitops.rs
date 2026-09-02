@@ -417,6 +417,8 @@ impl GitOpsSyncPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitOpsAutomatedSyncPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub prune: bool,
     #[serde(default, rename = "selfHeal")]
@@ -1402,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn automated_sync_is_enabled_by_policy_presence() {
+    fn automated_sync_accepts_argocd_enabled_semantics() {
         let mut value = argocd_instance();
         value["spec"]["catalogApplicationDefaults"] = json!({
             "syncPolicy": {
@@ -1413,8 +1415,18 @@ mod tests {
             panic!("expected ArgoCD instance");
         };
         let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
+        assert_eq!(automated.enabled, None);
+        assert!(serde_json::to_value(&automated).unwrap().get("enabled").is_none());
         assert!(automated.prune);
         assert!(automated.self_heal);
+
+        value["spec"]["catalogApplicationDefaults"]["syncPolicy"]["automated"]["enabled"] = json!(false);
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
+        assert_eq!(automated.enabled, Some(false));
+        assert_eq!(serde_json::to_value(automated).unwrap()["enabled"], false);
     }
 
     #[test]

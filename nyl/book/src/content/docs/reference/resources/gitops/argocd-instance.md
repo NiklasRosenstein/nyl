@@ -54,6 +54,7 @@ spec:
   catalogApplicationDefaults:
     syncPolicy:
       automated:
+        enabled: true
         prune: false
         selfHeal: true
       syncOptions:

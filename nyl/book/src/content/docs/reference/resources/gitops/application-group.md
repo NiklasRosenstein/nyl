@@ -132,7 +132,8 @@ attach additional relative files or glob matches to that release.
 
 | Field | Required | Default | Description |
 | --- | --- | --- | --- |
-| `spec.syncPolicy.automated` | No | — | Its presence enables Argo CD automated sync. |
+| `spec.syncPolicy.automated` | No | — | Its presence enables Argo CD automated sync unless `enabled` is `false`. |
+| `spec.syncPolicy.automated.enabled` | No | — | Explicitly enables or disables automated sync. Omission enables it when `automated` is present. |
 | `spec.syncPolicy.automated.prune` | No | `false` | Enables automated pruning. |
 | `spec.syncPolicy.automated.selfHeal` | No | `false` | Enables automated self-healing. |
 | `spec.syncPolicy.syncOptions` | No | `[ApplyOutOfSyncOnly=true, ServerSideApply=true]` | Argo CD Application sync options. An explicit value with the same option key overrides the generated default. |
