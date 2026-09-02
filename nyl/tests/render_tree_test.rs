@@ -210,6 +210,43 @@ fn seeded_bare_repository() -> (TempDir, TempDir) {
     (bare_dir, seed_dir)
 }
 
+fn publication_fixture() -> (TempDir, TempDir, TempDir, git2::Oid) {
+    let fixture = fixture();
+    let (destination, seed) = seeded_bare_repository();
+    fs::write(
+        fixture.path().join("config/repositories/deploy.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: {}\n  publishURL: {}\n",
+            destination.path().display(),
+            destination.path().display()
+        ),
+    )
+    .unwrap();
+    let source = Repository::open(fixture.path()).unwrap();
+    let mut source_config = source.config().unwrap();
+    source_config.set_str("user.name", "Nyl Tests").unwrap();
+    source_config
+        .set_str("user.email", "nyl-tests@example.invalid")
+        .unwrap();
+    source.remote("origin", "https://example.invalid/source.git").unwrap();
+    commit_all(&source, "Source");
+    let source_commit = source.head().unwrap().peel_to_commit().unwrap().id();
+    (fixture, destination, seed, source_commit)
+}
+
+fn published_commit<'repo>(repository: &'repo Repository, branch: &str) -> git2::Commit<'repo> {
+    repository
+        .find_reference(&format!("refs/heads/{branch}"))
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+}
+
+fn published_file(repository: &Repository, commit: &git2::Commit<'_>, path: &str) -> Vec<u8> {
+    let entry = commit.tree().unwrap().get_path(std::path::Path::new(path)).unwrap();
+    repository.find_blob(entry.id()).unwrap().content().to_vec()
+}
+
 #[test]
 fn renders_plain_directory_applications_and_owned_layout() {
     let fixture = fixture();
@@ -2068,26 +2105,7 @@ fn release_include_preserves_explicit_secret_manifest() {
 
 #[test]
 fn publishes_a_new_publication_branch_with_cas_workflow() {
-    let fixture = fixture();
-    let (destination, _seed) = seeded_bare_repository();
-    fs::write(
-        fixture.path().join("config/repositories/deploy.yaml"),
-        format!(
-            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: {}\n  publishURL: {}\n",
-            destination.path().display(),
-            destination.path().display()
-        ),
-    )
-    .unwrap();
-    let source = Repository::open(fixture.path()).unwrap();
-    let mut source_config = source.config().unwrap();
-    source_config.set_str("user.name", "Nyl Tests").unwrap();
-    source_config
-        .set_str("user.email", "nyl-tests@example.invalid")
-        .unwrap();
-    source.remote("origin", "https://example.invalid/source.git").unwrap();
-    commit_all(&source, "Source");
-    let source_commit = source.head().unwrap().peel_to_commit().unwrap().id();
+    let (fixture, destination, _seed, source_commit) = publication_fixture();
     let source_commit_string = source_commit.to_string();
 
     Command::cargo_bin("nyl")
@@ -2102,11 +2120,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .stdout(predicate::str::contains("  Commit: "));
 
     let destination_repository = Repository::open_bare(destination.path()).unwrap();
-    let commit = destination_repository
-        .find_reference("refs/heads/deploy/production")
-        .unwrap()
-        .peel_to_commit()
-        .unwrap();
+    let commit = published_commit(&destination_repository, "deploy/production");
     let message = commit.message().unwrap();
     assert!(message.starts_with("Render deployment target production\n\n"));
     assert!(message.contains("Nyl-Source-Repository: https://example.invalid/source.git"));
@@ -2331,4 +2345,112 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     let catalog_diff_contents = fs::read_to_string(catalog_diff).unwrap();
     assert!(catalog_diff_contents.contains("_nyl/catalog/projects/workloads.yaml"));
     assert!(!catalog_diff_contents.contains("workloads/api/resources.yaml"));
+}
+
+#[test]
+fn publish_tree_default_accepts_irrelevant_worktree_changes() {
+    let (fixture, destination, _seed, source_commit) = publication_fixture();
+    fs::write(fixture.path().join("untracked-publication-note.txt"), "local note\n").unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Published deployment target production"));
+
+    let destination = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&destination, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&destination, &commit, "production/_nyl/index.json")).unwrap();
+    assert_eq!(index["sourceCommit"], source_commit.to_string());
+    assert_eq!(index["dirty"], false);
+}
+
+#[test]
+fn publish_tree_default_rejects_changes_that_affect_the_rendered_target() {
+    let (fixture, destination, _seed, _source_commit) = publication_fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "environment: '{{ values.environment }}'",
+        "environment: locally-modified",
+    );
+    fs::write(release_path, release).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Local changes affect deployment target \"production\"",
+        ))
+        .stderr(predicate::str::contains("modified workloads/api/resources.yaml"))
+        .stderr(predicate::str::contains("--allow-dirty"));
+
+    let destination = Repository::open_bare(destination.path()).unwrap();
+    assert!(destination.find_reference("refs/heads/deploy/production").is_err());
+}
+
+#[test]
+fn publish_tree_allow_dirty_records_nonreproducible_provenance() {
+    let (fixture, destination, _seed, source_commit) = publication_fixture();
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path).unwrap().replace(
+        "environment: '{{ values.environment }}'",
+        "environment: locally-modified",
+    );
+    fs::write(release_path, release).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let destination = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&destination, "deploy/production");
+    assert!(commit.message().unwrap().contains("Nyl-Source-Dirty: true"));
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&destination, &commit, "production/_nyl/index.json")).unwrap();
+    assert_eq!(index["sourceCommit"], source_commit.to_string());
+    assert_eq!(index["dirty"], true);
+    let resources = String::from_utf8(published_file(
+        &destination,
+        &commit,
+        "production/workloads/api/resources.yaml",
+    ))
+    .unwrap();
+    assert!(resources.contains("environment: locally-modified"));
+}
+
+#[test]
+fn publish_tree_require_clean_rejects_irrelevant_worktree_changes() {
+    let (fixture, _destination, _seed, _source_commit) = publication_fixture();
+    fs::write(fixture.path().join("untracked-publication-note.txt"), "local note\n").unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production", "--require-clean"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "publish-tree --require-clean requires a clean source worktree",
+        ));
+}
+
+#[test]
+fn publish_tree_cleanliness_overrides_are_mutually_exclusive() {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .args(["publish-tree", "--allow-dirty", "--require-clean"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the argument '--allow-dirty' cannot be used with '--require-clean'",
+        ));
 }
