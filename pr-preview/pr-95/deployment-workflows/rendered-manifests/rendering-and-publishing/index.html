@@ -114,14 +114,17 @@ and symbolic-link protections remain enforced.</p>
 Release bundles, and parsed local Helm output. Complete target trees apply only
 to <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, and <code dir="auto">publish-tree</code>; bundle and Helm artifacts are
 also shared by <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code>. Cache entries are
-content-addressed and accompanied by dependency records. Nyl verifies the
-selected control-resource files, exact ApplicationGroup candidate membership,
-Release entrypoints and includes, resolved local chart directories, target
-context, Kubernetes capabilities, admitted <code dir="auto">NYL_*</code> environment, secrets through
-a cache-local keyed fingerprint, and renderer tool versions before reuse. It
-does not fingerprint the whole project checkout. A target miss can still reuse
-unchanged Releases, while target-wide ownership, namespace, project, catalog,
-and layout validation runs again.</p>
+content-addressed and accompanied by dependency records. Nyl verifies effective
+selected control resources by identity, exact ApplicationGroup candidate
+membership, Release entrypoints and includes, resolved local chart directories,
+target context, Kubernetes capabilities, admitted <code dir="auto">NYL_*</code> environment, secrets
+through a cache-local keyed fingerprint, and renderer tool versions before
+reuse. Formatting, comments, and unrelated resources colocated in the same YAML
+file do not invalidate a target artifact. Selected control-resource locations
+remain dependencies because the published ownership index records physical
+source provenance. Nyl does not fingerprint the whole project checkout. A
+target miss can still reuse unchanged Releases, while target-wide ownership,
+namespace, project, catalog, and layout validation runs again.</p>
 <p>The cache lives under <code dir="auto">$NYL_CACHE_DIR/gitops/v1</code>. Without <code dir="auto">NYL_CACHE_DIR</code>, the
 project-local <code dir="auto">.nyl/cache/gitops/v1</code> directory is used. Artifacts can contain
 the same rendered secret data as the publication tree and use private file
