@@ -18,11 +18,6 @@
             "project": "default",
             "selfPrunePolicy": "Confirm",
             "syncPolicy": {
-              "automated": {
-                "enabled": true,
-                "prune": false,
-                "selfHeal": true
-              },
               "syncOptions": [
                 "ApplyOutOfSyncOnly=true"
               ]
@@ -72,11 +67,6 @@
         "syncPolicy": {
           "$ref": "#/$defs/GitOpsSyncPolicy",
           "default": {
-            "automated": {
-              "enabled": true,
-              "prune": false,
-              "selfHeal": true
-            },
             "syncOptions": [
               "ApplyOutOfSyncOnly=true"
             ]
@@ -88,10 +78,6 @@
     "GitOpsAutomatedSyncPolicy": {
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "default": false,
-          "type": "boolean"
-        },
         "prune": {
           "default": false,
           "type": "boolean"

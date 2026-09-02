@@ -20,10 +20,6 @@ spec:
   catalogApplicationDefaults:
     project: default
     syncPolicy:
-      automated:
-        enabled: true
-        prune: false
-        selfHeal: true
       syncOptions:
         - ApplyOutOfSyncOnly=true
     applicationDeletionPolicy: Foreground
@@ -42,12 +38,25 @@ Every target emits a parent Application named `<target>-catalog` unless
 syncs `<pathPrefix>/_nyl/catalog` and therefore manages the generated child
 Applications, AppProjects, and its own manifest.
 
-The defaults enable automated sync and self-healing, apply only out-of-sync
-resources, and leave automated prune disabled. Foreground deletion cascades to
-catalog resources, and
-`selfPrunePolicy: Confirm` annotates the parent with `Prune=confirm`. A target
-can override the name, project, sync policy, deletion policy, self-prune
+The catalog requires manual sync by default and applies only out-of-sync
+resources when synchronized. Foreground deletion cascades to catalog resources,
+and `selfPrunePolicy: Confirm` annotates the parent with `Prune=confirm`. A
+target can override the name, project, sync policy, deletion policy, self-prune
 policy, labels, and annotations under `spec.catalogApplication`.
+
+Enable automated catalog synchronization explicitly when the publication
+workflow provides the required approval boundary:
+
+```yaml
+spec:
+  catalogApplicationDefaults:
+    syncPolicy:
+      automated:
+        prune: false
+        selfHeal: true
+      syncOptions:
+        - ApplyOutOfSyncOnly=true
+```
 
 When no ArgoCDInstance resources exist, each target gets an implicit local
 instance using its workload Cluster, the `argocd` namespace, and these defaults.

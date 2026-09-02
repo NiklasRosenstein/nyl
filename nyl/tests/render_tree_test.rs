@@ -246,9 +246,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(catalog.contains("path: production/_nyl/catalog"));
     assert!(catalog.contains("targetRevision: deploy/production"));
     assert!(catalog.contains("Prune=confirm"));
-    assert!(catalog.contains("enabled: true"));
-    assert!(catalog.contains("prune: false"));
-    assert!(catalog.contains("selfHeal: true"));
+    assert!(!catalog.contains("automated:"));
     assert_eq!(catalog.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
     assert_eq!(index["version"], 2);

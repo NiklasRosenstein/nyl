@@ -403,8 +403,6 @@ pub struct GitOpsSyncPolicy {
 #[serde(deny_unknown_fields)]
 pub struct GitOpsAutomatedSyncPolicy {
     #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
     pub prune: bool,
     #[serde(default, rename = "selfHeal")]
     pub self_heal: bool,
@@ -1238,11 +1236,7 @@ fn default_argocd_project() -> String {
 
 fn default_catalog_sync_policy() -> GitOpsSyncPolicy {
     GitOpsSyncPolicy {
-        automated: Some(GitOpsAutomatedSyncPolicy {
-            enabled: true,
-            prune: false,
-            self_heal: true,
-        }),
+        automated: None,
         sync_options: vec!["ApplyOutOfSyncOnly=true".to_owned()],
     }
 }
@@ -1383,9 +1377,23 @@ mod tests {
             ApplicationDeletionPolicy::Foreground
         );
         assert_eq!(defaults.self_prune_policy, ManagedResourceDeletionPolicy::Confirm);
-        let automated = defaults.sync_policy.automated.unwrap();
-        assert!(automated.enabled);
-        assert!(!automated.prune);
+        assert!(defaults.sync_policy.automated.is_none());
+    }
+
+    #[test]
+    fn automated_sync_is_enabled_by_policy_presence() {
+        let mut value = argocd_instance();
+        value["spec"]["catalogApplicationDefaults"] = json!({
+            "syncPolicy": {
+                "automated": {"prune": true, "selfHeal": true}
+            }
+        });
+        let GitOpsResource::ArgoCDInstance(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
+            panic!("expected ArgoCD instance");
+        };
+        let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
+        assert!(automated.prune);
+        assert!(automated.self_heal);
     }
 
     #[test]
