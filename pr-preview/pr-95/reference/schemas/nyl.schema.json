@@ -64,6 +64,41 @@
           "type": "string"
         }
       ]
+    },
+    "VendorMode": {
+      "description": "Controls whether remote renderer inputs may use an in-tree vendor snapshot.",
+      "enum": [
+        "disabled",
+        "preferred",
+        "required"
+      ],
+      "type": "string"
+    },
+    "VendorSettings": {
+      "additionalProperties": false,
+      "description": "Project-global remote artifact vendoring settings.",
+      "properties": {
+        "lfs_threshold_bytes": {
+          "default": 1048576,
+          "description": "Text blobs at least this large are tracked through Git LFS.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/VendorMode",
+          "description": "Resolution policy for vendored remote inputs."
+        },
+        "path": {
+          "default": "vendor",
+          "description": "In-tree directory containing the generated lock and artifact blobs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -83,6 +118,18 @@
         ],
         "strip_empty_metadata_labels": "always"
       }
+    },
+    "vendor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VendorSettings"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional project-global artifact vendoring policy."
     }
   },
   "title": "ProjectFile",
