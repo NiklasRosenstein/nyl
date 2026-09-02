@@ -87,6 +87,7 @@ export default defineConfig({
                 "commands/release",
                 "commands/generate",
                 "commands/cluster",
+                "commands/vendor",
               ],
             },
           ],

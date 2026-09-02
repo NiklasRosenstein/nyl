@@ -99,12 +99,50 @@ This includes RemoteManifest URLs and remote Helm charts with an explicit
 version. An unversioned remote chart remains uncacheable because its coordinate
 does not identify stable content.
 
-Use `--refresh` on a rendering command to bypass render cache reads, retrieve
-RemoteManifest URLs and remote charts again, rerender, and replace successful
-cache records. Use `--no-cache` to perform no persistent cache reads or writes;
-temporary Git and chart storage is deleted with the command. The two options
-are mutually exclusive. Neither option changes rendered bytes, validation, or
-publication semantics.
+Remote downloads have a separate exact source cache under
+`$NYL_CACHE_DIR/sources/v1`, or `.nyl/cache/sources/v1` by default. It stores
+original RemoteManifest bytes, Helm chart archives, and deterministic Git
+source archives. A render-cache miss can therefore rerun Helm or Nyl rendering
+without pulling the same exact source again.
+
+Use `--refresh` on a rendering command to bypass both render and exact source
+cache reads, retrieve the inputs again, rerender, and replace successful cache
+records. Use `--no-cache` to perform no disposable cache reads or writes;
+temporary storage is deleted with the command. The two options are mutually
+exclusive. An enabled vendor snapshot remains authoritative for both flags;
+refresh it explicitly with `nyl vendor sync --refresh`.
+
+## Vendored remote inputs
+
+Projects can commit every remote renderer input needed by one or more targets.
+This includes RemoteManifest response bytes, packaged Helm repository and OCI
+charts, and deterministic Git snapshots used by Git charts, remote
+ApplicationGroups, and ApplicationGenerators. Configure the project-wide
+policy in [`nyl.toml`](/nyl/configuration/#remote-artifact-vendoring), then run:
+
+```bash
+nyl vendor sync
+nyl vendor check
+```
+
+`vendor sync` scans all DeploymentTargets by default. Repeat `--target` to
+refresh a subset while retaining entries owned by other targets. It resolves
+existing vendor entries first, then the exact source cache, then the remote
+origin. `--refresh` forces upstream retrieval; when an old extracted Helm cache
+contains the exact chart, Nyl can package and import it before contacting the
+origin.
+
+`vendor check` performs no network access. It compiles the selected targets
+through the normal rendering pipeline, verifies every required coordinate and
+digest, reports unreferenced lock entries, and verifies the managed
+`.gitattributes`. A matching but missing, corrupt, or unmaterialized Git LFS
+artifact is an error rather than permission to fall back to a remote source.
+
+The directory backend is the current storage implementation. Its
+`lock.yaml`, artifacts, and generated `.gitattributes` are committed together.
+Helm and Git archives are assigned to Git LFS; large RemoteManifest files are
+assigned according to `vendor.lfs_threshold_bytes`. Run `nyl vendor prune` to
+remove artifact files not referenced by the lock.
 
 Rendering commands print rendering statistics on standard error. The Cache
 section reports work as reused, rebuilt, rendered, or avoided. Avoided work was

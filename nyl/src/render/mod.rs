@@ -1,5 +1,6 @@
 //! Authoritative Kubernetes manifest rendering engine.
 
+pub(crate) mod artifact;
 mod bundle;
 pub mod cache;
 mod expand;
@@ -1710,7 +1711,9 @@ metadata:
 
     #[tokio::test]
     async fn test_generate_resource_remote_manifest_rejects_http_url() {
+        let temp = TempDir::new().unwrap();
         let config = test_project_config();
+        let artifact_resolver = artifact::ArtifactResolver::new(temp.path(), &config, None).unwrap();
         let context = TemplateContext {
             values: serde_json::json!({}),
             secrets: serde_json::json!({}),
@@ -1725,7 +1728,18 @@ metadata:
             "spec": {"url": "http://example.com/manifests.yaml"}
         });
 
-        let result = generate_resource(&resource, &context, &config, "", &[], None, false, None).await;
+        let result = generate_resource(
+            &resource,
+            &context,
+            &config,
+            "",
+            &[],
+            None,
+            false,
+            None,
+            &artifact_resolver,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
     }

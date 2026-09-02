@@ -167,7 +167,22 @@ fn discover_project_inventory(
         )));
     }
 
-    let yaml_files = collect_git_visible_yaml(&repository, &repository_root, &project_root, output_subtree.as_deref())?;
+    let vendor_subtree = project_config.vendor().map(|settings| {
+        let path = project_config
+            .file
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(|config_root| settings.path.strip_prefix(config_root).ok())
+            .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
+        normalize_absolute_path(&path)
+    });
+    let yaml_files = collect_git_visible_yaml(
+        &repository,
+        &repository_root,
+        &project_root,
+        output_subtree.as_deref(),
+        vendor_subtree.as_deref(),
+    )?;
     let mut resources = BTreeMap::new();
 
     for relative_path in &yaml_files {
@@ -188,6 +203,7 @@ fn collect_git_visible_yaml(
     repository_root: &Path,
     project_root: &Path,
     output_subtree: Option<&Path>,
+    vendor_subtree: Option<&Path>,
 ) -> Result<Vec<PathBuf>> {
     let mut repository_paths = BTreeSet::new();
     let index = repository.index().map_err(crate::git::GitError::from)?;
@@ -228,6 +244,7 @@ fn collect_git_visible_yaml(
         let absolute_path = repository_root.join(&repository_relative);
         if !absolute_path.starts_with(project_root)
             || output_subtree.is_some_and(|output| absolute_path.starts_with(output))
+            || vendor_subtree.is_some_and(|vendor| absolute_path.starts_with(vendor))
         {
             continue;
         }
@@ -660,6 +677,30 @@ spec:
 
         let inventory = discover_gitops_inventory(temporary.path(), Some(Path::new("rendered"))).unwrap();
         assert_eq!(inventory.yaml_files, vec![PathBuf::from("applications.yaml")]);
+        assert!(inventory.resources.is_empty());
+    }
+
+    #[test]
+    fn excludes_the_configured_vendor_tree_from_yaml_discovery() {
+        let (temporary, repository) = project();
+        fs::write(
+            temporary.path().join("nyl.toml"),
+            "[vendor]\nmode = \"preferred\"\npath = \"third-party\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temporary.path().join("third-party/artifacts/manifests/example.com")).unwrap();
+        fs::write(
+            temporary
+                .path()
+                .join("third-party/artifacts/manifests/example.com/target.yaml"),
+            TARGET,
+        )
+        .unwrap();
+        track(&repository, "third-party/artifacts/manifests/example.com/target.yaml");
+
+        let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
+
+        assert!(inventory.yaml_files.is_empty(), "{:?}", inventory.yaml_files);
         assert!(inventory.resources.is_empty());
     }
 

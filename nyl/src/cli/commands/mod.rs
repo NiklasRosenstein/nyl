@@ -12,3 +12,4 @@ pub mod render_tree;
 pub mod source;
 pub mod target;
 pub mod validate;
+pub mod vendor;

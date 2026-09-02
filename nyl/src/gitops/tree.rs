@@ -10,7 +10,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::git::GitManager;
-use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
+use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
     ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster,
@@ -666,6 +666,13 @@ fn prepare_target_cache(
     if let Some(config_file) = &inventory.project_config.file {
         recorder.record_path_file(config_file)?;
     }
+    if let Some(lock) = inventory.project_config.vendor_lock_path() {
+        recorder.record_bytes(
+            format!("vendor-lock:{}", lock.display()),
+            "vendor-lock",
+            &std::fs::read(lock).unwrap_or_else(|_| b"missing".to_vec()),
+        );
+    }
     record_target_control_dependencies(&mut recorder, inputs, groups)?;
     for prepared in groups {
         let members = prepared
@@ -799,7 +806,7 @@ fn load_cached_target(
         );
         return Ok(None);
     }
-    if cache.mode() == CacheMode::Refresh {
+    if cache.bypasses_render_artifacts() {
         cache.observe(CacheLayer::Target, CacheOutcome::Refreshed, &[]);
         return Ok(None);
     }
@@ -1869,6 +1876,64 @@ struct StaticReleaseFile {
     name: Option<String>,
 }
 
+fn resolve_remote_group_source(
+    inventory: &GitOpsInventory,
+    source: &ApplicationGroupSource,
+    git_manager: &mut Option<GitManager>,
+    cache: Option<&GitOpsCache>,
+    provenance_inputs: &mut Vec<PathBuf>,
+) -> Result<(PathBuf, PathBuf, InlineGitRepository)> {
+    let (repository, repository_path) = resolve_source_repository(inventory, source)?;
+    if let Some(repository_path) = repository_path {
+        provenance_inputs.push(repository_path);
+    }
+    let commit = source.commit.as_deref().expect("validated remote source has commit");
+    let revision = source
+        .revision
+        .as_deref()
+        .expect("validated remote source has revision");
+    let artifacts = crate::render::artifact::ArtifactResolver::new(
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    )?;
+    let request = crate::render::artifact::ArtifactRequest::GitSource {
+        repository: repository.repo_url.clone(),
+        revision: revision.to_owned(),
+        commit: Some(commit.to_owned()),
+        subpath: None,
+    };
+    let checkout = if let Some(artifact) = artifacts.lookup(&request)? {
+        artifacts.materialize_git(&artifact)?
+    } else {
+        let manager = if let Some(manager) = git_manager {
+            manager
+        } else {
+            let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
+                GitManager::with_cache_dir(cache_root)
+            } else {
+                GitManager::new().map_err(NylError::Git)?
+            }
+            .with_render_cache(cache.cloned());
+            git_manager.insert(manager)
+        };
+        let checkout = manager
+            .resolve_ref(&repository.repo_url, Some(commit), None)
+            .map_err(NylError::Git)?;
+        let archive = tempfile::NamedTempFile::new()?;
+        crate::render::artifact::ArtifactResolver::archive_git_tree(&checkout, archive.path())?;
+        let artifact = artifacts.store(
+            &request,
+            archive.path(),
+            crate::render::artifact::ArtifactFormat::GitArchive,
+            Some(commit.to_owned()),
+        )?;
+        artifacts.materialize_git(&artifact)?
+    };
+    let selected = checked_checkout_subpath(&checkout, &source.path, "ApplicationGroup source.path")?;
+    Ok((selected, checkout, repository))
+}
+
 fn resolve_group_source(
     inventory: &GitOpsInventory,
     group_resource_path: &Path,
@@ -1880,26 +1945,8 @@ fn resolve_group_source(
     let mut provenance_inputs = Vec::new();
     let (root, source, remote_root, source_repository) = match &group.spec.source {
         Some(source) if source.is_remote() => {
-            let (repository, repository_path) = resolve_source_repository(inventory, source)?;
-            if let Some(repository_path) = repository_path {
-                provenance_inputs.push(repository_path);
-            }
-            let manager = if let Some(manager) = git_manager {
-                manager
-            } else {
-                let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
-                    GitManager::with_cache_dir(cache_root)
-                } else {
-                    GitManager::new().map_err(NylError::Git)?
-                }
-                .with_render_cache(cache.cloned());
-                git_manager.insert(manager)
-            };
-            let commit = source.commit.as_deref().expect("validated remote source has commit");
-            let checkout = manager
-                .resolve_ref(&repository.repo_url, Some(commit), None)
-                .map_err(NylError::Git)?;
-            let selected = checked_checkout_subpath(&checkout, &source.path, "ApplicationGroup source.path")?;
+            let (selected, checkout, repository) =
+                resolve_remote_group_source(inventory, source, git_manager, cache, &mut provenance_inputs)?;
             (selected, source.clone(), Some(checkout), Some(repository))
         }
         Some(source) => (inventory.project_root.join(&source.path), source.clone(), None, None),

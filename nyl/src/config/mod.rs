@@ -25,6 +25,14 @@ fn default_gitops_scaffold_path() -> PathBuf {
     PathBuf::from("config")
 }
 
+fn default_vendor_path() -> PathBuf {
+    PathBuf::from("vendor")
+}
+
+const fn default_vendor_lfs_threshold_bytes() -> u64 {
+    1024 * 1024
+}
+
 fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
@@ -53,6 +61,31 @@ impl StripEmptyMetadataLabelsMode {
             Self::Argocd => is_argocd,
         }
     }
+}
+
+/// Controls whether remote renderer inputs may use an in-tree vendor snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorMode {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+/// Project-global remote artifact vendoring settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VendorSettings {
+    /// Resolution policy for vendored remote inputs.
+    pub mode: VendorMode,
+
+    /// In-tree directory containing the generated lock and artifact blobs.
+    #[serde(default = "default_vendor_path")]
+    pub path: PathBuf,
+
+    /// Text blobs at least this large are tracked through Git LFS.
+    #[serde(default = "default_vendor_lfs_threshold_bytes")]
+    pub lfs_threshold_bytes: u64,
 }
 
 /// Project settings in `[project]` section of `nyl.toml`.
@@ -93,6 +126,9 @@ impl Default for ProjectSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
+
+    /// Optional project-global artifact vendoring policy.
+    pub vendor: Option<VendorSettings>,
 }
 
 /// Wrapper for project configuration file.
@@ -230,6 +266,29 @@ impl ProjectConfig {
         project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
         project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
         project.project.gitops_scaffold_path = resolve_path(&project.project.gitops_scaffold_path, base_dir);
+        if let Some(vendor) = &mut project.vendor {
+            if vendor.path.is_absolute() {
+                return Err(NylError::config(
+                    "vendor.path must be relative to the directory containing nyl.toml",
+                ));
+            }
+            if vendor.path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            }) {
+                return Err(NylError::config(
+                    "vendor.path must not contain parent-directory components",
+                ));
+            }
+            vendor.path = resolve_path(&vendor.path, base_dir);
+            if vendor.path == base_dir || !vendor.path.starts_with(base_dir) {
+                return Err(NylError::config(
+                    "vendor.path must resolve to a directory beneath the project root",
+                ));
+            }
+        }
 
         Ok(Self {
             file: Some(path.to_path_buf()),
@@ -266,6 +325,15 @@ impl ProjectConfig {
     /// Return the configured empty-label stripping mode for emitted manifests.
     pub fn get_strip_empty_metadata_labels_mode(&self) -> StripEmptyMetadataLabelsMode {
         self.config.project.strip_empty_metadata_labels
+    }
+
+    /// Project-global artifact vendoring settings.
+    pub fn vendor(&self) -> Option<&VendorSettings> {
+        self.config.vendor.as_ref()
+    }
+
+    pub fn vendor_lock_path(&self) -> Option<PathBuf> {
+        self.vendor().map(|settings| settings.path.join("lock.yaml"))
     }
 
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
@@ -393,6 +461,38 @@ strip_empty_metadata_labels = "argocd"
     }
 
     #[test]
+    fn loads_project_global_vendor_settings_relative_to_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(
+            &config_path,
+            "[vendor]\nmode = \"required\"\npath = \"third-party\"\nlfs_threshold_bytes = 2048\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let vendor = config.vendor().unwrap();
+        assert_eq!(vendor.mode, VendorMode::Required);
+        assert_eq!(vendor.path, temp.path().join("third-party"));
+        assert_eq!(vendor.lfs_threshold_bytes, 2048);
+        assert_eq!(
+            config.vendor_lock_path().unwrap(),
+            temp.path().join("third-party/lock.yaml")
+        );
+    }
+
+    #[test]
+    fn rejects_vendor_paths_that_escape_the_project() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"../vendor\"\n").unwrap();
+        assert!(ProjectConfig::load(Some(config_path))
+            .unwrap_err()
+            .to_string()
+            .contains("parent-directory"));
+    }
+
+    #[test]
     fn test_load_no_config_returns_defaults() {
         let temp = TempDir::new().unwrap();
 
@@ -420,6 +520,7 @@ strip_empty_metadata_labels = "argocd"
                     ]),
                     ..ProjectSettings::default()
                 },
+                vendor: None,
             },
         };
 

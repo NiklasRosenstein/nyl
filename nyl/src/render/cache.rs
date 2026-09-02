@@ -64,7 +64,11 @@ pub enum CacheLayer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SourceOperation {
     RemoteManifestDownload,
+    RemoteManifestReuse,
     HelmChartPull,
+    HelmChartReuse,
+    GitSourceReuse,
+    VendorArtifactReuse,
     GitRepositoryClone,
     GitRepositoryReuse,
     GitRefRefresh,
@@ -133,15 +137,37 @@ impl CacheStats {
     fn source_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         let remote_manifests = self.source_count(SourceOperation::RemoteManifestDownload);
-        if remote_manifests > 0 {
+        let reused_remote_manifests = self.source_count(SourceOperation::RemoteManifestReuse);
+        if remote_manifests + reused_remote_manifests > 0 {
             lines.push(stat_line(
                 "Remote manifests",
-                styled_count(remote_manifests, "downloaded", false),
+                styled_work_counts(&[
+                    (reused_remote_manifests, "reused", true),
+                    (remote_manifests, "downloaded", false),
+                ]),
             ));
         }
         let helm_pulls = self.source_count(SourceOperation::HelmChartPull);
-        if helm_pulls > 0 {
-            lines.push(stat_line("Helm charts", styled_count(helm_pulls, "pulled", false)));
+        let helm_reuses = self.source_count(SourceOperation::HelmChartReuse);
+        if helm_pulls + helm_reuses > 0 {
+            lines.push(stat_line(
+                "Helm charts",
+                styled_work_counts(&[(helm_reuses, "reused", true), (helm_pulls, "pulled", false)]),
+            ));
+        }
+        let vendor_reuses = self.source_count(SourceOperation::VendorArtifactReuse);
+        if vendor_reuses > 0 {
+            lines.insert(
+                0,
+                stat_line("Vendor artifacts", styled_count(vendor_reuses, "used", true)),
+            );
+        }
+        let git_source_reuses = self.source_count(SourceOperation::GitSourceReuse);
+        if git_source_reuses > 0 {
+            lines.push(stat_line(
+                "Git sources",
+                styled_count(git_source_reuses, "reused", true),
+            ));
         }
         let repository_clones = self.source_count(SourceOperation::GitRepositoryClone);
         let repository_reuses = self.source_count(SourceOperation::GitRepositoryReuse);
@@ -539,6 +565,10 @@ pub struct RenderCache {
     renderer_tools: Arc<OnceLock<BTreeMap<String, RecordedDependency>>>,
     source_cache: Option<Arc<tempfile::TempDir>>,
     stats: Arc<Mutex<CacheStats>>,
+    observed_artifacts: Arc<Mutex<BTreeMap<super::artifact::ArtifactRequest, super::artifact::ResolvedArtifact>>>,
+    vendor_population: bool,
+    vendor_population_refresh: bool,
+    vendor_check: bool,
 }
 
 /// Prints the shared cache summary when a command leaves its rendering scope.
@@ -581,6 +611,10 @@ impl RenderCache {
             renderer_tools: Arc::new(OnceLock::new()),
             source_cache,
             stats: Arc::new(Mutex::new(CacheStats::default())),
+            observed_artifacts: Arc::new(Mutex::new(BTreeMap::new())),
+            vendor_population: false,
+            vendor_population_refresh: false,
+            vendor_check: false,
         })
     }
 
@@ -642,6 +676,55 @@ impl RenderCache {
 
     pub fn stats(&self) -> CacheStats {
         self.stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[must_use]
+    pub fn with_vendor_population(mut self, refresh: bool) -> Self {
+        self.vendor_population = true;
+        self.vendor_population_refresh = refresh;
+        self
+    }
+
+    pub fn is_vendor_population(&self) -> bool {
+        self.vendor_population
+    }
+
+    pub fn vendor_population_refresh(&self) -> bool {
+        self.vendor_population_refresh
+    }
+
+    pub fn bypasses_render_artifacts(&self) -> bool {
+        self.mode == CacheMode::Refresh || self.vendor_population || self.vendor_check
+    }
+
+    #[must_use]
+    pub fn with_vendor_check(mut self) -> Self {
+        self.vendor_check = true;
+        self
+    }
+
+    pub fn is_vendor_check(&self) -> bool {
+        self.vendor_check
+    }
+
+    pub(crate) fn observe_artifact(
+        &self,
+        request: super::artifact::ArtifactRequest,
+        artifact: super::artifact::ResolvedArtifact,
+    ) {
+        self.observed_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request, artifact);
+    }
+
+    pub(crate) fn observed_artifacts(
+        &self,
+    ) -> BTreeMap<super::artifact::ArtifactRequest, super::artifact::ResolvedArtifact> {
+        self.observed_artifacts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()

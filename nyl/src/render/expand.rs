@@ -201,6 +201,7 @@ pub(crate) async fn generate_render_resource(
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
     gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<RenderResource>> {
     let provenance = resource.provenance.resource(&resource.value);
     let generated = generate_resource(
@@ -212,6 +213,7 @@ pub(crate) async fn generate_render_resource(
         credential_provider,
         track_parent,
         gitops_cache,
+        artifact_resolver,
     )
     .await
     .map_err(|error| error.with_render_provenance(provenance.to_string()))?;
@@ -286,6 +288,7 @@ pub(crate) async fn generate_resource(
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
     gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
@@ -302,7 +305,7 @@ pub(crate) async fn generate_resource(
             kube_version,
             api_versions,
             credential_provider.clone(),
-            gitops_cache,
+            artifact_resolver,
         )?;
 
         Ok(apply_parent_tracking_annotations(
@@ -316,7 +319,7 @@ pub(crate) async fn generate_resource(
     } else if kind == Some("RemoteManifest") && api_version == Some(API_VERSION) {
         let remote_manifest = RemoteManifest::from_value(resource)?;
         remote_manifest.validate()?;
-        let manifests = fetch_remote_manifest_documents(&remote_manifest, gitops_cache).await?;
+        let manifests = fetch_remote_manifest_documents(&remote_manifest, gitops_cache, artifact_resolver).await?;
         Ok(apply_parent_tracking_annotations(
             manifests,
             track_parent,
@@ -377,7 +380,7 @@ pub(crate) async fn generate_resource(
                 kube_version,
                 api_versions,
                 credential_provider.clone(),
-                gitops_cache,
+                artifact_resolver,
             )?;
 
             Ok(apply_parent_tracking_annotations(
@@ -418,7 +421,7 @@ pub(crate) async fn generate_resource(
                 kube_version,
                 api_versions,
                 credential_provider.clone(),
-                gitops_cache,
+                artifact_resolver,
             )?;
 
             Ok(apply_parent_tracking_annotations(
@@ -464,6 +467,7 @@ pub(crate) async fn generate_resource(
 async fn fetch_remote_manifest_documents(
     remote_manifest: &RemoteManifest,
     render_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
@@ -485,7 +489,7 @@ async fn fetch_remote_manifest_documents(
 
     fetch_remote_manifest_documents_with_fetcher(remote_manifest, |url| {
         let client = &client;
-        async move { fetch_single_remote_url(client, remote_manifest, &url, render_cache).await }
+        async move { fetch_single_remote_url(client, remote_manifest, &url, render_cache, artifact_resolver).await }
     })
     .await
 }
@@ -515,8 +519,14 @@ async fn fetch_single_remote_url(
     remote_manifest: &RemoteManifest,
     url: &str,
     render_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
     let sanitized_url = crate::util::sanitize_url(url);
+    let request = crate::render::artifact::ArtifactRequest::RemoteManifest { url: url.to_owned() };
+    if let Some(artifact) = artifact_resolver.lookup(&request)? {
+        let bytes = std::fs::read(&artifact.path)?;
+        return parse_remote_manifest_bytes(&remote_manifest.metadata.name, &sanitized_url, &bytes);
+    }
     let mut response = client.get(url).send().await.map_err(|e| {
         let detail = if e.is_timeout() {
             "request timed out"
@@ -563,16 +573,30 @@ async fn fetch_single_remote_url(
         body_bytes.extend_from_slice(&chunk);
     }
 
-    let body = String::from_utf8(body_bytes).map_err(|e| {
-        NylError::Process(format!(
-            "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
-            remote_manifest.metadata.name, sanitized_url, e
-        ))
-    })?;
+    let temporary = tempfile::NamedTempFile::new()?;
+    std::fs::write(temporary.path(), &body_bytes)?;
+    let artifact = artifact_resolver.store(
+        &request,
+        temporary.path(),
+        crate::render::artifact::ArtifactFormat::Manifest,
+        None,
+    )?;
+    let body_bytes = std::fs::read(&artifact.path)?;
+    let documents = parse_remote_manifest_bytes(&remote_manifest.metadata.name, &sanitized_url, &body_bytes)?;
     if let Some(cache) = render_cache {
         cache.observe_source(crate::render::cache::SourceOperation::RemoteManifestDownload);
     }
-    let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{sanitized_url}")));
+    Ok(documents)
+}
+
+fn parse_remote_manifest_bytes(name: &str, url: &str, body_bytes: &[u8]) -> Result<Vec<serde_json::Value>> {
+    let body = String::from_utf8(body_bytes.to_vec()).map_err(|e| {
+        NylError::Process(format!(
+            "RemoteManifest '{}' from {} returned non-UTF-8 content: {}",
+            name, url, e
+        ))
+    })?;
+    let source_ctx = crate::util::SourceContext::new(PathBuf::from(format!("remote:{url}")));
     source_ctx.parse_yaml_documents(&body)
 }
 
@@ -660,8 +684,9 @@ fn render_helm_chart(
     kube_version: &str,
     api_versions: &[String],
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
-    gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
+    let gitops_cache = artifact_resolver.render_cache();
     let working_dir = if let Some(config_file) = &config.file {
         config_file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
     } else {
@@ -671,12 +696,11 @@ fn render_helm_chart(
     let resolver = HelmChartResolver::with_cache_dir_and_provider(
         config.get_helm_chart_search_paths().to_vec(),
         working_dir,
-        gitops_cache
-            .and_then(RenderCache::external_cache_root)
-            .map(Path::to_path_buf),
+        Some(artifact_resolver.cache_base().to_path_buf()),
         credential_provider,
     )
-    .with_render_cache(gitops_cache.cloned());
+    .with_render_cache(gitops_cache.cloned())
+    .with_artifact_resolver(Some(artifact_resolver.clone()));
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
 
     let executor = HelmTemplateExecutor::new()

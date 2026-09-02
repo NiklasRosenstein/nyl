@@ -68,6 +68,8 @@ pub struct HelmChartResolver {
     credential_provider: Option<Arc<CredentialProvider>>,
 
     render_cache: Option<crate::render::cache::RenderCache>,
+
+    artifact_resolver: Option<crate::render::artifact::ArtifactResolver>,
 }
 
 impl HelmChartResolver {
@@ -102,12 +104,19 @@ impl HelmChartResolver {
             cache_dir,
             credential_provider,
             render_cache: None,
+            artifact_resolver: None,
         }
     }
 
     #[must_use]
     pub fn with_render_cache(mut self, cache: Option<crate::render::cache::RenderCache>) -> Self {
         self.render_cache = cache;
+        self
+    }
+
+    #[must_use]
+    pub fn with_artifact_resolver(mut self, resolver: Option<crate::render::artifact::ArtifactResolver>) -> Self {
+        self.artifact_resolver = resolver;
         self
     }
 
@@ -244,7 +253,8 @@ impl HelmChartResolver {
         } else {
             OciChartPuller::new()?
         }
-        .with_render_cache(self.render_cache.clone());
+        .with_render_cache(self.render_cache.clone())
+        .with_artifact_resolver(self.artifact_resolver.clone());
         let chart_path = puller.pull(repository, version, chart_ref.name.as_deref())?;
 
         Ok(ResolvedChart {
@@ -255,6 +265,19 @@ impl HelmChartResolver {
 
     /// Resolve a Git chart reference
     fn resolve_git(&self, repository_url: &str, chart_ref: &ChartRef) -> Result<ResolvedChart> {
+        let revision = chart_ref.version.as_deref().unwrap_or("HEAD");
+        let request = crate::render::artifact::ArtifactRequest::GitSource {
+            repository: repository_url.to_owned(),
+            revision: revision.to_owned(),
+            commit: None,
+            subpath: chart_ref.name.clone(),
+        };
+        if let Some(resolver) = &self.artifact_resolver {
+            if let Some(artifact) = resolver.lookup(&request)? {
+                let checkout = resolver.materialize_git(&artifact)?;
+                return Self::finish_git_chart(checkout, chart_ref, false);
+            }
+        }
         let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
             crate::git::GitManager::with_cache_dir_and_provider(cache_dir, self.credential_provider.clone())
         } else {
@@ -265,8 +288,50 @@ impl HelmChartResolver {
         // Use 'name' field as subpath for Git repos
         let subpath = chart_ref.name.as_deref();
 
-        let worktree_path = git_manager.resolve_ref(repository_url, chart_ref.version.as_deref(), subpath)?;
+        let checkout = git_manager.resolve_ref(repository_url, chart_ref.version.as_deref(), None)?;
+        if let Some(resolver) = &self.artifact_resolver {
+            let chart_path = subpath.map_or(checkout.clone(), |subpath| checkout.join(subpath));
+            Self::verify_and_prepare_git_chart(chart_path, chart_ref, true)?;
+            let repository = git2::Repository::discover(&checkout)
+                .map_err(|error| NylError::config(format!("Failed to inspect Git chart source: {error}")))?;
+            let commit = repository
+                .head()
+                .ok()
+                .and_then(|head| head.target())
+                .map(|oid| oid.to_string());
+            let archive = tempfile::NamedTempFile::new()?;
+            crate::render::artifact::ArtifactResolver::archive_git_tree(&checkout, archive.path())?;
+            let artifact = resolver.store(
+                &request,
+                archive.path(),
+                crate::render::artifact::ArtifactFormat::GitArchive,
+                commit,
+            )?;
+            let checkout = resolver.materialize_git(&artifact)?;
+            return Self::finish_git_chart(checkout, chart_ref, false);
+        }
+        let worktree_path = subpath.map_or(checkout.clone(), |subpath| checkout.join(subpath));
 
+        Self::verify_and_prepare_git_chart(worktree_path, chart_ref, true)
+    }
+
+    fn finish_git_chart(
+        checkout: PathBuf,
+        chart_ref: &ChartRef,
+        allow_dependency_build: bool,
+    ) -> Result<ResolvedChart> {
+        let chart_path = chart_ref
+            .name
+            .as_deref()
+            .map_or(checkout.clone(), |subpath| checkout.join(subpath));
+        Self::verify_and_prepare_git_chart(chart_path, chart_ref, allow_dependency_build)
+    }
+
+    fn verify_and_prepare_git_chart(
+        worktree_path: PathBuf,
+        chart_ref: &ChartRef,
+        allow_dependency_build: bool,
+    ) -> Result<ResolvedChart> {
         // Verify Chart.yaml exists
         let chart_yaml = worktree_path.join("Chart.yaml");
         if !chart_yaml.exists() {
@@ -278,6 +343,12 @@ impl HelmChartResolver {
 
         // Run helm dependency build if the chart has dependencies
         if chart_has_dependencies(&worktree_path)? {
+            if !allow_dependency_build && !dependencies_already_built(&worktree_path) {
+                return Err(NylError::Config(format!(
+                    "Cached or vendored Git chart at {} has unresolved dependencies; run 'nyl vendor sync --refresh' while the source is reachable",
+                    worktree_path.display()
+                )));
+            }
             build_helm_dependencies(&worktree_path)?;
         }
 
@@ -299,6 +370,10 @@ impl std::fmt::Debug for HelmChartResolver {
                 &self.credential_provider.as_ref().map(|_| "<redacted>"),
             )
             .field("render_cache", &self.render_cache.as_ref().map(|_| "<attached>"))
+            .field(
+                "artifact_resolver",
+                &self.artifact_resolver.as_ref().map(|_| "<attached>"),
+            )
             .finish()
     }
 }

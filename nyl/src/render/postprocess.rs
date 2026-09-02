@@ -86,6 +86,7 @@ pub(crate) fn process_application_generator(
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     template_context: &TemplateContext,
     render_cache: Option<&crate::render::cache::RenderCache>,
+    artifact_resolver: Option<&crate::render::artifact::ArtifactResolver>,
 ) -> Result<Vec<serde_json::Value>> {
     let target_name = template_context
         .target
@@ -101,7 +102,12 @@ pub(crate) fn process_application_generator(
         source_selectors.join(", ")
     );
 
-    let source_root = resolve_application_generator_source_path(generator, credential_provider, render_cache)?;
+    let source_root = resolve_application_generator_source_path_with_artifacts(
+        generator,
+        credential_provider,
+        render_cache,
+        artifact_resolver,
+    )?;
     tracing::debug!(
         "ApplicationGenerator {} resolved source root to {}",
         generator.metadata.name,
@@ -316,10 +322,20 @@ pub(crate) fn application_generator_source_selectors(
 /// If `NYL_APPGEN_REPO_PATH_OVERRIDE` is set, all ApplicationGenerators are resolved
 /// against that local repository root and no Git clone/worktree is used.
 /// Otherwise, falls back to Git resolution via repoURL + targetRevision.
+#[cfg(test)]
 pub(crate) fn resolve_application_generator_source_path(
     generator: &crate::resources::ApplicationGenerator,
     credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     render_cache: Option<&crate::render::cache::RenderCache>,
+) -> Result<PathBuf> {
+    resolve_application_generator_source_path_with_artifacts(generator, credential_provider, render_cache, None)
+}
+
+fn resolve_application_generator_source_path_with_artifacts(
+    generator: &crate::resources::ApplicationGenerator,
+    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
+    render_cache: Option<&crate::render::cache::RenderCache>,
+    artifact_resolver: Option<&crate::render::artifact::ArtifactResolver>,
 ) -> Result<PathBuf> {
     const APPGEN_REPO_PATH_OVERRIDE: &str = "NYL_APPGEN_REPO_PATH_OVERRIDE";
 
@@ -356,6 +372,18 @@ pub(crate) fn resolve_application_generator_source_path(
         }
     }
 
+    let request = crate::render::artifact::ArtifactRequest::GitSource {
+        repository: generator.spec.source.repo_url.clone(),
+        revision: generator.spec.source.target_revision.clone(),
+        commit: None,
+        subpath: None,
+    };
+    if let Some(resolver) = artifact_resolver {
+        if let Some(artifact) = resolver.lookup(&request)? {
+            return resolver.materialize_git(&artifact);
+        }
+    }
+
     if let Some(local_repo_root) = try_resolve_application_generator_source_from_local_git_repo(generator) {
         if let Some(cache) = render_cache {
             cache.observe_source(crate::render::cache::SourceOperation::GitWorktreeReuse);
@@ -365,11 +393,30 @@ pub(crate) fn resolve_application_generator_source_path(
 
     let mut git_manager =
         crate::git::GitManager::with_credential_provider(credential_provider)?.with_render_cache(render_cache.cloned());
-    Ok(git_manager.resolve_ref(
+    let checkout = git_manager.resolve_ref(
         &generator.spec.source.repo_url,
         Some(&generator.spec.source.target_revision),
         None,
-    )?)
+    )?;
+    let Some(resolver) = artifact_resolver else {
+        return Ok(checkout);
+    };
+    let repository = git2::Repository::discover(&checkout)
+        .map_err(|error| NylError::config(format!("Failed to inspect ApplicationGenerator source: {error}")))?;
+    let commit = repository
+        .head()
+        .ok()
+        .and_then(|head| head.target())
+        .map(|oid| oid.to_string());
+    let archive = tempfile::NamedTempFile::new()?;
+    crate::render::artifact::ArtifactResolver::archive_git_tree(&checkout, archive.path())?;
+    let artifact = resolver.store(
+        &request,
+        archive.path(),
+        crate::render::artifact::ArtifactFormat::GitArchive,
+        commit,
+    )?;
+    resolver.materialize_git(&artifact)
 }
 
 pub(crate) fn try_resolve_application_generator_source_from_local_git_repo(

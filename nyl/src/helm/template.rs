@@ -247,7 +247,7 @@ impl HelmTemplateExecutor {
         )?;
         cache.record_renderer_tools(&mut recorder)?;
         let current = recorder.clone().finish("helm", String::new());
-        let cached = if cache.mode() == CacheMode::Refresh {
+        let cached = if cache.bypasses_render_artifacts() {
             cache.observe(CacheLayer::Helm, CacheOutcome::Refreshed, &[]);
             None
         } else {

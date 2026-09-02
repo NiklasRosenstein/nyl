@@ -28,6 +28,32 @@ gitops_scaffold_path = "config"
 - `aliases` maps an API version and kind to a component shortcut or local
   component path.
 
+## Remote artifact vendoring
+
+Vendoring is a project-wide policy for remote inputs used by every Cluster and
+DeploymentTarget in the project:
+
+```toml
+[vendor]
+mode = "preferred"
+path = "vendor"
+lfs_threshold_bytes = 1048576
+```
+
+- `mode` is required when the section exists. `disabled` ignores the vendor
+  snapshot during rendering, `preferred` resolves vendor then the disposable
+  source cache then the origin, and `required` permits only a matching
+  vendored artifact.
+- `path` defaults to `vendor` and must remain beneath the directory containing
+  `nyl.toml`. Nyl excludes this subtree from GitOps YAML discovery.
+- `lfs_threshold_bytes` defaults to 1 MiB. Helm and Git archives always use Git
+  LFS rules; RemoteManifest blobs use LFS at or above this threshold.
+
+The committed lock identifies artifacts by a deterministic fingerprint of the
+complete request coordinate. Multiple Releases requesting the same coordinate
+share one lock entry and one blob. See [`nyl vendor`](/nyl/commands/vendor/)
+for snapshot maintenance.
+
 Deployment values, Kubernetes capabilities, and kube contexts live in
 Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/reference/resources/gitops/),
 not in `nyl.toml`.

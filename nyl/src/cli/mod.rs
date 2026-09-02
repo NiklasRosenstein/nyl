@@ -79,6 +79,9 @@ enum Commands {
 
     /// Manage releases
     Release(commands::release::ReleaseArgs),
+
+    /// Manage project-global vendored renderer inputs
+    Vendor(commands::vendor::VendorArgs),
 }
 
 impl Cli {
@@ -107,6 +110,7 @@ impl Cli {
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Cluster(args) => commands::cluster::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
+            Commands::Vendor(args) => commands::vendor::execute(args).await,
         }
     }
 }

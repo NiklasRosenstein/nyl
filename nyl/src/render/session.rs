@@ -380,6 +380,8 @@ impl RenderSession {
         let mut manifest_provenance = HashMap::new();
         let mut helm_render_count = 0;
         let mut pending = resources;
+        let artifact_resolver =
+            super::artifact::ArtifactResolver::new(&self.project_root, &self.project_config, self.cache.clone())?;
         for _ in 0..request.max_depth {
             let mut next = Vec::new();
             for resource in pending {
@@ -396,6 +398,7 @@ impl RenderSession {
                     self.credential_provider.clone(),
                     request.track_parent,
                     self.cache.as_ref(),
+                    &artifact_resolver,
                 )
                 .await?
                 {
@@ -440,6 +443,7 @@ impl RenderSession {
                     self.credential_provider.clone(),
                     &self.template_context,
                     self.cache.as_ref(),
+                    Some(&artifact_resolver),
                 )?);
             }
         }
@@ -542,6 +546,13 @@ impl RenderSession {
         if let Some(config_file) = &self.project_config.file {
             recorder.record_path_file(config_file)?;
         }
+        if let Some(lock) = self.project_config.vendor_lock_path() {
+            recorder.record_bytes(
+                format!("vendor-lock:{}", lock.display()),
+                "vendor-lock",
+                &std::fs::read(lock).unwrap_or_else(|_| b"missing".to_vec()),
+            );
+        }
         recorder.record_template_context(&self.template_context.to_json())?;
         recorder.record_value(
             "request",
@@ -562,7 +573,7 @@ impl RenderSession {
             recorder.replay_filesystem_dependencies(previous)?;
         }
         let current = recorder.clone().finish("release", String::new());
-        let cached = if cache.mode() == CacheMode::Refresh {
+        let cached = if cache.bypasses_render_artifacts() {
             cache.observe(CacheLayer::Release, CacheOutcome::Refreshed, &[]);
             None
         } else {

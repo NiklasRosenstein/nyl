@@ -15,6 +15,7 @@ nyl provides several commands for managing Kubernetes manifests:
 - [`apply`](/nyl/commands/apply/) - Apply rendered manifests to the cluster
 - [`release`](/nyl/commands/release/) - Inspect release history and roll back to a previous revision
 - [`cluster`](/nyl/commands/cluster/) - Inspect clusters and maintain their rendering capabilities
+- [`vendor`](/nyl/commands/vendor/) - Snapshot and verify remote renderer inputs
 - [`Rendered GitOps commands`](/nyl/commands/gitops/) - Render, diff, lock, and publish target trees
 
 ## Global Options
