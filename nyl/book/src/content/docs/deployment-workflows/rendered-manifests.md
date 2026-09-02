@@ -32,17 +32,20 @@ commit that tree to the target revision.
 
 ## Quick start
 
-Create a project and the control resources:
+Initialize a Git repository with one cluster, deployment target, AppProject, and
+ApplicationGroup:
 
 ```bash
-nyl new project platform
-nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
-nyl new gitops cluster primary --context admin@primary
-nyl new gitops argocd-instance central
-nyl new gitops target production
-nyl new gitops project workloads
-nyl new gitops application-group workloads
+mkdir platform && cd platform
+git init
+git remote add origin https://git.example.com/platform/deploy.git
+nyl init gitops --cluster-name production --context admin@production
 ```
+
+The wizard detects the Git remote and current kube context, writes a compact
+`gitops.yaml`, creates a minimal `nyl.toml` when needed, and creates the
+`applications/` source directory. See [`nyl init gitops`](/nyl/commands/init/)
+for fully non-interactive flags and stdout mode.
 
 Then validate and render one target:
 

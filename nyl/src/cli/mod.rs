@@ -68,6 +68,9 @@ enum Commands {
     /// Create a new nyl project
     New(commands::new::NewArgs),
 
+    /// Initialize project features and configuration
+    Init(Box<commands::init::InitArgs>),
+
     /// Validate project configuration
     Validate(commands::validate::ValidateArgs),
 
@@ -100,6 +103,7 @@ impl Cli {
             Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::Generate(args) => commands::generate::execute(args),
             Commands::New(args) => commands::new::execute(args).await,
+            Commands::Init(args) => commands::init::execute(*args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Cluster(args) => commands::cluster::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,

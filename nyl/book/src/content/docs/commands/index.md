@@ -7,6 +7,7 @@ nyl provides several commands for managing Kubernetes manifests:
 ## Available Commands
 
 - [`new`](/nyl/commands/new/) - Create new projects and components
+- [`init`](/nyl/commands/init/) - Initialize a compact rendered GitOps project
 - [`validate`](/nyl/commands/validate/) - Validate project configuration
 - [`rendering-pipeline`](/nyl/commands/rendering-pipeline/) - Shared rendering pipeline used by render/diff/apply
 - [`render`](/nyl/commands/render/) - Render Kubernetes manifests

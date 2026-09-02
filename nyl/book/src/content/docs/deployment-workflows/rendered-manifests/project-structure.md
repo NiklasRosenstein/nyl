@@ -8,6 +8,19 @@ conventions rather than mandatory lookup paths.
 
 ## Recommended layout
 
+The smallest useful repository keeps all control resources in one file:
+
+```text
+nyl.toml
+gitops.yaml
+applications/
+components/
+```
+
+Create it with `nyl init gitops`. GitOps resource discovery is independent of
+the file name and directory layout, so the configuration can be split as it
+grows. A conventional split layout is:
+
 ```text
 nyl.toml
 config/
@@ -35,7 +48,7 @@ Set `project.gitops_scaffold_path` in `nyl.toml` when generated control
 resources should live somewhere other than `config/`. This setting changes only
 scaffold destinations; it does not restrict discovery.
 
-Create resources individually with:
+Create additional resources individually with:
 
 ```bash
 nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git

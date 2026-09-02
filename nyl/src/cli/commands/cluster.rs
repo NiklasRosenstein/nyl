@@ -125,7 +125,11 @@ fn list_clusters() -> Result<()> {
 }
 
 pub(crate) async fn update(args: ClusterUpdateArgs) -> Result<()> {
-    let inventory = inventory(&std::env::current_dir()?)?;
+    update_from_dir(args, &std::env::current_dir()?).await
+}
+
+pub(crate) async fn update_from_dir(args: ClusterUpdateArgs, start_dir: &Path) -> Result<()> {
+    let inventory = inventory(start_dir)?;
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, &args.name)
         .ok_or_else(|| NylError::config(format!("Cluster '{}' not found", args.name)))?;
