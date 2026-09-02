@@ -1,7 +1,6 @@
 /// Resource definitions (HelmChart, Component, etc.)
 ///
 /// This module provides Kubernetes-style resource definitions for Nyl
-mod application_generator;
 mod argocd_application_field_catalog;
 mod component;
 mod gitops;
@@ -11,10 +10,6 @@ mod path_glob;
 mod release;
 mod remote_manifest;
 
-pub use application_generator::{
-    extract_application_generators, ApplicationDestination, ApplicationGenerator, ApplicationGeneratorMetadata,
-    ApplicationGeneratorSpec, ApplicationSource, AutomatedSyncPolicy, ReleaseCustomizationPolicy, SyncPolicy,
-};
 pub use argocd_application_field_catalog::{
     is_supported_application_array_field_path, is_supported_application_field_path,
 };

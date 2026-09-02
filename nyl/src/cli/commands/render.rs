@@ -9,7 +9,6 @@ use crate::{
     cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster},
     cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     config::ProjectConfig,
-    git::is_argocd_env,
     gitops::{discover_gitops_inventory, resolve_deployment_target_name},
     kubernetes::{KubeRsClient, ResourceKey},
     render::{cache, prepare_manifests_for_output, RenderPathMode, RenderRequest, RenderSession},
@@ -17,7 +16,6 @@ use crate::{
     NylError, Result,
 };
 
-pub(crate) use crate::render::best_effort_parse_yaml_documents;
 /// Common options for manifest rendering operations (render, apply, diff)
 #[derive(Args, Debug, Clone)]
 pub struct RenderOptions {
@@ -170,8 +168,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             .map(|resolved| (&resolved.target, &resolved.cluster)),
         explicit_capabilities,
         missing_capabilities_error,
-    )
-    .await?;
+    )?;
     let render_cache = cache::RenderCache::new(&project_root, options.common.cache.mode())?;
     let _cache_reporter = render_cache.reporter();
     session.set_cache(Some(render_cache));
@@ -186,8 +183,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.only_source_kind = options.common.only_source_kind.as_deref();
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
-    request.expand_application_generators = true;
-    request.strip_empty_metadata_labels_default = is_argocd_env();
+    request.strip_empty_metadata_labels_default = false;
     let rendered = session.render(request).await?;
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
     let mut manifests = rendered.manifests;

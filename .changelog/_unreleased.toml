@@ -21,3 +21,15 @@ id = "177306ad-7542-4b3d-875d-f4127d14a470"
 type = "feature"
 description = "Add an exact source cache and project-wide `nyl vendor` workflow for reproducible, network-free rendered GitOps inputs"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "61fc9e7f-acde-40c4-a9e0-5d0d7d4f26d8"
+type = "breaking change"
+description = "Remove the Argo CD CMP integration, ApplicationGenerator resource, `nyl generate argocd`, and deployment chart; keep the published image as a shell-friendly CI renderer with Nyl, Helm, Git, SOPS, and Kyverno CLI"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "cb8fdd17-a169-4a62-9655-3865d324849f"
+type = "feature"
+description = "Exclude project secrets and NYL_* environment inputs from tree rendering by default, with explicit per-command admission through `--allow-secret-inputs` for trusted central sources"
+author = "@NiklasRosenstein"

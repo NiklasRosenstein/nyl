@@ -1,6 +1,6 @@
 # Nyl
 
-Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, cluster-aware rendering, and ArgoCD integration.
+Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, cluster-aware rendering, and rendered GitOps output.
 
 ## Highlights
 
@@ -10,7 +10,7 @@ Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based compo
 - Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
 - Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
-- ArgoCD integration via CMP container, Helm chart, and `ApplicationGenerator` resource
+- CI image with Nyl, Helm, Git, SOPS, and Kyverno CLI
 
 ## Quick Start
 
@@ -63,24 +63,22 @@ spec:
   url: https://example.com/platform/crds.yaml
 ```
 
-### ArgoCD Bootstrap
+### CI image
 
-Nyl ships ArgoCD integration assets in this repo:
+The published image is a shell-friendly rendering environment with no fixed
+entrypoint:
 
-- `docker/`: Nyl CMP container image
-- `chart/`: Helm chart to deploy ArgoCD with Nyl
-- `examples/argocd-bootstrap/`: self-managing ArgoCD bootstrap using `ApplicationGenerator`
-
-```bash
-export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
-nyl apply examples/argocd-bootstrap/bootstrap.yaml
+```yaml
+render:
+  image: ghcr.io/niklasrosenstein/nyl:TAG
+  script:
+    - nyl render-tree --target production --output-dir deploy
 ```
 
 ## Repository Layout
 
 - `nyl/`: main Rust crate and CLI
-- `docker/`: ArgoCD CMP image
-- `chart/`: ArgoCD Helm chart
+- `docker/`: CI rendering image
 - `examples/`: runnable examples
 
 ## Docs

@@ -10,8 +10,8 @@ use similar::TextDiff;
 
 use crate::git::GitManager;
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, resolve_deployment_target_name, GitOpsCache,
-    RenderIndex, TreeCacheArgs,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
+    GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::{NylError, Result};
 
@@ -27,6 +27,7 @@ pub enum DiffTreeBase {
 
 /// Diff a target without modifying its publication tree.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DiffTreeArgs {
     #[command(flatten)]
     pub cache: TreeCacheArgs,
@@ -63,6 +64,10 @@ pub struct DiffTreeArgs {
     /// Return an error when differences exist.
     #[arg(long)]
     pub fail_on_diff: bool,
+
+    /// Allow project secrets and NYL_* environment variables to affect rendered output.
+    #[arg(long)]
+    pub allow_secret_inputs: bool,
 }
 
 #[derive(Debug)]
@@ -166,9 +171,18 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     let _cache_reporter = cache.reporter();
     let desired_phase = matches!(args.against, DiffTreeBase::Source).then(|| "Desired".to_string());
     let mut desired_progress = TreeProgressReporter::new(args.progress, desired_phase);
-    let desired =
-        compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut desired_progress).await?;
-    let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache).await?;
+    let options = TreeRenderOptions {
+        allow_secret_inputs: args.allow_secret_inputs,
+    };
+    let desired = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut desired_progress,
+        options,
+    )
+    .await?;
+    let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
     let selection = DiffSelection::from_args(&args);
     print_comparison_summary(&ComparisonSummary {
         target: &target_name,
@@ -216,6 +230,7 @@ async fn resolve_baseline(
     target_name: &str,
     desired: &crate::gitops::CompiledTargetTree,
     cache: &GitOpsCache,
+    options: TreeRenderOptions,
 ) -> Result<ResolvedBaseline> {
     match args.against {
         DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(desired, cache)?)),
@@ -231,6 +246,7 @@ async fn resolve_baseline(
                 target_name,
                 cache,
                 args.progress,
+                options,
             )
             .await?;
             Ok(ResolvedBaseline::Source(Box::new(baseline)))
@@ -612,6 +628,7 @@ async fn source_derived_tree(
     target: &str,
     cache: &GitOpsCache,
     progress_args: TreeProgressArgs,
+    options: TreeRenderOptions,
 ) -> Result<SourceBaseline> {
     let repository_url = if let Some(url) = source_repository {
         url.to_string()
@@ -631,7 +648,8 @@ async fn source_derived_tree(
     let commit = checkout_commit(&checkout)?;
     let inventory = discover_gitops_inventory(&checkout, None)?;
     let mut progress = TreeProgressReporter::new(progress_args, Some(format!("Baseline {source_ref}")));
-    let compiled = compile_target_tree_cached_with_observer(&inventory, target, cache, &mut progress).await?;
+    let compiled =
+        compile_target_tree_cached_with_observer_and_options(&inventory, target, cache, &mut progress, options).await?;
     Ok(SourceBaseline {
         compiled,
         repository: repository_url,

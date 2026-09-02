@@ -12,10 +12,6 @@ Nyl provides Kubernetes-style custom resources for declarative configuration and
 - **[HelmChart](/nyl/reference/resources/helmchart/)**: Declarative Helm chart deployment with templating support
 - **[RemoteManifest](/nyl/reference/resources/remote-manifest/)**: Fetch and include manifests from a remote HTTPS URL
 
-### ArgoCD Resources
-
-- **[ApplicationGenerator](/nyl/reference/resources/application-generator/)**: Automatically generates ArgoCD Applications from Release files
-
 ### Rendered GitOps Resources
 
 - **[Release](/nyl/reference/resources/gitops/release/)**: Defines one rendered deployment unit and its namespace scope
@@ -47,7 +43,6 @@ spec:
 ## API Versions
 
 - `nyl.niklasrosenstein.github.com/v1`: Core rendering resources (`HelmChart`, `RemoteManifest`)
-- `argocd.nyl.niklasrosenstein.github.com/v1`: ArgoCD integration resources (ApplicationGenerator)
 - `gitops.nyl/v1`: Release metadata and rendered GitOps control resources (`Release`, `GitRepository`, `Cluster`, `ArgoCDInstance`, `DeploymentTarget`, `AppProjectDefinition`, `ApplicationGroup`)
 - `components.nyl.niklasrosenstein.github.com/v1`: Component resources (dynamic `kind` path/shortcut)
 
@@ -65,7 +60,6 @@ Nyl resources are processed based on their kind:
 - **Component**: Resolved to a chart reference and rendered via Helm, replaced with rendered manifests
 - **HelmChart**: Rendered using Helm templating, replaced with rendered manifests
 - **RemoteManifest**: Fetched via HTTPS and parsed into documents, then processed recursively
-- **ApplicationGenerator**: Processed to generate ArgoCD Applications, removed from output
 - **Rendered GitOps resources**: Discovered as compiler configuration for `render-tree`, `diff-tree`, and `publish-tree`; not emitted as workload manifests
 
 ## Multi-Document Files

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{
     deduplicate_manifests, filter_render_resources, generate_render_resource, is_helm_renderable_resource,
-    is_renderable_resource, load_release_bundle_with_root, prepare_manifests_for_output, process_application_generator,
+    is_renderable_resource, load_release_bundle_with_root, prepare_manifests_for_output,
     resolve_strip_empty_metadata_labels_mode, RenderResource,
 };
 use crate::config::ProjectConfig;
@@ -17,9 +17,8 @@ use crate::helm::HelmChartResolver;
 use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
 use crate::resources::{
-    component_kind_to_chart_ref, extract_all_kyverno_policies, extract_application_generators, extract_release,
-    is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ApplicationGenerator, Cluster,
-    DeploymentTarget, HelmChart, KyvernoScope, Release,
+    component_kind_to_chart_ref, extract_all_kyverno_policies, extract_release, is_nyl_component,
+    is_remote_helm_chart_shortcut, parse_component_kind, Cluster, DeploymentTarget, HelmChart, KyvernoScope, Release,
 };
 use crate::secrets::SecretsConfig;
 use crate::template::TemplateContext;
@@ -49,7 +48,6 @@ pub struct RenderRequest<'a> {
     pub only_source_kind: Option<&'a str>,
     pub max_depth: usize,
     pub track_parent: bool,
-    pub expand_application_generators: bool,
     pub strip_empty_metadata_labels_default: bool,
 }
 
@@ -68,7 +66,6 @@ impl<'a> RenderRequest<'a> {
             only_source_kind: None,
             max_depth: 10,
             track_parent: false,
-            expand_application_generators: false,
             strip_empty_metadata_labels_default: false,
         }
     }
@@ -81,8 +78,6 @@ pub struct RenderedBundle {
     pub release: Option<Release>,
     /// Fully expanded, policy-processed and deduplicated Kubernetes manifests.
     pub manifests: Vec<Value>,
-    /// ApplicationGenerator controls found in the source bundle.
-    pub application_generators: Vec<ApplicationGenerator>,
     /// Duplicate Kubernetes resources discarded by last-write-wins processing.
     pub duplicates: HashMap<ResourceKey, usize>,
     /// Whether empty `metadata.labels` objects were normalized out.
@@ -111,7 +106,18 @@ impl RenderSession {
         target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
-        Self::build(project_root, Some(project_config), target, cluster, true, false)
+        Self::build(project_root, Some(project_config), target, cluster, false, false, true)
+    }
+
+    /// Build an offline rendering session that admits the project's secrets
+    /// provider and `NYL_*` process environment.
+    pub fn for_target_with_secret_inputs(
+        project_root: &Path,
+        project_config: &ProjectConfig,
+        target: &DeploymentTarget,
+        cluster: &Cluster,
+    ) -> Result<Self> {
+        Self::build(project_root, Some(project_config), target, cluster, true, false, true)
     }
 
     /// Build with the central project configuration but without secrets or
@@ -122,13 +128,13 @@ impl RenderSession {
         target: &DeploymentTarget,
         cluster: &Cluster,
     ) -> Result<Self> {
-        Self::build(project_root, Some(project_config), target, cluster, false, false)
+        Self::build(project_root, Some(project_config), target, cluster, false, false, false)
     }
 
     /// Build a restricted remote-source session. Remote projects cannot load a
     /// secrets provider from their checkout.
     pub fn for_remote_target(project_root: &Path, target: &DeploymentTarget, cluster: &Cluster) -> Result<Self> {
-        Self::build(project_root, None, target, cluster, false, true)
+        Self::build(project_root, None, target, cluster, false, true, false)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -139,6 +145,7 @@ impl RenderSession {
         cluster: &Cluster,
         load_secrets: bool,
         restrict_checkout: bool,
+        trusted_source: bool,
     ) -> Result<Self> {
         target.validate()?;
         cluster.validate()?;
@@ -219,7 +226,7 @@ impl RenderSession {
             .and_then(Value::as_object_mut)
             .expect("serialized Cluster spec is an object")
             .remove("live");
-        let target_context = target_template_context(target, load_secrets)?;
+        let target_context = target_template_context(target, trusted_source)?;
         let template_context = if load_secrets {
             let secrets = SecretsConfig::load_from_dir(None, Some(&project_root))?;
             TemplateContext::build(effective_values.clone(), &secrets)?
@@ -248,15 +255,15 @@ impl RenderSession {
     }
 
     /// Build the session used by `render`, `apply`, and `diff`.
-    pub async fn for_cli(
+    pub fn for_cli(
         project_root: &Path,
         project_config: &ProjectConfig,
         target: Option<(&DeploymentTarget, &Cluster)>,
         explicit_capabilities: Option<(String, Vec<String>)>,
         missing_capabilities_error: Option<String>,
     ) -> Result<Self> {
-        let mut session = if let Some((target, cluster)) = target {
-            Self::build(project_root, Some(project_config), target, cluster, true, false)?
+        let session = if let Some((target, cluster)) = target {
+            Self::build(project_root, Some(project_config), target, cluster, true, false, true)?
         } else {
             let project_root = project_root
                 .canonicalize()
@@ -275,7 +282,6 @@ impl RenderSession {
                 cache: None,
             }
         };
-        session.credential_provider = crate::git::argocd_credential_provider_from_cluster().await;
         Ok(session)
     }
 
@@ -434,20 +440,6 @@ impl RenderSession {
             release.as_ref(),
         );
 
-        let (application_generators, mut manifests) = extract_application_generators(&manifests)?;
-        if request.expand_application_generators {
-            for generator in &application_generators {
-                manifests.extend(process_application_generator(
-                    generator,
-                    source_path_text,
-                    self.credential_provider.clone(),
-                    &self.template_context,
-                    self.cache.as_ref(),
-                    Some(&artifact_resolver),
-                )?);
-            }
-        }
-
         let (policies, manifests) = extract_all_kyverno_policies(&manifests)?;
         let global = policies.get(&KyvernoScope::Global).cloned().unwrap_or_default();
         let non_global_count: usize = policies
@@ -494,7 +486,6 @@ impl RenderSession {
         let rendered = RenderedBundle {
             release,
             manifests,
-            application_generators,
             duplicates,
             strip_empty_metadata_labels,
             manifest_provenance,
@@ -561,7 +552,6 @@ impl RenderSession {
                 "pathMode": format!("{:?}", request.path_mode),
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
-                "expandApplicationGenerators": request.expand_application_generators,
                 "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,
             }),
         )?;
@@ -666,7 +656,6 @@ struct CachedReleaseHit {
 struct CachedRenderedBundle {
     release: Option<Release>,
     manifests: Vec<Value>,
-    application_generators: Vec<ApplicationGenerator>,
     duplicates: Vec<(ResourceKey, usize)>,
     strip_empty_metadata_labels: bool,
     manifest_provenance: Vec<(ResourceKey, String)>,
@@ -692,7 +681,6 @@ impl CachedRenderedBundle {
         Self {
             release: rendered.release.clone(),
             manifests: rendered.manifests.clone(),
-            application_generators: rendered.application_generators.clone(),
             duplicates,
             strip_empty_metadata_labels: rendered.strip_empty_metadata_labels,
             manifest_provenance,
@@ -709,7 +697,6 @@ impl CachedRenderedBundle {
         RenderedBundle {
             release: self.release,
             manifests: self.manifests,
-            application_generators: self.application_generators,
             duplicates: self.duplicates.into_iter().collect(),
             strip_empty_metadata_labels: self.strip_empty_metadata_labels,
             manifest_provenance: self.manifest_provenance.into_iter().collect(),
@@ -953,6 +940,28 @@ data:
         RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
     }
 
+    #[test]
+    fn target_sessions_require_explicit_secret_input_admission() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        fs::write(temp.path().join("nyl-secrets.yaml"), "not: [valid").unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+
+        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        let context = session.template_context().to_json();
+        assert_eq!(context["secrets"], serde_json::json!({}));
+        assert_eq!(context["env"], serde_json::json!({}));
+        assert_eq!(
+            context["target"]["spec"]["publication"]["repository"]["repoURL"],
+            "https://example.invalid/deploy.git"
+        );
+
+        let error = RenderSession::for_target_with_secret_inputs(temp.path(), &config, &target(), &cluster())
+            .err()
+            .expect("explicit admission loads the configured secrets provider");
+        assert!(error.to_string().contains("Failed to parse secrets YAML"));
+    }
+
     #[tokio::test]
     async fn target_values_and_context_are_visible() {
         let temp = TempDir::new().unwrap();
@@ -1076,34 +1085,6 @@ spec:
             error.contains("additional properties 'unexpected' not allowed"),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn retains_application_generator_for_the_consumer() {
-        let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("nyl.toml"), "").unwrap();
-        fs::write(
-            temp.path().join("app.yaml"),
-            r"apiVersion: argocd.nyl.niklasrosenstein.github.com/v1
-kind: ApplicationGenerator
-metadata:
-  name: legacy
-spec:
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: argocd
-  source:
-    repoURL: https://example.invalid/source.git
-    path: applications
-",
-        )
-        .unwrap();
-
-        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
-        let session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
-        let rendered = session.render_release_file(Path::new("app.yaml")).await.unwrap();
-        assert_eq!(rendered.application_generators.len(), 1);
-        assert!(rendered.manifests.is_empty());
     }
 
     #[test]

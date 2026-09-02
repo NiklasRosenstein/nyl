@@ -9,8 +9,8 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Sig
 use crate::git::CredentialProvider;
 use crate::git::GitManager;
 use crate::gitops::{
-    compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree,
-    resolve_deployment_target_name, GitOpsCache, RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, reconcile_rendered_tree,
+    resolve_deployment_target_name, GitOpsCache, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::{NylError, Result};
 
@@ -37,6 +37,10 @@ pub struct PublishTreeArgs {
     /// Prepare and commit locally without pushing.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Allow project secrets and NYL_* environment variables to affect rendered output.
+    #[arg(long)]
+    pub allow_secret_inputs: bool,
 }
 
 struct PublicationProvenance<'a> {
@@ -70,7 +74,16 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
-    let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
+    let compiled = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut progress,
+        TreeRenderOptions {
+            allow_secret_inputs: args.allow_secret_inputs,
+        },
+    )
+    .await?;
     let publication_url = compiled
         .repository
         .publish_url

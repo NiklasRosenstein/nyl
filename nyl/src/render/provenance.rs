@@ -1,6 +1,12 @@
 //! Resource-level rendering provenance.
 
-use super::*;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::Result;
+
+use super::render_resource_identity;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RenderResource {

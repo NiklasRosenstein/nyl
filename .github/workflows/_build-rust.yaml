@@ -112,7 +112,7 @@ jobs:
             exit 1
           }
 
-      # Verify static linking for musl targets (important for Docker containers)
+      # Verify static linking for musl targets used in the CI image.
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
         run: |
