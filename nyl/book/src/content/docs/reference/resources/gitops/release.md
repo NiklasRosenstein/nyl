@@ -134,7 +134,8 @@ may allow exact sync-option values through
 `spec.releaseCustomization.allowedSyncOptions`; a Release merges them with a
 `+syncOptions` key rather than replacing the group policy. Nyl replaces an
 existing option with the same key, which permits an approved
-`ApplyOutOfSyncOnly=false` exception to the generated default.
+`ApplyOutOfSyncOnly=false` or `ServerSideApply=false` exception to the generated
+defaults.
 
 ## Direct commands and release history
 

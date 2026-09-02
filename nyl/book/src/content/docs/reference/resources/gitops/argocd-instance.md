@@ -22,6 +22,7 @@ spec:
     syncPolicy:
       syncOptions:
         - ApplyOutOfSyncOnly=true
+        - ServerSideApply=true
     applicationDeletionPolicy: Foreground
     selfPrunePolicy: Confirm
 ```
@@ -38,11 +39,12 @@ Every target emits a parent Application named `<target>-catalog` unless
 syncs `<pathPrefix>/_nyl/catalog` and therefore manages the generated child
 Applications, AppProjects, and its own manifest.
 
-The catalog requires manual sync by default and applies only out-of-sync
-resources when synchronized. Foreground deletion cascades to catalog resources,
-and `selfPrunePolicy: Confirm` annotates the parent with `Prune=confirm`. A
-target can override the name, project, sync policy, deletion policy, self-prune
-policy, labels, and annotations under `spec.catalogApplication`.
+The catalog requires manual sync by default. When synchronized, it applies only
+out-of-sync resources with Kubernetes server-side apply. Foreground deletion
+cascades to catalog resources, and `selfPrunePolicy: Confirm` annotates the
+parent with `Prune=confirm`. A target can override the name, project, sync
+policy, deletion policy, self-prune policy, labels, and annotations under
+`spec.catalogApplication`.
 
 Enable automated catalog synchronization explicitly when the publication
 workflow provides the required approval boundary:
@@ -56,6 +58,7 @@ spec:
         selfHeal: true
       syncOptions:
         - ApplyOutOfSyncOnly=true
+        - ServerSideApply=true
 ```
 
 When no ArgoCDInstance resources exist, each target gets an implicit local

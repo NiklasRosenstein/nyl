@@ -9,7 +9,6 @@ use crate::{NylError, Result};
 
 const FOREGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io";
 const BACKGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io/background";
-const APPLY_OUT_OF_SYNC_ONLY_DEFAULT: &str = "ApplyOutOfSyncOnly=true";
 
 /// Validated inputs for an Argo CD Application backed by a plain Git directory.
 pub struct DirectoryApplicationInput {
@@ -84,13 +83,7 @@ pub fn build_directory_application(input: &DirectoryApplicationInput) -> Result<
         automated: None,
         sync_options: Vec::new(),
     });
-    if !sync_policy
-        .sync_options
-        .iter()
-        .any(|option| sync_option_key(option) == sync_option_key(APPLY_OUT_OF_SYNC_ONLY_DEFAULT))
-    {
-        sync_policy.sync_options.push(APPLY_OUT_OF_SYNC_ONLY_DEFAULT.to_owned());
-    }
+    sync_policy.add_generated_application_defaults();
     spec.insert("syncPolicy".to_string(), serde_json::to_value(sync_policy)?);
 
     Ok(json!({
@@ -157,24 +150,27 @@ mod tests {
         assert_eq!(application["metadata"]["finalizers"][0], FOREGROUND_FINALIZER);
         assert!(application["spec"]["source"].get("plugin").is_none());
         assert_eq!(
-            application["spec"]["syncPolicy"]["syncOptions"][0],
-            APPLY_OUT_OF_SYNC_ONLY_DEFAULT
+            application["spec"]["syncPolicy"]["syncOptions"],
+            json!(["ApplyOutOfSyncOnly=true", "ServerSideApply=true"])
         );
     }
 
     #[test]
-    fn explicit_apply_out_of_sync_only_value_overrides_the_default() {
+    fn explicit_sync_option_values_override_generated_defaults() {
         let mut input = input(ApplicationDeletionPolicy::Foreground);
         input.sync_policy = Some(GitOpsSyncPolicy {
             automated: None,
-            sync_options: vec!["ApplyOutOfSyncOnly=false".to_owned()],
+            sync_options: vec![
+                "ApplyOutOfSyncOnly=false".to_owned(),
+                "ServerSideApply=false".to_owned(),
+            ],
         });
 
         let application = build_directory_application(&input).unwrap();
 
         assert_eq!(
             application["spec"]["syncPolicy"]["syncOptions"],
-            json!(["ApplyOutOfSyncOnly=false"])
+            json!(["ApplyOutOfSyncOnly=false", "ServerSideApply=false"])
         );
     }
 

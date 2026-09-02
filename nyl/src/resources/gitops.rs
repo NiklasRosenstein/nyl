@@ -399,6 +399,21 @@ pub struct GitOpsSyncPolicy {
     pub sync_options: Vec<String>,
 }
 
+impl GitOpsSyncPolicy {
+    pub(crate) fn add_generated_application_defaults(&mut self) {
+        for default in ["ApplyOutOfSyncOnly=true", "ServerSideApply=true"] {
+            let default_key = sync_option_key(default);
+            if !self
+                .sync_options
+                .iter()
+                .any(|option| sync_option_key(option) == default_key)
+            {
+                self.sync_options.push(default.to_owned());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitOpsAutomatedSyncPolicy {
@@ -1235,10 +1250,16 @@ fn default_argocd_project() -> String {
 }
 
 fn default_catalog_sync_policy() -> GitOpsSyncPolicy {
-    GitOpsSyncPolicy {
+    let mut policy = GitOpsSyncPolicy {
         automated: None,
-        sync_options: vec!["ApplyOutOfSyncOnly=true".to_owned()],
-    }
+        sync_options: Vec::new(),
+    };
+    policy.add_generated_application_defaults();
+    policy
+}
+
+fn sync_option_key(option: &str) -> &str {
+    option.split_once('=').map_or(option, |(key, _)| key)
 }
 
 fn default_source_include() -> Vec<String> {

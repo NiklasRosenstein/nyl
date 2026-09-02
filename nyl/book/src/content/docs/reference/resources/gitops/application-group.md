@@ -132,10 +132,10 @@ attach additional relative files or glob matches to that release.
 
 | Field | Required | Default | Description |
 | --- | --- | --- | --- |
-| `spec.syncPolicy.automated.enabled` | No | `false` | Sets Argo CD automated sync enablement. |
+| `spec.syncPolicy.automated` | No | — | Its presence enables Argo CD automated sync. |
 | `spec.syncPolicy.automated.prune` | No | `false` | Enables automated pruning. |
 | `spec.syncPolicy.automated.selfHeal` | No | `false` | Enables automated self-healing. |
-| `spec.syncPolicy.syncOptions` | No | `[ApplyOutOfSyncOnly=true]` | Argo CD Application sync options. An explicit value with the same option key overrides the generated default. |
+| `spec.syncPolicy.syncOptions` | No | `[ApplyOutOfSyncOnly=true, ServerSideApply=true]` | Argo CD Application sync options. An explicit value with the same option key overrides the generated default. |
 | `spec.applicationDeletionPolicy` | No | `Foreground` | `Foreground`, `Background`, or `Orphan`. |
 | `spec.namespace.create` | No | `true` | Synthesizes missing destination and additional Namespaces. |
 | `spec.namespace.prunePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
@@ -178,9 +178,11 @@ the same resource instead of silently discarding an authored Namespace.
 lists applied to `Release.spec.argocd.applicationOverride`. `*` matches one
 path segment and `**` matches multiple segments. Deny wins.
 
-Every generated directory Application defaults to `ApplyOutOfSyncOnly=true`.
-Set `ApplyOutOfSyncOnly=false` in the ApplicationGroup sync options when every
-resource must participate in each sync.
+Every generated directory Application defaults to `ApplyOutOfSyncOnly=true`
+and `ServerSideApply=true`. Set an option to `false` in the ApplicationGroup
+sync options to override that generated default. A resource can opt out of
+server-side apply with the
+`argocd.argoproj.io/sync-options: ServerSideApply=false` annotation.
 
 `spec.releaseCustomization.allowedSyncOptions` is an exact allow-list for sync
 options that a Release may merge with `spec.syncPolicy.+syncOptions` in its

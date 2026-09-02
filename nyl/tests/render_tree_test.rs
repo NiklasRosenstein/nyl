@@ -235,6 +235,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(application.contains("environment: production"));
     assert!(application.contains("server: https://kubernetes.default.svc"));
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
+    assert_eq!(application.matches("- ServerSideApply=true").count(), 1);
     assert!(!fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -248,6 +249,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(catalog.contains("Prune=confirm"));
     assert!(!catalog.contains("automated:"));
     assert_eq!(catalog.matches("- ApplyOutOfSyncOnly=true").count(), 1);
+    assert_eq!(catalog.matches("- ServerSideApply=true").count(), 1);
     let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
     assert_eq!(index["version"], 2);
     assert_eq!(index["target"], "production");
