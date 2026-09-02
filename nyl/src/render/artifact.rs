@@ -177,7 +177,7 @@ impl Default for VendorLock {
 #[serde(deny_unknown_fields)]
 pub struct VendorArtifact {
     pub request: ArtifactDescriptor,
-    pub path: PathBuf,
+    pub path: String,
     pub format: ArtifactFormat,
     pub size: u64,
     pub digest: String,
@@ -271,6 +271,7 @@ impl DirectoryVendorWriter {
         for (request, artifact) in observed {
             let fingerprint = request.fingerprint()?;
             let relative = request.vendor_relative_path()?;
+            let portable_relative = portable_relative_path(&relative)?;
             let destination = checked_relative_path(&self.root, &relative, "generated vendor artifact path")?;
             let bytes = fs::read(&artifact.path)?;
             let digest = sha256(&bytes);
@@ -288,7 +289,7 @@ impl DirectoryVendorWriter {
                 fingerprint,
                 VendorArtifact {
                     request: request.descriptor(),
-                    path: relative,
+                    path: portable_relative,
                     format: artifact.format,
                     size: bytes.len() as u64,
                     digest,
@@ -403,7 +404,7 @@ impl DirectoryVendorWriter {
         {
             rules.push(format!(
                 "{} filter=lfs diff=lfs merge=lfs -text",
-                entry.path.to_string_lossy().replace(' ', "\\ ")
+                entry.path.replace(' ', "\\ ")
             ));
         }
         rules.sort();
@@ -427,7 +428,7 @@ impl VendorStore for DirectoryVendorStore {
         let Some(entry) = self.lock.artifacts.get(&fingerprint) else {
             return Ok(None);
         };
-        let path = checked_relative_path(&self.root, &entry.path, "vendor lock artifact path")?;
+        let path = checked_relative_path(&self.root, Path::new(&entry.path), "vendor lock artifact path")?;
         let bytes = fs::read(&path).map_err(|error| {
             NylError::config(format!(
                 "Vendored artifact {} for {} is missing or unreadable: {error}",
@@ -764,6 +765,22 @@ fn checked_relative_path(root: &Path, relative: &Path, label: &str) -> Result<Pa
         return Err(NylError::config(format!("Invalid {label}: {}", relative.display())));
     }
     Ok(root.join(relative))
+}
+
+fn portable_relative_path(path: &Path) -> Result<String> {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(value) => value
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| NylError::config(format!("Generated vendor path is not UTF-8: {}", path.display()))),
+            _ => Err(NylError::config(format!(
+                "Generated vendor path is not a normalized relative path: {}",
+                path.display()
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 fn coordinate_host(value: &str) -> Option<&str> {
