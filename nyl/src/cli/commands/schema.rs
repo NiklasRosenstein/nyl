@@ -11,22 +11,13 @@ use crate::{
 
 /// Generate project and resource schemas.
 #[derive(Args, Debug)]
-pub struct GenerateArgs {
+pub struct SchemaArgs {
     #[command(subcommand)]
-    pub command: GenerateSubcommand,
+    command: SchemaCommand,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum GenerateSubcommand {
-    /// Generate JSON schemas.
-    Schema {
-        #[command(subcommand)]
-        command: SchemaSubcommand,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum SchemaSubcommand {
+enum SchemaCommand {
     /// Generate JSON schema for nyl.toml project configuration.
     Config,
 
@@ -52,6 +43,8 @@ pub enum SchemaResourceKind {
     GitRepository,
     #[value(name = "Cluster", alias = "cluster")]
     Cluster,
+    #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
+    ArgoCDInstance,
     #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
     DeploymentTarget,
     #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
@@ -67,6 +60,7 @@ impl SchemaResourceKind {
         match self {
             Self::GitRepository => Some(GitOpsResourceKind::GitRepository),
             Self::Cluster => Some(GitOpsResourceKind::Cluster),
+            Self::ArgoCDInstance => Some(GitOpsResourceKind::ArgoCDInstance),
             Self::DeploymentTarget => Some(GitOpsResourceKind::DeploymentTarget),
             Self::AppProjectDefinition => Some(GitOpsResourceKind::AppProjectDefinition),
             Self::ApplicationGroup => Some(GitOpsResourceKind::ApplicationGroup),
@@ -75,21 +69,15 @@ impl SchemaResourceKind {
     }
 }
 
-pub fn execute(args: GenerateArgs) -> Result<()> {
+pub fn execute(args: SchemaArgs) -> Result<()> {
     match args.command {
-        GenerateSubcommand::Schema { command } => execute_schema(command),
-    }
-}
-
-fn execute_schema(command: SchemaSubcommand) -> Result<()> {
-    match command {
-        SchemaSubcommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
-        SchemaSubcommand::Resource { kind } => print_schema(&match kind.gitops_kind() {
+        SchemaCommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
+        SchemaCommand::Resource { kind } => print_schema(&match kind.gitops_kind() {
             Some(kind) => generate_gitops_resource_schema(kind),
             None => generate_release_schema(),
         }),
-        SchemaSubcommand::Gitops => print_schema(&generate_gitops_aggregate_schema()),
-        SchemaSubcommand::All { output_dir } => write_all_schemas(&output_dir),
+        SchemaCommand::Gitops => print_schema(&generate_gitops_aggregate_schema()),
+        SchemaCommand::All { output_dir } => write_all_schemas(&output_dir),
     }
 }
 

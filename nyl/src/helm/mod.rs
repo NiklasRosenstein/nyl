@@ -333,7 +333,7 @@ impl HelmChartResolver {
         if chart_has_dependencies(&worktree_path)? {
             if !allow_dependency_build && !dependencies_already_built(&worktree_path) {
                 return Err(NylError::Config(format!(
-                    "Cached or vendored Git chart at {} has unresolved dependencies; run 'nyl vendor sync --refresh' while the source is reachable",
+                    "Cached or vendored Git chart at {} has unresolved dependencies; run 'nyl vendor --refresh' while the source is reachable",
                     worktree_path.display()
                 )));
             }

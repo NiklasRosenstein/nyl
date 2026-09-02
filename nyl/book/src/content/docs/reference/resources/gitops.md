@@ -53,7 +53,7 @@ groups them under `config/` for readability.
 Validate the complete reference graph with:
 
 ```bash
-nyl validate gitops
+nyl validate
 ```
 
 Kind-specific JSON schemas are available from the

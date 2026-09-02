@@ -46,8 +46,8 @@ files that were made outside Nyl.
 ## Validate and render
 
 ```bash
-nyl validate gitops
-nyl target list
+nyl validate
+nyl get targets
 nyl render-tree --target production --output-dir deploy-worktree
 ```
 
@@ -110,7 +110,7 @@ cache reads, retrieve the inputs again, rerender, and replace successful cache
 records. Use `--no-cache` to perform no disposable cache reads or writes;
 temporary storage is deleted with the command. The two options are mutually
 exclusive. An enabled vendor snapshot remains authoritative for both flags;
-refresh it explicitly with `nyl vendor sync --refresh`.
+refresh it explicitly with `nyl vendor --refresh`.
 
 ## Vendored remote inputs
 
@@ -121,18 +121,18 @@ ApplicationGroups. Configure the project-wide
 policy in [`nyl.toml`](/nyl/configuration/#remote-artifact-vendoring), then run:
 
 ```bash
-nyl vendor sync
-nyl vendor check
+nyl vendor
+nyl vendor --check
 ```
 
-`vendor sync` scans all DeploymentTargets by default. Repeat `--target` to
+`nyl vendor` scans all DeploymentTargets by default. Repeat `--target` to
 refresh a subset while retaining entries owned by other targets. It resolves
 existing vendor entries first, then the exact source cache, then the remote
 origin. `--refresh` forces upstream retrieval; when an old extracted Helm cache
 contains the exact chart, Nyl can package and import it before contacting the
 origin.
 
-`vendor check` performs no network access. It compiles the selected targets
+`nyl vendor --check` performs no network access. It compiles the selected targets
 through the normal rendering pipeline, verifies every required coordinate and
 digest, reports unreferenced lock entries, and verifies the managed
 `.gitattributes`. A matching but missing, corrupt, or unmaterialized Git LFS
@@ -141,7 +141,7 @@ artifact is an error rather than permission to fall back to a remote source.
 The directory backend is the current storage implementation. Its
 `lock.yaml`, artifacts, and generated `.gitattributes` are committed together.
 Helm and Git archives are assigned to Git LFS; large RemoteManifest files are
-assigned according to `vendor.lfs_threshold_bytes`. Run `nyl vendor prune` to
+assigned according to `vendor.lfs_threshold_bytes`. Run `nyl vendor --prune` to
 remove artifact files not referenced by the lock.
 
 Rendering commands print rendering statistics on standard error. The Cache

@@ -7,7 +7,7 @@ title: 'Nyl Resource Schemas'
 Generate from CLI:
 
 ```bash
-nyl generate schema config
+nyl schema config
 ```
 
 Committed schema used in published docs:
@@ -30,5 +30,5 @@ Each scaffolded resource points at its kind-specific schema:
 Regenerate all published artifacts with:
 
 ```bash
-nyl generate schema all --output-dir book/public/reference/schemas
+nyl schema all --output-dir book/public/reference/schemas
 ```

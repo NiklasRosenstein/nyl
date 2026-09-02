@@ -1769,7 +1769,7 @@ mod tests {
             assert_eq!(
                 published,
                 generate_gitops_resource_schema(kind),
-                "Published {} is out of date; run `nyl generate schema all --output-dir nyl/book/public/reference/schemas`",
+                "Published {} is out of date; run `nyl schema all --output-dir nyl/book/public/reference/schemas`",
                 kind.schema_filename()
             );
         }

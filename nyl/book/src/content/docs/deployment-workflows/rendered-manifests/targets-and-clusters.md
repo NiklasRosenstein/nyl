@@ -68,9 +68,9 @@ CI cluster access.
 Inspect and refresh committed capabilities from a live cluster with:
 
 ```bash
-nyl cluster list
-nyl cluster update primary
-nyl cluster update primary --check
+nyl get clusters
+nyl update cluster primary
+nyl update cluster primary --check
 ```
 
 `cluster update` changes only `spec.kubernetes`, sorting and deduplicating API
@@ -80,7 +80,7 @@ kubeconfig context.
 
 Review and commit capability changes like any other platform configuration
 change because they can alter rendered output. See the
-[`cluster` command reference](/nyl/commands/cluster/) for live-context checks.
+[`get and update` command reference](/nyl/commands/project-resources/) for live-context checks.
 
 ## Next steps
 

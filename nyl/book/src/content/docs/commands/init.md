@@ -2,13 +2,17 @@
 title: 'init'
 ---
 
-`nyl init gitops [DIR]` initializes the compact form of a rendered-manifest
+`nyl init [DIR]` initializes the compact form of a rendered-manifest
 GitOps project. `DIR` defaults to the current directory and must be inside a
 Git worktree.
 
 ```bash
-nyl init gitops
+nyl init
 ```
+
+Use `nyl init DIR --minimal` to create only `nyl.toml` and the conventional
+project directories. Minimal initialization can create a project outside Git;
+GitOps-specific options cannot be combined with `--minimal`.
 
 When attached to a terminal, the command proposes values detected from the Git
 `origin` remote and the current kubeconfig context. It creates:

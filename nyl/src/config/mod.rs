@@ -223,7 +223,7 @@ impl ProjectConfig {
             Self::load_from_file(path)
         } else {
             tracing::warn!("No project configuration file found");
-            tracing::info!("Using default settings. Initialize with 'nyl new project' to create one.");
+            tracing::info!("Using default settings. Run 'nyl init' to create a project.");
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),

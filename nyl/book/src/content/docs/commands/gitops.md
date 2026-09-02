@@ -2,13 +2,13 @@
 title: 'Rendered GitOps commands'
 ---
 
-## `nyl target list`
+## `nyl get targets`
 
 List every discovered target with its Cluster, publication repository, revision,
 and path prefix.
 
 ```bash
-nyl target list
+nyl get targets
 ```
 
 ## `nyl render-tree`
@@ -116,14 +116,14 @@ and path prefix through a synthetic `_nyl/publication.json` diff entry. Scoped
 views leave those coordinates in the stderr summary. Mutable comparison refs
 must refresh successfully; cached refs are not accepted as current state.
 
-## `nyl source update`
+## `nyl update source-locks`
 
 Resolve remote ApplicationGroup revisions and update their full commit locks:
 
 ```bash
-nyl source update
-nyl source update workloads
-nyl source update --check
+nyl update source-locks
+nyl update source-locks workloads
+nyl update source-locks --check
 ```
 
 Mutable revisions must refresh successfully before a lock is reported current

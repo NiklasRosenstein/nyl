@@ -26,7 +26,6 @@ fn initializes_simple_gitops_project_from_detected_repository() {
         .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
         .args([
             "init",
-            "gitops",
             ".",
             "--yes",
             "--cluster-name",
@@ -55,7 +54,7 @@ fn initializes_simple_gitops_project_from_detected_repository() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(repository.path())
-        .args(["init", "gitops", ".", "--yes"])
+        .args(["init", ".", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Refusing to overwrite existing configuration"));
@@ -70,7 +69,6 @@ fn stdout_mode_has_no_filesystem_side_effects() {
         .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
         .args([
             "init",
-            "gitops",
             ".",
             "--yes",
             "--output",
@@ -87,4 +85,34 @@ fn stdout_mode_has_no_filesystem_side_effects() {
     assert!(!repository.path().join("nyl.toml").exists());
     assert!(!repository.path().join("gitops.yaml").exists());
     assert!(!repository.path().join("applications").exists());
+}
+
+#[test]
+fn initializes_a_missing_directory_inside_the_git_worktree() {
+    let repository = repository();
+    let project = repository.path().join("platform");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
+        .args(["init", "platform", "--yes", "--no-context", "--skip-applications"])
+        .assert()
+        .success();
+    assert!(project.join("nyl.toml").is_file());
+    assert!(project.join("gitops.yaml").is_file());
+}
+
+#[test]
+fn minimal_mode_rejects_gitops_options() {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .args([
+            "init",
+            "--minimal",
+            "--repo-url",
+            "https://git.example.invalid/deploy.git",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::Args;
 use colored::Colorize;
 
 use crate::cli::tree_progress::{TreeProgressArgs, TreeProgressReporter};
@@ -14,26 +14,6 @@ use crate::{NylError, Result};
 
 #[derive(Args, Debug)]
 pub struct VendorArgs {
-    #[command(subcommand)]
-    command: VendorCommand,
-}
-
-#[derive(Subcommand, Debug)]
-enum VendorCommand {
-    /// Discover and materialize every remote renderer input.
-    Sync(VendorRenderArgs),
-    /// Verify that the vendor snapshot completely covers the selected targets.
-    Check(VendorCheckArgs),
-    /// Remove artifact blobs not referenced by vendor/lock.yaml.
-    Prune {
-        /// Project directory or a path beneath it.
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-}
-
-#[derive(Args, Debug)]
-struct VendorRenderArgs {
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -43,33 +23,57 @@ struct VendorRenderArgs {
     target: Vec<String>,
 
     /// Retrieve every remote input again instead of using vendor/source-cache entries.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check")]
     refresh: bool,
+
+    /// Verify that the vendor snapshot is complete without writing or using the network.
+    #[arg(long, conflicts_with = "prune")]
+    check: bool,
+
+    /// Synchronize all targets, then remove unreferenced artifact blobs.
+    #[arg(long, conflicts_with_all = ["check", "target"])]
+    prune: bool,
 
     #[command(flatten)]
     progress: TreeProgressArgs,
 }
 
-#[derive(Args, Debug)]
-struct VendorCheckArgs {
-    /// Project directory or a path beneath it.
-    #[arg(default_value = ".")]
+#[derive(Debug)]
+struct VendorRenderArgs {
     path: PathBuf,
-
-    /// DeploymentTarget to check. Repeat to check a subset; all targets are checked when omitted.
-    #[arg(long)]
     target: Vec<String>,
+    refresh: bool,
+    progress: TreeProgressArgs,
+}
 
-    #[command(flatten)]
+#[derive(Debug)]
+struct VendorCheckArgs {
+    path: PathBuf,
+    target: Vec<String>,
     progress: TreeProgressArgs,
 }
 
 pub async fn execute(args: VendorArgs) -> Result<()> {
-    match args.command {
-        VendorCommand::Sync(args) => sync(args).await,
-        VendorCommand::Check(args) => check(args).await,
-        VendorCommand::Prune { path } => prune(&path),
+    if args.check {
+        return check(VendorCheckArgs {
+            path: args.path,
+            target: args.target,
+            progress: args.progress,
+        })
+        .await;
     }
+    let path = args.path.clone();
+    sync(VendorRenderArgs {
+        path: args.path,
+        target: args.target,
+        refresh: args.refresh,
+        progress: args.progress,
+    })
+    .await?;
+    if args.prune {
+        prune(&path)?;
+    }
+    Ok(())
 }
 
 async fn sync(args: VendorRenderArgs) -> Result<()> {

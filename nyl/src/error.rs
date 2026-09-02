@@ -25,7 +25,7 @@ pub enum NylError {
     #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed, or the apiVersion/kind may not be supported by the cluster.")]
     ApiResourceNotFound(String),
 
-    #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl.toml file.")]
+    #[error("Configuration file not found: {0}\nHint: Initialize a project with 'nyl init' or ensure you're in a directory with a valid nyl.toml file.")]
     ConfigNotFound(String),
 
     #[error("IO error: {0}")]

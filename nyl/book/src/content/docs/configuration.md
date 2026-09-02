@@ -22,9 +22,9 @@ gitops_scaffold_path = "config"
   for `<root>/<apiVersion>/<kind>/Chart.yaml`.
 - `helm_chart_search_paths` defaults to `["."]` and controls Helm chart name
   resolution.
-- `gitops_scaffold_path` defaults to `"config"` and controls where
-  `nyl new resource` and `nyl new gitops` create files. Discovery remains
-  project-wide.
+- `gitops_scaffold_path` defaults to `"config"` and controls where `nyl create`
+  writes GitOps resources when the project has no root `gitops.yaml`.
+  Discovery remains project-wide.
 - `aliases` maps an API version and kind to a component shortcut or local
   component path.
 
@@ -101,7 +101,7 @@ Nyl resolves the paths to `/home/user/platform/components`,
 ```bash
 nyl validate
 nyl validate --strict
-nyl generate schema config
+nyl schema config
 ```
 
 The published project schema is available at
