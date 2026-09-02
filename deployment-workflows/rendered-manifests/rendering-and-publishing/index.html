@@ -211,12 +211,19 @@ marker comment on later pipelines. Comment ownership and forge API calls remain
 outside Nyl.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="publish-from-the-protected-branch">Publish from the protected branch</h2><a class="sl-anchor-link" href="#publish-from-the-protected-branch"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Publish from the protected branch”</span></a></div>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">publish-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl publish-tree --target production"><div></div></button></div></figure></div>
-<p>The source worktree must be clean and committed. Nyl clones the destination
-revision, reconciles only indexed files, creates one commit, refreshes the
-remote revision, and performs a compare-and-swap push. It refuses to push when
-the remote tip changes concurrently. The result identifies the destination
-repository, branch, and commit. The commit message records the source
-repository and commit plus the deployment target and cluster as Git trailers.</p>
+<p>The source worktree must have a committed revision. A dirty worktree triggers a
+second render from a temporary clean checkout of <code dir="auto">HEAD</code>. Nyl publishes the
+clean result when its rendered files and publication coordinates match the
+working-tree result. Use <code dir="auto">--require-clean</code> to reject every non-ignored change,
+or <code dir="auto">--allow-dirty</code> to publish a differing working-tree render with explicit
+dirty provenance. These options are mutually exclusive.</p>
+<p>Nyl clones the destination revision, reconciles only indexed files, creates one
+commit, refreshes the remote revision, and performs a compare-and-swap push. It
+refuses to push when the remote tip changes concurrently. The result identifies
+the destination repository, branch, and commit. The commit message records the
+source repository and commit plus the deployment target and cluster as Git
+trailers. Dirty publications also include <code dir="auto">Nyl-Source-Dirty: true</code>, and their
+ownership index records <code dir="auto">dirty: true</code>.</p>
 <p>An interrupted local reconciliation can resume when installed files match the
 intended generation. Unrelated modifications and symbolic-link ancestors fail
 closed. Git credentials and protected-branch rules remain forge configuration.</p>
