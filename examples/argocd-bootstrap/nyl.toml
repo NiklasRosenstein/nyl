@@ -1,3 +1,0 @@
-[project]
-components_search_paths = ["components"]
-helm_chart_search_paths = ["."]

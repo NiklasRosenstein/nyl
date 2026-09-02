@@ -5,7 +5,6 @@
 /// - Creating worktrees
 /// - Resolving refs
 /// - HelmChart Git integration
-/// - ApplicationGenerator Git integration
 use nyl::git::GitManager;
 use std::env;
 use std::fs;

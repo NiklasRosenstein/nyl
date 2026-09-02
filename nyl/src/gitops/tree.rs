@@ -26,7 +26,15 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-semantic-v1";
+const TARGET_CACHE_ACTION: &str = "target-semantic-v2";
+
+/// Inputs admitted while compiling a rendered deployment tree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct TreeRenderOptions {
+    /// Allow the trusted central project to read its secrets provider and
+    /// `NYL_*` process environment.
+    pub allow_secret_inputs: bool,
+}
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
 #[derive(Debug, Deserialize, Serialize)]
@@ -158,6 +166,10 @@ struct EffectiveArgoCDInstance {
 
 /// Validate cross-resource references and target-prefix ownership without rendering releases.
 pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
+    validate_gitops_inventory_with_options(inventory, TreeRenderOptions::default())
+}
+
+fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: TreeRenderOptions) -> Result<()> {
     let mut publications = Vec::new();
     let instance_count = inventory
         .resources
@@ -207,7 +219,7 @@ pub fn validate_gitops_inventory(inventory: &GitOpsInventory) -> Result<()> {
             }
         }
     }
-    validate_same_instance_catalog_collisions(inventory, instance_count)?;
+    validate_same_instance_catalog_collisions(inventory, instance_count, options)?;
     Ok(())
 }
 
@@ -227,7 +239,16 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 // The orchestration stays linear so ownership and policy checks remain visibly ordered.
 #[allow(clippy::too_many_lines)]
 pub async fn compile_target_tree(inventory: &GitOpsInventory, target_name: &str) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, None, &mut NoTreeRenderObserver).await
+    compile_target_tree_with_options(inventory, target_name, TreeRenderOptions::default()).await
+}
+
+/// Compile all applicable groups and releases with explicit input policy.
+pub async fn compile_target_tree_with_options(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    options: TreeRenderOptions,
+) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, None, &mut NoTreeRenderObserver, options).await
 }
 
 /// Compile one target while reusing a verified content-addressed result when possible.
@@ -236,7 +257,17 @@ pub async fn compile_target_tree_cached(
     target_name: &str,
     cache: &GitOpsCache,
 ) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, Some(cache), &mut NoTreeRenderObserver).await
+    compile_target_tree_cached_with_options(inventory, target_name, cache, TreeRenderOptions::default()).await
+}
+
+/// Compile one target with cache reuse and explicit input policy.
+pub async fn compile_target_tree_cached_with_options(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: &GitOpsCache,
+    options: TreeRenderOptions,
+) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, Some(cache), &mut NoTreeRenderObserver, options).await
 }
 
 /// Compile one target with cache reuse and observable Release progress.
@@ -246,7 +277,25 @@ pub async fn compile_target_tree_cached_with_observer(
     cache: &GitOpsCache,
     observer: &mut dyn TreeRenderObserver,
 ) -> Result<CompiledTargetTree> {
-    compile_target_tree_inner(inventory, target_name, Some(cache), observer).await
+    compile_target_tree_cached_with_observer_and_options(
+        inventory,
+        target_name,
+        cache,
+        observer,
+        TreeRenderOptions::default(),
+    )
+    .await
+}
+
+/// Compile one target with cache reuse, progress, and explicit input policy.
+pub async fn compile_target_tree_cached_with_observer_and_options(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: &GitOpsCache,
+    observer: &mut dyn TreeRenderObserver,
+    options: TreeRenderOptions,
+) -> Result<CompiledTargetTree> {
+    compile_target_tree_inner(inventory, target_name, Some(cache), observer, options).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -255,8 +304,9 @@ async fn compile_target_tree_inner(
     target_name: &str,
     cache: Option<&GitOpsCache>,
     observer: &mut dyn TreeRenderObserver,
+    options: TreeRenderOptions,
 ) -> Result<CompiledTargetTree> {
-    validate_gitops_inventory(inventory)?;
+    validate_gitops_inventory_with_options(inventory, options)?;
     let target_discovered = inventory
         .get(GitOpsResourceKind::DeploymentTarget, target_name)
         .ok_or_else(|| NylError::config(format!("DeploymentTarget {target_name:?} was not found")))?;
@@ -283,9 +333,17 @@ async fn compile_target_tree_inner(
         );
     }
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
-    let central_session =
+    let central_session = if options.allow_secret_inputs {
+        RenderSession::for_target_with_secret_inputs(
+            &inventory.project_root,
+            &inventory.project_config,
+            &target,
+            &cluster,
+        )?
+    } else {
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
-            .with_cache(cache.cloned());
+    }
+    .with_cache(cache.cloned());
     let mut git_manager = None;
 
     let mut groups = Vec::new();
@@ -336,6 +394,7 @@ async fn compile_target_tree_inner(
     }
 
     let target_cache_inputs = TargetCacheInputs {
+        options,
         target: &target,
         target_source_path: &target_discovered.source_path,
         cluster: &cluster,
@@ -447,12 +506,6 @@ async fn compile_target_tree_inner(
                 probe
                     .recorder
                     .extend_filesystem_dependencies(&rendered.cache_dependencies);
-            }
-            if !rendered.application_generators.is_empty() {
-                return Err(NylError::config(format!(
-                    "ApplicationGenerator is not supported in rendered GitOps source {}",
-                    source_file.path.display()
-                )));
             }
             target_cacheable &= rendered.cacheable;
             target_cache_bypass_reasons.extend(rendered.cache_bypass_reasons.iter().cloned());
@@ -637,6 +690,7 @@ struct TargetCacheProbe {
 }
 
 struct TargetCacheInputs<'a> {
+    options: TreeRenderOptions,
     target: &'a DeploymentTarget,
     target_source_path: &'a Path,
     cluster: &'a Cluster,
@@ -709,6 +763,7 @@ fn record_target_control_dependencies(
     inputs: &TargetCacheInputs<'_>,
     groups: &[PreparedGroup],
 ) -> Result<()> {
+    recorder.record_value("tree-render-options", &inputs.options)?;
     let mut effective_target = inputs.target.clone();
     effective_target.apply_defaults();
     recorder.record_value(
@@ -1434,7 +1489,11 @@ fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: 
 // Keep the cross-target checks together so every generated Argo CD identity is
 // audited in one pass over each target's effective configuration.
 #[allow(clippy::too_many_lines)]
-fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instance_count: usize) -> Result<()> {
+fn validate_same_instance_catalog_collisions(
+    inventory: &GitOpsInventory,
+    instance_count: usize,
+    options: TreeRenderOptions,
+) -> Result<()> {
     let targets = inventory
         .resources
         .values()
@@ -1474,7 +1533,16 @@ fn validate_same_instance_catalog_collisions(inventory: &GitOpsInventory, instan
             }
         }
         let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
-        let session = RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?;
+        let session = if options.allow_secret_inputs {
+            RenderSession::for_target_with_secret_inputs(
+                &inventory.project_root,
+                &inventory.project_config,
+                target,
+                &cluster,
+            )?
+        } else {
+            RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?
+        };
         for discovered in &groups {
             if !target_selects_group(target, &discovered.static_labels) {
                 continue;

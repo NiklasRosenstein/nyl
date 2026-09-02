@@ -5,7 +5,7 @@ title: 'Rendered Manifest Pattern'
 The rendered manifest pattern is the recommended Nyl deployment model. Nyl
 compiles trusted source configuration into ordinary Kubernetes YAML in a
 deployment Git revision. Argo CD reads plain recursive directories and does not
-need the Nyl CMP.
+run Nyl in the reconciliation path.
 
 ## How the model fits together
 
@@ -75,5 +75,4 @@ Applications use ordinary Git directory sources with recursive discovery.
   documents every configuration field by resource kind.
 
 For direct cluster operations and debugging, see
-[CLI-first workflows](/nyl/deployment-workflows/cli-workflows/). For runtime
-rendering inside Argo CD, see the [Argo CD CMP integration](/nyl/argocd/plugin/).
+[CLI-first workflows](/nyl/deployment-workflows/cli-workflows/).

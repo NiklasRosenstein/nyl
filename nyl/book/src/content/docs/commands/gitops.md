@@ -41,6 +41,14 @@ renders any Releases or Helm charts.
 reads or writes. These mutually exclusive flags are also available on
 `diff-tree` and `publish-tree`.
 
+Tree rendering excludes the project secrets provider and `NYL_*` process
+environment by default. Pass `--allow-secret-inputs` to the individual
+`render-tree`, `diff-tree`, or `publish-tree` invocation when trusted central
+project templates intentionally depend on them. Explicit Kubernetes `Secret`
+manifests remain ordinary input resources. Remote and independently controlled
+source sessions never receive project secrets or process environment, including
+when this flag is set.
+
 All three tree commands report Release progress on stderr. The default
 `--progress auto` displays an updating bar when stderr is attached to a terminal
 and prints one line as each Release starts in CI or other non-interactive

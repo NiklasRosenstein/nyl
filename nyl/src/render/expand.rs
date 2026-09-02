@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::cache::RenderCache;
 use super::RenderResource;
 use crate::config::ProjectConfig;
-use crate::constants::{API_VERSION, API_VERSION_ARGOCD, API_VERSION_COMPONENTS};
+use crate::constants::{API_VERSION, API_VERSION_COMPONENTS};
 use crate::helm::{HelmChartResolver, HelmTemplateExecutor};
 use crate::resources::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef,
@@ -104,7 +104,7 @@ pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
 
     // Check for similar patterns using Levenshtein distance
     // Extract base domains from the API version constants
-    let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+    let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS];
 
     for api_ver in &nyl_api_versions {
         let known_domain = api_ver.split('/').next().unwrap_or(api_ver);
@@ -178,13 +178,6 @@ pub(crate) fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
     // Check for RemoteManifest
     if RemoteManifest::is_remote_manifest(resource) {
         return true;
-    }
-
-    // Check for ApplicationGenerator
-    if let Some(api_ver) = api_version {
-        if api_ver == API_VERSION_ARGOCD && kind == Some("ApplicationGenerator") {
-            return true;
-        }
     }
 
     false
@@ -439,7 +432,7 @@ pub(crate) async fn generate_resource(
             if is_nyl_like_api_version(api_ver) && !is_known_nyl_resource(resource) {
                 let kind_str = kind.unwrap_or("<unknown>");
                 // Dynamically build the list of known API versions from constants
-                let known_api_versions = [API_VERSION, API_VERSION_COMPONENTS, API_VERSION_ARGOCD];
+                let known_api_versions = [API_VERSION, API_VERSION_COMPONENTS];
                 let api_versions_str = known_api_versions
                     .iter()
                     .map(|s| format!("'{}'", s))
@@ -450,7 +443,7 @@ pub(crate) async fn generate_resource(
                     "Resource with apiVersion '{}' and kind '{}' looks like a Nyl resource but is not recognized. \
                      It will be treated as a regular Kubernetes manifest. \
                      Known Nyl apiVersions: {}. \
-                     Known kinds: HelmChart, RemoteManifest, Release, ApplicationGenerator, and any Component kind.",
+                     Known kinds: HelmChart, RemoteManifest, Release, and any Component kind.",
                     api_ver,
                     kind_str,
                     api_versions_str

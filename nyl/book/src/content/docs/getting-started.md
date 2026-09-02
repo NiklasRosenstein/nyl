@@ -151,5 +151,4 @@ platform/
 
 - Use the [rendered manifest pattern](/nyl/deployment-workflows/rendered-manifests/) when CI should produce plain YAML for ArgoCD, Flux, or another reconciler.
 - Use [CLI-first workflows](/nyl/deployment-workflows/cli-workflows/) for debugging, bootstrapping, testing, and direct cluster operations.
-- Use [ArgoCD CMP integration](/nyl/argocd/overview/) when ArgoCD should render Nyl inputs directly.
 - Read about [Configuration](/nyl/configuration/) and the [Component System](/nyl/components/overview/).

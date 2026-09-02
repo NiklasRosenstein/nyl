@@ -62,7 +62,7 @@ enum Commands {
     /// Apply rendered manifests to the cluster
     Apply(commands::apply::ApplyArgs),
 
-    /// Generate configurations (ArgoCD, etc.)
+    /// Generate project and resource schemas.
     Generate(commands::generate::GenerateArgs),
 
     /// Create a new nyl project
@@ -85,14 +85,6 @@ enum Commands {
 }
 
 impl Cli {
-    /// Return the render input path if this invocation is `nyl render`.
-    pub fn render_input_path(&self) -> Option<&str> {
-        match &self.command {
-            Commands::Render(args) => Some(args.common.path.as_str()),
-            _ => None,
-        }
-    }
-
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
         match self.command {

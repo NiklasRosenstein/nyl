@@ -58,6 +58,17 @@ fn test_cli_help() {
 }
 
 #[test]
+fn tree_commands_expose_explicit_secret_input_admission() {
+    for command in ["render-tree", "diff-tree", "publish-tree"] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+        cmd.args([command, "--help"]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("--allow-secret-inputs"));
+    }
+}
+
+#[test]
 fn test_cli_version() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.arg("--version");
@@ -531,36 +542,7 @@ fn test_verbose_flag() {
 }
 
 #[test]
-fn test_render_missing_file_in_argocd_prints_diagnostics() {
-    let temp = TempDir::new().unwrap();
-
-    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-    fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.current_dir(temp.path());
-    cmd.arg("render").arg("does-not-exist.yaml");
-    cmd.env("ARGOCD_APP_NAME", "demo-app");
-    cmd.env("ARGOCD_APP_NAMESPACE", "argocd");
-    cmd.env("ARGOCD_APP_SOURCE_PATH", "apps");
-    cmd.env("ARGOCD_ENV_NYL_CMP_TEMPLATE_INPUT", "does-not-exist.yaml");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("File not found: does-not-exist.yaml"))
-        .stderr(predicate::str::contains(
-            "[nyl-debug] ---- begin argocd file-not-found diagnostics ----",
-        ))
-        .stderr(predicate::str::contains("[nyl-debug] env.ARGOCD_APP_NAME=demo-app"))
-        .stderr(predicate::str::contains(
-            "[nyl-debug] render_input.raw=does-not-exist.yaml",
-        ))
-        .stderr(predicate::str::contains(
-            "[nyl-debug] ---- end argocd file-not-found diagnostics ----",
-        ));
-}
-
-#[test]
-fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
+fn test_render_missing_file_reports_path() {
     let temp = TempDir::new().unwrap();
 
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
@@ -571,12 +553,11 @@ fn test_render_missing_file_outside_argocd_does_not_print_diagnostics() {
     cmd.arg("render").arg("does-not-exist.yaml");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("File not found: does-not-exist.yaml"))
-        .stderr(predicate::str::contains("[nyl-debug] ---- begin argocd file-not-found diagnostics ----").not());
+        .stderr(predicate::str::contains("File not found: does-not-exist.yaml"));
 }
 
 #[test]
-fn test_render_rejects_removed_profile_flag_without_argocd_diagnostics() {
+fn test_render_rejects_removed_profile_flag() {
     let temp = TempDir::new().unwrap();
 
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
@@ -598,10 +579,7 @@ metadata:
         .arg("--profile")
         .arg("missing")
         .arg("test-resource.yaml");
-    cmd.env("ARGOCD_APP_NAME", "demo-app");
-    cmd.env("ARGOCD_APP_NAMESPACE", "argocd");
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected argument '--profile'"))
-        .stderr(predicate::str::contains("[nyl-debug] ---- begin argocd file-not-found diagnostics ----").not());
+        .stderr(predicate::str::contains("unexpected argument '--profile'"));
 }
