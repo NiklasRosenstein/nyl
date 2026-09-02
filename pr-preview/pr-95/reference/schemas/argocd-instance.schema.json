@@ -19,7 +19,8 @@
             "selfPrunePolicy": "Confirm",
             "syncPolicy": {
               "syncOptions": [
-                "ApplyOutOfSyncOnly=true"
+                "ApplyOutOfSyncOnly=true",
+                "ServerSideApply=true"
               ]
             }
           }
@@ -68,7 +69,8 @@
           "$ref": "#/$defs/GitOpsSyncPolicy",
           "default": {
             "syncOptions": [
-              "ApplyOutOfSyncOnly=true"
+              "ApplyOutOfSyncOnly=true",
+              "ServerSideApply=true"
             ]
           }
         }
