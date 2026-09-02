@@ -150,6 +150,25 @@ data:
     temp
 }
 
+fn colocate_gitops_resources(root: &std::path::Path) -> PathBuf {
+    let resources = [
+        "config/repositories/deploy.yaml",
+        "config/clusters/kasoku.yaml",
+        "config/targets/production.yaml",
+        "config/projects/workloads.yaml",
+        "config/application-groups/workloads.yaml",
+    ];
+    let mut documents = Vec::new();
+    for relative in resources {
+        let path = root.join(relative);
+        documents.push(fs::read_to_string(&path).unwrap());
+        fs::remove_file(path).unwrap();
+    }
+    let path = root.join("gitops.yaml");
+    fs::write(&path, documents.join("\n---\n")).unwrap();
+    path
+}
+
 fn commit_all(repository: &Repository, message: &str) {
     let mut index = repository.index().unwrap();
     index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
@@ -497,6 +516,96 @@ metadata:
         .stderr(predicate::str::contains(
             "Cache: rebuilt target tree; Release renders: 1 reused, 1 rebuilt; Helm renders: 1 avoided",
         ));
+}
+
+#[test]
+fn colocated_gitops_resources_use_semantic_target_cache_dependencies() {
+    let fixture = fixture();
+    let mut gitops = colocate_gitops_resources(fixture.path());
+    let output = fixture.path().join("deploy");
+    let args = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+    ];
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success();
+    let initial_index: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("production/_nyl/index.json")).unwrap()).unwrap();
+
+    let contents = fs::read_to_string(&gitops).unwrap();
+    fs::write(&gitops, format!("# Repository-local GitOps resources\n{contents}")).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cache: reused target tree"));
+    let comment_index: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("production/_nyl/index.json")).unwrap()).unwrap();
+    assert_ne!(
+        initial_index["inputs"]["gitops.yaml"],
+        comment_index["inputs"]["gitops.yaml"]
+    );
+    assert_eq!(initial_index["files"], comment_index["files"]);
+
+    let contents = fs::read_to_string(&gitops).unwrap();
+    fs::write(
+        &gitops,
+        format!(
+            "{contents}\n---\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: unused\nspec:\n  repoURL: https://example.invalid/unused.git\n"
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cache: reused target tree"));
+
+    let moved = fixture.path().join("repository-gitops.yaml");
+    fs::rename(&gitops, &moved).unwrap();
+    gitops = moved;
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cache: rebuilt target tree"))
+        .stderr(predicate::str::contains("Release renders: 1 reused"));
+    let moved_index: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("production/_nyl/index.json")).unwrap()).unwrap();
+    assert!(moved_index["inputs"].get("repository-gitops.yaml").is_some());
+    assert!(moved_index["inputs"].get("gitops.yaml").is_none());
+
+    let contents = fs::read_to_string(&gitops).unwrap();
+    fs::write(
+        &gitops,
+        contents.replace(
+            "  annotations:\n    environment: production\n{% endif %}",
+            "  annotations:\n    environment: changed\n{% endif %}",
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cache: rebuilt target tree"))
+        .stderr(predicate::str::contains("Release renders: 1 reused"));
 }
 
 #[test]

@@ -76,14 +76,17 @@ Nyl caches three expensive results: complete target trees, individual rendered
 Release bundles, and parsed local Helm output. Complete target trees apply only
 to `render-tree`, `diff-tree`, and `publish-tree`; bundle and Helm artifacts are
 also shared by `render`, `diff`, and `apply`. Cache entries are
-content-addressed and accompanied by dependency records. Nyl verifies the
-selected control-resource files, exact ApplicationGroup candidate membership,
-Release entrypoints and includes, resolved local chart directories, target
-context, Kubernetes capabilities, admitted `NYL_*` environment, secrets through
-a cache-local keyed fingerprint, and renderer tool versions before reuse. It
-does not fingerprint the whole project checkout. A target miss can still reuse
-unchanged Releases, while target-wide ownership, namespace, project, catalog,
-and layout validation runs again.
+content-addressed and accompanied by dependency records. Nyl verifies effective
+selected control resources by identity, exact ApplicationGroup candidate
+membership, Release entrypoints and includes, resolved local chart directories,
+target context, Kubernetes capabilities, admitted `NYL_*` environment, secrets
+through a cache-local keyed fingerprint, and renderer tool versions before
+reuse. Formatting, comments, and unrelated resources colocated in the same YAML
+file do not invalidate a target artifact. Selected control-resource locations
+remain dependencies because the published ownership index records physical
+source provenance. Nyl does not fingerprint the whole project checkout. A
+target miss can still reuse unchanged Releases, while target-wide ownership,
+namespace, project, catalog, and layout validation runs again.
 
 The cache lives under `$NYL_CACHE_DIR/gitops/v1`. Without `NYL_CACHE_DIR`, the
 project-local `.nyl/cache/gitops/v1` directory is used. Artifacts can contain

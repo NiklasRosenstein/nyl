@@ -26,6 +26,8 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession,
 };
 
+const TARGET_CACHE_ACTION: &str = "target-semantic-v1";
+
 /// Pure output of compiling one target. Paths are relative to the target prefix.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CompiledTargetTree {
@@ -118,6 +120,25 @@ struct EffectiveProject {
     name: String,
     manifest: Option<Value>,
     destination_namespaces: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct EffectiveProjectCacheInput<'a> {
+    catalog_id: &'a str,
+    name: &'a str,
+    manifest: &'a Option<Value>,
+    destination_namespaces: &'a Option<Vec<String>>,
+}
+
+impl EffectiveProject {
+    fn cache_input(&self) -> EffectiveProjectCacheInput<'_> {
+        EffectiveProjectCacheInput {
+            catalog_id: &self.catalog_id,
+            name: &self.name,
+            manifest: &self.manifest,
+            destination_namespaces: &self.destination_namespaces,
+        }
+    }
 }
 
 struct PreparedGroup {
@@ -314,22 +335,21 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let base_input_paths = [
-        Some(target_discovered.source_path.as_path()),
-        Some(cluster_path.as_path()),
-        Some(argocd.cluster_path.as_path()),
-        argocd.source_path.as_deref(),
-        repository_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+    let target_cache_inputs = TargetCacheInputs {
+        target: &target,
+        target_source_path: &target_discovered.source_path,
+        cluster: &cluster,
+        cluster_source_path: &cluster_path,
+        argocd: &argocd,
+        repository_name: repository_name.as_deref(),
+        repository: &repository,
+        repository_source_path: repository_path.as_deref(),
+    };
     let mut cache_probe = prepare_target_cache(
         inventory,
-        target_name,
+        &target_cache_inputs,
         &central_session,
         cache,
-        &base_input_paths,
         &prepared_groups,
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
@@ -616,12 +636,22 @@ struct TargetCacheProbe {
     cacheable: bool,
 }
 
+struct TargetCacheInputs<'a> {
+    target: &'a DeploymentTarget,
+    target_source_path: &'a Path,
+    cluster: &'a Cluster,
+    cluster_source_path: &'a Path,
+    argocd: &'a EffectiveArgoCDInstance,
+    repository_name: Option<&'a str>,
+    repository: &'a InlineGitRepository,
+    repository_source_path: Option<&'a Path>,
+}
+
 fn prepare_target_cache(
     inventory: &GitOpsInventory,
-    target_name: &str,
+    inputs: &TargetCacheInputs<'_>,
     session: &RenderSession,
     cache: Option<&GitOpsCache>,
-    base_input_paths: &[&Path],
     groups: &[PreparedGroup],
 ) -> Result<Option<TargetCacheProbe>> {
     let Some(cache) = cache else {
@@ -630,23 +660,14 @@ fn prepare_target_cache(
     if cache.mode() == crate::gitops::CacheMode::Disabled {
         return Ok(None);
     }
-    let key = format!("{}\0{target_name}", inventory.project_root.display());
+    let key = format!("{}\0{}", inventory.project_root.display(), inputs.target.metadata.name);
     let previous = cache.load_record("target", &key)?;
     let mut recorder = cache.recorder();
     if let Some(config_file) = &inventory.project_config.file {
         recorder.record_path_file(config_file)?;
     }
-    for path in base_input_paths {
-        recorder.record_path_file(&inventory.project_root.join(path))?;
-    }
+    record_target_control_dependencies(&mut recorder, inputs, groups)?;
     for prepared in groups {
-        recorder.record_path_file(&inventory.project_root.join(&prepared.group_resource_path))?;
-        for path in &prepared.project.source_paths {
-            recorder.record_path_file(&inventory.project_root.join(path))?;
-        }
-        for path in &prepared.source.provenance_inputs {
-            recorder.record_path_file(&inventory.project_root.join(path))?;
-        }
         let members = prepared
             .source
             .candidate_files
@@ -665,7 +686,7 @@ fn prepare_target_cache(
     }
     recorder.record_template_context(&session.template_context().to_json())?;
     cache.record_renderer_tools(&mut recorder)?;
-    if let Some(previous) = &previous {
+    if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
         recorder.replay_filesystem_dependencies(previous)?;
     }
     let cacheable = recorder.is_cacheable();
@@ -674,6 +695,93 @@ fn prepare_target_cache(
         recorder,
         cacheable,
     }))
+}
+
+fn record_target_control_dependencies(
+    recorder: &mut crate::render::cache::DependencyRecorder,
+    inputs: &TargetCacheInputs<'_>,
+    groups: &[PreparedGroup],
+) -> Result<()> {
+    let mut effective_target = inputs.target.clone();
+    effective_target.apply_defaults();
+    recorder.record_value(
+        format!("resource:DeploymentTarget/{}", effective_target.metadata.name),
+        &effective_target,
+    )?;
+    recorder.record_value(
+        format!("location:DeploymentTarget/{}", effective_target.metadata.name),
+        &inputs.target_source_path,
+    )?;
+    record_cluster_cache_input(recorder, inputs.cluster)?;
+    recorder.record_value(
+        format!("location:Cluster/{}", inputs.cluster.metadata.name),
+        &inputs.cluster_source_path,
+    )?;
+    record_cluster_cache_input(recorder, &inputs.argocd.cluster)?;
+    recorder.record_value(
+        format!("location:ArgoCDInstance/{}/cluster", inputs.argocd.identity),
+        &inputs.argocd.cluster_path,
+    )?;
+    recorder.record_value(
+        format!("resource:ArgoCDInstance/{}", inputs.argocd.identity),
+        &inputs.argocd.resource,
+    )?;
+    recorder.record_value(
+        format!("location:ArgoCDInstance/{}", inputs.argocd.identity),
+        &inputs.argocd.source_path,
+    )?;
+    recorder.record_value(
+        inputs.repository_name.map_or_else(
+            || "publication:repository".to_owned(),
+            |name| format!("resource:GitRepository/{name}"),
+        ),
+        inputs.repository,
+    )?;
+    recorder.record_value(
+        inputs.repository_name.map_or_else(
+            || "location:publication:repository".to_owned(),
+            |name| format!("location:GitRepository/{name}"),
+        ),
+        &inputs.repository_source_path,
+    )?;
+    for prepared in groups {
+        recorder.record_value(
+            format!("resource:ApplicationGroup/{}", prepared.group.metadata.name),
+            &prepared.group,
+        )?;
+        recorder.record_value(
+            format!("location:ApplicationGroup/{}", prepared.group.metadata.name),
+            &prepared.group_resource_path,
+        )?;
+        recorder.record_value(
+            format!("project:{}", prepared.project.catalog_id),
+            &prepared.project.cache_input(),
+        )?;
+        recorder.record_value(
+            format!("location:project:{}", prepared.project.catalog_id),
+            &prepared.project.source_paths,
+        )?;
+        if let Some(repository) = &prepared.source.repository {
+            recorder.record_value(
+                format!("source:{}:repository", prepared.group.metadata.name),
+                repository,
+            )?;
+        }
+        recorder.record_value(
+            format!("location:source:{}:controls", prepared.group.metadata.name),
+            &prepared.source.provenance_inputs,
+        )?;
+    }
+    Ok(())
+}
+
+fn record_cluster_cache_input(
+    recorder: &mut crate::render::cache::DependencyRecorder,
+    cluster: &Cluster,
+) -> Result<()> {
+    let mut cluster = cluster.clone();
+    cluster.spec.live = None;
+    recorder.record_value(format!("resource:Cluster/{}", cluster.metadata.name), &cluster)
 }
 
 fn load_cached_target(
@@ -699,7 +807,7 @@ fn load_cached_target(
         cache.observe(CacheLayer::Target, CacheOutcome::Miss, &[]);
         return Ok(None);
     };
-    let current = probe.recorder.clone().finish("target", String::new());
+    let current = probe.recorder.clone().finish(TARGET_CACHE_ACTION, String::new());
     if !record.same_inputs(&current) {
         let changed_inputs = record.changed_inputs(&current);
         tracing::debug!(
@@ -749,7 +857,7 @@ fn store_cached_target(
     let Some(digest) = cache.store_artifact("target", &cached)? else {
         return Ok(());
     };
-    let record = probe.recorder.finish("target", digest);
+    let record = probe.recorder.finish(TARGET_CACHE_ACTION, digest);
     cache.store_record("target", &probe.key, &record)?;
     cache.observe(CacheLayer::Target, CacheOutcome::Stored, &[]);
     Ok(())
@@ -1753,6 +1861,7 @@ struct ResolvedGroupSource {
     source_session: Option<RenderSession>,
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
+    repository: Option<InlineGitRepository>,
 }
 
 struct StaticReleaseFile {
@@ -1769,7 +1878,7 @@ fn resolve_group_source(
     cache: Option<&GitOpsCache>,
 ) -> Result<ResolvedGroupSource> {
     let mut provenance_inputs = Vec::new();
-    let (root, source, remote_root) = match &group.spec.source {
+    let (root, source, remote_root, source_repository) = match &group.spec.source {
         Some(source) if source.is_remote() => {
             let (repository, repository_path) = resolve_source_repository(inventory, source)?;
             if let Some(repository_path) = repository_path {
@@ -1790,9 +1899,9 @@ fn resolve_group_source(
                 .resolve_ref(&repository.repo_url, Some(commit), None)
                 .map_err(NylError::Git)?;
             let selected = checked_checkout_subpath(&checkout, &source.path, "ApplicationGroup source.path")?;
-            (selected, source.clone(), Some(checkout))
+            (selected, source.clone(), Some(checkout), Some(repository))
         }
-        Some(source) => (inventory.project_root.join(&source.path), source.clone(), None),
+        Some(source) => (inventory.project_root.join(&source.path), source.clone(), None, None),
         None => {
             let root =
                 if group_resource_path.file_name().and_then(|name| name.to_str()) == Some("_application-group.yaml") {
@@ -1815,6 +1924,7 @@ fn resolve_group_source(
                     recursive: true,
                     renderer_config: RendererConfig::default(),
                 },
+                None,
                 None,
             )
         }
@@ -1857,6 +1967,7 @@ fn resolve_group_source(
         source_session,
         remote: remote_root.is_some(),
         provenance_inputs,
+        repository: source_repository,
     })
 }
 
@@ -2298,6 +2409,7 @@ mod tests {
             source_session: None,
             remote: false,
             provenance_inputs: Vec::new(),
+            repository: None,
         };
         let claimed = BTreeSet::from([manifest_path_identity(&entry), manifest_path_identity(&included)]);
 
