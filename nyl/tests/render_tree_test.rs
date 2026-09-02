@@ -41,6 +41,7 @@ metadata:
   name: deploy
 spec:
   repoURL: https://example.invalid/deploy.git
+  publishURL: ssh://git@example.invalid/deploy.git
 "#,
     )
     .unwrap();
@@ -93,6 +94,8 @@ metadata:
   name: workloads
 spec:
   management: Rendered
+  sourceRepositoryRefs:
+    - name: deploy
   manifest:
     apiVersion: argoproj.io/v1alpha1
     kind: AppProject
@@ -101,7 +104,7 @@ spec:
       namespace: argocd
     spec:
       sourceRepos:
-        - https://example.invalid/deploy.git
+        - https://charts.example.invalid
       destinations:
         - server: https://kubernetes.default.svc
           namespace: '*'
@@ -225,6 +228,11 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
 
+    let project = fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap();
+    assert!(project.contains("https://charts.example.invalid"));
+    assert!(project.contains("https://example.invalid/deploy.git"));
+    assert!(!project.contains("ssh://git@example.invalid/deploy.git"));
+
     let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
     assert!(application.contains("targetRevision: deploy/production"));
     assert!(application.contains("path: production/workloads/api"));
@@ -326,6 +334,33 @@ fn renders_plain_directory_applications_and_owned_layout() {
         fs::read(root.join("_nyl/index.json")).unwrap(),
         index_before_live_context
     );
+}
+
+#[test]
+fn reports_missing_project_source_repository() {
+    let fixture = fixture();
+    let project_path = fixture.path().join("config/projects/workloads.yaml");
+    let project = fs::read_to_string(&project_path)
+        .unwrap()
+        .replace("name: deploy", "name: missing");
+    fs::write(project_path, project).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            ".",
+            "--target",
+            "production",
+            "--output-dir",
+            "deploy-worktree",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "AppProjectDefinition references GitRepository \"missing\", but it was not found",
+        ));
 }
 
 #[test]
@@ -937,7 +972,7 @@ metadata:
   name: deploy-publisher
 spec:
   repoURL: https://example.invalid/another-read-repository.git
-  publishURL: https://example.invalid/deploy.git
+  publishURL: ssh://git@example.invalid/deploy.git
 ",
     )
     .unwrap();

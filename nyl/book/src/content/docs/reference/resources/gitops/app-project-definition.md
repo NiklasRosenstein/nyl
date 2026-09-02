@@ -22,6 +22,8 @@ metadata:
   name: workloads
 spec:
   management: Rendered
+  sourceRepositoryRefs:
+    - name: deploy
   manifest:
     apiVersion: argoproj.io/v1alpha1
     kind: AppProject
@@ -29,8 +31,6 @@ spec:
       name: workloads
       namespace: argocd
     spec:
-      sourceRepos:
-        - https://git.example.com/platform/deploy.git
       destinations:
         - server: https://kubernetes.default.svc
           namespace: '*'
@@ -43,6 +43,7 @@ spec:
 | `metadata.name` | Yes | Project-local identity referenced by groups. |
 | `metadata.labels` | No | Labels for organization and tooling. |
 | `spec.management` | Yes | `Rendered` or `External`. |
+| `spec.sourceRepositoryRefs[].name` | No | Local GitRepository identities whose `repoURL` values are added to the rendered AppProject's `sourceRepos`. Valid only for `Rendered` projects. |
 | `spec.manifest` | Yes | An `argoproj.io/v1alpha1` `AppProject` object with a valid name and object-valued `spec`. |
 
 `Rendered` writes the AppProject manifest to
@@ -50,6 +51,9 @@ spec:
 Nyl sets the rendered object's namespace to the effective ArgoCDInstance
 namespace so the project and its Applications belong to the same control
 plane.
+Referenced repository URLs are appended to literal `manifest.spec.sourceRepos`
+in declaration order and deduplicated. `publishURL` is a writer coordinate and
+is never granted to Argo CD.
 `External` uses the manifest as a contract and project-name source but does not
 publish it. The external AppProject must already be managed through another
 administrator-approved path.

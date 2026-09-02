@@ -6,7 +6,13 @@
         "management": {
           "$ref": "#/$defs/AppProjectManagement"
         },
-        "manifest": true
+        "manifest": true,
+        "sourceRepositoryRefs": {
+          "items": {
+            "$ref": "#/$defs/LocalReference"
+          },
+          "type": "array"
+        }
       },
       "required": [
         "management",
@@ -31,6 +37,18 @@
           },
           "type": "object"
         },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
         "name": {
           "type": "string"
         }

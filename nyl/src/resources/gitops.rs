@@ -257,6 +257,8 @@ pub struct AppProjectDefinition {
 #[serde(deny_unknown_fields)]
 pub struct AppProjectDefinitionSpec {
     pub management: AppProjectManagement,
+    #[serde(default, rename = "sourceRepositoryRefs", skip_serializing_if = "Vec::is_empty")]
+    pub source_repository_refs: Vec<LocalReference>,
     pub manifest: serde_json::Value,
 }
 
@@ -860,8 +862,34 @@ impl AppProjectDefinition {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| NylError::config("spec.manifest.metadata.name must be a string"))?;
         validate_dns_subdomain("spec.manifest.metadata.name", name)?;
-        if !object.get("spec").is_some_and(serde_json::Value::is_object) {
+        let spec = object.get("spec").and_then(serde_json::Value::as_object);
+        if spec.is_none() {
             return Err(NylError::config("spec.manifest.spec must be an object"));
+        }
+        if let Some(source_repos) = spec.and_then(|spec| spec.get("sourceRepos")) {
+            let valid = source_repos
+                .as_array()
+                .is_some_and(|values| values.iter().all(serde_json::Value::is_string));
+            if !valid {
+                return Err(NylError::config(
+                    "spec.manifest.spec.sourceRepos must be an array of strings",
+                ));
+            }
+        }
+        if self.spec.management == AppProjectManagement::External && !self.spec.source_repository_refs.is_empty() {
+            return Err(NylError::config(
+                "spec.sourceRepositoryRefs is only valid when spec.management is Rendered",
+            ));
+        }
+        let mut repository_refs = BTreeSet::new();
+        for reference in &self.spec.source_repository_refs {
+            validate_static_required("spec.sourceRepositoryRefs[].name", &reference.name)?;
+            if !repository_refs.insert(&reference.name) {
+                return Err(NylError::config(format!(
+                    "spec.sourceRepositoryRefs contains duplicate GitRepository reference {:?}",
+                    reference.name
+                )));
+            }
         }
         Ok(())
     }
@@ -1616,9 +1644,26 @@ mod tests {
             }
         });
         assert!(parse_gitops_resource(&valid).is_ok());
-        let mut invalid = valid;
+        let mut invalid = valid.clone();
         invalid["spec"]["manifest"]["kind"] = json!("Application");
         assert!(parse_gitops_resource(&invalid).is_err());
+
+        let mut with_references = valid.clone();
+        with_references["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}]);
+        assert!(parse_gitops_resource(&with_references).is_ok());
+        with_references["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}, {"name": "deploy"}]);
+        assert!(parse_gitops_resource(&with_references)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate GitRepository reference"));
+
+        let mut external = valid;
+        external["spec"]["management"] = json!("External");
+        external["spec"]["sourceRepositoryRefs"] = json!([{"name": "deploy"}]);
+        assert!(parse_gitops_resource(&external)
+            .unwrap_err()
+            .to_string()
+            .contains("only valid when spec.management is Rendered"));
     }
 
     #[test]

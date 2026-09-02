@@ -114,7 +114,7 @@ enum NamespaceScopeViolation {
 
 struct EffectiveProject {
     catalog_id: String,
-    source_path: Option<PathBuf>,
+    source_paths: Vec<PathBuf>,
     name: String,
     manifest: Option<Value>,
     destination_namespaces: Option<Vec<String>>,
@@ -369,9 +369,7 @@ async fn compile_target_tree_inner(
     } in prepared_groups
     {
         inputs.insert(group_resource_path.clone());
-        if let Some(project_path) = project.source_path.clone() {
-            inputs.insert(project_path);
-        }
+        inputs.extend(project.source_paths.iter().cloned());
         let argocd_project_name = project.name;
         if let Some(manifest) = project.manifest {
             if emitted_projects.insert(project.catalog_id.clone()) {
@@ -643,7 +641,7 @@ fn prepare_target_cache(
     }
     for prepared in groups {
         recorder.record_path_file(&inventory.project_root.join(&prepared.group_resource_path))?;
-        if let Some(path) = &prepared.project.source_path {
+        for path in &prepared.project.source_paths {
             recorder.record_path_file(&inventory.project_root.join(path))?;
         }
         for path in &prepared.source.provenance_inputs {
@@ -1517,8 +1515,14 @@ fn resolve_effective_group_project(
     if let Some(project_ref) = &group.spec.project_ref {
         let (project_id, project_path, project) = resolve_effective_project(inventory, project_ref, session)?;
         let name = app_project_name(&project)?;
+        let mut source_paths = vec![project_path];
         let manifest = if project.spec.management == AppProjectManagement::Rendered {
             let mut manifest = project.spec.manifest;
+            source_paths.extend(resolve_project_source_repositories(
+                inventory,
+                &project.spec.source_repository_refs,
+                &mut manifest,
+            )?);
             manifest["metadata"]["namespace"] = argocd.spec.namespace.clone().into();
             Some(manifest)
         } else {
@@ -1526,7 +1530,7 @@ fn resolve_effective_group_project(
         };
         return Ok(EffectiveProject {
             catalog_id: project_id,
-            source_path: Some(project_path),
+            source_paths,
             name,
             manifest,
             destination_namespaces: None,
@@ -1603,11 +1607,56 @@ fn resolve_effective_group_project(
     });
     Ok(EffectiveProject {
         catalog_id: group.metadata.name.clone(),
-        source_path: None,
+        source_paths: Vec::new(),
         name,
         manifest: Some(manifest),
         destination_namespaces: Some(destination_namespaces),
     })
+}
+
+fn resolve_project_source_repositories(
+    inventory: &GitOpsInventory,
+    references: &[LocalReference],
+    manifest: &mut Value,
+) -> Result<Vec<PathBuf>> {
+    if references.is_empty() {
+        return Ok(Vec::new());
+    }
+    let spec = manifest
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .expect("AppProjectDefinition validation requires manifest.spec to be an object");
+    let source_repos = spec
+        .entry("sourceRepos")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("AppProjectDefinition validation requires sourceRepos to be an array of strings");
+    let mut seen = source_repos
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut source_paths = Vec::new();
+    for reference in references {
+        let discovered = inventory
+            .get(GitOpsResourceKind::GitRepository, &reference.name)
+            .ok_or_else(|| {
+                NylError::config(format!(
+                    "AppProjectDefinition references GitRepository {:?}, but it was not found",
+                    reference.name
+                ))
+            })?;
+        let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
+            unreachable!("inventory kind key and resource variant must agree");
+        };
+        if seen.insert(repository.spec.repo_url.clone()) {
+            source_repos.push(Value::String(repository.spec.repo_url.clone()));
+        }
+        source_paths.push(discovered.source_path.clone());
+    }
+    source_paths.sort();
+    source_paths.dedup();
+    Ok(source_paths)
 }
 
 fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
