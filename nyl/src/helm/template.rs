@@ -232,7 +232,7 @@ impl HelmTemplateExecutor {
             release_namespace.unwrap_or_default()
         );
         let mut recorder = cache.recorder();
-        recorder.record_directory(&resolved.path)?;
+        recorder.record_filesystem_path(&resolved.path)?;
         recorder.record_value(
             "parameters",
             &serde_json::json!({

@@ -428,6 +428,14 @@ impl DependencyRecorder {
         self.record_file(format!("file:{}", path.display()), &path)
     }
 
+    pub fn record_filesystem_path(&mut self, path: &Path) -> Result<()> {
+        if path.is_dir() {
+            self.record_directory(path)
+        } else {
+            self.record_path_file(path)
+        }
+    }
+
     pub fn record_directory(&mut self, path: &Path) -> Result<()> {
         let path = path.canonicalize()?;
         let mut contents = Vec::new();
@@ -1140,5 +1148,29 @@ mod tests {
         };
 
         assert_eq!(previous.changed_inputs(&current), ["added", "changed", "removed"]);
+    }
+
+    #[test]
+    fn filesystem_path_records_files_and_directories_with_their_correct_kind() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let archive = temp.path().join("chart.tgz");
+        let directory = temp.path().join("chart");
+        fs::write(&archive, b"archive").unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("Chart.yaml"), b"name: chart\n").unwrap();
+        let mut recorder = DependencyRecorder::new([0; 32]);
+
+        recorder.record_filesystem_path(&archive).unwrap();
+        recorder.record_filesystem_path(&directory).unwrap();
+
+        let record = recorder.finish("helm", String::new());
+        assert_eq!(
+            record.dependencies[&format!("file:{}", archive.canonicalize().unwrap().display())].kind,
+            "file"
+        );
+        assert_eq!(
+            record.dependencies[&format!("directory:{}", directory.canonicalize().unwrap().display())].kind,
+            "directory"
+        );
     }
 }
