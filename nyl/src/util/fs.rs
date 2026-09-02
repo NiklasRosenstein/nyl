@@ -8,7 +8,19 @@ pub fn path_for_display(path: &Path) -> PathBuf {
     let Ok(current_dir) = std::env::current_dir() else {
         return path.to_path_buf();
     };
-    path_for_display_from(path, &current_dir)
+    let displayed = path_for_display_from(path, &current_dir);
+    if !displayed.is_absolute() {
+        return displayed;
+    }
+
+    // Windows canonical paths use a verbatim prefix (`\\?\`) while
+    // current_dir() commonly returns the equivalent drive path without it.
+    // Compare against the canonical current directory as a fallback so paths
+    // within it can still be shown relatively.
+    let Ok(canonical_current_dir) = current_dir.canonicalize() else {
+        return displayed;
+    };
+    path_for_display_from(path, &canonical_current_dir)
 }
 
 fn path_for_display_from(path: &Path, current_dir: &Path) -> PathBuf {

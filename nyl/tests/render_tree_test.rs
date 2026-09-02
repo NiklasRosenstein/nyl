@@ -2028,6 +2028,11 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     )
     .unwrap();
     let source = Repository::open(fixture.path()).unwrap();
+    let mut source_config = source.config().unwrap();
+    source_config.set_str("user.name", "Nyl Tests").unwrap();
+    source_config
+        .set_str("user.email", "nyl-tests@example.invalid")
+        .unwrap();
     commit_all(&source, "Source");
 
     Command::cargo_bin("nyl")
