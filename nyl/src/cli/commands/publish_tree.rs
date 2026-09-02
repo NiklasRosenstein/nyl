@@ -7,10 +7,11 @@ use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Signature, StatusOptions};
 
 use crate::git::CredentialProvider;
-use crate::git::GitManager;
+use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::{
     compile_target_tree_cached_with_observer, discover_gitops_inventory, reconcile_rendered_tree,
-    resolve_deployment_target_name, GitOpsCache, RenderIndex, RenderIndexPublication, TreeCacheArgs,
+    resolve_deployment_target_name, CompiledTargetTree, GitOpsCache, GitOpsInventory, RenderIndex,
+    RenderIndexPublication, TreeCacheArgs, TreeRenderObserver,
 };
 use crate::{NylError, Result};
 
@@ -37,11 +38,20 @@ pub struct PublishTreeArgs {
     /// Prepare and commit locally without pushing.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Publish the working-tree render even when it differs from the committed revision.
+    #[arg(long, conflicts_with = "require_clean")]
+    pub allow_dirty: bool,
+
+    /// Require the entire source worktree to be clean before rendering.
+    #[arg(long, conflicts_with = "allow_dirty")]
+    pub require_clean: bool,
 }
 
 struct PublicationProvenance<'a> {
     source_repository: Option<&'a str>,
     source_commit: &'a str,
+    source_dirty: bool,
     target: &'a str,
     cluster: &'a str,
 }
@@ -51,26 +61,139 @@ struct CommitRenderedTreeInput<'a> {
     compiled: &'a crate::gitops::CompiledTargetTree,
     target_name: &'a str,
     source_commit: &'a str,
+    source_dirty: bool,
     branch: &'a str,
     repository: &'a Repository,
     output_root: &'a Path,
     subject: Option<&'a str>,
 }
 
+struct CleanHeadWorktree {
+    repository_root: PathBuf,
+    checkout_root: PathBuf,
+    _temporary: tempfile::TempDir,
+}
+
+impl CleanHeadWorktree {
+    fn create(project_root: &Path, source_commit: &str) -> Result<(Self, PathBuf)> {
+        let repository = Repository::discover(project_root)
+            .map_err(|error| NylError::config(format!("Failed to inspect source Git repository: {error}")))?;
+        let repository_root = repository
+            .workdir()
+            .ok_or_else(|| NylError::config("Source Git repository has no worktree"))?
+            .canonicalize()?;
+        let project_root = project_root.canonicalize()?;
+        let project_relative = project_root.strip_prefix(&repository_root).map_err(|_| {
+            NylError::config(format!(
+                "Nyl project {} is outside source worktree {}",
+                project_root.display(),
+                repository_root.display()
+            ))
+        })?;
+        let oid = git2::Oid::from_str(source_commit)
+            .map_err(|error| NylError::config(format!("Invalid source commit {source_commit}: {error}")))?;
+        let temporary = tempfile::Builder::new().prefix("nyl-publish-head-").tempdir()?;
+        let checkout_name = temporary
+            .path()
+            .file_name()
+            .ok_or_else(|| NylError::config("Temporary source checkout has no name"))?;
+        let checkout_root = temporary.path().join(checkout_name);
+        WorktreeManager::get_or_create_worktree(&repository_root, "HEAD", oid, &checkout_root)
+            .map_err(NylError::Git)?;
+        let clean_project_root = checkout_root.join(project_relative);
+        Ok((
+            Self {
+                repository_root,
+                checkout_root,
+                _temporary: temporary,
+            },
+            clean_project_root,
+        ))
+    }
+}
+
+impl Drop for CleanHeadWorktree {
+    fn drop(&mut self) {
+        if let Err(error) = WorktreeManager::remove_worktree(&self.repository_root, &self.checkout_root) {
+            tracing::warn!(
+                path = %self.checkout_root.display(),
+                %error,
+                "Failed to remove temporary clean source worktree"
+            );
+        }
+    }
+}
+
+struct CleanHeadCompilation {
+    _worktree: CleanHeadWorktree,
+    inventory: GitOpsInventory,
+    compiled: CompiledTargetTree,
+}
+
+struct SilentTreeRenderObserver;
+
+impl TreeRenderObserver for SilentTreeRenderObserver {}
+
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
-    if dirty || source_commit.is_none() {
+    let Some(source_commit) = source_commit else {
         return Err(NylError::config(
-            "publish-tree requires a clean source worktree at a committed revision",
+            "publish-tree requires the source worktree to have a committed revision",
+        ));
+    };
+    if dirty && args.require_clean {
+        return Err(NylError::config(
+            "publish-tree --require-clean requires a clean source worktree",
         ));
     }
-    let source_commit = source_commit.expect("a clean committed worktree has a source commit");
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let compiled = compile_target_tree_cached_with_observer(&inventory, &target_name, &cache, &mut progress).await?;
+    let clean = if dirty && !args.allow_dirty {
+        Some(compile_clean_head(&inventory, &compiled, &target_name, &source_commit, &cache).await?)
+    } else {
+        None
+    };
+    let (publication_inventory, compiled, source_dirty) = if let Some(clean) = &clean {
+        tracing::info!(
+            target = target_name,
+            commit = source_commit,
+            "Source worktree is dirty but the rendered deployment target matches HEAD"
+        );
+        (&clean.inventory, &clean.compiled, false)
+    } else {
+        if dirty {
+            tracing::warn!(
+                target = target_name,
+                commit = source_commit,
+                "Publishing a rendered deployment target from a dirty source worktree because --allow-dirty was specified"
+            );
+        }
+        (&inventory, &compiled, dirty)
+    };
+    publish_compiled(
+        &args,
+        publication_inventory,
+        compiled,
+        &target_name,
+        &source_commit,
+        source_dirty,
+        &cache,
+    )
+}
+
+fn publish_compiled(
+    args: &PublishTreeArgs,
+    inventory: &GitOpsInventory,
+    compiled: &CompiledTargetTree,
+    target_name: &str,
+    source_commit: &str,
+    source_dirty: bool,
+    cache: &GitOpsCache,
+) -> Result<()> {
     let publication_url = compiled
         .repository
         .publish_url
@@ -78,7 +201,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         .unwrap_or(&compiled.repository.repo_url);
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = Arc::new(CredentialProvider::new());
-    if let Some(commit) = publication_current_commit(&compiled, publication_url, &credentials, &cache)? {
+    if let Some(commit) = publication_current_commit(compiled, publication_url, &credentials, cache)? {
         print_publication_result(
             &format!("Deployment target {target_name} is already published"),
             publication_url,
@@ -97,10 +220,11 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         temp.path().join(compiled.target.publication_path_prefix())
     };
     let commit = commit_rendered_tree(&CommitRenderedTreeInput {
-        inventory: &inventory,
-        compiled: &compiled,
-        target_name: &target_name,
-        source_commit: &source_commit,
+        inventory,
+        compiled,
+        target_name,
+        source_commit,
+        source_dirty,
         branch,
         repository: &repository,
         output_root: &output_root,
@@ -149,6 +273,104 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     Ok(())
 }
 
+async fn compile_clean_head(
+    working_inventory: &GitOpsInventory,
+    working: &CompiledTargetTree,
+    target_name: &str,
+    source_commit: &str,
+    cache: &GitOpsCache,
+) -> Result<CleanHeadCompilation> {
+    let (worktree, project_root) = CleanHeadWorktree::create(&working_inventory.project_root, source_commit)?;
+    let inventory = discover_gitops_inventory(&project_root, None).map_err(|error| {
+        dirty_verification_failure(
+            target_name,
+            source_commit,
+            format!("could not discover the committed project: {error}"),
+        )
+    })?;
+    resolve_deployment_target_name(&inventory, Some(target_name)).map_err(|error| {
+        dirty_verification_failure(
+            target_name,
+            source_commit,
+            format!("could not select the committed target: {error}"),
+        )
+    })?;
+    let mut observer = SilentTreeRenderObserver;
+    let compiled = compile_target_tree_cached_with_observer(&inventory, target_name, cache, &mut observer)
+        .await
+        .map_err(|error| {
+            dirty_verification_failure(
+                target_name,
+                source_commit,
+                format!("could not render the committed target: {error}"),
+            )
+        })?;
+    let differences = compilation_differences(working, &compiled)?;
+    if !differences.is_empty() {
+        return Err(NylError::config(format!(
+            "Local changes affect deployment target {target_name:?} relative to source commit {source_commit}:\n- {}\nCommit or stash the relevant changes, or pass --allow-dirty to publish them explicitly.",
+            differences.join("\n- ")
+        )));
+    }
+    Ok(CleanHeadCompilation {
+        _worktree: worktree,
+        inventory,
+        compiled,
+    })
+}
+
+fn dirty_verification_failure(target_name: &str, source_commit: &str, detail: String) -> NylError {
+    NylError::config(format!(
+        "Could not verify dirty source worktree for deployment target {target_name:?} against source commit {source_commit}: {detail}\nCommit or stash the relevant changes, or pass --allow-dirty to publish them explicitly."
+    ))
+}
+
+fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTargetTree) -> Result<Vec<String>> {
+    const MAX_DIFFERENCES: usize = 12;
+
+    let mut differences = Vec::new();
+    if working.target.spec.publication != committed.target.spec.publication
+        || working.repository_name != committed.repository_name
+        || working.repository != committed.repository
+    {
+        differences.push("publication destination changed".to_owned());
+    }
+    if working.cluster.metadata.name != committed.cluster.metadata.name {
+        differences.push(format!(
+            "destination cluster changed from {:?} to {:?}",
+            committed.cluster.metadata.name, working.cluster.metadata.name
+        ));
+    }
+    for path in working
+        .files
+        .keys()
+        .chain(committed.files.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        match (working.files.get(path), committed.files.get(path)) {
+            (Some(_), None) => differences.push(format!(
+                "added {}",
+                crate::resources::relative_path_to_posix("rendered output path", path)?
+            )),
+            (None, Some(_)) => differences.push(format!(
+                "removed {}",
+                crate::resources::relative_path_to_posix("rendered output path", path)?
+            )),
+            (Some(working), Some(committed)) if working != committed => differences.push(format!(
+                "modified {}",
+                crate::resources::relative_path_to_posix("rendered output path", path)?
+            )),
+            _ => {}
+        }
+    }
+    if differences.len() > MAX_DIFFERENCES {
+        let omitted = differences.len() - MAX_DIFFERENCES;
+        differences.truncate(MAX_DIFFERENCES);
+        differences.push(format!("and {omitted} more difference(s)"));
+    }
+    Ok(differences)
+}
+
 fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<git2::Oid>> {
     let inputs = super::render_tree::hash_inputs(input.inventory, input.compiled)?;
     let repository_identity = input
@@ -168,7 +390,7 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
                 path_prefix: input.compiled.target.publication_path_prefix().to_owned(),
             },
             Some(input.source_commit.to_owned()),
-            false,
+            input.source_dirty,
             inputs,
         ),
     )?;
@@ -184,6 +406,7 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         &PublicationProvenance {
             source_repository: source_repository.as_deref(),
             source_commit: input.source_commit,
+            source_dirty: input.source_dirty,
             target: input.target_name,
             cluster: &input.compiled.cluster.metadata.name,
         },
@@ -265,6 +488,9 @@ fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<
         writeln!(message, "Nyl-Source-Repository: {source_repository}").expect("writing to a String cannot fail");
     }
     writeln!(message, "Nyl-Source-Commit: {}", provenance.source_commit).expect("writing to a String cannot fail");
+    if provenance.source_dirty {
+        writeln!(message, "Nyl-Source-Dirty: true").expect("writing to a String cannot fail");
+    }
     writeln!(message, "Nyl-Deployment-Target: {}", provenance.target).expect("writing to a String cannot fail");
     write!(message, "Nyl-Cluster: {}", provenance.cluster).expect("writing to a String cannot fail");
     message
@@ -510,6 +736,7 @@ mod tests {
             &PublicationProvenance {
                 source_repository: Some("https://example.invalid/source.git"),
                 source_commit: "0123456789abcdef",
+                source_dirty: false,
                 target: "production",
                 cluster: "kasoku",
             },

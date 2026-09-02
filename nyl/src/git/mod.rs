@@ -52,7 +52,7 @@ pub use error::{GitError, Result};
 
 use cache::CacheLayout;
 use repository::BareRepository;
-use worktree::WorktreeManager;
+pub(crate) use worktree::WorktreeManager;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};

@@ -293,6 +293,9 @@ src/
   `applications/` paths are scaffold conventions, not lookup restrictions.
 - One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
   repository revision must have disjoint prefixes.
+- `publish-tree` attributes reproducible output to a committed revision. A
+  dirty worktree is verified against a clean render of `HEAD` unless the user
+  explicitly requires a wholly clean worktree or permits dirty provenance.
 - Rendered reconciliation removes only files recorded in `_nyl/index.json` and
   fails when owned files were modified outside Nyl. It accepts bytes from an
   interrupted intended generation so the next run can converge, and rejects

@@ -105,7 +105,6 @@ impl WorktreeManager {
     }
 
     /// Remove a worktree (cleanup)
-    #[allow(dead_code)]
     pub fn remove_worktree(bare_repo_path: &Path, worktree_path: &Path) -> Result<()> {
         let output = Command::new("git")
             .arg("-C")

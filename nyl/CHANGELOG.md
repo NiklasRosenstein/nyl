@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `publish-tree --require-clean` for strict source-worktree validation
+  and `--allow-dirty` for explicit publication with dirty provenance. By
+  default, dirty worktrees are accepted only when the target matches a clean
+  render of the committed revision.
+
 - Added `ApplicationGroup.spec.releaseCustomization.allowedSyncOptions` for
   exact, platform-approved Argo CD sync options that Releases may append to
   their generated Applications.
