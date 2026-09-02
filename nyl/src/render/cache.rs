@@ -550,7 +550,7 @@ impl Drop for CacheReporter {
     fn drop(&mut self) {
         let stats = self.cache.stats();
         if stats.has_reportable_work() {
-            eprintln!("{stats}");
+            eprintln!("\n{stats}");
         }
     }
 }

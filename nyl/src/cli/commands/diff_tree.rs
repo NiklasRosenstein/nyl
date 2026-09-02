@@ -4,6 +4,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
+use colored::Colorize;
 use git2::Repository;
 use similar::TextDiff;
 
@@ -659,49 +660,79 @@ fn source_repository_url(project_root: &Path) -> Result<Option<String>> {
 }
 
 fn print_comparison_summary(summary: &ComparisonSummary<'_>) {
-    eprintln!("Comparing rendered deployment target {}", summary.target);
-    eprintln!("  View: {}", summary.selection.description());
-    eprintln!(
-        "  Desired source: repository={} commit={} state={}",
-        summary.desired_source_repository.unwrap_or("<local Git repository>"),
-        summary.desired_source_commit.unwrap_or("<uncommitted>"),
-        if summary.desired_dirty { "dirty" } else { "clean" }
-    );
+    let desired_state = if summary.desired_dirty {
+        "dirty".yellow().bold().to_string()
+    } else {
+        "clean".green().to_string()
+    };
+    let mut lines = vec![
+        "Rendered tree comparison".bold().to_string(),
+        comparison_field("Deployment target", summary.target.cyan().bold()),
+        comparison_field("View", summary.selection.description()),
+        format!("  {}", "Desired source".cyan().bold()),
+        comparison_detail(
+            "Repository",
+            summary.desired_source_repository.unwrap_or("<local Git repository>"),
+        ),
+        comparison_detail("Commit", summary.desired_source_commit.unwrap_or("<uncommitted>")),
+        comparison_detail("Working tree", desired_state),
+    ];
     match summary.baseline {
         ResolvedBaseline::Published(baseline) => {
-            eprintln!(
-                "  Baseline: published repository={} revision={} commit={} path={}",
+            lines.push(format!("  {}", "Published baseline".cyan().bold()));
+            lines.push(comparison_detail(
+                "Repository",
                 crate::util::sanitize_url(&summary.desired.repository.repo_url),
-                summary.desired.target.spec.publication.revision,
-                baseline.commit,
-                publication_path(summary.desired)
-            );
+            ));
+            lines.push(comparison_detail(
+                "Revision",
+                summary.desired.target.spec.publication.revision.cyan(),
+            ));
+            lines.push(comparison_detail("Commit", baseline.commit));
+            lines.push(comparison_detail("Path", publication_path(summary.desired).cyan()));
         }
         ResolvedBaseline::Source(baseline) => {
-            eprintln!(
-                "  Baseline source: repository={} revision={} commit={}",
+            lines.push(format!("  {}", "Source baseline".cyan().bold()));
+            lines.push(comparison_detail(
+                "Repository",
                 crate::util::sanitize_url(&baseline.repository),
-                baseline.revision,
-                baseline.commit
-            );
-            print_publication_summary("Desired publication", summary.desired);
-            print_publication_summary("Baseline publication", &baseline.compiled);
+            ));
+            lines.push(comparison_detail("Revision", baseline.revision.cyan()));
+            lines.push(comparison_detail("Commit", baseline.commit));
+            push_publication_summary(&mut lines, "Desired publication", summary.desired);
+            push_publication_summary(&mut lines, "Baseline publication", &baseline.compiled);
         }
     }
     if summary.output == Path::new("-") {
-        eprintln!("  Output: stdout");
+        lines.push(comparison_field("Diff output", "stdout".cyan()));
     } else {
-        eprintln!("  Output: {}", summary.output.display());
+        lines.push(comparison_field(
+            "Diff output",
+            summary.output.display().to_string().cyan(),
+        ));
     }
+    eprintln!("{}\n", lines.join("\n"));
 }
 
-fn print_publication_summary(label: &str, compiled: &crate::gitops::CompiledTargetTree) {
-    eprintln!(
-        "  {label}: repository={} revision={} path={}",
+fn push_publication_summary(lines: &mut Vec<String>, label: &str, compiled: &crate::gitops::CompiledTargetTree) {
+    lines.push(format!("  {}", label.cyan().bold()));
+    lines.push(comparison_detail(
+        "Repository",
         crate::util::sanitize_url(&compiled.repository.repo_url),
-        compiled.target.spec.publication.revision,
-        publication_path(compiled)
-    );
+    ));
+    lines.push(comparison_detail(
+        "Revision",
+        compiled.target.spec.publication.revision.cyan(),
+    ));
+    lines.push(comparison_detail("Path", publication_path(compiled).cyan()));
+}
+
+fn comparison_field(label: &str, value: impl std::fmt::Display) -> String {
+    format!("  {label:<20}{value}")
+}
+
+fn comparison_detail(label: &str, value: impl std::fmt::Display) -> String {
+    format!("    {label:<18}{value}")
 }
 
 fn publication_path(compiled: &crate::gitops::CompiledTargetTree) -> &str {

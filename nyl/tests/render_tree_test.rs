@@ -2138,22 +2138,29 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["diff-tree", "--target", "production", "--against", "published"])
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "published",
+            "--color",
+            "never",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(
-            "Comparing rendered deployment target production",
+            "Rendered tree comparison\n  Deployment target   production\n  View                entire rendered tree\n  Desired source",
         ))
-        .stderr(predicate::str::contains("View: entire rendered tree"))
         .stderr(predicate::str::contains(format!(
-            "Desired source: repository=https://example.invalid/source.git commit={source_commit} state=clean"
+            "    Repository        https://example.invalid/source.git\n    Commit            {source_commit}\n    Working tree      clean"
         )))
-        .stderr(predicate::str::contains("Baseline: published repository="))
-        .stderr(predicate::str::contains("revision=deploy/production"))
-        .stderr(predicate::str::contains(format!("commit={}", commit.id())))
-        .stderr(predicate::str::contains("path=production"))
-        .stderr(predicate::str::contains("Output: stdout"))
+        .stderr(predicate::str::contains("  Published baseline"))
+        .stderr(predicate::str::contains("    Revision          deploy/production"))
+        .stderr(predicate::str::contains(format!("    Commit            {}", commit.id())))
+        .stderr(predicate::str::contains("    Path              production"))
+        .stderr(predicate::str::contains("  Diff output         stdout\n\n"))
         .stderr(predicate::str::contains("has no rendered differences"));
 
     let empty_diff = fixture.path().join("artifacts/no-differences.diff");
@@ -2170,7 +2177,10 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains(format!("Output: {}", empty_diff.display())))
+        .stderr(predicate::str::contains(format!(
+            "Diff output         {}",
+            empty_diff.display()
+        )))
         .stderr(predicate::str::contains("has no rendered differences"));
     assert_eq!(fs::metadata(&empty_diff).unwrap().len(), 0);
 
@@ -2187,15 +2197,17 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
             &source_commit_string,
             "--source-repository",
             fixture.path().to_str().unwrap(),
+            "--color",
+            "never",
         ])
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("Baseline source: repository="))
-        .stderr(predicate::str::contains(format!("revision={source_commit}")))
-        .stderr(predicate::str::contains(format!("commit={source_commit}")))
-        .stderr(predicate::str::contains("Desired publication: repository="))
-        .stderr(predicate::str::contains("Baseline publication: repository="));
+        .stderr(predicate::str::contains("Source baseline"))
+        .stderr(predicate::str::contains(format!("Revision          {source_commit}")))
+        .stderr(predicate::str::contains(format!("Commit            {source_commit}")))
+        .stderr(predicate::str::contains("  Desired publication\n    Repository"))
+        .stderr(predicate::str::contains("  Baseline publication\n    Repository"));
 
     let application_source = fixture.path().join("applications/workloads/api.yaml");
     let changed = fs::read_to_string(&application_source)
@@ -2205,11 +2217,19 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["diff-tree", "--target", "production", "--against", "published"])
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "published",
+            "--color",
+            "never",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("+  environment: changed"))
-        .stderr(predicate::str::contains("state=dirty"))
+        .stderr(predicate::str::contains("Working tree      dirty"))
         .stderr(predicate::str::contains("Rendered differences: 1 file(s)"));
 
     Command::cargo_bin("nyl")
@@ -2219,7 +2239,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("View: Argo CD catalog"))
+        .stderr(predicate::str::contains("View                Argo CD catalog"))
         .stderr(predicate::str::contains("has no rendered differences"));
 
     let application_diff = fixture.path().join("artifacts/api.diff");
@@ -2238,7 +2258,9 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("View: Applications argocd-production/api"))
+        .stderr(predicate::str::contains(
+            "View                Applications argocd-production/api",
+        ))
         .stderr(predicate::str::contains("Wrote rendered diff"));
     let application_diff_contents = fs::read_to_string(&application_diff).unwrap();
     assert!(application_diff_contents.contains("workloads/api/resources.yaml"));
