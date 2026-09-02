@@ -129,6 +129,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     let output = crate::util::path_for_display(&output_root)
         .display()
         .to_string()
+        .replace(std::path::MAIN_SEPARATOR, "/")
         .green();
     println!(
         "✓ deployment target {target} ready at {output} ({}, {})",
