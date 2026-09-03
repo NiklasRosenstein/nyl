@@ -70,9 +70,8 @@ pub struct KubeRsClient {
 impl KubeRsClient {
     /// Build kube config from explicit path/context options.
     ///
-    /// Notes for exec-based auth plugins:
-    /// - kube-client is responsible for spawning the exec plugin
-    /// - when supported by kube-client, plugin stderr should be visible in CLI stderr
+    /// Exec-based auth plugins inherit stderr when they may interact with the user,
+    /// so login instructions remain visible in CLI stderr.
     pub async fn load_kube_config(path: Option<&Path>, context: Option<&str>) -> Result<kube::Config> {
         tracing::debug!(
             kubeconfig_path = %path.map_or_else(|| "<default>".to_string(), |p| p.display().to_string()),
