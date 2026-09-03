@@ -84,17 +84,10 @@ fn delete_resource(kind: GitOpsResourceKind, name: &str, dry_run: bool) -> Resul
     let contents = fs::read_to_string(&path)?;
     let count = document_count(&contents);
     let primary = inventory.project_root.join("gitops.yaml");
+    let updated = remove_document(&contents, discovered.document_index, &discovered.raw_document)?;
+    atomic_replace(&path, &contents, &updated)?;
     if count == 1 && path != primary {
-        if fs::symlink_metadata(&path)?.file_type().is_symlink() {
-            return Err(NylError::config(format!(
-                "Refusing to delete symlink {}",
-                path.display()
-            )));
-        }
         fs::remove_file(&path)?;
-    } else {
-        let updated = remove_document(&contents, discovered.document_index, &discovered.raw_document)?;
-        atomic_replace(&path, &contents, &updated)?;
     }
     println!(
         "✓ Deleted {} {:?} from {}",

@@ -60,18 +60,18 @@ pub(crate) fn atomic_replace(path: &Path, expected: &str, replacement: &str) -> 
     let parent = path
         .parent()
         .ok_or_else(|| NylError::config(format!("{} has no parent directory", path.display())))?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(NylError::config(format!("Refusing to edit symlink {}", path.display())));
+    }
     if fs::read_to_string(path)? != expected {
         return Err(NylError::config(format!(
             "{} changed while it was being edited; refusing to overwrite it",
             path.display()
         )));
     }
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(NylError::config(format!("Refusing to edit symlink {}", path.display())));
-    }
-    let permissions = fs::metadata(path)?.permissions();
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.as_file().set_permissions(permissions)?;
+    temporary.as_file().set_permissions(metadata.permissions())?;
     temporary.write_all(replacement.as_bytes())?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map(|_| ()).map_err(|error| error.error.into())
@@ -184,5 +184,22 @@ mod tests {
     fn removes_the_following_separator_with_the_first_document() {
         let input = "first: true\n---\nsecond: true\n";
         assert_eq!(remove_document(input, 1, "first: true\n").unwrap(), "second: true\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_rejects_a_symlink_before_reading_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::TempDir::new().unwrap();
+        let target = temporary.path().join("target.yaml");
+        let link = temporary.path().join("link.yaml");
+        fs::write(&target, [0xff]).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = atomic_replace(&link, "", "replacement").unwrap_err();
+
+        assert!(error.to_string().contains("Refusing to edit symlink"));
+        assert_eq!(fs::read(target).unwrap(), [0xff]);
     }
 }
