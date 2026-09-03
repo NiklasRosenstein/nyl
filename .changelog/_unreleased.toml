@@ -3,3 +3,33 @@ id = "4e41292f-c1fa-4c27-890f-af356476f0e5"
 type = "breaking change"
 description = "Remove daemon functionality as it was never recommended and added complexity to the codebase"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "de649901-52e5-4ca4-84bf-f4d11e85a21e"
+type = "feature"
+description = "Allow pinning the target kube context in `nyl.toml` via `[project.kubernetes].context`, overridable per profile via `[profile.<name>.kubernetes].context`, to guard against accidentally running against the wrong cluster. Precedence is `--context` > profile > project > current kubeconfig context."
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "f6751c05-94dd-4e42-b3a8-23c9dbe3fffd"
+type = "breaking change"
+description = "Remove the unused `nyl-profiles.yaml` profile system (including the unwired SSH kubeconfig and SSH tunnel stubs); profiles are configured through `nyl.toml`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "177306ad-7542-4b3d-875d-f4127d14a470"
+type = "feature"
+description = "Add an exact source cache and project-wide `nyl vendor` workflow for reproducible, network-free rendered GitOps inputs"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "61fc9e7f-acde-40c4-a9e0-5d0d7d4f26d8"
+type = "breaking change"
+description = "Remove the Argo CD CMP integration, ApplicationGenerator resource, `nyl generate argocd`, and deployment chart; keep the published image as a shell-friendly CI renderer with Nyl, Helm, Git, SOPS, and Kyverno CLI"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "cb8fdd17-a169-4a62-9655-3865d324849f"
+type = "feature"
+description = "Exclude project secrets and NYL_* environment inputs from tree rendering by default, with explicit per-command admission through `--allow-secret-inputs` for trusted central sources"
+author = "@NiklasRosenstein"

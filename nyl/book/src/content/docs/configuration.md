@@ -2,148 +2,89 @@
 title: 'Configuration'
 ---
 
-nyl project settings are loaded from a single file: `nyl.toml`.
+Nyl loads project settings from `nyl.toml`. It searches from the current
+directory upward and resolves relative paths against the directory containing
+the file.
 
-## Configuration File Discovery
-
-nyl searches for `nyl.toml` starting in the current directory and walking up parent directories.
-
-## Configuration Structure
-
-`nyl.toml` supports:
-- `[project]` for project settings
-- `[project.kubernetes]` for default offline render Kubernetes metadata
-- `[profile.<name>.values]` for profile values used in templates
-- `[profile.<name>.kubernetes]` for profile-specific offline render Kubernetes metadata
+## Project settings
 
 ```toml
 [project]
 components_search_paths = ["components"]
 helm_chart_search_paths = ["."]
-
-[project.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1"]
-
-[profile.default.values]
-namespace = "default"
-replicas = 1
-
-[profile.dev.values]
-namespace = "dev"
-replicas = 2
-
-[profile.dev.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "networking.k8s.io/v1"]
+gitops_scaffold_path = "config"
 
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://mycharts.org/my-kind@1.0.0"
 ```
 
-## Settings
+- `components_search_paths` defaults to `["components"]`. Each root is scanned
+  for `<root>/<apiVersion>/<kind>/Chart.yaml`.
+- `helm_chart_search_paths` defaults to `["."]` and controls Helm chart name
+  resolution.
+- `gitops_scaffold_path` defaults to `"config"` and controls where `nyl create`
+  writes GitOps resources when the project has no root `gitops.yaml`.
+  Discovery remains project-wide.
+- `aliases` maps an API version and kind to a component shortcut or local
+  component path.
 
-### `project.components_search_paths`
+## Remote artifact vendoring
 
-- Type: array of path strings
-- Default: `["components"]`
-- Meaning: Direct roots for component charts. Each root is scanned as:
-  - `<root>/<apiVersion>/<kind>/Chart.yaml`
-
-### `project.helm_chart_search_paths`
-
-- Type: array of path strings
-- Default: `["."]`
-- Meaning: Search paths used for Helm chart name resolution.
-
-### `project.aliases`
-
-- Type: table/map of string to string
-- Default: empty table
-- Key format: `<apiVersion>/<kind>`
-- Value format: same component shortcut format accepted in `kind` (`<repository>[#<name>][@<version>]`) or a local component path
-- Meaning: Treat matching resources as component-style resources and resolve them directly to the configured target instead of `components_search_paths`.
-
-### `project.kubernetes`
-
-- Type: object/table
-- Default: empty
-- Meaning: Default Kubernetes target metadata for `nyl render --offline`.
-- Typical use: Commit this when using [rendered manifest GitOps](/nyl/deployment-workflows/rendered-manifests/) so CI can render deterministically without connecting to a cluster.
-- Fields:
-  - `kube_version`: Kubernetes version passed to Helm, for example `"1.30.0"`.
-  - `api_versions`: array of Kubernetes API versions passed to Helm, for example `["v1", "apps/v1"]`.
-
-### `profile.<name>.values`
-
-- Type: object/map
-- Default: none
-- Meaning: Template values for profile `<name>` exposed as `values.*` during rendering.
-- Selection: `--profile <name>` selects a profile. If omitted, Nyl uses `default` when available.
-
-Example:
+Vendoring is a project-wide policy for remote inputs used by every Cluster and
+DeploymentTarget in the project:
 
 ```toml
-[profile.dev.values]
-my_value = "Hello!"
-replicas = 1
-
-[profile.prod.values]
-my_value = "World!"
-replicas = 3
+[vendor]
+mode = "preferred"
+path = "vendor"
+lfs_threshold_bytes = 1048576
 ```
 
-### `profile.<name>.kubernetes`
+- `mode` is required when the section exists. `disabled` ignores the vendor
+  snapshot during rendering, `preferred` resolves vendor then the disposable
+  source cache then the origin, and `required` permits only a matching
+  vendored artifact.
+- `path` defaults to `vendor` and must remain beneath the directory containing
+  `nyl.toml`. Nyl excludes this subtree from GitOps YAML discovery.
+- `lfs_threshold_bytes` defaults to 1 MiB. Helm and Git archives always use Git
+  LFS rules; RemoteManifest blobs use LFS at or above this threshold.
 
-- Type: object/table
-- Default: empty
-- Meaning: Profile-specific Kubernetes target metadata for `nyl render --offline`.
-- Precedence: CLI flags override profile config, profile config overrides `project.kubernetes`.
+The committed lock identifies artifacts by a deterministic fingerprint of the
+complete request coordinate. Multiple Releases requesting the same coordinate
+share one lock entry and one blob. See [`nyl vendor`](/nyl/commands/vendor/)
+for snapshot maintenance.
 
-Example:
+Deployment values, Kubernetes capabilities, and kube contexts live in
+Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/reference/resources/gitops/),
+not in `nyl.toml`.
 
-```toml
-[profile.prod.kubernetes]
-kube_version = "1.30.0"
-api_versions = ["v1", "apps/v1", "batch/v1", "networking.k8s.io/v1"]
+## Render inputs
+
+A target-aware render resolves one `DeploymentTarget` and its referenced `Cluster`.
+Values merge recursively in this order:
+
+```text
+Cluster.spec.values < DeploymentTarget.spec.values
 ```
 
-Template usage:
+Target values win at every conflicting leaf. Templates receive the merged map
+as `values`, the sanitized Cluster as `cluster`, and the target as `target`.
+`Cluster.spec.live` is local connection configuration and is never exposed to
+templates or generated output.
 
-```jinja
-{{ values.my_value }}
-{% if profile == "dev" %}
-# dev-specific logic
-{% endif %}
+A targetless render receives no `cluster` or `target`. In offline mode, pass
+Kubernetes capabilities explicitly when a Helm chart depends on them:
+
+```bash
+nyl render --offline \
+  --kube-version 1.31.0 \
+  --kube-api-versions v1,apps/v1 \
+  applications/example.yaml
 ```
 
-Example:
+## Path resolution
 
-```toml
-[project]
-components_search_paths = ["components"]
-
-[project.aliases]
-"myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
-"platform.example.io/v1/IngressStack" = "https://charts.bitnami.com/bitnami#nginx@18.2.4"
-```
-
-Then this manifest is resolved through the alias target:
-
-```yaml
-apiVersion: myapi.io/v1
-kind: MyKind
-metadata:
-  name: my-nginx
-spec:
-  replicaCount: 2
-```
-
-## Path Resolution
-
-Relative paths are resolved against the directory that contains `nyl.toml`.
-
-Example (`/home/user/my-app/nyl.toml`):
+Given `/home/user/platform/nyl.toml`:
 
 ```toml
 [project]
@@ -151,40 +92,17 @@ components_search_paths = ["components", "/opt/shared-components"]
 helm_chart_search_paths = [".", "charts"]
 ```
 
-Resolves to:
-- `components_search_paths`:
-  - `/home/user/my-app/components`
-  - `/opt/shared-components`
-- `helm_chart_search_paths`:
-  - `/home/user/my-app`
-  - `/home/user/my-app/charts`
+Nyl resolves the paths to `/home/user/platform/components`,
+`/opt/shared-components`, `/home/user/platform`, and
+`/home/user/platform/charts`.
 
-## Validation
-
-Use:
+## Validation and schema
 
 ```bash
 nyl validate
-```
-
-Checks:
-- `nyl.toml` discovery and parse validity
-- existence of configured `components_search_paths`
-- existence of configured `helm_chart_search_paths`
-
-Use strict mode in CI:
-
-```bash
 nyl validate --strict
+nyl schema config
 ```
 
-## JSON Schema
-
-Generate schema from the current binary:
-
-```bash
-nyl generate schema config
-```
-
-Published schema artifact:
-- [`reference/schemas/nyl.schema.json`](/nyl/reference/schemas/nyl.schema.json)
+The published project schema is available at
+[`reference/schemas/nyl.schema.json`](/nyl/reference/schemas/nyl.schema.json).

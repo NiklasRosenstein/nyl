@@ -1,0 +1,11 @@
+apiVersion: gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: minikube
+spec:
+  clusterRef:
+    name: minikube
+  publication:
+    repository:
+      repoURL: https://example.invalid/nyl-integration-deploy.git
+    revision: deploy/minikube

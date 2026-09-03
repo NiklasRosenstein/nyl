@@ -1,4 +1,5 @@
 use clap::Args;
+use git2::Repository;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -17,7 +18,7 @@ pub struct ValidateArgs {
     pub strict: bool,
 }
 
-pub fn execute(args: ValidateArgs) -> Result<()> {
+pub async fn execute(args: ValidateArgs) -> Result<()> {
     info!("Validating project configuration");
     debug!("Validation path: {}", args.path);
     debug!("Strict mode: {}", args.strict);
@@ -36,7 +37,7 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
     }
 
     // Load configuration
-    let config = ProjectConfig::load(config_file)?;
+    let config = ProjectConfig::load(config_file.clone())?;
 
     for path in config.get_components_search_paths() {
         if path.exists() {
@@ -70,6 +71,33 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
         }
     }
 
+    if let Some(config_file) = config_file {
+        let project_root = config_file.parent().unwrap_or(project_dir);
+        if Repository::discover(project_root).is_ok() {
+            let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
+            crate::gitops::validate_gitops_inventory(&inventory)?;
+            let target_names = inventory
+                .resources
+                .values()
+                .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
+                .map(|resource| resource.identity.name.clone())
+                .collect::<Vec<_>>();
+            for target in target_names {
+                crate::gitops::compile_target_tree(&inventory, &target).await?;
+            }
+            println!(
+                "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
+                inventory.resources.len(),
+                inventory.yaml_files.len()
+            );
+        } else if project_root.join("gitops.yaml").exists() {
+            return Err(NylError::config(format!(
+                "GitOps configuration {} requires a Git worktree",
+                project_root.join("gitops.yaml").display()
+            )));
+        }
+    }
+
     // Determine result
     if args.strict && has_warnings {
         println!("\n✗ Validation failed in strict mode (warnings treated as errors)");
@@ -90,8 +118,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_validate_with_valid_config() {
+    #[tokio::test]
+    async fn test_validate_with_valid_config() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
         let components_dir = temp.path().join("components");
@@ -104,12 +132,12 @@ mod tests {
             strict: false,
         };
 
-        let result = execute(args);
+        let result = execute(args).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_validate_no_config() {
+    #[tokio::test]
+    async fn test_validate_no_config() {
         let temp = TempDir::new().unwrap();
 
         let args = ValidateArgs {
@@ -117,13 +145,13 @@ mod tests {
             strict: false,
         };
 
-        let result = execute(args);
+        let result = execute(args).await;
         // Should succeed but with warnings
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_validate_strict_mode_fails_on_warnings() {
+    #[tokio::test]
+    async fn test_validate_strict_mode_fails_on_warnings() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "[project]\ncomponents_search_paths = [\"nonexistent\"]\n").unwrap();
@@ -133,13 +161,13 @@ mod tests {
             strict: true,
         };
 
-        let result = execute(args);
+        let result = execute(args).await;
         // Should fail in strict mode due to validation warning
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_validate_missing_components_dir() {
+    #[tokio::test]
+    async fn test_validate_missing_components_dir() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
         fs::write(&config_path, "[project]\n").unwrap();
@@ -150,7 +178,7 @@ mod tests {
             strict: false,
         };
 
-        let result = execute(args);
+        let result = execute(args).await;
         // Should succeed with warnings
         assert!(result.is_ok());
     }

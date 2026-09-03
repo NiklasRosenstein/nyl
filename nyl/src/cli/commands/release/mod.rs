@@ -2,6 +2,7 @@ mod delete;
 mod format;
 mod history;
 mod list;
+mod rollback;
 mod show;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -28,6 +29,9 @@ pub enum ReleaseSubcommand {
 
     /// Delete release(s)
     Delete(delete::DeleteArgs),
+
+    /// Roll back a release to a previous revision
+    Rollback(rollback::RollbackArgs),
 }
 
 /// Output format for commands
@@ -74,5 +78,6 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
         ReleaseSubcommand::Show(args) => show::execute(args).await,
         ReleaseSubcommand::History(args) => history::execute(args).await,
         ReleaseSubcommand::Delete(args) => delete::execute(args).await,
+        ReleaseSubcommand::Rollback(args) => rollback::execute(args).await,
     }
 }

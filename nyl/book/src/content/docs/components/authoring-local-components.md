@@ -31,7 +31,7 @@ components/example/v1/Nginx/Chart.yaml
 ## Create a New Component
 
 ```bash
-nyl new component example/v1 Nginx
+nyl create component example/v1 Nginx
 ```
 
 This scaffolds:

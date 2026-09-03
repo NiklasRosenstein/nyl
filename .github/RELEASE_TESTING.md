@@ -150,7 +150,7 @@ git tag v0.1.0
 
 **Fix**: Follow the "Setup (One-time)" steps above.
 
-### "Binary size exceeds 20MB limit"
+### "Binary size exceeds 22MiB limit"
 
 **Cause**: Release binary is too large.
 
@@ -162,7 +162,7 @@ ls -lh nyl/target/release/nyl
 # Reduce size with strip
 strip nyl/target/release/nyl
 
-# Or update size limit in .github/workflows/rust.yaml
+# Or update the intentional size budget in .github/workflows/_build-rust.yaml
 ```
 
 ## Recommended Release Process
