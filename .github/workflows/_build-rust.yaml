@@ -130,7 +130,7 @@ jobs:
       # Artifact name format: nyl-{target}
       - name: Upload artifact
         if: inputs.upload-artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nyl-${{ matrix.target }}
           path: |
