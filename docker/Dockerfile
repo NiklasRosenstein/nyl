@@ -22,23 +22,14 @@ RUN \
     && printf "%s" "$BIN_ARCH" > /BINARY_ARCH
 
 
-#: Fetch binaries for ArgoCD, Helm and SOPS.
-#: -----------------------------------------
-
-FROM fetch-bin-base AS argocd-bin
-# Find ArgoCD releases at https://github.com/argoproj/argo-cd/releases
-# renovate: datasource=github-releases depName=argocd packageName=argoproj/argo-cd
-ARG ARGOCD_VERSION=v3.4.2
-RUN curl -sSfLo /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-$(cat /BINARY_ARCH) \
-    && chmod +x /usr/local/bin/argocd \
-    && upx /usr/local/bin/argocd \
-    && argocd version --client
+#: Fetch binaries used by Nyl rendering workflows.
+#: ------------------------------------------------
 
 FROM fetch-bin-base AS helm-bin
 # Find Helm releases at https://github.com/helm/helm/releases
 # renovate: datasource=github-releases depName=helm packageName=helm/helm
-ARG HELM_VERSION=v3.21.0
-RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+ARG HELM_VERSION=v4.2.0
+RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 \
     && chmod 700 get_helm.sh \
     && ./get_helm.sh --version $HELM_VERSION \
     && upx /usr/local/bin/helm \
@@ -47,7 +38,7 @@ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/s
 FROM fetch-bin-base AS sops-bin
 # Find SOPS releases at https://github.com/getsops/sops/releases
 # renovate: datasource=github-releases depName=sops packageName=getsops/sops
-ARG SOPS_VERSION=v3.13.1
+ARG SOPS_VERSION=v3.13.3
 RUN curl -fLO https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.$(cat /BINARY_ARCH) \
     && mv sops-${SOPS_VERSION}.linux.$(cat /BINARY_ARCH) /usr/local/bin/sops \
     && chmod +x /usr/local/bin/sops \
@@ -56,7 +47,7 @@ RUN curl -fLO https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/
 
 FROM fetch-bin-base AS kyverno-bin
 # renovate: datasource=github-releases depName=kyverno packageName=kyverno/kyverno
-ARG KYVERNO_VERSION=1.18.0
+ARG KYVERNO_VERSION=1.19.0
 RUN \
     case "$(uname -m)" in \
         x86_64) KYVERNO_ARCH='x86_64' ;; \
@@ -68,28 +59,18 @@ RUN \
     && mv kyverno /usr/local/bin/ \
     && upx /usr/local/bin/kyverno
 
-#: Build the ArgoCD CMP server image.
-#: ----------------------------------
+#: Build the CI rendering image.
+#: -----------------------------
 
-FROM debian:bookworm-slim AS nyl-cmp
+FROM debian:bookworm-slim AS nyl-ci
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates && \
+    apt-get install -y --no-install-recommends bash git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=argocd-bin /usr/local/bin/argocd /usr/local/bin/argocd
-RUN ln -s /usr/local/bin/argocd /usr/local/bin/argocd-cmp-server && chown 999:999 /usr/local/bin/argocd-cmp-server
 COPY --from=helm-bin /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=sops-bin /usr/local/bin/sops /usr/local/bin/sops
 COPY --from=kyverno-bin /usr/local/bin/kyverno /usr/local/bin/kyverno
 COPY --from=nyl-bin /usr/local/bin/nyl /usr/local/bin/nyl
-COPY --chown=999 docker/plugin.yaml /home/argocd/cmp-server/config/plugin.yaml
 
-RUN groupadd --system --gid 999 argocd && \
-    useradd --system --uid 999 --gid 999 --home /home/argocd -m --shell /bin/false argocd && \
-    mkdir -p /var/log/nyl \
-    && chown -R argocd:argocd /var/log/nyl
-
-USER argocd
-WORKDIR /home/argocd
-VOLUME /home/argocd/cmp-server/plugins/
-ENTRYPOINT [ "/usr/local/bin/argocd-cmp-server" ]
+WORKDIR /workspace
+CMD ["nyl", "--help"]

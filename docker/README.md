@@ -1,37 +1,47 @@
-# nyl
+# Nyl CI image
 
-This directory builds a container image that contains Nyl and the [ArgoCD CMP Server][1] with the following tools:
+The Nyl image is a shell-friendly rendering environment for CI jobs. It contains:
 
-  [1]: https://argo-cd.readthedocs.io/en/stable/operator-manual/config-management-plugins/#register-the-plugin-sidecar
+- Nyl
+- Helm
+- Git
+- SOPS
+- Kyverno CLI
+- Bash and CA certificates
 
-* **Nyl** (static binary from CI build artifacts)
-* **ArgoCD CMP Server** (v3.2.5)
-* **Helm** (v3.19.5)
-* **SOPS** (v3.11.0) - included for future use
-* **Kyverno** (v1.16.2)
+The image has no entrypoint, so CI systems can run any included command. Its
+default command prints Nyl's help.
+
+```bash
+docker run --rm ghcr.io/niklasrosenstein/nyl:TAG nyl --version
+docker run --rm -v "$PWD:/workspace" ghcr.io/niklasrosenstein/nyl:TAG \
+  nyl render-tree /workspace --target production --output-dir /workspace/deploy
+```
 
 ## Building
 
 The Nyl binary is built by CI and must be provided in the Docker build context as `nyl-amd64` or `nyl-arm64`.
 
-**Example** (for local testing):
+Example for local testing:
+
 ```bash
-# Build the binary first
+# Build a Linux binary matching the image architecture
 cd nyl
-cargo build --release
+cargo build --release --target x86_64-unknown-linux-musl
 cd ..
 
 # Copy binary to build context
-cp nyl/target/release/nyl ./nyl-amd64
+cp target/x86_64-unknown-linux-musl/release/nyl ./nyl-amd64
 
 # Build Docker image
-docker build -t nyl:test -f docker/Dockerfile . --build-arg TARGETARCH=amd64
+docker buildx build --platform linux/amd64 --load -t nyl:test -f docker/Dockerfile .
 ```
 
-**Note**: In CI, the binary is built separately and added to the build context automatically.
+CI builds the binaries separately and adds them to the build context.
 
 ## Image Details
 
-- **Base image**: `debian:bookworm-slim`
-- **Binary**: Static binary
-- **Runtime dependencies**: none for Nyl itself
+- Base image: `debian:bookworm-slim`
+- Working directory: `/workspace`
+- User: `root`, allowing CI jobs to install or write workspace tooling as needed
+- Nyl binary: statically linked

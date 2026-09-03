@@ -75,7 +75,8 @@ examples/
 ├── README.md                    # Examples overview
 └── simple-app/
     ├── README.md                # Usage instructions
-    ├── nyl-project.yaml         # Multi-profile configuration
+    ├── nyl.toml                 # Project configuration
+    ├── config/                  # Cluster and target resources
     └── manifests/
         ├── deployment.yaml      # Templated Deployment
         ├── service.yaml         # Service definition
@@ -84,15 +85,10 @@ examples/
 
 **Features Demonstrated**:
 - Template variables with `{{ }}` syntax
-- Multi-environment profiles (dev, staging, prod)
+- Cluster facts and target-specific value overlays
 - Resource requests/limits per environment
 - Conditional logic in templates
-- Environment-specific values
-
-**Example Profiles**:
-- **dev**: 1 replica, debug mode, minimal resources
-- **staging**: 2 replicas, optimized resources
-- **prod**: 3 replicas, production resources, monitoring enabled
+- Target-specific values selected with `--target`
 
 ### 5. ✅ Created Comprehensive CHANGELOG
 **Status**: Complete
@@ -155,8 +151,6 @@ examples/
 - `CloneFailed`: Network and credentials check
 - `RefNotFound`: Git ls-remote suggestion
 - `AuthenticationFailed`: SSH/HTTPS specific guidance
-- `CredentialNotFound`: ArgoCD secret creation help
-- `ArgoCDSecretQueryFailed`: RBAC permission hints
 
 **Helper Methods**:
 - `is_config_error()` - Check if configuration-related
@@ -178,7 +172,7 @@ NylError::kubernetes("message")
 
 **Test Statistics**:
 - **Unit Tests**: 227 tests
-- **Integration Tests**: 20 tests (error handling, util, git, argocd)
+- **Integration Tests**: Error handling, utilities, Git, rendering, and CLI behavior
 - **Total**: 247+ tests
 - **Coverage**: Estimated >85%
 

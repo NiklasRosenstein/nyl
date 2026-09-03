@@ -1,7 +1,7 @@
 /// Phase 2 Integration Tests
 ///
 /// These tests verify the complete Phase 2 implementation including:
-/// - Profile loading with precedence
+/// - Target and cluster value precedence
 /// - Component discovery
 /// - Helm chart resolution
 /// - Component instantiation to HelmChart

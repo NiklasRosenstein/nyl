@@ -36,7 +36,7 @@ Tests template engine performance across various scenarios:
 Tests configuration discovery and loading performance:
 
 - **config_discovery**: Finding config file via upward directory traversal
-- **config_parsing_simple**: YAML config parsing with profiles
+- **config_parsing_simple**: TOML project configuration parsing
 - **config_load_full**: Full config load including directory creation
 
 ## Performance Targets
