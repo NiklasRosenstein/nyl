@@ -252,7 +252,7 @@ fn create_get_and_delete_edit_the_primary_gitops_file() {
         .args(["get", "cluster", "production"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("NAME\tDESTINATION\tCONTEXT\tVERSION\tFILE"))
+        .stdout(predicate::str::contains("NAME        DESTINATION"))
         .stdout(predicate::str::contains("gitops.yaml#document-2"));
 
     Command::new(assert_cmd::cargo::cargo_bin!("nyl"))

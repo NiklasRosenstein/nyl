@@ -1061,7 +1061,7 @@ fn lists_and_validates_targets() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "production\tkasoku\tdeploy@deploy/production\tproduction",
+            "production  kasoku   deploy@deploy/production  production",
         ));
 
     Command::cargo_bin("nyl")

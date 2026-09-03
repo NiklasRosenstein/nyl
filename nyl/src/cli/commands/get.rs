@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use clap::{Args, Subcommand};
+use comfy_table::{presets::NOTHING, Table};
 
 use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource};
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
@@ -72,89 +73,155 @@ pub fn execute(args: GetArgs) -> Result<()> {
 }
 
 fn print_resources(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResource]) {
-    match kind {
-        GitOpsResourceKind::GitRepository => println!("NAME\tREPOSITORY\tPUBLISH\tFILE"),
-        GitOpsResourceKind::Cluster => println!("NAME\tDESTINATION\tCONTEXT\tVERSION\tFILE"),
-        GitOpsResourceKind::ArgoCDInstance => println!("NAME\tCLUSTER\tNAMESPACE\tFILE"),
-        GitOpsResourceKind::DeploymentTarget => println!("NAME\tCLUSTER\tPUBLICATION\tPATH-PREFIX\tFILE"),
-        GitOpsResourceKind::AppProjectDefinition => println!("NAME\tMANAGEMENT\tFILE"),
-        GitOpsResourceKind::ApplicationGroup => println!("NAME\tPROJECT\tSOURCE\tFILE"),
-    }
-    for resource in resources {
-        let name = &resource.identity.name;
-        let file = format!(
-            "{}#document-{}",
-            resource.source_path.display(),
-            resource.document_index
-        );
-        match resource.resource.as_ref() {
-            Some(GitOpsResource::GitRepository(repository)) => println!(
-                "{name}\t{}\t{}\t{file}",
-                repository.spec.repo_url,
-                repository.spec.publish_url.as_deref().unwrap_or("-")
-            ),
-            Some(GitOpsResource::Cluster(cluster)) => {
-                let destination = cluster
-                    .spec
-                    .destination
-                    .server
-                    .as_deref()
-                    .or(cluster.spec.destination.name.as_deref())
-                    .unwrap_or("-");
-                let context = cluster.spec.live.as_ref().map_or("-", |live| live.context.as_str());
-                let version = cluster.spec.kubernetes.kube_version.as_deref().unwrap_or("-");
-                println!("{name}\t{destination}\t{context}\t{version}\t{file}");
-            }
-            Some(GitOpsResource::ArgoCDInstance(instance)) => println!(
-                "{name}\t{}\t{}\t{file}",
-                instance.spec.cluster_ref.name, instance.spec.namespace
-            ),
-            Some(GitOpsResource::DeploymentTarget(target)) => {
-                let repository = target
-                    .spec
-                    .publication
-                    .repository_ref
-                    .as_ref()
-                    .map(|reference| reference.name.as_str())
-                    .or_else(|| {
-                        target
-                            .spec
-                            .publication
-                            .repository
-                            .as_ref()
-                            .map(|repository| repository.repo_url.as_str())
-                    })
-                    .unwrap_or("-");
-                println!(
-                    "{name}\t{}\t{}@{}\t{}\t{file}",
-                    target.cluster_name(),
-                    repository,
-                    target.spec.publication.revision,
-                    target.publication_path_prefix()
-                );
-            }
-            Some(GitOpsResource::AppProjectDefinition(project)) => {
-                println!("{name}\t{:?}\t{file}", project.spec.management);
-            }
-            Some(GitOpsResource::ApplicationGroup(group)) => {
-                let project = group.spec.project_ref.as_deref().unwrap_or("<inline>");
-                let source = group.spec.source.as_ref().map_or("-", |source| source.path.as_str());
-                println!("{name}\t{project}\t{source}\t{file}");
-            }
-            None => println_templated(kind, name, &file),
+    let headers = match kind {
+        GitOpsResourceKind::GitRepository => vec!["NAME", "REPOSITORY", "PUBLISH", "FILE"],
+        GitOpsResourceKind::Cluster => vec!["NAME", "DESTINATION", "CONTEXT", "VERSION", "FILE"],
+        GitOpsResourceKind::ArgoCDInstance => vec!["NAME", "CLUSTER", "NAMESPACE", "FILE"],
+        GitOpsResourceKind::DeploymentTarget => vec!["NAME", "CLUSTER", "PUBLICATION", "PATH-PREFIX", "FILE"],
+        GitOpsResourceKind::AppProjectDefinition => vec!["NAME", "MANAGEMENT", "FILE"],
+        GitOpsResourceKind::ApplicationGroup => vec!["NAME", "PROJECT", "SOURCE", "FILE"],
+    };
+    let rows = resources.iter().map(|resource| resource_row(kind, resource)).collect();
+    println!("{}", format_table(headers, rows));
+}
+
+fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -> Vec<String> {
+    let name = &resource.identity.name;
+    let file = format!(
+        "{}#document-{}",
+        resource.source_path.display(),
+        resource.document_index
+    );
+    match resource.resource.as_ref() {
+        Some(GitOpsResource::GitRepository(repository)) => vec![
+            name.clone(),
+            repository.spec.repo_url.clone(),
+            repository.spec.publish_url.clone().unwrap_or_else(|| "-".to_owned()),
+            file,
+        ],
+        Some(GitOpsResource::Cluster(cluster)) => {
+            let destination = cluster
+                .spec
+                .destination
+                .server
+                .as_deref()
+                .or(cluster.spec.destination.name.as_deref())
+                .unwrap_or("-");
+            let context = cluster.spec.live.as_ref().map_or("-", |live| live.context.as_str());
+            let version = cluster.spec.kubernetes.kube_version.as_deref().unwrap_or("-");
+            vec![
+                name.clone(),
+                destination.to_owned(),
+                context.to_owned(),
+                version.to_owned(),
+                file,
+            ]
         }
+        Some(GitOpsResource::ArgoCDInstance(instance)) => vec![
+            name.clone(),
+            instance.spec.cluster_ref.name.clone(),
+            instance.spec.namespace.clone(),
+            file,
+        ],
+        Some(GitOpsResource::DeploymentTarget(target)) => {
+            let repository = target
+                .spec
+                .publication
+                .repository_ref
+                .as_ref()
+                .map(|reference| reference.name.as_str())
+                .or_else(|| {
+                    target
+                        .spec
+                        .publication
+                        .repository
+                        .as_ref()
+                        .map(|repository| repository.repo_url.as_str())
+                })
+                .unwrap_or("-");
+            vec![
+                name.clone(),
+                target.cluster_name().to_owned(),
+                format!("{}@{}", repository, target.spec.publication.revision),
+                target.publication_path_prefix().to_owned(),
+                file,
+            ]
+        }
+        Some(GitOpsResource::AppProjectDefinition(project)) => {
+            vec![name.clone(), format!("{:?}", project.spec.management), file]
+        }
+        Some(GitOpsResource::ApplicationGroup(group)) => {
+            let project = group.spec.project_ref.as_deref().unwrap_or("<inline>");
+            let source = group.spec.source.as_ref().map_or("-", |source| source.path.as_str());
+            vec![name.clone(), project.to_owned(), source.to_owned(), file]
+        }
+        None => templated_resource_row(kind, name, file),
     }
 }
 
-fn println_templated(kind: GitOpsResourceKind, name: &str, file: &str) {
+fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) -> Vec<String> {
     match kind {
-        GitOpsResourceKind::GitRepository => println!("{name}\t<templated>\t<templated>\t{file}"),
         GitOpsResourceKind::Cluster | GitOpsResourceKind::DeploymentTarget => {
-            println!("{name}\t<templated>\t<templated>\t<templated>\t{file}");
+            vec![
+                name.to_owned(),
+                "<templated>".to_owned(),
+                "<templated>".to_owned(),
+                "<templated>".to_owned(),
+                file,
+            ]
         }
-        GitOpsResourceKind::ArgoCDInstance | GitOpsResourceKind::ApplicationGroup => {
-            println!("{name}\t<templated>\t<templated>\t{file}");
-        }
-        GitOpsResourceKind::AppProjectDefinition => println!("{name}\t<templated>\t{file}"),
+        GitOpsResourceKind::GitRepository
+        | GitOpsResourceKind::ArgoCDInstance
+        | GitOpsResourceKind::ApplicationGroup => vec![
+            name.to_owned(),
+            "<templated>".to_owned(),
+            "<templated>".to_owned(),
+            file,
+        ],
+        GitOpsResourceKind::AppProjectDefinition => vec![name.to_owned(), "<templated>".to_owned(), file],
+    }
+}
+
+fn format_table(headers: Vec<&'static str>, rows: Vec<Vec<String>>) -> String {
+    let mut table = Table::new();
+    table.load_preset(NOTHING).set_header(headers);
+    for row in rows {
+        table.add_row(row);
+    }
+    let column_count = table.column_count();
+    for (index, column) in table.column_iter_mut().enumerate() {
+        column.set_padding((0, if index + 1 == column_count { 0 } else { 2 }));
+    }
+    table
+        .to_string()
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_columns_align_to_the_longest_value() {
+        let repository = "git@gitlab.com:NiklasRosenstein/config.git";
+        let output = format_table(
+            vec!["NAME", "REPOSITORY", "PUBLISH", "FILE"],
+            vec![vec![
+                "this".to_owned(),
+                repository.to_owned(),
+                repository.to_owned(),
+                "gitops.yaml#document-1".to_owned(),
+            ]],
+        );
+        let mut lines = output.lines();
+        let header = lines.next().unwrap();
+        let row = lines.next().unwrap();
+        assert_eq!(header.find("REPOSITORY"), row.find(repository));
+        assert_eq!(header.find("PUBLISH"), row.rfind(repository));
+        assert_eq!(header.find("FILE"), row.find("gitops.yaml"));
+        assert!(output.lines().all(|line| !line.ends_with(' ')));
     }
 }
