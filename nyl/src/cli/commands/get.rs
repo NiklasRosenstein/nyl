@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use clap::{Args, Subcommand};
-use comfy_table::{presets::NOTHING, Table};
 
+use crate::cli::table::{render as render_table, Cell};
 use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource};
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -81,8 +81,11 @@ fn print_resources(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResou
         GitOpsResourceKind::AppProjectDefinition => vec!["NAME", "MANAGEMENT", "FILE"],
         GitOpsResourceKind::ApplicationGroup => vec!["NAME", "PROJECT", "SOURCE", "FILE"],
     };
-    let rows = resources.iter().map(|resource| resource_row(kind, resource)).collect();
-    println!("{}", format_table(headers, rows));
+    let rows = resources
+        .iter()
+        .map(|resource| resource_row(kind, resource).into_iter().map(Cell::plain).collect())
+        .collect::<Vec<_>>();
+    println!("{}", render_table(&headers, &rows));
 }
 
 fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -> Vec<String> {
@@ -179,49 +182,5 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
             file,
         ],
         GitOpsResourceKind::AppProjectDefinition => vec![name.to_owned(), "<templated>".to_owned(), file],
-    }
-}
-
-fn format_table(headers: Vec<&'static str>, rows: Vec<Vec<String>>) -> String {
-    let mut table = Table::new();
-    table.load_preset(NOTHING).set_header(headers);
-    for row in rows {
-        table.add_row(row);
-    }
-    let column_count = table.column_count();
-    for (index, column) in table.column_iter_mut().enumerate() {
-        column.set_padding((0, if index + 1 == column_count { 0 } else { 2 }));
-    }
-    table
-        .to_string()
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn table_columns_align_to_the_longest_value() {
-        let repository = "git@gitlab.com:NiklasRosenstein/config.git";
-        let output = format_table(
-            vec!["NAME", "REPOSITORY", "PUBLISH", "FILE"],
-            vec![vec![
-                "this".to_owned(),
-                repository.to_owned(),
-                repository.to_owned(),
-                "gitops.yaml#document-1".to_owned(),
-            ]],
-        );
-        let mut lines = output.lines();
-        let header = lines.next().unwrap();
-        let row = lines.next().unwrap();
-        assert_eq!(header.find("REPOSITORY"), row.find(repository));
-        assert_eq!(header.find("PUBLISH"), row.rfind(repository));
-        assert_eq!(header.find("FILE"), row.find("gitops.yaml"));
-        assert!(output.lines().all(|line| !line.ends_with(' ')));
     }
 }

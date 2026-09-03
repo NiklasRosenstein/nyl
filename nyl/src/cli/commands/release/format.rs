@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Cell, Color, Table};
+use colored::Colorize;
 
+use crate::cli::table::Cell;
 use crate::kubernetes::ReleaseStatus;
 
 /// Format a timestamp as a human-readable age
@@ -24,22 +25,16 @@ pub fn format_timestamp(timestamp: &DateTime<Utc>) -> String {
     timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
-/// Create a new styled table
-pub fn create_table() -> Table {
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL).apply_modifier(UTF8_ROUND_CORNERS);
-    table
-}
-
 /// Color a status string based on the status value
 pub fn color_status(status: &ReleaseStatus) -> Cell {
     let text = format!("{:?}", status).to_lowercase();
-    match status {
-        ReleaseStatus::Deployed => Cell::new(text).fg(Color::Green),
-        ReleaseStatus::Failed => Cell::new(text).fg(Color::Red),
-        ReleaseStatus::Rendered => Cell::new(text).fg(Color::Yellow),
-        ReleaseStatus::Superseded => Cell::new(text).fg(Color::DarkGrey),
-    }
+    let rendered = match status {
+        ReleaseStatus::Deployed => text.as_str().green().to_string(),
+        ReleaseStatus::Failed => text.as_str().red().to_string(),
+        ReleaseStatus::Rendered => text.as_str().yellow().to_string(),
+        ReleaseStatus::Superseded => text.as_str().bright_black().to_string(),
+    };
+    Cell::styled(text, rendered)
 }
 
 #[cfg(test)]

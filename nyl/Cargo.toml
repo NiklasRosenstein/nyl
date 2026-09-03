@@ -71,7 +71,7 @@ reqwest = { version = "0.13.2", default-features = false, features = ["rustls"] 
 # Diff and output
 colored = "3"
 similar = "3"
-comfy-table = "7.1"
+unicode-width = "0.2"
 dialoguer = "0.12"
 
 [dev-dependencies]
