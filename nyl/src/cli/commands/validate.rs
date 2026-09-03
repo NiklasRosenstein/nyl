@@ -1,4 +1,5 @@
-use clap::{Args, Subcommand};
+use clap::Args;
+use git2::Repository;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -8,9 +9,6 @@ use crate::{NylError, Result};
 /// Validate project configuration
 #[derive(Args, Debug)]
 pub struct ValidateArgs {
-    #[command(subcommand)]
-    pub command: Option<ValidateSubcommand>,
-
     /// Path to the project directory
     #[arg(default_value = ".")]
     pub path: String,
@@ -20,36 +18,7 @@ pub struct ValidateArgs {
     pub strict: bool,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum ValidateSubcommand {
-    /// Validate all discovered rendered GitOps resources and references.
-    Gitops {
-        /// Project directory or a path beneath it.
-        #[arg(default_value = ".")]
-        path: String,
-    },
-}
-
 pub async fn execute(args: ValidateArgs) -> Result<()> {
-    if let Some(ValidateSubcommand::Gitops { path }) = args.command {
-        let inventory = crate::gitops::discover_gitops_inventory(Path::new(&path), None)?;
-        crate::gitops::validate_gitops_inventory(&inventory)?;
-        let target_names = inventory
-            .resources
-            .values()
-            .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
-            .map(|resource| resource.identity.name.clone())
-            .collect::<Vec<_>>();
-        for target in target_names {
-            crate::gitops::compile_target_tree(&inventory, &target).await?;
-        }
-        println!(
-            "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
-            inventory.resources.len(),
-            inventory.yaml_files.len()
-        );
-        return Ok(());
-    }
     info!("Validating project configuration");
     debug!("Validation path: {}", args.path);
     debug!("Strict mode: {}", args.strict);
@@ -68,7 +37,7 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
     }
 
     // Load configuration
-    let config = ProjectConfig::load(config_file)?;
+    let config = ProjectConfig::load(config_file.clone())?;
 
     for path in config.get_components_search_paths() {
         if path.exists() {
@@ -102,6 +71,33 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
         }
     }
 
+    if let Some(config_file) = config_file {
+        let project_root = config_file.parent().unwrap_or(project_dir);
+        if Repository::discover(project_root).is_ok() {
+            let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
+            crate::gitops::validate_gitops_inventory(&inventory)?;
+            let target_names = inventory
+                .resources
+                .values()
+                .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
+                .map(|resource| resource.identity.name.clone())
+                .collect::<Vec<_>>();
+            for target in target_names {
+                crate::gitops::compile_target_tree(&inventory, &target).await?;
+            }
+            println!(
+                "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
+                inventory.resources.len(),
+                inventory.yaml_files.len()
+            );
+        } else if project_root.join("gitops.yaml").exists() {
+            return Err(NylError::config(format!(
+                "GitOps configuration {} requires a Git worktree",
+                project_root.join("gitops.yaml").display()
+            )));
+        }
+    }
+
     // Determine result
     if args.strict && has_warnings {
         println!("\n✗ Validation failed in strict mode (warnings treated as errors)");
@@ -132,7 +128,6 @@ mod tests {
         fs::create_dir(&components_dir).unwrap();
 
         let args = ValidateArgs {
-            command: None,
             path: temp.path().to_str().unwrap().to_string(),
             strict: false,
         };
@@ -146,7 +141,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         let args = ValidateArgs {
-            command: None,
             path: temp.path().to_str().unwrap().to_string(),
             strict: false,
         };
@@ -163,7 +157,6 @@ mod tests {
         fs::write(&config_path, "[project]\ncomponents_search_paths = [\"nonexistent\"]\n").unwrap();
 
         let args = ValidateArgs {
-            command: None,
             path: temp.path().to_str().unwrap().to_string(),
             strict: true,
         };
@@ -181,7 +174,6 @@ mod tests {
         // Don't create components directory
 
         let args = ValidateArgs {
-            command: None,
             path: temp.path().to_str().unwrap().to_string(),
             strict: false,
         };

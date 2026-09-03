@@ -6,15 +6,16 @@ nyl provides several commands for managing Kubernetes manifests:
 
 ## Available Commands
 
-- [`new`](/nyl/commands/new/) - Create new projects and components
-- [`init`](/nyl/commands/init/) - Initialize a compact rendered GitOps project
+- [`init`](/nyl/commands/init/) - Initialize a Nyl project
+- [`create and delete`](/nyl/commands/create/) - Manage GitOps resource source files
+- [`get and update`](/nyl/commands/project-resources/) - Inspect and refresh project resources
 - [`validate`](/nyl/commands/validate/) - Validate project configuration
 - [`rendering-pipeline`](/nyl/commands/rendering-pipeline/) - Shared rendering pipeline used by render/diff/apply
 - [`render`](/nyl/commands/render/) - Render Kubernetes manifests
 - [`diff`](/nyl/commands/diff/) - Show diff between rendered manifests and cluster state
 - [`apply`](/nyl/commands/apply/) - Apply rendered manifests to the cluster
 - [`release`](/nyl/commands/release/) - Inspect release history and roll back to a previous revision
-- [`cluster`](/nyl/commands/cluster/) - Inspect clusters and maintain their rendering capabilities
+- [`schema`](/nyl/commands/schema/) - Generate project and resource schemas
 - [`vendor`](/nyl/commands/vendor/) - Snapshot and verify remote renderer inputs
 - [`Rendered GitOps commands`](/nyl/commands/gitops/) - Render, diff, lock, and publish target trees
 
@@ -26,7 +27,7 @@ Enable verbose logging for debugging.
 
 ```bash
 nyl --verbose validate
-nyl -v new project my-app
+nyl -v init my-app --minimal
 ```
 
 ### `--color <COLOR>`
@@ -63,7 +64,7 @@ Show help information for any command.
 
 ```bash
 nyl --help
-nyl new --help
+nyl create --help
 nyl validate --help
 ```
 

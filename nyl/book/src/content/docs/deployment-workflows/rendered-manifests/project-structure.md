@@ -17,7 +17,7 @@ applications/
 components/
 ```
 
-Create it with `nyl init gitops`. GitOps resource discovery is independent of
+Create it with `nyl init`. GitOps resource discovery is independent of
 the file name and directory layout, so the configuration can be split as it
 grows. A conventional split layout is:
 
@@ -51,12 +51,12 @@ scaffold destinations; it does not restrict discovery.
 Create additional resources individually with:
 
 ```bash
-nyl new gitops repository deploy --repo-url https://git.example.com/platform/deploy.git
-nyl new gitops cluster primary --context admin@primary
-nyl new gitops argocd-instance central
-nyl new gitops target production
-nyl new gitops project workloads
-nyl new gitops application-group workloads
+nyl create repository deploy --repo-url https://git.example.com/platform/deploy.git
+nyl create cluster primary --context admin@primary
+nyl create argocd-instance central
+nyl create target production
+nyl create app-project workloads
+nyl create application-group workloads
 ```
 
 ## Application source paths
@@ -69,7 +69,7 @@ no explicit source derives `applications/<group-name>`. An explicit
 An ApplicationGroup can instead be colocated with its source:
 
 ```bash
-nyl new gitops application-group workloads \
+nyl create application-group workloads \
   --source applications/workloads \
   --colocate
 ```
@@ -85,8 +85,8 @@ source records both a human-readable mutable `revision` and an authoritative
 full `commit` lock. Update locks with:
 
 ```bash
-nyl source update workloads
-nyl source update --check
+nyl update source-locks workloads
+nyl update source-locks --check
 ```
 
 Central renderer mode applies the platform project's `nyl.toml` and component
@@ -105,7 +105,7 @@ static discovery envelope. `ApplicationGroup.spec` and
 the envelope cannot. A source-lock update also requires the ApplicationGroup's
 source coordinates and lock to remain statically parseable.
 
-Use `nyl validate gitops` to detect duplicate identities, invalid references,
+Use `nyl validate` to detect duplicate identities, invalid references,
 overlapping publication paths, unsafe paths, and unsupported templating before
 rendering.
 

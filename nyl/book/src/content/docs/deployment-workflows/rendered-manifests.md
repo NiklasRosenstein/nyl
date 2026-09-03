@@ -39,19 +39,19 @@ ApplicationGroup:
 mkdir platform && cd platform
 git init
 git remote add origin https://git.example.com/platform/deploy.git
-nyl init gitops --cluster-name production --context admin@production
+nyl init --cluster-name production --context admin@production
 ```
 
 The wizard detects the Git remote and current kube context, writes a compact
 `gitops.yaml`, creates a minimal `nyl.toml` when needed, and creates the
-`applications/` source directory. See [`nyl init gitops`](/nyl/commands/init/)
+`applications/` source directory. See [`nyl init`](/nyl/commands/init/)
 for fully non-interactive flags and stdout mode.
 
 Then validate and render one target:
 
 ```bash
-nyl validate gitops
-nyl target list
+nyl validate
+nyl get targets
 nyl render-tree --target production --output-dir deploy-worktree
 ```
 

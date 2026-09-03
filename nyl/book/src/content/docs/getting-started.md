@@ -53,7 +53,7 @@ This installs `nyl` to `~/.cargo/bin/nyl`.
 ### 1. Create a Project
 
 ```bash
-nyl new project platform
+nyl init platform --minimal
 cd platform
 ```
 
@@ -66,7 +66,7 @@ This creates:
 ### 2. Add a Component
 
 ```bash
-nyl new component v1.example.io MyApp
+nyl create component v1.example.io MyApp
 ```
 
 This creates a new [local component](/nyl/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
@@ -114,14 +114,16 @@ For target-aware rendering, scaffold a Cluster and target, update the Cluster's
 capabilities, then select the target:
 
 ```bash
-nyl new gitops cluster local --context kind-kind
-nyl new gitops target dev
+git init
+nyl create cluster local --context kind-kind
+nyl update cluster local
+nyl create target dev
 nyl render --target dev apps.yaml
 ```
 
-When `kind-kind` exists and the command runs in a terminal, cluster creation
-offers to populate its Kubernetes capabilities immediately. Run
-`nyl cluster update local` if you decline the prompt.
+GitOps resource discovery follows Git visibility. Cluster creation records the
+context without contacting Kubernetes; `nyl update cluster` performs the live
+capability refresh explicitly.
 
 ## Project Structure
 

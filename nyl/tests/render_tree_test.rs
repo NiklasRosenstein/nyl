@@ -858,7 +858,7 @@ spec:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["validate", "gitops"])
+        .args(["validate"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("must set spec.argocdRef"));
@@ -995,7 +995,7 @@ spec:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["validate", "gitops"])
+        .args(["validate"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("applicationNameTemplate"));
@@ -1057,17 +1057,17 @@ fn lists_and_validates_targets() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["target", "list"])
+        .args(["get", "targets"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "production\tkasoku\tdeploy@deploy/production\tproduction",
+            "production  kasoku   deploy@deploy/production  production",
         ));
 
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["validate", "gitops"])
+        .args(["validate"])
         .assert()
         .success()
         .stdout(predicate::str::contains("GitOps configuration is valid"));
@@ -1146,7 +1146,7 @@ spec:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["validate", "gitops"])
+        .args(["validate"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("overlapping publication path prefixes"));
@@ -1235,7 +1235,7 @@ spec:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .args(["validate", "gitops"])
+        .args(["validate"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("overlapping publication path prefixes"));

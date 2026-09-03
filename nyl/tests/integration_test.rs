@@ -102,19 +102,33 @@ fn test_render_reuses_the_shared_bundle_cache() {
 }
 
 #[test]
-fn test_cluster_help_exposes_only_list_and_update() {
+fn project_resource_commands_are_exposed_at_the_top_level() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("cluster").arg("--help");
+    cmd.arg("--help");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("create"))
+        .stdout(predicate::str::contains("get"))
         .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("Fetch live capabilities").not());
+        .stdout(predicate::str::contains("delete"));
 }
 
 #[test]
-fn test_new_gitops_cluster_uses_explicit_context_without_prompting_on_a_pipe() {
+fn removed_command_families_are_rejected() {
+    for command in ["new", "target", "cluster", "source", "generate"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+            .arg(command)
+            .arg("--help")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
+}
+
+#[test]
+fn test_create_cluster_records_explicit_context_without_contacting_kubernetes() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     let kubeconfig = temp.path().join("kubeconfig.yaml");
     fs::write(
@@ -133,8 +147,7 @@ users: []
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig).args([
-        "new",
-        "gitops",
+        "create",
         "cluster",
         "primary",
         "--context",
@@ -150,8 +163,9 @@ users: []
 }
 
 #[test]
-fn test_new_gitops_cluster_warns_when_implied_context_is_missing() {
+fn test_create_cluster_does_not_inspect_kubeconfig() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     let kubeconfig = temp.path().join("kubeconfig.yaml");
     fs::write(
@@ -163,34 +177,20 @@ fn test_new_gitops_cluster_warns_when_implied_context_is_missing() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path())
         .env("KUBECONFIG", &kubeconfig)
-        .args(["new", "gitops", "cluster", "primary"]);
-    cmd.assert().success().stderr(predicate::str::contains(
-        "Kubernetes context \"primary\" implied by the Cluster name was not found",
-    ));
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.current_dir(temp.path()).env("KUBECONFIG", &kubeconfig).args([
-        "new",
-        "gitops",
-        "cluster",
-        "secondary",
-        "--context",
-        "missing",
-    ]);
-    cmd.assert().success().stderr(predicate::str::contains(
-        "Kubernetes context \"missing\" specified by --context was not found",
-    ));
+        .args(["create", "cluster", "primary"]);
+    cmd.assert().success().stderr(predicate::str::is_empty());
 }
 
 #[test]
-fn test_new_gitops_repository_requires_and_writes_repository_urls() {
+fn test_create_repository_requires_and_writes_repository_urls() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
 
     let mut missing = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     missing
         .current_dir(temp.path())
-        .args(["new", "gitops", "repository", "deploy"]);
+        .args(["create", "repository", "deploy"]);
     missing
         .assert()
         .failure()
@@ -198,8 +198,7 @@ fn test_new_gitops_repository_requires_and_writes_repository_urls() {
 
     let mut create = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     create.current_dir(temp.path()).args([
-        "new",
-        "gitops",
+        "create",
         "repository",
         "deploy",
         "--repo-url",
@@ -215,22 +214,122 @@ fn test_new_gitops_repository_requires_and_writes_repository_urls() {
 }
 
 #[test]
-fn test_new_gitops_argocd_instance_uses_documented_name() {
+fn test_create_argocd_instance_uses_documented_name() {
     let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
         .current_dir(temp.path())
-        .args(["new", "gitops", "argocd-instance", "central"]);
+        .args(["create", "argocd-instance", "central"]);
     command.assert().success();
     let resource = fs::read_to_string(temp.path().join("config/argocd-instances/central.yaml")).unwrap();
     assert!(resource.contains("kind: ArgoCDInstance"));
 }
 
 #[test]
-fn test_generate_schema_config_command() {
+fn create_get_and_delete_edit_the_primary_gitops_file() {
+    let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    let original = "# primary configuration\napiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n";
+    fs::write(temp.path().join("gitops.yaml"), original).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["create", "cluster", "production", "--context", "admin@production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created Cluster in gitops.yaml"));
+
+    let created = fs::read_to_string(temp.path().join("gitops.yaml")).unwrap();
+    assert!(created.starts_with(original));
+    assert!(created.contains("---\n# yaml-language-server:"));
+    assert!(created.contains("kind: Cluster"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["get", "cluster", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NAME        DESTINATION"))
+        .stdout(predicate::str::contains("gitops.yaml#document-2"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["delete", "cluster", "production", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would delete Cluster \"production\""));
+    assert_eq!(fs::read_to_string(temp.path().join("gitops.yaml")).unwrap(), created);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["delete", "cluster", "production"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(temp.path().join("gitops.yaml")).unwrap(), original);
+}
+
+#[test]
+fn delete_removes_a_dedicated_resource_file() {
+    let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["create", "cluster", "production"])
+        .assert()
+        .success();
+    let resource = temp.path().join("config/clusters/production.yaml");
+    assert!(resource.is_file());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["delete", "cluster", "production"])
+        .assert()
+        .success();
+    assert!(!resource.exists());
+}
+
+#[test]
+fn delete_refuses_to_break_remaining_resource_references() {
+    let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
+    let path = temp.path().join("gitops.yaml");
+    fs::write(&path, resources).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .current_dir(temp.path())
+        .args(["delete", "cluster", "primary"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Cannot delete Cluster \"primary\" because the remaining project is invalid",
+        ));
+    assert_eq!(fs::read_to_string(path).unwrap(), resources);
+}
+
+#[test]
+fn vendor_modes_are_mutually_exclusive() {
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .args(["vendor", "--check", "--prune"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .args(["vendor", "--prune", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_schema_config_command() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.arg("generate").arg("schema").arg("config");
+    cmd.arg("schema").arg("config");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("\"project\""))
@@ -339,8 +438,15 @@ data:
     .unwrap();
 
     let mut list = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    list.current_dir(temp.path()).args(["cluster", "list"]);
-    list.assert().success().stdout(predicate::eq("kasoku\n"));
+    list.current_dir(temp.path()).args(["get", "clusters"]);
+    let cluster_source = std::path::Path::new("config").join("clusters").join("kasoku.yaml");
+    list.assert()
+        .success()
+        .stdout(predicate::str::contains("kasoku"))
+        .stdout(predicate::str::contains(format!(
+            "{}#document-1",
+            cluster_source.display()
+        )));
 
     let mut render = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     render
@@ -425,15 +531,15 @@ metadata:
 }
 
 #[test]
-fn test_new_project_command() {
+fn test_init_minimal_project_command() {
     let temp = TempDir::new().unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("new").arg("project").arg("test-project");
+    cmd.arg("init").arg("test-project").arg("--minimal");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Project created successfully"));
+        .stdout(predicate::str::contains("Initialized Nyl project"));
 
     // Verify project structure (defaults to TOML format with hidden file)
     let project_dir = temp.path().join("test-project");
@@ -443,19 +549,7 @@ fn test_new_project_command() {
 }
 
 #[test]
-fn test_new_without_subcommand_shows_error() {
-    let temp = TempDir::new().unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
-    cmd.current_dir(temp.path());
-    cmd.arg("new").arg("test-project");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand"));
-}
-
-#[test]
-fn test_new_component_command() {
+fn test_create_component_command() {
     let temp = TempDir::new().unwrap();
 
     // Create a project first
@@ -467,7 +561,7 @@ fn test_new_component_command() {
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     cmd.current_dir(temp.path());
-    cmd.arg("new").arg("component").arg("v1.example.io").arg("MyApp");
+    cmd.arg("create").arg("component").arg("v1.example.io").arg("MyApp");
     cmd.assert().success().stdout(predicate::str::contains(
         "Component 'v1.example.io/MyApp' created successfully",
     ));

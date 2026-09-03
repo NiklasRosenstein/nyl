@@ -24,10 +24,13 @@ version_prefix = "v"
 
 ```bash
 mise install
-nyl new project platform
+nyl init platform --minimal
 cd platform
-nyl new gitops cluster local --context kind-kind
-nyl new gitops target dev
+git init
+nyl create repository deploy --repo-url https://example.invalid/deploy.git
+nyl create cluster dev --context kind-kind
+nyl update cluster dev
+nyl create target dev
 nyl render --target dev apps.yaml
 ```
 

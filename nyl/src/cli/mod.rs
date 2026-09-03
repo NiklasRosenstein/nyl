@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod filter;
 pub(crate) mod namespace_resolution;
+pub(crate) mod resource_file;
 pub(crate) mod tree_progress;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -47,11 +48,17 @@ enum Commands {
     /// Render and compare-and-swap publish a deployment target revision
     PublishTree(commands::publish_tree::PublishTreeArgs),
 
-    /// Inspect rendered deployment targets
-    Target(commands::target::TargetArgs),
+    /// Create a component or GitOps resource
+    Create(commands::create::CreateArgs),
 
-    /// Manage remote GitOps source locks
-    Source(commands::source::SourceArgs),
+    /// Inspect GitOps resources declared in the project
+    Get(commands::get::GetArgs),
+
+    /// Refresh derived information stored in project resources
+    Update(commands::update::UpdateArgs),
+
+    /// Remove a GitOps resource from project source
+    Delete(commands::delete::DeleteArgs),
 
     /// Show diff between rendered manifests and cluster state
     Diff(commands::diff::DiffArgs),
@@ -62,20 +69,14 @@ enum Commands {
     /// Apply rendered manifests to the cluster
     Apply(commands::apply::ApplyArgs),
 
-    /// Generate project and resource schemas.
-    Generate(commands::generate::GenerateArgs),
+    /// Generate project and resource schemas
+    Schema(commands::schema::SchemaArgs),
 
-    /// Create a new nyl project
-    New(commands::new::NewArgs),
-
-    /// Initialize project features and configuration
+    /// Initialize a Nyl project
     Init(Box<commands::init::InitArgs>),
 
     /// Validate project configuration
     Validate(commands::validate::ValidateArgs),
-
-    /// Inspect and update configured Kubernetes clusters
-    Cluster(commands::cluster::ClusterArgs),
 
     /// Manage releases
     Release(commands::release::ReleaseArgs),
@@ -91,16 +92,16 @@ impl Cli {
             Commands::Render(args) => commands::render::execute(args).await,
             Commands::RenderTree(args) => commands::render_tree::execute(args).await,
             Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
-            Commands::Target(args) => commands::target::execute(args),
-            Commands::Source(args) => commands::source::execute(args),
+            Commands::Create(args) => commands::create::execute(args),
+            Commands::Get(args) => commands::get::execute(args),
+            Commands::Update(args) => commands::update::execute(args).await,
+            Commands::Delete(args) => commands::delete::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
             Commands::DiffTree(args) => commands::diff_tree::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
-            Commands::Generate(args) => commands::generate::execute(args),
-            Commands::New(args) => commands::new::execute(args).await,
+            Commands::Schema(args) => commands::schema::execute(args),
             Commands::Init(args) => commands::init::execute(*args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
-            Commands::Cluster(args) => commands::cluster::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
             Commands::Vendor(args) => commands::vendor::execute(args).await,
         }

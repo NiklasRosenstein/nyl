@@ -8,7 +8,7 @@ fn resource_schema_cli_accepts_canonical_kind_and_alias() {
     for kind in ["DeploymentTarget", "target"] {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
         command
-            .args(["generate", "schema", "resource", kind])
+            .args(["schema", "resource", kind])
             .assert()
             .success()
             .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
@@ -21,7 +21,7 @@ fn resource_schema_cli_supports_cluster() {
     for kind in ["Cluster", "cluster"] {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
         command
-            .args(["generate", "schema", "resource", kind])
+            .args(["schema", "resource", kind])
             .assert()
             .success()
             .stdout(predicate::str::contains("\"const\": \"Cluster\""));
@@ -29,10 +29,22 @@ fn resource_schema_cli_supports_cluster() {
 }
 
 #[test]
+fn resource_schema_cli_supports_argocd_instance() {
+    for kind in ["ArgoCDInstance", "argocd-instance"] {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+        command
+            .args(["schema", "resource", kind])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"const\": \"ArgoCDInstance\""));
+    }
+}
+
+#[test]
 fn resource_schema_cli_supports_release() {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
-        .args(["generate", "schema", "resource", "Release"])
+        .args(["schema", "resource", "Release"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
@@ -45,7 +57,7 @@ fn resource_schema_cli_supports_release() {
 fn aggregate_schema_cli_uses_relative_refs() {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
-        .args(["generate", "schema", "gitops"])
+        .args(["schema", "gitops"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"$ref\": \"git-repository.schema.json\""))
@@ -59,7 +71,7 @@ fn all_schema_cli_writes_the_complete_set() {
     let directory = tempfile::tempdir().unwrap();
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     command
-        .args(["generate", "schema", "all", "--output-dir"])
+        .args(["schema", "all", "--output-dir"])
         .arg(directory.path())
         .assert()
         .success();

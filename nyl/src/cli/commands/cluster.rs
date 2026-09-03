@@ -1,28 +1,14 @@
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
 use std::path::Path;
 
-use clap::{Args, Subcommand};
+use clap::Args;
 
+use crate::cli::resource_file::{atomic_replace, replace_document};
 use crate::gitops::discovery::{discover_gitops_inventory, DiscoveredGitOpsResource, GitOpsInventory};
 use crate::kubernetes::{KubeClient, KubeRsClient};
 use crate::resources::{Cluster, DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
-
-#[derive(Args, Debug)]
-pub struct ClusterArgs {
-    #[command(subcommand)]
-    pub command: ClusterSubcommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ClusterSubcommand {
-    /// List configured clusters without connecting to Kubernetes
-    List,
-    /// Refresh the stored capabilities of a configured cluster
-    Update(ClusterUpdateArgs),
-}
 
 #[derive(Args, Debug)]
 pub struct ClusterUpdateArgs {
@@ -44,13 +30,6 @@ struct ClusterInfo {
 pub struct ResolvedTargetCluster {
     pub target: DeploymentTarget,
     pub cluster: Cluster,
-}
-
-pub async fn execute(args: ClusterArgs) -> Result<()> {
-    match args.command {
-        ClusterSubcommand::List => list_clusters(),
-        ClusterSubcommand::Update(args) => update(args).await,
-    }
 }
 
 fn inventory(start_dir: &Path) -> Result<GitOpsInventory> {
@@ -121,16 +100,6 @@ fn normalize_cluster_url(value: &str) -> String {
     )
 }
 
-fn list_clusters() -> Result<()> {
-    let inventory = inventory(&std::env::current_dir()?)?;
-    for discovered in inventory.resources.values() {
-        if discovered.identity.kind == GitOpsResourceKind::Cluster {
-            println!("{}", discovered.identity.name);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn update(args: ClusterUpdateArgs) -> Result<()> {
     update_from_dir(args, &std::env::current_dir()?).await
 }
@@ -154,7 +123,7 @@ pub(crate) async fn update_from_dir(args: ClusterUpdateArgs, start_dir: &Path) -
     }
     if args.check {
         return Err(NylError::config(format!(
-            "Cluster '{}' capabilities differ from the live cluster; run `nyl cluster update {}`",
+            "Cluster '{}' capabilities differ from the live cluster; run `nyl update cluster {}`",
             args.name, args.name
         )));
     }
@@ -224,55 +193,14 @@ fn update_cluster_document(
     }
     let contents = fs::read_to_string(path)?;
     let replacement = replace_kubernetes_block(&discovered.raw_document, info)?;
-    let occurrences = contents.match_indices(&discovered.raw_document).count();
-    if occurrences != 1 {
-        return Err(NylError::config(format!(
-            "Cannot safely locate Cluster '{}' document in {}",
-            discovered.identity.name,
-            path.display()
-        )));
-    }
-    let updated = contents.replacen(&discovered.raw_document, &replacement, 1);
+    let updated = replace_document(
+        &contents,
+        discovered.document_index,
+        &discovered.raw_document,
+        &replacement,
+    )?;
     reject_symlink_path(project_root, path)?;
-    if fs::read_to_string(path)? != contents {
-        return Err(NylError::config(format!(
-            "Cluster source {} changed while capabilities were being fetched; refusing to overwrite it",
-            path.display()
-        )));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| NylError::config(format!("Cluster source {} has no parent directory", path.display())))?;
-    let permissions = fs::metadata(path)?.permissions();
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.as_file().set_permissions(permissions)?;
-    temporary.write_all(updated.as_bytes())?;
-    temporary.as_file().sync_all()?;
-    reject_symlink_path(project_root, path)?;
-    let backup_path = tempfile::Builder::new()
-        .prefix(".nyl-cluster-backup-")
-        .tempfile_in(parent)?
-        .into_temp_path();
-    fs::remove_file(&backup_path)?;
-    fs::rename(path, &backup_path)?;
-    if fs::symlink_metadata(&backup_path)?.file_type().is_symlink() || fs::read_to_string(&backup_path)? != contents {
-        fs::hard_link(&backup_path, path)?;
-        return Err(NylError::config(format!(
-            "Cluster source {} changed while capabilities were being fetched; refusing to overwrite it",
-            path.display()
-        )));
-    }
-    if let Err(error) = temporary.persist_noclobber(path) {
-        if !path.exists() {
-            fs::hard_link(&backup_path, path)?;
-        }
-        return Err(NylError::config(format!(
-            "Cluster source {} changed while capabilities were being installed: {}",
-            path.display(),
-            error.error
-        )));
-    }
-    Ok(())
+    atomic_replace(path, &contents, &updated)
 }
 
 fn reject_symlink_path(project_root: &Path, path: &Path) -> Result<()> {
@@ -362,6 +290,9 @@ fn replace_kubernetes_block(document: &str, info: &ClusterInfo) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::resources::GitOpsResourceIdentity;
 
     #[test]
     fn update_preserves_unrelated_document_content() {
@@ -378,6 +309,42 @@ mod tests {
         assert!(output.contains("  # cluster facts\n  values:\n    region: eu\n"));
         assert!(output.contains("    kubeVersion: 1.31.2\n"));
         assert!(output.contains("      - apps/v1\n      - v1\n"));
+    }
+
+    #[test]
+    fn update_edits_only_the_selected_document_in_a_shared_file() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("gitops.yaml");
+        let first = "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: first\nspec:\n  destination:\n    name: first\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
+        let second = "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: second\nspec:\n  destination:\n    name: second\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
+        fs::write(&path, format!("{first}---\n{second}")).unwrap();
+        let discovered = DiscoveredGitOpsResource {
+            source_path: "gitops.yaml".into(),
+            document_index: 2,
+            raw_document: second.to_owned(),
+            identity: GitOpsResourceIdentity {
+                kind: GitOpsResourceKind::Cluster,
+                name: "second".to_owned(),
+            },
+            static_labels: BTreeMap::new(),
+            resource: None,
+        };
+
+        update_cluster_document(
+            temporary.path(),
+            &path,
+            &discovered,
+            &ClusterInfo {
+                kube_version: "1.31.2".to_owned(),
+                api_versions: vec!["v1".to_owned()],
+            },
+        )
+        .unwrap();
+
+        let updated = fs::read_to_string(path).unwrap();
+        assert!(updated.starts_with(first));
+        assert_eq!(updated.matches("kubeVersion: old").count(), 1);
+        assert_eq!(updated.matches("kubeVersion: 1.31.2").count(), 1);
     }
 
     #[test]

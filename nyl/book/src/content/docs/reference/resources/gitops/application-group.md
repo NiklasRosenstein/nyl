@@ -110,7 +110,7 @@ containing directory.
 | `source.path` | For explicit sources | — | Normalized project-relative path. For remote sources, relative to the checkout. |
 | `source.repositoryRef.name` | For referenced remote sources | — | Local GitRepository identity. |
 | `source.repository` | For inline remote sources | — | Inline `repoURL` and optional `publishURL`. |
-| `source.revision` | For remote sources | — | Human-readable Git revision updated by `nyl source update`. |
+| `source.revision` | For remote sources | — | Human-readable Git revision updated by `nyl update source-locks`. |
 | `source.commit` | For remote sources | — | Authoritative full immutable commit lock. |
 | `source.include` | No | `['*.yaml', '*.yml']` | Relative glob patterns included from the source. |
 | `source.exclude` | No | `[]` | Relative glob patterns excluded after inclusion. |
@@ -120,7 +120,7 @@ containing directory.
 
 `repositoryRef` and `repository` are mutually exclusive. A repository makes the
 source remote and requires both `revision` and `commit`. `Remote` renderer mode
-requires a remote source. Run `nyl source update` to refresh commit locks.
+requires a remote source. Run `nyl update source-locks` to refresh commit locks.
 
 Source selectors identify candidate entry files. Nyl renders only candidates
 containing a literal, parseable `gitops.nyl/v1` Release document; other files
@@ -220,7 +220,7 @@ ordinary release overrides are rejected.
 The ApplicationGroup `spec` can vary per target or render to no document to
 omit the group. Its API version, kind, and metadata name remain static. Remote
 source coordinates and commit locks must remain statically parseable for
-`nyl source update`.
+`nyl update source-locks`.
 
 ## See also
 

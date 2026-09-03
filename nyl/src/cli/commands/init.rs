@@ -3,7 +3,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::Args;
 use dialoguer::{Confirm, Input};
 use git2::Repository;
 use serde_json::{json, Value};
@@ -21,19 +21,22 @@ const MINIMAL_PROJECT_CONFIG: &str = r"#:schema https://niklasrosenstein.github.
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    #[command(subcommand)]
-    command: InitSubcommand,
-}
+    /// Create only the project configuration and conventional directories.
+    #[arg(long, conflicts_with_all = [
+        "output", "repository_name", "repo_url", "publish_url", "cluster_name", "context",
+        "no_context", "destination_server", "destination_name", "update_cluster", "no_update_cluster",
+        "target_name", "revision", "path_prefix", "argocd_namespace", "project_name", "allowed_namespaces",
+        "allowed_cluster_resources", "applications_path", "applications_name", "skip_applications", "yes"
+    ])]
+    minimal: bool,
 
-#[derive(Subcommand, Debug)]
-enum InitSubcommand {
-    /// Initialize a rendered-manifest GitOps project
-    Gitops(GitOpsInitArgs),
+    #[command(flatten)]
+    gitops: GitOpsInitArgs,
 }
 
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Paired positive/negative CLI switches preserve scriptable intent.
-struct GitOpsInitArgs {
+pub struct GitOpsInitArgs {
     /// Directory in or below the Nyl project to initialize.
     #[arg(value_name = "DIR", default_value = ".")]
     dir: PathBuf,
@@ -131,9 +134,78 @@ struct GitOpsInitConfig {
 }
 
 pub async fn execute(args: InitArgs) -> Result<()> {
-    match args.command {
-        InitSubcommand::Gitops(args) => init_gitops(args).await,
+    if args.minimal {
+        return init_minimal(&args.gitops.dir);
     }
+    prepare_gitops_directory(&args.gitops.dir)?;
+    init_gitops(args.gitops).await
+}
+
+fn prepare_gitops_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            return Ok(());
+        }
+        return Err(NylError::config(format!(
+            "Initialization path is not a directory: {}",
+            path.display()
+        )));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let repository = Repository::discover(parent)
+        .map_err(|_| NylError::config(format!("{} is not inside a Git worktree", parent.display())))?;
+    let worktree = repository
+        .workdir()
+        .ok_or_else(|| NylError::config("nyl init requires a non-bare Git worktree"))?;
+    let parent = fs::canonicalize(parent)?;
+    let worktree = fs::canonicalize(worktree)?;
+    if !parent.starts_with(&worktree) {
+        return Err(NylError::config(format!(
+            "Initialization directory {} is outside Git worktree {}",
+            path.display(),
+            worktree.display()
+        )));
+    }
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn init_minimal(path: &Path) -> Result<()> {
+    if path.exists() && !path.is_dir() {
+        return Err(NylError::config(format!(
+            "Initialization path is not a directory: {}",
+            path.display()
+        )));
+    }
+    fs::create_dir_all(path)?;
+    let config_path = path.join("nyl.toml");
+    if config_path.exists() {
+        return Err(NylError::config(format!(
+            "Project already exists at {}",
+            path_for_display(path).display()
+        )));
+    }
+    for relative in [
+        "components",
+        "applications",
+        "config/repositories",
+        "config/clusters",
+        "config/argocd-instances",
+        "config/targets",
+        "config/projects",
+        "config/application-groups",
+    ] {
+        fs::create_dir_all(path.join(relative))?;
+    }
+    fs::write(
+        &config_path,
+        "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json\n\n[project]\ncomponents_search_paths = [\"components\"]\nhelm_chart_search_paths = [\".\"]\ngitops_scaffold_path = \"config\"\n",
+    )?;
+    println!("✓ Initialized Nyl project at {}", path_for_display(path).display());
+    Ok(())
 }
 
 async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
@@ -198,7 +270,7 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         .map_err(|_| NylError::config(format!("{} is not inside a Git worktree", dir.display())))?;
     let worktree = repository
         .workdir()
-        .ok_or_else(|| NylError::config("nyl init gitops requires a non-bare Git worktree"))?;
+        .ok_or_else(|| NylError::config("nyl init requires a non-bare Git worktree"))?;
     let worktree = fs::canonicalize(worktree)?;
     let found_config = ProjectConfig::find(Some(&dir))?;
     let project_root = if let Some(path) = &found_config {
