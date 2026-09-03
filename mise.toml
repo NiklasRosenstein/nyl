@@ -1,6 +1,6 @@
 [tools]
 # Rust toolchain (PRIMARY)
-rust = "1.95.0"
+rust = "1.98.0"
 
 # Cargo extensions for development and release
 "cargo:cargo-dist" = "latest"
@@ -9,10 +9,10 @@ rust = "1.95.0"
 "cargo:cargo-audit" = "latest"
 
 # Kubernetes tools
-kyverno = "1.18.0"
-sops = "3.13.1"
-helm = "3.21.0"
-kubectl = "1.36.1"
+kyverno = "1.19.0"
+sops = "3.13.3"
+helm = "3.21.4"
+kubectl = "1.37.0"
 node = "22"
 
 # Primary Rust tasks (run from repository root)

@@ -234,7 +234,7 @@ pub(super) fn source_state(project_root: &Path) -> Result<(Option<String>, bool)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
     let dirty = statuses
         .iter()
-        .any(|entry| !is_project_cache_status(&repository, project_root, entry.path()));
+        .any(|entry| !is_project_cache_status(&repository, project_root, entry.path().ok()));
     Ok((commit, dirty))
 }
 

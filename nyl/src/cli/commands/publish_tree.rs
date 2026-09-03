@@ -515,7 +515,7 @@ fn source_repository_url(repository: &Repository) -> Option<String> {
     repository
         .find_remote("origin")
         .ok()
-        .and_then(|remote| remote.url().map(crate::util::sanitize_url))
+        .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url))
 }
 
 fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<'_>) -> String {
@@ -679,7 +679,7 @@ fn configured_publication_signature(
         .or_else(|| {
             configured
                 .as_ref()
-                .and_then(|signature| signature.name().map(ToOwned::to_owned))
+                .and_then(|signature| signature.name().ok().map(ToOwned::to_owned))
         })
         .ok_or_else(|| {
             NylError::config(
@@ -692,7 +692,7 @@ fn configured_publication_signature(
         .or_else(|| {
             configured
                 .as_ref()
-                .and_then(|signature| signature.email().map(ToOwned::to_owned))
+                .and_then(|signature| signature.email().ok().map(ToOwned::to_owned))
         })
         .ok_or_else(|| {
             NylError::config(
@@ -727,7 +727,7 @@ fn push_branch(
         move |updates| {
             let update = updates
                 .iter()
-                .find(|update| update.dst_refname() == Some(publication_ref.as_str()))
+                .find(|update| update.dst_refname().is_ok_and(|name| name == publication_ref.as_str()))
                 .ok_or_else(|| git2::Error::from_str("publication branch was absent from push negotiation"))?;
             let advertised = (!update.src().is_zero()).then_some(update.src());
             if advertised != expected {
@@ -839,8 +839,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let commit = repository.find_commit(commit).unwrap();
-        assert_eq!(commit.author().name(), Some("Configured Author"));
-        assert_eq!(commit.author().email(), Some("author@example.invalid"));
+        assert_eq!(commit.author().name().unwrap(), "Configured Author");
+        assert_eq!(commit.author().email().unwrap(), "author@example.invalid");
         assert!(commit.tree().unwrap().get_path(Path::new("deploy/new.yaml")).is_ok());
         assert!(commit.tree().unwrap().get_path(Path::new("unrelated.txt")).is_err());
     }
@@ -880,7 +880,7 @@ mod tests {
             Some("git@example.invalid"),
         )
         .unwrap();
-        assert_eq!(signature.name(), Some("Nyl Override"));
-        assert_eq!(signature.email(), Some("nyl@example.invalid"));
+        assert_eq!(signature.name().unwrap(), "Nyl Override");
+        assert_eq!(signature.email().unwrap(), "nyl@example.invalid");
     }
 }

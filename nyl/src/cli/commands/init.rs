@@ -316,10 +316,13 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
 
     let interactive = !args.yes && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let origin = repository.find_remote("origin").ok();
-    let detected_repo_url = origin.as_ref().and_then(|remote| remote.url()).map(ToOwned::to_owned);
+    let detected_repo_url = origin
+        .as_ref()
+        .and_then(|remote| remote.url().ok())
+        .map(ToOwned::to_owned);
     let detected_publish_url = origin
         .as_ref()
-        .and_then(|remote| remote.pushurl())
+        .and_then(|remote| remote.pushurl().ok().flatten())
         .filter(|url| Some(*url) != detected_repo_url.as_deref())
         .map(ToOwned::to_owned);
     let current_context = kube::config::Kubeconfig::read()

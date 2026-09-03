@@ -28,7 +28,7 @@ RUN \
 FROM fetch-bin-base AS helm-bin
 # Find Helm releases at https://github.com/helm/helm/releases
 # renovate: datasource=github-releases depName=helm packageName=helm/helm
-ARG HELM_VERSION=v3.21.0
+ARG HELM_VERSION=v3.21.4
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
     && chmod 700 get_helm.sh \
     && ./get_helm.sh --version $HELM_VERSION \
@@ -38,7 +38,7 @@ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/s
 FROM fetch-bin-base AS sops-bin
 # Find SOPS releases at https://github.com/getsops/sops/releases
 # renovate: datasource=github-releases depName=sops packageName=getsops/sops
-ARG SOPS_VERSION=v3.13.1
+ARG SOPS_VERSION=v3.13.3
 RUN curl -fLO https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.$(cat /BINARY_ARCH) \
     && mv sops-${SOPS_VERSION}.linux.$(cat /BINARY_ARCH) /usr/local/bin/sops \
     && chmod +x /usr/local/bin/sops \
@@ -47,7 +47,7 @@ RUN curl -fLO https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/
 
 FROM fetch-bin-base AS kyverno-bin
 # renovate: datasource=github-releases depName=kyverno packageName=kyverno/kyverno
-ARG KYVERNO_VERSION=1.18.0
+ARG KYVERNO_VERSION=1.19.0
 RUN \
     case "$(uname -m)" in \
         x86_64) KYVERNO_ARCH='x86_64' ;; \

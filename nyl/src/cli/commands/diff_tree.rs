@@ -638,7 +638,7 @@ async fn source_derived_tree(
         repository
             .find_remote("origin")
             .ok()
-            .and_then(|remote| remote.url().map(ToOwned::to_owned))
+            .and_then(|remote| remote.url().ok().map(ToOwned::to_owned))
             .ok_or_else(|| NylError::config("Source repository has no origin; pass --source-repository"))?
     };
     let mut manager = git_manager(cache)?;
@@ -674,7 +674,7 @@ fn source_repository_url(project_root: &Path) -> Result<Option<String>> {
     Ok(repository
         .find_remote("origin")
         .ok()
-        .and_then(|remote| remote.url().map(crate::util::sanitize_url)))
+        .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url)))
 }
 
 fn print_comparison_summary(summary: &ComparisonSummary<'_>) {

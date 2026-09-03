@@ -16,6 +16,14 @@ impl TemplateEngine {
     /// Create a new template engine with custom filters
     pub fn new() -> Self {
         let mut env = Environment::new();
+        env.set_formatter(|out, state, value| {
+            if value.kind() == minijinja::value::ValueKind::Bool {
+                out.write_str(if value.is_true() { "true" } else { "false" })?;
+                Ok(())
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
 
         // Register custom filters
         env.add_filter("b64encode", filters::b64encode);
@@ -201,6 +209,14 @@ mod tests {
         });
         let result = engine.render("Hello {{ name }}! Count: {{ count }}", &context).unwrap();
         assert_eq!(result, "Hello world! Count: 42");
+    }
+
+    #[test]
+    fn test_render_bool_uses_yaml_compatible_spelling() {
+        let engine = TemplateEngine::new();
+        let context = serde_json::json!({"enabled": true, "disabled": false});
+        let result = engine.render("{{ enabled }} {{ disabled }}", &context).unwrap();
+        assert_eq!(result, "true false");
     }
 
     #[test]
