@@ -231,7 +231,7 @@ fn collect_git_visible_yaml(
         if !entry.status().contains(Status::WT_NEW) {
             continue;
         }
-        if let Some(path) = entry.path() {
+        if let Ok(path) = entry.path() {
             repository_paths.insert(PathBuf::from(path));
         }
     }
