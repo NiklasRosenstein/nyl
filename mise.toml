@@ -1,6 +1,6 @@
 [tools]
 # Rust toolchain (PRIMARY)
-rust = "1.93.0"
+rust = "1.98.0"
 
 # Cargo extensions for development and release
 "cargo:cargo-dist" = "latest"
@@ -9,11 +9,11 @@ rust = "1.93.0"
 "cargo:cargo-audit" = "latest"
 
 # Kubernetes tools
-kyverno = "1.17.0"
-sops = "3.11.0"
-helm = "3.19.5"
-kubectl = "1.35.0"
-mdbook = "latest"
+kyverno = "1.19.0"
+sops = "3.13.3"
+helm = "3.21.4"
+kubectl = "1.37.0"
+node = "22"
 
 # Primary Rust tasks (run from repository root)
 [tasks.fmt]
@@ -95,14 +95,14 @@ dir = "nyl"
 run = "dist plan"
 
 [tasks.docs-build]
-description = "Build Rust mdbook docs"
-dir = "nyl"
-run = "mdbook build book"
+description = "Build documentation site"
+dir = "nyl/book"
+run = "npm run build"
 
 [tasks.docs-serve]
-description = "Serve Rust mdbook docs"
-dir = "nyl"
-run = "mdbook serve book --open"
+description = "Serve documentation site"
+dir = "nyl/book"
+run = "npm run dev"
 
 [tasks.docs-rustdoc]
 description = "Generate API docs"

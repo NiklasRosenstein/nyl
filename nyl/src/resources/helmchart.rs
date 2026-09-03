@@ -99,6 +99,11 @@ pub struct HelmChartSpec {
     /// Values to pass to the chart
     #[serde(default)]
     pub values: serde_json::Value,
+
+    /// Whether to include CRDs from the chart's crds/ directory in the rendered output.
+    /// Defaults to true when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
+    pub include_crds: Option<bool>,
 }
 
 impl Default for HelmChartSpec {
@@ -106,6 +111,7 @@ impl Default for HelmChartSpec {
         Self {
             chart: ChartRef::default(),
             values: serde_json::Value::Object(serde_json::Map::new()),
+            include_crds: None,
         }
     }
 }
@@ -279,6 +285,67 @@ mod tests {
     fn test_helm_chart_spec_defaults() {
         let spec = HelmChartSpec::default();
         assert!(spec.values.is_object());
+        assert_eq!(spec.include_crds, None);
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_explicit_false() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  includeCrds: false
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, Some(false));
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_explicit_true() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  includeCrds: true
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, Some(true));
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_omitted_is_none() {
+        let yaml = r"
+apiVersion: nyl.niklasrosenstein.github.com/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+";
+        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(result.spec.include_crds, None);
+    }
+
+    #[test]
+    fn test_helm_chart_spec_include_crds_not_serialized_when_none() {
+        let helm_chart = HelmChart::new(
+            "test",
+            ChartRef {
+                name: Some("mychart".to_string()),
+                ..Default::default()
+            },
+        );
+        let yaml = serde_norway::to_string(&helm_chart).unwrap();
+        assert!(!yaml.contains("includeCrds"));
     }
 
     #[test]

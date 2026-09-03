@@ -1,7 +1,10 @@
 /// Helm template command building and execution
 use super::ResolvedChart;
+use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
 use crate::{NylError, Result};
 use std::process::Command;
+
+pub(crate) const HELM_SOURCE_ANNOTATION: &str = "gitops.nyl.niklasrosenstein.github.com/helm-source";
 
 /// Parameters for building a Helm template command
 pub struct HelmTemplateParams<'a> {
@@ -24,6 +27,11 @@ pub struct HelmTemplateExecutor {
 
     /// API versions to pass to Helm
     api_versions: Vec<String>,
+
+    /// Whether to pass --include-crds to helm template (default: true)
+    include_crds: bool,
+
+    gitops_cache: Option<crate::gitops::GitOpsCache>,
 }
 
 impl HelmTemplateExecutor {
@@ -32,6 +40,8 @@ impl HelmTemplateExecutor {
         Self {
             kube_version: None,
             api_versions: Vec::new(),
+            include_crds: true,
+            gitops_cache: None,
         }
     }
 
@@ -46,6 +56,19 @@ impl HelmTemplateExecutor {
     #[must_use]
     pub fn with_api_versions(mut self, versions: Vec<String>) -> Self {
         self.api_versions = versions;
+        self
+    }
+
+    /// Set whether to include CRDs in the rendered output (default: true)
+    #[must_use]
+    pub fn with_include_crds(mut self, include_crds: bool) -> Self {
+        self.include_crds = include_crds;
+        self
+    }
+
+    #[must_use]
+    pub fn with_gitops_cache(mut self, cache: Option<crate::gitops::GitOpsCache>) -> Self {
+        self.gitops_cache = cache;
         self
     }
 
@@ -89,6 +112,11 @@ impl HelmTemplateExecutor {
             cmd.arg(file_path);
         }
 
+        // Include CRDs from the chart's crds/ directory
+        if self.include_crds {
+            cmd.arg("--include-crds");
+        }
+
         cmd
     }
 
@@ -103,6 +131,40 @@ impl HelmTemplateExecutor {
         release_namespace: Option<&str>,
         values: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
+        self.template_impl(resolved, release_name, release_namespace, values, false)
+    }
+
+    /// Execute Helm while carrying its `# Source:` markers through the JSON
+    /// rendering pipeline as a reserved, temporary annotation.
+    pub(crate) fn template_with_source_comments(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.template_impl(resolved, release_name, release_namespace, values, true)
+    }
+
+    fn template_impl(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+        preserve_source_comments: bool,
+    ) -> Result<Vec<serde_json::Value>> {
+        let (cache_probe, cached) = self.prepare_cache(
+            resolved,
+            release_name,
+            release_namespace,
+            values,
+            preserve_source_comments,
+        )?;
+        if let Some(cached) = cached {
+            tracing::debug!(chart = %resolved.path.display(), release = release_name, "Reusing cached Helm output");
+            return Ok(cached);
+        }
         tracing::debug!(
             "Rendering Helm chart: {} (release: {})",
             resolved.path.display(),
@@ -141,7 +203,101 @@ impl HelmTemplateExecutor {
 
         // Parse YAML output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_yaml_documents(&stdout)
+        let manifests = if preserve_source_comments {
+            parse_yaml_documents_with_source_comments(&stdout, resolved, release_name)
+        } else {
+            parse_yaml_documents(&stdout)
+        }?;
+        self.store_cache(cache_probe, &manifests)?;
+        Ok(manifests)
+    }
+
+    fn prepare_cache(
+        &self,
+        resolved: &ResolvedChart,
+        release_name: &str,
+        release_namespace: Option<&str>,
+        values: &serde_json::Value,
+        preserve_source_comments: bool,
+    ) -> Result<(Option<HelmCacheProbe>, Option<Vec<serde_json::Value>>)> {
+        let Some(cache) = &self.gitops_cache else {
+            return Ok((None, None));
+        };
+        if cache.mode() == CacheMode::Disabled {
+            return Ok((None, None));
+        }
+        let key = format!(
+            "{}\0{release_name}\0{}",
+            resolved.path.display(),
+            release_namespace.unwrap_or_default()
+        );
+        let mut recorder = cache.recorder();
+        recorder.record_filesystem_path(&resolved.path)?;
+        recorder.record_value(
+            "parameters",
+            &serde_json::json!({
+                "releaseName": release_name,
+                "releaseNamespace": release_namespace,
+                "values": values,
+                "kubeVersion": self.kube_version,
+                "apiVersions": self.api_versions,
+                "includeCrds": self.include_crds,
+                "preserveSourceComments": preserve_source_comments,
+            }),
+        )?;
+        cache.record_renderer_tools(&mut recorder)?;
+        let current = recorder.clone().finish("helm", String::new());
+        let cached = if cache.bypasses_render_artifacts() {
+            cache.observe(CacheLayer::Helm, CacheOutcome::Refreshed, &[]);
+            None
+        } else {
+            match cache.load_record("helm", &key)? {
+                None => {
+                    cache.observe(CacheLayer::Helm, CacheOutcome::Miss, &[]);
+                    None
+                }
+                Some(previous) if previous.same_inputs(&current) => {
+                    let cached = cache.load_artifact("helm", &previous.artifact_digest)?;
+                    cache.observe(
+                        CacheLayer::Helm,
+                        if cached.is_some() {
+                            CacheOutcome::Hit
+                        } else {
+                            CacheOutcome::Miss
+                        },
+                        &[],
+                    );
+                    cached
+                }
+                Some(previous) => {
+                    let changed_inputs = previous.changed_inputs(&current);
+                    tracing::debug!(
+                        chart = %resolved.path.display(),
+                        release = release_name,
+                        changed_inputs = ?changed_inputs,
+                        "Invalidating cached Helm output"
+                    );
+                    cache.observe(CacheLayer::Helm, CacheOutcome::Invalidated, &[]);
+                    None
+                }
+            }
+        };
+        Ok((Some(HelmCacheProbe { key, recorder }), cached))
+    }
+
+    fn store_cache(&self, probe: Option<HelmCacheProbe>, manifests: &[serde_json::Value]) -> Result<()> {
+        let (Some(cache), Some(probe)) = (&self.gitops_cache, probe) else {
+            return Ok(());
+        };
+        if !probe.recorder.is_cacheable() {
+            return Ok(());
+        }
+        let Some(digest) = cache.store_artifact("helm", &manifests)? else {
+            return Ok(());
+        };
+        cache.store_record("helm", &probe.key, &probe.recorder.finish("helm", digest))?;
+        cache.observe(CacheLayer::Helm, CacheOutcome::Stored, &[]);
+        Ok(())
     }
 
     /// Check if helm is installed and available
@@ -180,8 +336,15 @@ impl std::fmt::Debug for HelmTemplateExecutor {
         f.debug_struct("HelmTemplateExecutor")
             .field("kube_version", &self.kube_version)
             .field("api_versions", &self.api_versions)
+            .field("include_crds", &self.include_crds)
+            .field("gitops_cache", &self.gitops_cache.as_ref().map(|_| "configured"))
             .finish()
     }
+}
+
+struct HelmCacheProbe {
+    key: String,
+    recorder: crate::render::cache::DependencyRecorder,
 }
 
 /// Helper to write values to a temporary file
@@ -206,6 +369,114 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
 /// Handles Helm's output with Kubernetes-compatible scalar semantics.
 fn parse_yaml_documents(yaml_str: &str) -> Result<Vec<serde_json::Value>> {
     crate::yaml::parse_yaml_documents_k8s_compatible(yaml_str).map_err(Into::into)
+}
+
+fn parse_yaml_documents_with_source_comments(
+    yaml_str: &str,
+    resolved: &ResolvedChart,
+    release_name: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let mut manifests = Vec::new();
+    for document in split_helm_documents(yaml_str) {
+        let source = document
+            .lines()
+            .find_map(|line| line.trim_end().strip_prefix("# Source: "));
+        let mut parsed = parse_yaml_documents(document)?;
+        if let Some(source) = source {
+            for manifest in &mut parsed {
+                let context = helm_output_context(source, resolved, release_name, manifest);
+                let manifest_type = value_type(manifest);
+                let object = manifest.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!("{context}: manifest is {manifest_type}; expected an object"))
+                })?;
+                let metadata_value = object.entry("metadata").or_insert_with(|| serde_json::json!({}));
+                let metadata_type = value_type(metadata_value);
+                let metadata = metadata_value.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!("{context}: metadata is {metadata_type}; expected an object"))
+                })?;
+                let annotations_value = metadata.entry("annotations").or_insert_with(|| serde_json::json!({}));
+                if annotations_value.is_null() {
+                    *annotations_value = serde_json::json!({});
+                }
+                let annotations_type = value_type(annotations_value);
+                let annotations = annotations_value.as_object_mut().ok_or_else(|| {
+                    NylError::HelmOutput(format!(
+                        "{context}: metadata.annotations is {annotations_type}; expected an object"
+                    ))
+                })?;
+                if annotations
+                    .insert(
+                        HELM_SOURCE_ANNOTATION.to_string(),
+                        serde_json::Value::String(source.to_string()),
+                    )
+                    .is_some()
+                {
+                    return Err(NylError::HelmOutput(format!(
+                        "{context}: manifest uses reserved annotation {HELM_SOURCE_ANNOTATION}"
+                    )));
+                }
+            }
+        }
+        manifests.extend(parsed);
+    }
+    Ok(manifests)
+}
+
+fn helm_output_context(
+    source: &str,
+    resolved: &ResolvedChart,
+    release_name: &str,
+    manifest: &serde_json::Value,
+) -> String {
+    let kind = manifest
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown kind>");
+    let name = manifest
+        .pointer("/metadata/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown name>");
+    let namespace = manifest
+        .pointer("/metadata/namespace")
+        .and_then(serde_json::Value::as_str);
+    let identity = namespace.map_or_else(
+        || format!("{kind} {name}"),
+        |namespace| format!("{kind} {namespace}/{name}"),
+    );
+    format!(
+        "Helm output from {source} (chart {}, release {release_name}, {identity})",
+        resolved.path.display()
+    )
+}
+
+fn value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+fn split_helm_documents(input: &str) -> Vec<&str> {
+    let mut documents = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    for line in input.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']).trim_end() == "---" {
+            if offset > start {
+                documents.push(&input[start..offset]);
+            }
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    if start < input.len() {
+        documents.push(&input[start..]);
+    }
+    documents
 }
 
 #[cfg(test)]
@@ -324,6 +595,40 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_includes_crds_by_default() {
+        let executor = HelmTemplateExecutor::new();
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/nginx"),
+            chart_ref: ChartRef::default(),
+        };
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(args.contains(&"--include-crds".to_string()));
+    }
+
+    #[test]
+    fn test_build_command_include_crds_disabled() {
+        let executor = HelmTemplateExecutor::new().with_include_crds(false);
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/nginx"),
+            chart_ref: ChartRef::default(),
+        };
+        let cmd = executor.build_command(HelmTemplateParams {
+            resolved: &resolved,
+            release_name: "my-release",
+            release_namespace: None,
+            values_file: None,
+        });
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(!args.contains(&"--include-crds".to_string()));
+    }
+
+    #[test]
     fn test_build_command_with_values() {
         use std::io::Write;
         let executor = HelmTemplateExecutor::new();
@@ -424,6 +729,83 @@ metadata:
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["kind"], "ConfigMap");
         assert_eq!(docs[1]["kind"], "Service");
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_carries_helm_source_when_requested() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/chart"),
+            chart_ref: ChartRef::default(),
+        };
+        let manifests = parse_yaml_documents_with_source_comments(
+            "---\n# Source: chart/crds/widgets.yaml\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.example.com\n",
+            &resolved,
+            "widgets",
+        )
+        .unwrap();
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("chart/crds/widgets.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_parser_does_not_treat_indented_content_as_helm_markers() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/chart"),
+            chart_ref: ChartRef::default(),
+        };
+        let manifests = parse_yaml_documents_with_source_comments(
+            "# Source: chart/templates/config.yaml\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: script\ndata:\n  script: |\n    ---\n    # Source: not-a-template\n",
+            &resolved,
+            "script",
+        )
+        .unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0]["data"]["script"], "---\n# Source: not-a-template\n");
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("chart/templates/config.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_parser_treats_null_annotations_as_omitted() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/immich"),
+            chart_ref: ChartRef::default(),
+        };
+        let manifests = parse_yaml_documents_with_source_comments(
+            "# Source: immich/templates/server.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: immich-server\n  namespace: immich\n  annotations:\n",
+            &resolved,
+            "immich",
+        )
+        .unwrap();
+        assert_eq!(
+            manifests[0].pointer("/metadata/annotations/gitops.nyl.niklasrosenstein.github.com~1helm-source"),
+            Some(&serde_json::Value::String("immich/templates/server.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_parser_reports_template_chart_release_and_resource_for_invalid_annotations() {
+        let resolved = ResolvedChart {
+            path: PathBuf::from("/charts/immich"),
+            chart_ref: ChartRef::default(),
+        };
+        let error = parse_yaml_documents_with_source_comments(
+            "# Source: immich/templates/server.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: immich-server\n  namespace: immich\n  annotations: []\n",
+            &resolved,
+            "immich",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("immich/templates/server.yaml"));
+        assert!(error.contains("chart /charts/immich"));
+        assert!(error.contains("release immich"));
+        assert!(error.contains("Deployment immich/immich-server"));
+        assert!(error.contains("metadata.annotations is an array; expected an object"));
+        assert!(!error.contains("nyl.toml"));
     }
 
     #[test]

@@ -6,12 +6,11 @@ use kube::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use crate::{
-    error::API_RESOURCE_NOT_FOUND_PREFIX,
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
-    profiles::{KubeconfigSource, Profile},
     NylError, Result,
 };
 
@@ -62,7 +61,9 @@ pub trait KubeClient: Send + Sync {
 pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
-    api_resources: HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>,
+    /// API resource index, rebuildable via [`Self::refresh_discovery`] after CRDs
+    /// are applied so newly registered custom resource kinds become resolvable.
+    api_resources: RwLock<HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>>,
     crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
 }
 
@@ -114,34 +115,10 @@ impl KubeRsClient {
             .map_err(Into::into)
     }
 
-    /// Build kube config from a Nyl profile and optional context override.
-    pub async fn load_kube_config_from_profile(
-        profile: &Profile,
-        context_override: Option<&str>,
-    ) -> Result<kube::Config> {
-        let kubeconfig = &profile.kubeconfig;
-
-        if matches!(kubeconfig, KubeconfigSource::Ssh { .. }) {
-            return Err(NylError::Config(
-                "SSH kubeconfig is not yet supported. This feature is planned for Phase 5.".to_string(),
-            ));
-        }
-
-        let KubeconfigSource::Local { path, context } = kubeconfig else {
-            unreachable!()
-        };
-
-        let resolved_context = context_override.or(context.as_deref());
-        Self::load_kube_config(path.as_deref(), resolved_context).await
-    }
-
-    /// Create a new Kubernetes client from a profile
-    pub async fn from_profile(profile: &Profile, context_override: Option<&str>) -> Result<Self> {
-        tracing::debug!(
-            has_context_override = context_override.is_some(),
-            "Initializing Kubernetes client from profile"
-        );
-        let config = Self::load_kube_config_from_profile(profile, context_override).await?;
+    /// Create a new Kubernetes client using an explicitly resolved kube context.
+    pub async fn from_context(context: Option<&str>) -> Result<Self> {
+        tracing::debug!(has_context = context.is_some(), "Initializing Kubernetes client");
+        let config = Self::load_kube_config(None, context).await?;
         tracing::debug!("Creating kube-rs client from loaded config");
         let client = Client::try_from(config)?;
         tracing::debug!("Running Kubernetes API discovery");
@@ -152,7 +129,7 @@ impl KubeRsClient {
         Ok(Self {
             client,
             discovery,
-            api_resources,
+            api_resources: RwLock::new(api_resources),
             crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -164,9 +141,58 @@ impl KubeRsClient {
         Ok(Self {
             client,
             discovery,
-            api_resources,
+            api_resources: RwLock::new(api_resources),
             crd_scope_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Re-run API discovery and rebuild the resource index.
+    ///
+    /// The index is captured once at construction. After applying a
+    /// CustomResourceDefinition, the kinds it introduces are not yet present in
+    /// the index, so applying their custom resources in the same batch would fail
+    /// with `ApiResourceNotFound`. Calling this after CRDs are applied refreshes
+    /// the index so those kinds become resolvable.
+    pub async fn refresh_discovery(&self) -> Result<()> {
+        let discovery = Discovery::new(self.client.clone()).run().await?;
+        let index = Self::build_api_resource_index(&discovery);
+        *self.api_resources.write().unwrap() = index;
+        Ok(())
+    }
+
+    /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
+    /// index or the attempts are exhausted.
+    ///
+    /// A newly-applied CustomResourceDefinition is not served by the API server the
+    /// instant the apply returns — it must first become `Established`. A single
+    /// [`Self::refresh_discovery`] can therefore rebuild the index before the new
+    /// kind is published, so a custom resource applied right after would still fail
+    /// with `ApiResourceNotFound`. This retries with a short delay until the kinds
+    /// are discoverable. Best-effort: if some kinds never appear it returns `Ok` and
+    /// the subsequent apply surfaces a clear `ApiResourceNotFound`.
+    pub async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
+        const MAX_ATTEMPTS: u32 = 10;
+        const DELAY: Duration = Duration::from_millis(500);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            self.refresh_discovery().await?;
+
+            let all_known = {
+                let index = self.api_resources.read().unwrap();
+                required.iter().all(|gvk| index.contains_key(gvk))
+            };
+            if all_known || attempt == MAX_ATTEMPTS {
+                break;
+            }
+
+            tracing::debug!(
+                attempt,
+                "Waiting for newly-applied CRD kinds to become discoverable before applying their resources"
+            );
+            tokio::time::sleep(DELAY).await;
+        }
+
+        Ok(())
     }
 
     fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
@@ -188,7 +214,8 @@ impl KubeRsClient {
 
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        if let Some((ar, caps)) = self.api_resources.get(gvk) {
+        let api_resources = self.api_resources.read().unwrap();
+        if let Some((ar, caps)) = api_resources.get(gvk) {
             return Ok((ar.clone(), caps.clone()));
         }
 
@@ -198,8 +225,7 @@ impl KubeRsClient {
             format!("{}/{}", gvk.group, gvk.version)
         };
 
-        let mut available_versions: Vec<String> = self
-            .api_resources
+        let mut available_versions: Vec<String> = api_resources
             .keys()
             .filter(|known| known.group == gvk.group && known.kind == gvk.kind)
             .map(|known| known.version.clone())
@@ -213,8 +239,8 @@ impl KubeRsClient {
             format!(" (available versions for this kind: {})", available_versions.join(", "))
         };
 
-        Err(NylError::Config(format!(
-            "{API_RESOURCE_NOT_FOUND_PREFIX}{}/{}{}",
+        Err(NylError::ApiResourceNotFound(format!(
+            "{}/{}{}",
             group_version, gvk.kind, versions_hint
         )))
     }
@@ -405,11 +431,15 @@ impl KubeClient for KubeRsClient {
 
         let mut api_versions = HashSet::new();
 
-        // Iterate through all discovered API groups and resources
+        // Helm's version set includes every served group/version and kind, not
+        // only the preferred version of each API group.
         for group in self.discovery.groups() {
-            for (ar, _caps) in group.recommended_resources() {
-                // Format as {api_version}/{kind} (e.g., "apps/v1/Deployment", "v1/Pod")
-                api_versions.insert(format!("{}/{}", ar.api_version, ar.kind));
+            for version in group.versions() {
+                for (ar, _caps) in group.versioned_resources(version) {
+                    api_versions.insert(ar.api_version.clone());
+                    // Format as {api_version}/{kind} (e.g., "apps/v1/Deployment", "v1/Pod")
+                    api_versions.insert(format!("{}/{}", ar.api_version, ar.kind));
+                }
             }
         }
 

@@ -1,20 +1,31 @@
 use thiserror::Error;
 
-pub(crate) const API_RESOURCE_NOT_FOUND_PREFIX: &str = "API resource not found for ";
-
 /// Main error type for nyl
 #[derive(Error, Debug)]
 pub enum NylError {
-    #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined in your profile.")]
+    #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined by the selected target.")]
     Template(#[from] minijinja::Error),
 
-    #[error("Helm chart error: {0}\nHint: Verify the chart path exists and Helm is installed. Run 'helm version' to check Helm availability.")]
+    #[error("Helm chart error: {0}\nHint: Check the chart reference and explicit Helm values. Run with RUST_LOG=debug for Helm execution details.")]
     HelmChart(String),
+
+    #[error("Render error:\n{provenance}\nCaused by: {source}")]
+    Render {
+        provenance: String,
+        #[source]
+        source: Box<NylError>,
+    },
+
+    #[error("Helm output error: {0}")]
+    HelmOutput(String),
 
     #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
 
-    #[error("Configuration file not found: {0}\nHint: Create a new project with 'nyl new project <name>' or ensure you're in a directory with a valid nyl.toml file.")]
+    #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed, or the apiVersion/kind may not be supported by the cluster.")]
+    ApiResourceNotFound(String),
+
+    #[error("Configuration file not found: {0}\nHint: Initialize a project with 'nyl init' or ensure you're in a directory with a valid nyl.toml file.")]
     ConfigNotFound(String),
 
     #[error("IO error: {0}")]
@@ -44,7 +55,7 @@ pub enum NylError {
     #[error("Process execution error: {0}\nHint: Ensure the required tool is installed and available in PATH. Check tool-specific documentation for installation.")]
     Process(String),
 
-    #[error("Validation error: {0}\nHint: Fix the validation issues listed above. Use 'nyl validate' to see detailed validation results.")]
+    #[error("Validation error: {0}\nHint: Fix the validation issues listed above and rerun the command.")]
     Validation(String),
 
     #[error("Resource validation error in {file}: {message}\nHint: {hint}")]
@@ -73,6 +84,15 @@ impl NylError {
     /// Create a Helm chart error with context
     pub fn helm_chart(msg: impl Into<String>) -> Self {
         NylError::HelmChart(msg.into())
+    }
+
+    /// Attach the source and expansion chain of a rendered resource.
+    #[must_use]
+    pub fn with_render_provenance(self, provenance: impl Into<String>) -> Self {
+        NylError::Render {
+            provenance: provenance.into(),
+            source: Box::new(self),
+        }
     }
 
     /// Create a process execution error with context
@@ -119,7 +139,7 @@ impl NylError {
 
     /// Returns true if this is an API discovery miss for a specific GVK.
     pub fn is_api_resource_not_found_error(&self) -> bool {
-        matches!(self, NylError::Config(message) if message.starts_with(API_RESOURCE_NOT_FOUND_PREFIX))
+        matches!(self, NylError::ApiResourceNotFound(_))
     }
 }
 
@@ -210,12 +230,21 @@ mod tests {
         let helm_err = NylError::HelmChart("chart error".to_string());
         let display = format!("{}", helm_err);
         assert!(display.contains("Hint:"));
-        assert!(display.contains("helm version"));
+        assert!(display.contains("explicit Helm values"));
+    }
+
+    #[test]
+    fn test_render_error_includes_provenance_and_cause() {
+        let error =
+            NylError::helm_chart("invalid values").with_render_provenance("Source: system/flyctr.yaml (document 4)");
+        let display = error.to_string();
+        assert!(display.contains("Source: system/flyctr.yaml (document 4)"));
+        assert!(display.contains("Helm chart error: invalid values"));
     }
 
     #[test]
     fn test_is_api_resource_not_found_error() {
-        let err = NylError::Config(format!("{API_RESOURCE_NOT_FOUND_PREFIX}kyverno.io/v1/ClusterPolicy"));
+        let err = NylError::ApiResourceNotFound("kyverno.io/v1/ClusterPolicy".to_string());
         assert!(err.is_api_resource_not_found_error());
 
         let other = NylError::Config("some other config error".to_string());

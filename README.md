@@ -1,27 +1,37 @@
 # Nyl
 
-Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, profile-aware rendering, and ArgoCD integration.
+Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, cluster-aware rendering, and rendered GitOps output.
 
 ## Highlights
 
 - Component-oriented workflow (Helm chart-backed resources)
 - `RemoteManifest` resources for HTTPS-hosted YAML/JSON
 - Jinja2-compatible templating (MiniJinja)
-- Profile-based environment config (for example: `dev`, `staging`, `prod`)
+- Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
-- ArgoCD integration via CMP container, Helm chart, and `ApplicationGenerator` resource
+- Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
+- CI image with Nyl, Helm, Git, SOPS, and Kyverno CLI
 
 ## Quick Start
 
-```bash
-# install from release (Linux x86_64)
-curl -LO https://github.com/NiklasRosenstein/nyl/releases/latest/download/nyl-x86_64-unknown-linux-gnu.tar.gz
-tar xzf nyl-x86_64-unknown-linux-gnu.tar.gz
-sudo mv nyl /usr/local/bin/
+Install with mise:
 
-nyl new project my-app
-cd my-app
-nyl render --profile dev  # profile name is project-defined; "dev" is only an example
+```toml
+[tools."github:NiklasRosenstein/nyl"]
+version = "0.4.1"
+version_prefix = "v"
+```
+
+```bash
+mise install
+nyl init platform --minimal
+cd platform
+git init
+nyl create repository deploy --repo-url https://example.invalid/deploy.git
+nyl create cluster dev --context kind-kind
+nyl update cluster dev
+nyl create target dev
+nyl render --target dev apps.yaml
 ```
 
 ## Feature Examples
@@ -56,31 +66,29 @@ spec:
   url: https://example.com/platform/crds.yaml
 ```
 
-### ArgoCD Bootstrap
+### CI image
 
-Nyl ships ArgoCD integration assets in this repo:
+The published image is a shell-friendly rendering environment with no fixed
+entrypoint:
 
-- `docker/`: Nyl CMP container image
-- `chart/`: Helm chart to deploy ArgoCD with Nyl
-- `examples/argocd-bootstrap/`: self-managing ArgoCD bootstrap using `ApplicationGenerator`
-
-```bash
-export NYL_REPO_URL="https://github.com/NiklasRosenstein/nyl-rs.git"
-nyl apply examples/argocd-bootstrap/bootstrap.yaml
+```yaml
+render:
+  image: ghcr.io/niklasrosenstein/nyl:TAG
+  script:
+    - nyl render-tree --target production --output-dir deploy
 ```
 
 ## Repository Layout
 
 - `nyl/`: main Rust crate and CLI
-- `docker/`: ArgoCD CMP image
-- `chart/`: ArgoCD Helm chart
+- `docker/`: CI rendering image
 - `examples/`: runnable examples
 
 ## Docs
 
 - Full docs: https://niklasrosenstein.github.io/nyl/
 - CLI and development details: [nyl/README.md](nyl/README.md)
-- Components guide: [nyl/book/src/components/overview.md](nyl/book/src/components/overview.md)
+- Components guide: [nyl/book/src/content/docs/components/overview.md](nyl/book/src/content/docs/components/overview.md)
 
 ## License
 

@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Authenticate with crates.io (trusted publishing)
         uses: rust-lang/crates-io-auth-action@v1
@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
 
@@ -70,8 +70,13 @@ jobs:
         working-directory: nyl
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo binstall cargo-audit --no-confirm --disable-strategies compile --only-signed --disable-telemetry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Security audit
         run: cargo audit
@@ -103,7 +108,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -130,20 +135,13 @@ jobs:
         ]
       upload-artifacts: true
 
-  package-image-and-chart:
-    name: Build image and chart
+  package-image:
+    name: Build CI image
     needs: [build-linux-musl]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    outputs:
-      full_sha: ${{ steps.vars.outputs.full_sha }}
-      short_sha: ${{ steps.vars.outputs.short_sha }}
-      image_tag: ${{ steps.vars.outputs.image_tag }}
-      chart_version: ${{ steps.vars.outputs.chart_version }}
-      owner_lc: ${{ steps.vars.outputs.owner_lc }}
-      can_push: ${{ steps.vars.outputs.can_push }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -172,7 +170,6 @@ jobs:
         run: |
           set -euo pipefail
           REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           FULL_SHA="${{ github.sha }}"
           SHORT_SHA="${FULL_SHA:0:7}"
           CAN_PUSH="true"
@@ -184,9 +181,6 @@ jobs:
             FULL_SHA="${{ github.event.pull_request.head.sha }}"
             SHORT_SHA="${FULL_SHA:0:7}"
             PR_NUMBER="${{ github.event.number }}"
-            # Helm chart versions must be valid SemVer. Prefix the SHA segment
-            # with a letter so it is parsed as alphanumeric, not numeric with
-            # potential leading zeros.
             CANONICAL_VERSION="0.0.0-pr.${PR_NUMBER}.sha.g${SHORT_SHA}"
             CAN_PUSH=$([ "${{ github.event.pull_request.head.repo.fork }}" = "true" ] && echo "false" || echo "true")
           elif [ "$EVENT_NAME" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
@@ -207,14 +201,8 @@ jobs:
           fi
 
           IMAGE_TAG="$CANONICAL_VERSION"
-          CHART_VERSION="$CANONICAL_VERSION"
           IMAGE_TAGS=$'ghcr.io/'"${REPO_LC}"':'"${IMAGE_TAG}"$'\n''ghcr.io/'"${REPO_LC}"':sha-'"${SHORT_SHA}"
 
-          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
           echo "can_push=${CAN_PUSH}" >> "$GITHUB_OUTPUT"
           echo "image_tags<<EOF" >> "$GITHUB_OUTPUT"
           echo "${IMAGE_TAGS}" >> "$GITHUB_OUTPUT"
@@ -231,6 +219,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build image for smoke tests
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --tag nyl-ci:test \
+            --file docker/Dockerfile \
+            .
+
+      - name: Smoke test image tools
+        run: |
+          docker run --rm nyl-ci:test
+          docker run --rm nyl-ci:test nyl --version
+          docker run --rm nyl-ci:test helm version
+          docker run --rm nyl-ci:test git --version
+          docker run --rm nyl-ci:test sops --version
+          docker run --rm nyl-ci:test kyverno version
+
       - name: Build and optionally push image
         uses: docker/build-push-action@v6
         with:
@@ -241,50 +247,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.vars.outputs.can_push == 'true' }}
           tags: ${{ steps.vars.outputs.image_tags }}
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: v3.14.0
-
-      - name: Package Helm chart
-        run: |
-          set -euo pipefail
-          cp -r chart "$RUNNER_TEMP/chart"
-          CHART_VERSION="${{ steps.vars.outputs.chart_version }}"
-          IMAGE_TAG="${{ steps.vars.outputs.image_tag }}"
-
-          sed -i -E "s|^version: .*|version: ${CHART_VERSION}|" "$RUNNER_TEMP/chart/Chart.yaml"
-          sed -i -E "s|^appVersion: .*|appVersion: \"${CHART_VERSION}\"|" "$RUNNER_TEMP/chart/Chart.yaml"
-          sed -i -E "s|^([[:space:]]*tag: ).*|\\1${IMAGE_TAG}|" "$RUNNER_TEMP/chart/values.yaml"
-
-          helm package "$RUNNER_TEMP/chart" --version="${CHART_VERSION}" -d "$RUNNER_TEMP"
-          if ! grep -Fxq "version: ${CHART_VERSION}" "$RUNNER_TEMP/chart/Chart.yaml"; then
-            echo "error: Chart.yaml version mismatch" >&2
-            exit 1
-          fi
-          if ! grep -Fxq "appVersion: \"${CHART_VERSION}\"" "$RUNNER_TEMP/chart/Chart.yaml"; then
-            echo "error: Chart.yaml appVersion mismatch" >&2
-            exit 1
-          fi
-          if ! grep -Eq "^[[:space:]]*tag: ${IMAGE_TAG}$" "$RUNNER_TEMP/chart/values.yaml"; then
-            echo "error: values.yaml image tag mismatch" >&2
-            exit 1
-          fi
-          ls -lh "$RUNNER_TEMP"/chart-*.tgz
-
-      - name: Push Helm chart
-        if: steps.vars.outputs.can_push == 'true'
-        run: |
-          helm push "$RUNNER_TEMP"/chart-*.tgz oci://ghcr.io/${{ steps.vars.outputs.owner_lc }}/nyl
-
-      - name: Upload packaged chart
-        uses: actions/upload-artifact@v7
-        with:
-          name: helm-chart-package
-          path: ${{ runner.temp }}/chart-*.tgz
-          if-no-files-found: error
-          retention-days: 7
 
   build-all-platform-binaries:
     name: Build all platform binaries
@@ -304,21 +266,18 @@ jobs:
 
   integration-minikube:
     name: Integration tests (Minikube)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: [package-image-and-chart, build-all-platform-binaries]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    needs: [build-linux-musl]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
       actions: read
-    env:
-      DEPLOYMENT_TIMEOUT: 300
-      SYNC_TIMEOUT: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.package-image-and-chart.outputs.full_sha }}
 
       - name: Download Nyl x86_64 musl binary
         uses: actions/download-artifact@v8
@@ -333,7 +292,7 @@ jobs:
           nyl --version
 
       - name: Start Minikube
-        uses: medyagh/setup-minikube@v0.0.18
+        uses: medyagh/setup-minikube@v0.0.21
         with:
           cpus: 2
           memory: 4096
@@ -349,32 +308,6 @@ jobs:
         run: |
           cd integrationtests
           ./test-kind-filtering-append-release.sh
-
-      - name: Run ArgoCD bootstrap test
-        env:
-          NYL_CHART_OWNER: ${{ needs.package-image-and-chart.outputs.owner_lc }}
-          NYL_CHART_VERSION: ${{ needs.package-image-and-chart.outputs.chart_version }}
-          NYL_IMAGE_TAG: ${{ needs.package-image-and-chart.outputs.image_tag }}
-          NYL_REPO_URL: https://github.com/${{ github.repository }}.git
-          NYL_TARGET_REVISION: ${{ needs.package-image-and-chart.outputs.full_sha }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          DEPLOYMENT_TIMEOUT: ${{ env.DEPLOYMENT_TIMEOUT }}
-          SYNC_TIMEOUT: ${{ env.SYNC_TIMEOUT }}
-        run: |
-          cd integrationtests
-          ./test-argocd-bootstrap.sh
-
-      - name: Run ArgoCD credential lookup test
-        env:
-          NYL_BIN: /usr/local/bin/nyl
-          TEST_REPO_URL: ${{ secrets.TEST_REPO_URL }}
-          TEST_REPO_USERNAME: ${{ secrets.TEST_REPO_USERNAME }}
-          TEST_REPO_PASSWORD: ${{ secrets.TEST_REPO_PASSWORD }}
-          REQUIRE_PRIVATE_REPO: true
-        run: |
-          cd integrationtests
-          ./test-argocd-credential-lookup-local.sh
 
       - name: Debug on failure
         if: failure()

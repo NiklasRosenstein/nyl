@@ -6,7 +6,7 @@
 /// - JSON schema generation for `nyl.toml`
 pub mod schema;
 
-use crate::util::fs::{find_config_file, resolve_paths};
+use crate::util::fs::{find_config_file, resolve_path, resolve_paths};
 use crate::{NylError, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,11 +21,19 @@ fn default_helm_chart_search_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(".")]
 }
 
-fn default_aliases() -> BTreeMap<String, String> {
-    BTreeMap::new()
+fn default_gitops_scaffold_path() -> PathBuf {
+    PathBuf::from("config")
 }
 
-fn default_profile_values() -> BTreeMap<String, BTreeMap<String, serde_json::Value>> {
+fn default_vendor_path() -> PathBuf {
+    PathBuf::from("vendor")
+}
+
+const fn default_vendor_lfs_threshold_bytes() -> u64 {
+    1024 * 1024
+}
+
+fn default_aliases() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
@@ -55,8 +63,33 @@ impl StripEmptyMetadataLabelsMode {
     }
 }
 
+/// Controls whether remote renderer inputs may use an in-tree vendor snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorMode {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+/// Project-global remote artifact vendoring settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VendorSettings {
+    /// Resolution policy for vendored remote inputs.
+    pub mode: VendorMode,
+
+    /// In-tree directory containing the generated lock and artifact blobs.
+    #[serde(default = "default_vendor_path")]
+    pub path: PathBuf,
+
+    /// Text blobs at least this large are tracked through Git LFS.
+    #[serde(default = "default_vendor_lfs_threshold_bytes")]
+    pub lfs_threshold_bytes: u64,
+}
+
 /// Project settings in `[project]` section of `nyl.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectSettings {
     /// Search paths for local component charts.
@@ -64,6 +97,9 @@ pub struct ProjectSettings {
 
     /// Search paths for Helm chart names.
     pub helm_chart_search_paths: Vec<PathBuf>,
+
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub gitops_scaffold_path: PathBuf,
 
     /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
     /// Values are component kind targets (local component path or remote shortcut URL).
@@ -78,42 +114,25 @@ impl Default for ProjectSettings {
         Self {
             components_search_paths: default_components_search_paths(),
             helm_chart_search_paths: default_helm_chart_search_paths(),
+            gitops_scaffold_path: default_gitops_scaffold_path(),
             aliases: default_aliases(),
             strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
         }
     }
 }
 
-/// Profile configuration in `[profile]` section of `nyl.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProfileSettings {
-    /// Per-profile template values, keyed by profile name.
-    ///
-    /// Example:
-    /// `[profile.values.dev]`
-    /// `replicas = 2`
-    pub values: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
-}
-
-impl Default for ProfileSettings {
-    fn default() -> Self {
-        Self {
-            values: default_profile_values(),
-        }
-    }
-}
-
 /// Root structure of `nyl.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
-    pub profile: ProfileSettings,
+
+    /// Optional project-global artifact vendoring policy.
+    pub vendor: Option<VendorSettings>,
 }
 
 /// Wrapper for project configuration file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectConfig {
     /// Path to the configuration file (None if using defaults).
     pub file: Option<PathBuf>,
@@ -204,7 +223,7 @@ impl ProjectConfig {
             Self::load_from_file(path)
         } else {
             tracing::warn!("No project configuration file found");
-            tracing::info!("Using default settings. Initialize with 'nyl new project' to create one.");
+            tracing::info!("Using default settings. Run 'nyl init' to create a project.");
             Ok(Self {
                 file: None,
                 config: ProjectFile::default(),
@@ -238,6 +257,7 @@ impl ProjectConfig {
         tracing::debug!("Reading configuration file: {}", path.display());
 
         let contents = std::fs::read_to_string(path)?;
+        reject_removed_configuration(&contents)?;
         let mut project: ProjectFile =
             toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
 
@@ -245,6 +265,30 @@ impl ProjectConfig {
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
         project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
+        project.project.gitops_scaffold_path = resolve_path(&project.project.gitops_scaffold_path, base_dir);
+        if let Some(vendor) = &mut project.vendor {
+            if vendor.path.is_absolute() {
+                return Err(NylError::config(
+                    "vendor.path must be relative to the directory containing nyl.toml",
+                ));
+            }
+            if vendor.path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            }) {
+                return Err(NylError::config(
+                    "vendor.path must not contain parent-directory components",
+                ));
+            }
+            vendor.path = resolve_path(&vendor.path, base_dir);
+            if vendor.path == base_dir || !vendor.path.starts_with(base_dir) {
+                return Err(NylError::config(
+                    "vendor.path must resolve to a directory beneath the project root",
+                ));
+            }
+        }
 
         Ok(Self {
             file: Some(path.to_path_buf()),
@@ -260,6 +304,11 @@ impl ProjectConfig {
     /// Helm chart search paths from configuration.
     pub fn get_helm_chart_search_paths(&self) -> &[PathBuf] {
         &self.config.project.helm_chart_search_paths
+    }
+
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub fn get_gitops_scaffold_path(&self) -> &Path {
+        &self.config.project.gitops_scaffold_path
     }
 
     /// Return alias target for a fully qualified key (`<apiVersion>/<kind>`).
@@ -278,19 +327,13 @@ impl ProjectConfig {
         self.config.project.strip_empty_metadata_labels
     }
 
-    /// Return whether any profile values are configured.
-    pub fn has_profiles(&self) -> bool {
-        !self.config.profile.values.is_empty()
+    /// Project-global artifact vendoring settings.
+    pub fn vendor(&self) -> Option<&VendorSettings> {
+        self.config.vendor.as_ref()
     }
 
-    /// Return configured profile names.
-    pub fn profile_names(&self) -> Vec<&str> {
-        self.config.profile.values.keys().map(String::as_str).collect()
-    }
-
-    /// Return template values for a profile name.
-    pub fn get_profile_values(&self, name: &str) -> Option<&BTreeMap<String, serde_json::Value>> {
-        self.config.profile.values.get(name)
+    pub fn vendor_lock_path(&self) -> Option<PathBuf> {
+        self.vendor().map(|settings| settings.path.join("lock.yaml"))
     }
 
     /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
@@ -342,6 +385,26 @@ impl ProjectConfig {
     }
 }
 
+fn reject_removed_configuration(contents: &str) -> Result<()> {
+    let value: toml::Value =
+        toml::from_str(contents).map_err(|error| NylError::Config(format!("Failed to parse TOML config: {error}")))?;
+    if value.get("profile").is_some() {
+        return Err(NylError::config(
+            "[profile.*] is no longer supported. Define Cluster and DeploymentTarget resources under config/ and select a target with --target.",
+        ));
+    }
+    if value
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|project| project.contains_key("kubernetes"))
+    {
+        return Err(NylError::config(
+            "[project.kubernetes] is no longer supported. Store kubeVersion and apiVersions in a Cluster resource under spec.kubernetes.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_raw_string_hashes)]
 mod tests {
@@ -354,17 +417,12 @@ mod tests {
         let settings = ProjectSettings::default();
         assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
         assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
+        assert_eq!(settings.gitops_scaffold_path, PathBuf::from("config"));
         assert!(settings.aliases.is_empty());
         assert_eq!(
             settings.strip_empty_metadata_labels,
             StripEmptyMetadataLabelsMode::Always
         );
-    }
-
-    #[test]
-    fn test_default_profile_settings() {
-        let settings = ProfileSettings::default();
-        assert!(settings.values.is_empty());
     }
 
     #[test]
@@ -376,6 +434,7 @@ mod tests {
 [project]
 components_search_paths = ["my-components"]
 helm_chart_search_paths = ["lib", "vendor"]
+gitops_scaffold_path = "gitops-config"
 strip_empty_metadata_labels = "argocd"
 [project.aliases]
 "myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
@@ -398,6 +457,39 @@ strip_empty_metadata_labels = "argocd"
         assert!(config.get_components_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[0].is_absolute());
         assert!(config.get_helm_chart_search_paths()[1].is_absolute());
+        assert_eq!(config.get_gitops_scaffold_path(), temp.path().join("gitops-config"));
+    }
+
+    #[test]
+    fn loads_project_global_vendor_settings_relative_to_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(
+            &config_path,
+            "[vendor]\nmode = \"required\"\npath = \"third-party\"\nlfs_threshold_bytes = 2048\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let vendor = config.vendor().unwrap();
+        assert_eq!(vendor.mode, VendorMode::Required);
+        assert_eq!(vendor.path, temp.path().join("third-party"));
+        assert_eq!(vendor.lfs_threshold_bytes, 2048);
+        assert_eq!(
+            config.vendor_lock_path().unwrap(),
+            temp.path().join("third-party/lock.yaml")
+        );
+    }
+
+    #[test]
+    fn rejects_vendor_paths_that_escape_the_project() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"../vendor\"\n").unwrap();
+        assert!(ProjectConfig::load(Some(config_path))
+            .unwrap_err()
+            .to_string()
+            .contains("parent-directory"));
     }
 
     #[test]
@@ -408,12 +500,12 @@ strip_empty_metadata_labels = "argocd"
         assert!(config.file.is_none());
         assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
         assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
+        assert_eq!(config.get_gitops_scaffold_path(), Path::new("config"));
         assert!(config.config.project.aliases.is_empty());
         assert_eq!(
             config.get_strip_empty_metadata_labels_mode(),
             StripEmptyMetadataLabelsMode::Always
         );
-        assert!(!config.has_profiles());
     }
 
     #[test]
@@ -428,7 +520,7 @@ strip_empty_metadata_labels = "argocd"
                     ]),
                     ..ProjectSettings::default()
                 },
-                profile: ProfileSettings::default(),
+                vendor: None,
             },
         };
 
@@ -510,34 +602,50 @@ components_search_paths = ["comps1", "comps2"]
     }
 
     #[test]
-    fn test_load_profile_values_from_toml() {
+    fn test_removed_profile_configuration_has_migration_error() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
 
         let toml_content = r#"
 [project]
 
-[profile.values.dev]
+[profile.dev.values]
 replicas = 1
 image_tag = "dev-latest"
 
-[profile.values.prod]
+[profile.prod.values]
 replicas = 3
 image_tag = "v1.0.0"
+
+[profile.prod.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1"]
 "#;
         fs::write(&config_path, toml_content).unwrap();
 
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
-        assert!(config.has_profiles());
-        assert_eq!(config.profile_names().len(), 2);
-        assert_eq!(
-            config.get_profile_values("dev").and_then(|v| v.get("replicas")),
-            Some(&serde_json::json!(1))
-        );
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[profile.*] is no longer supported"));
+        assert!(error.contains("--target"));
     }
 
     #[test]
-    fn test_profile_invalid_shape_rejected() {
+    fn test_removed_project_kubernetes_has_migration_error() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project.kubernetes]
+context = "project-cluster"
+
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[project.kubernetes] is no longer supported"));
+        assert!(error.contains("Cluster resource"));
+    }
+
+    #[test]
+    fn test_removed_profile_invalid_shape_still_has_migration_error() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
 
@@ -550,7 +658,7 @@ replicas = 1
         fs::write(&config_path, toml_content).unwrap();
 
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
-        assert!(err.contains("Failed to parse TOML config"));
+        assert!(err.contains("[profile.*] is no longer supported"));
     }
 
     #[test]

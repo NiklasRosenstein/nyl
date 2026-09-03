@@ -83,7 +83,7 @@ Before creating a real release, verify:
 - [ ] Formatting is correct: `cargo fmt --check`
 - [ ] Version number updated in `Cargo.toml`
 - [ ] CHANGELOG.md updated with release notes
-- [ ] Documentation builds: `mdbook build book`
+- [ ] Documentation builds: `mise run docs-build`
 - [ ] Test with prerelease tag (e.g., `v0.1.0-rc.1`)
 - [ ] Verify GitHub release artifacts are correct
 - [ ] Verify binary sizes are acceptable (<20MB)
@@ -150,7 +150,7 @@ git tag v0.1.0
 
 **Fix**: Follow the "Setup (One-time)" steps above.
 
-### "Binary size exceeds 20MB limit"
+### "Binary size exceeds 22MiB limit"
 
 **Cause**: Release binary is too large.
 
@@ -162,7 +162,7 @@ ls -lh nyl/target/release/nyl
 # Reduce size with strip
 strip nyl/target/release/nyl
 
-# Or update size limit in .github/workflows/rust.yaml
+# Or update the intentional size budget in .github/workflows/_build-rust.yaml
 ```
 
 ## Recommended Release Process
