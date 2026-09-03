@@ -439,10 +439,14 @@ data:
 
     let mut list = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     list.current_dir(temp.path()).args(["get", "clusters"]);
+    let cluster_source = std::path::Path::new("config").join("clusters").join("kasoku.yaml");
     list.assert()
         .success()
         .stdout(predicate::str::contains("kasoku"))
-        .stdout(predicate::str::contains("config/clusters/kasoku.yaml#document-1"));
+        .stdout(predicate::str::contains(format!(
+            "{}#document-1",
+            cluster_source.display()
+        )));
 
     let mut render = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     render
