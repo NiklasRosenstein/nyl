@@ -6,11 +6,6 @@ set -euo pipefail
 # Usage:
 #   ./run-all.sh              # Run all tests against existing cluster
 #   ./run-all.sh --recreate   # Recreate Minikube between each test (slow but isolated)
-#
-# Optional environment variables:
-#   RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST=true
-#     Include test-argocd-credential-lookup-local.sh in the test run.
-#     This test requires TEST_REPO_URL, TEST_REPO_USERNAME, TEST_REPO_PASSWORD.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECREATE_CLUSTER=false
@@ -41,11 +36,6 @@ echo ""
 # Find all test scripts
 TEST_SCRIPTS=()
 while IFS= read -r script; do
-    test_name=$(basename "${script}")
-    if [ "${test_name}" = "test-argocd-credential-lookup-local.sh" ] && \
-        [ "${RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST:-false}" != "true" ]; then
-        continue
-    fi
     TEST_SCRIPTS+=("${script}")
 done < <(find "${SCRIPT_DIR}" -name "test-*.sh" -type f | sort)
 
@@ -55,9 +45,6 @@ if [ ${#TEST_SCRIPTS[@]} -eq 0 ]; then
 fi
 
 echo "Found ${#TEST_SCRIPTS[@]} integration test(s)"
-if [ "${RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST:-false}" != "true" ]; then
-    echo "Note: skipping test-argocd-credential-lookup-local.sh (set RUN_ARGOCD_CREDENTIAL_LOOKUP_TEST=true to include)"
-fi
 echo ""
 
 # Track results

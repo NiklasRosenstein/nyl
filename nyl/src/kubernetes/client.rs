@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crate::{
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
-    profiles::Profile,
     NylError, Result,
 };
 
@@ -71,9 +70,8 @@ pub struct KubeRsClient {
 impl KubeRsClient {
     /// Build kube config from explicit path/context options.
     ///
-    /// Notes for exec-based auth plugins:
-    /// - kube-client is responsible for spawning the exec plugin
-    /// - when supported by kube-client, plugin stderr should be visible in CLI stderr
+    /// Exec-based auth plugins inherit stderr when they may interact with the user,
+    /// so login instructions remain visible in CLI stderr.
     pub async fn load_kube_config(path: Option<&Path>, context: Option<&str>) -> Result<kube::Config> {
         tracing::debug!(
             kubeconfig_path = %path.map_or_else(|| "<default>".to_string(), |p| p.display().to_string()),
@@ -116,22 +114,10 @@ impl KubeRsClient {
             .map_err(Into::into)
     }
 
-    /// Build kube config from a Nyl profile and optional context override.
-    pub async fn load_kube_config_from_profile(
-        profile: &Profile,
-        context_override: Option<&str>,
-    ) -> Result<kube::Config> {
-        let resolved_context = context_override.or(profile.context.as_deref());
-        Self::load_kube_config(profile.kubeconfig_path.as_deref(), resolved_context).await
-    }
-
-    /// Create a new Kubernetes client from a profile
-    pub async fn from_profile(profile: &Profile, context_override: Option<&str>) -> Result<Self> {
-        tracing::debug!(
-            has_context_override = context_override.is_some(),
-            "Initializing Kubernetes client from profile"
-        );
-        let config = Self::load_kube_config_from_profile(profile, context_override).await?;
+    /// Create a new Kubernetes client using an explicitly resolved kube context.
+    pub async fn from_context(context: Option<&str>) -> Result<Self> {
+        tracing::debug!(has_context = context.is_some(), "Initializing Kubernetes client");
+        let config = Self::load_kube_config(None, context).await?;
         tracing::debug!("Creating kube-rs client from loaded config");
         let client = Client::try_from(config)?;
         tracing::debug!("Running Kubernetes API discovery");
@@ -444,11 +430,15 @@ impl KubeClient for KubeRsClient {
 
         let mut api_versions = HashSet::new();
 
-        // Iterate through all discovered API groups and resources
+        // Helm's version set includes every served group/version and kind, not
+        // only the preferred version of each API group.
         for group in self.discovery.groups() {
-            for (ar, _caps) in group.recommended_resources() {
-                // Format as {api_version}/{kind} (e.g., "apps/v1/Deployment", "v1/Pod")
-                api_versions.insert(format!("{}/{}", ar.api_version, ar.kind));
+            for version in group.versions() {
+                for (ar, _caps) in group.versioned_resources(version) {
+                    api_versions.insert(ar.api_version.clone());
+                    // Format as {api_version}/{kind} (e.g., "apps/v1/Deployment", "v1/Pod")
+                    api_versions.insert(format!("{}/{}", ar.api_version, ar.kind));
+                }
             }
         }
 

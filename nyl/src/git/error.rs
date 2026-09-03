@@ -42,17 +42,8 @@ pub enum GitError {
     #[error("Object {oid} not found in repository\nHint: The commit may not have been fetched. Try fetching latest changes.")]
     ObjectNotFound { oid: String },
 
-    #[error("Authentication failed for {url}: {reason}\nHint: For SSH, ensure your SSH key is added to the agent and authorized on the server. For HTTPS, verify your credentials in ArgoCD repository secrets.")]
+    #[error("Authentication failed for {url}: {reason}\nHint: For SSH, ensure your SSH key is available to the agent. For HTTPS, configure an appropriate Git credential helper or token.")]
     AuthenticationFailed { url: String, reason: String },
-
-    #[error("No credentials found for repository: {url}\nHint: Create an ArgoCD repository secret with label 'argocd.argoproj.io/secret-type=repository' containing SSH key or HTTPS credentials.")]
-    CredentialNotFound { url: String },
-
-    #[error("Failed to query ArgoCD secrets: {0}\nHint: Ensure you have permissions to read secrets in the 'argocd' namespace. Check RBAC configuration.")]
-    ArgoCDSecretQueryFailed(String),
-
-    #[error("Invalid credential format in secret {secret_name}: {reason}\nHint: Repository secrets must contain 'sshPrivateKey' for SSH or 'username'+'password' for HTTPS authentication.")]
-    InvalidCredentialFormat { secret_name: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, GitError>;
@@ -60,18 +51,12 @@ pub type Result<T> = std::result::Result<T, GitError>;
 impl GitError {
     /// Returns true if this error is authentication-related
     pub fn is_auth_error(&self) -> bool {
-        matches!(
-            self,
-            GitError::AuthenticationFailed { .. } | GitError::CredentialNotFound { .. }
-        )
+        matches!(self, GitError::AuthenticationFailed { .. })
     }
 
     /// Returns true if this error is likely transient (network issues)
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            GitError::CloneFailed { .. } | GitError::ArgoCDSecretQueryFailed(_)
-        )
+        matches!(self, GitError::CloneFailed { .. })
     }
 }
 
@@ -87,11 +72,6 @@ mod tests {
         };
         assert!(auth_err.is_auth_error());
 
-        let cred_err = GitError::CredentialNotFound {
-            url: "https://example.com".to_string(),
-        };
-        assert!(cred_err.is_auth_error());
-
         let other_err = GitError::InvalidUrl("bad url".to_string());
         assert!(!other_err.is_auth_error());
     }
@@ -103,9 +83,6 @@ mod tests {
             source: git2::Error::from_str("network error"),
         };
         assert!(clone_err.is_transient());
-
-        let secret_err = GitError::ArgoCDSecretQueryFailed("timeout".to_string());
-        assert!(secret_err.is_transient());
 
         let ref_err = GitError::RefNotFound {
             ref_name: "main".to_string(),
@@ -123,13 +100,6 @@ mod tests {
         assert!(display.contains("Hint:"));
         assert!(display.contains("SSH key"));
 
-        let cred_err = GitError::CredentialNotFound {
-            url: "https://github.com/user/repo.git".to_string(),
-        };
-        let display = format!("{}", cred_err);
-        assert!(display.contains("Hint:"));
-        assert!(display.contains("ArgoCD repository secret"));
-
         let ref_err = GitError::RefNotFound {
             ref_name: "feature-branch".to_string(),
         };
@@ -146,17 +116,5 @@ mod tests {
         assert!(display.contains("Hint:"));
         assert!(display.contains("credentials"));
         assert!(display.contains("HEAD"));
-    }
-
-    #[test]
-    fn test_invalid_credential_format_error() {
-        let err = GitError::InvalidCredentialFormat {
-            secret_name: "my-secret".to_string(),
-            reason: "missing sshPrivateKey field".to_string(),
-        };
-        let display = format!("{}", err);
-        assert!(display.contains("my-secret"));
-        assert!(display.contains("sshPrivateKey"));
-        assert!(display.contains("Hint:"));
     }
 }

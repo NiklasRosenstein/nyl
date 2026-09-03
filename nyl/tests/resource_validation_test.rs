@@ -1,5 +1,5 @@
 /// Integration tests for resource validation and error reporting
-use nyl::resources::{HelmChart, NylRelease};
+use nyl::resources::{HelmChart, Release};
 use nyl::util::SourceContext;
 use std::path::PathBuf;
 
@@ -91,11 +91,11 @@ spec:
 }
 
 #[test]
-fn test_nyl_release_unknown_field() {
-    // Create a NylRelease with an unknown field
+fn test_release_unknown_field() {
+    // Create a Release with an unknown field
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: NylRelease
+apiVersion: gitops.nyl/v1
+kind: Release
 metadata:
   name: my-release
   namespace: production
@@ -103,7 +103,7 @@ metadata:
 "#;
 
     let source_ctx = SourceContext::new(PathBuf::from("/test/manifests/release.yaml"));
-    let result: nyl::Result<NylRelease> = source_ctx.parse_yaml(yaml);
+    let result: nyl::Result<Release> = source_ctx.parse_yaml(yaml);
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();

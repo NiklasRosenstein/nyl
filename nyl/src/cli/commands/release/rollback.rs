@@ -4,6 +4,7 @@ use dialoguer::Confirm;
 
 use crate::{
     cli::commands::apply::{apply_and_record_release, apply_sorted_manifests, print_apply_summary},
+    cli::commands::cluster::load_target_kube_config,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
     NylError, Result,
 };
@@ -11,6 +12,10 @@ use crate::{
 /// Roll back a release to a previously stored revision
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
+    /// deployment target whose cluster stores the release
+    #[arg(long)]
+    pub target: String,
+
     /// Release name
     pub name: String,
 
@@ -33,7 +38,7 @@ pub struct RollbackArgs {
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
     // Create Kubernetes clients
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
     let storage = KubernetesReleaseStorage::new(client);

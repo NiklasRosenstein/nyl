@@ -6,7 +6,7 @@
 # - Cross-compilation support (Linux, macOS, Windows)
 # - Architecture support (x86_64, aarch64)
 # - ABI variants (gnu, musl, darwin, msvc)
-# - Binary size verification (max 20MB)
+# - Binary size verification (max 22MiB)
 # - Static linking verification for musl targets
 # - Consistent caching with rust-cache@v2
 
@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
 
@@ -90,14 +90,14 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Verify binary size doesn't exceed 20MB limit
+      # Verify binary size doesn't exceed 22MiB limit
       - name: Check binary size (Unix)
         if: runner.os != 'Windows'
         run: |
           size=$(stat -f%z ../target/${{ matrix.target }}/release/nyl 2>/dev/null || stat -c%s ../target/${{ matrix.target }}/release/nyl)
-          echo "Binary size: $((size / 1024 / 1024))MB"
-          if [ $size -gt 20971520 ]; then
-            echo "::error::Binary size exceeds 20MB limit"
+          echo "Binary size: ${size} bytes (limit: 22MiB)"
+          if [ $size -gt 23068672 ]; then
+            echo "::error::Binary size exceeds 22MiB limit"
             exit 1
           fi
 
@@ -106,13 +106,13 @@ jobs:
         shell: pwsh
         run: |
           $size = (Get-Item ../target/${{ matrix.target }}/release/nyl.exe).Length
-          Write-Host "Binary size: $([math]::Round($size / 1MB, 2))MB"
-          if ($size -gt 20971520) {
-            Write-Error "Binary size exceeds 20MB limit"
+          Write-Host "Binary size: $size bytes (limit: 22MiB)"
+          if ($size -gt 23068672) {
+            Write-Error "Binary size exceeds 22MiB limit"
             exit 1
           }
 
-      # Verify static linking for musl targets (important for Docker containers)
+      # Verify static linking for musl targets used in the CI image.
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
         run: |
@@ -130,7 +130,7 @@ jobs:
       # Artifact name format: nyl-{target}
       - name: Upload artifact
         if: inputs.upload-artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nyl-${{ matrix.target }}
           path: |

@@ -7,9 +7,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    #[ignore = "Requires kube-client version that forwards exec-plugin stderr to parent stderr"]
     fn test_exec_auth_stderr_is_visible_in_cli_output() {
         let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
 
         let script_path = temp.path().join("exec-auth.sh");
         fs::write(
@@ -22,7 +22,7 @@ printf '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredent
         .unwrap();
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let kubeconfig_path = temp.path().join("config");
+        let kubeconfig_path = temp.path().join("kubeconfig");
         let kubeconfig = format!(
             r#"apiVersion: v1
 kind: Config
@@ -48,10 +48,47 @@ users:
         );
         fs::write(&kubeconfig_path, kubeconfig).unwrap();
 
+        fs::write(
+            temp.path().join("nyl.toml"),
+            "[project]\ncomponents_search_paths = []\n",
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("config")).unwrap();
+        fs::write(
+            temp.path().join("config/target.yaml"),
+            r#"apiVersion: gitops.nyl/v1
+kind: Cluster
+metadata:
+  name: test
+spec:
+  destination:
+    server: https://127.0.0.1:9
+  kubernetes:
+    kubeVersion: 1.30.0
+    apiVersions: [v1]
+---
+apiVersion: gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: test
+spec:
+  clusterRef:
+    name: test
+  publication:
+    repository:
+      repoURL: https://example.invalid/exec-auth.git
+    revision: deploy/test
+"#,
+        )
+        .unwrap();
+
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
         cmd.arg("release")
             .arg("list")
+            .arg("--target")
+            .arg("test")
             .arg("--all")
+            .current_dir(temp.path())
             .env("KUBECONFIG", &kubeconfig_path);
 
         cmd.assert()

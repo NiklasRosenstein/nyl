@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Cell, Color, Table};
+use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 
 use crate::kubernetes::ReleaseStatus;
 
@@ -27,7 +27,9 @@ pub fn format_timestamp(timestamp: &DateTime<Utc>) -> String {
 /// Create a new styled table
 pub fn create_table() -> Table {
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL).apply_modifier(UTF8_ROUND_CORNERS);
+    table
+        .load_style(UTF8_FULL.with_rounded_corners())
+        .set_truncation_indicator("...");
     table
 }
 
@@ -71,5 +73,14 @@ mod tests {
             .with_timezone(&Utc);
         let formatted = format_timestamp(&timestamp);
         assert_eq!(formatted, "2024-02-06 14:30:00 UTC");
+    }
+
+    #[test]
+    fn table_uses_rounded_utf8_borders() {
+        let mut table = create_table();
+        table.set_header(["NAME"]);
+        table.add_row(["café"]);
+
+        assert_eq!(table.to_string(), "╭──────╮\n│ NAME │\n╞══════╡\n│ café │\n╰──────╯");
     }
 }
