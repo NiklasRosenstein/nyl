@@ -2,6 +2,7 @@ pub mod commands;
 pub mod filter;
 pub(crate) mod namespace_resolution;
 pub(crate) mod resource_file;
+pub(crate) mod table;
 pub(crate) mod tree_progress;
 
 use clap::{Parser, Subcommand, ValueEnum};
