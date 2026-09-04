@@ -1,6 +1,9 @@
 pub mod commands;
 pub mod filter;
 pub(crate) mod namespace_resolution;
+pub(crate) mod resource_file;
+pub(crate) mod table;
+pub(crate) mod tree_progress;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -9,7 +12,7 @@ use crate::Result;
 /// When to use colored output
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ColorChoice {
-    /// Automatically detect if colors should be used (based on TTY detection)
+    /// Use colors for terminals and conventional CI environments.
     #[default]
     Auto,
     /// Always use colors
@@ -40,48 +43,68 @@ enum Commands {
     /// Render Kubernetes manifests to stdout
     Render(commands::render::RenderArgs),
 
+    /// Render a deployment target into a deterministic manifest tree
+    RenderTree(commands::render_tree::RenderTreeArgs),
+
+    /// Render and compare-and-swap publish a deployment target revision
+    PublishTree(commands::publish_tree::PublishTreeArgs),
+
+    /// Create a component or GitOps resource
+    Create(commands::create::CreateArgs),
+
+    /// Inspect GitOps resources declared in the project
+    Get(commands::get::GetArgs),
+
+    /// Refresh derived information stored in project resources
+    Update(commands::update::UpdateArgs),
+
+    /// Remove a GitOps resource from project source
+    Delete(commands::delete::DeleteArgs),
+
     /// Show diff between rendered manifests and cluster state
     Diff(commands::diff::DiffArgs),
+
+    /// Diff a rendered deployment target against published or source-derived state
+    DiffTree(commands::diff_tree::DiffTreeArgs),
 
     /// Apply rendered manifests to the cluster
     Apply(commands::apply::ApplyArgs),
 
-    /// Generate configurations (ArgoCD, etc.)
-    Generate(commands::generate::GenerateArgs),
+    /// Generate project and resource schemas
+    Schema(commands::schema::SchemaArgs),
 
-    /// Create a new nyl project
-    New(commands::new::NewArgs),
+    /// Initialize a Nyl project
+    Init(Box<commands::init::InitArgs>),
 
     /// Validate project configuration
     Validate(commands::validate::ValidateArgs),
 
-    /// Display Kubernetes cluster version information
-    ClusterInfo(commands::cluster_info::ClusterInfoArgs),
-
     /// Manage releases
     Release(commands::release::ReleaseArgs),
+
+    /// Manage project-global vendored renderer inputs
+    Vendor(commands::vendor::VendorArgs),
 }
 
 impl Cli {
-    /// Return the render input path if this invocation is `nyl render`.
-    pub fn render_input_path(&self) -> Option<&str> {
-        match &self.command {
-            Commands::Render(args) => Some(args.common.path.as_str()),
-            _ => None,
-        }
-    }
-
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
         match self.command {
             Commands::Render(args) => commands::render::execute(args).await,
+            Commands::RenderTree(args) => commands::render_tree::execute(args).await,
+            Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
+            Commands::Create(args) => commands::create::execute(args),
+            Commands::Get(args) => commands::get::execute(args),
+            Commands::Update(args) => commands::update::execute(args).await,
+            Commands::Delete(args) => commands::delete::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
+            Commands::DiffTree(args) => commands::diff_tree::execute(args).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
-            Commands::Generate(args) => commands::generate::execute(args),
-            Commands::New(args) => commands::new::execute(args),
-            Commands::Validate(args) => commands::validate::execute(args),
-            Commands::ClusterInfo(args) => commands::cluster_info::execute(args).await,
+            Commands::Schema(args) => commands::schema::execute(args),
+            Commands::Init(args) => commands::init::execute(*args).await,
+            Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
+            Commands::Vendor(args) => commands::vendor::execute(args).await,
         }
     }
 }
@@ -91,8 +114,7 @@ impl ColorChoice {
     pub fn apply(&self) {
         match self {
             ColorChoice::Auto => {
-                // Use default TTY detection from colored crate
-                colored::control::unset_override();
+                colored::control::set_override(auto_color_enabled());
             }
             ColorChoice::Always => {
                 colored::control::set_override(true);
@@ -107,14 +129,25 @@ impl ColorChoice {
     /// This is used for tracing_subscriber configuration
     pub fn should_use_ansi(&self) -> bool {
         match self {
-            ColorChoice::Auto => {
-                // Check if stderr is a TTY (tracing writes to stderr)
-                std::io::IsTerminal::is_terminal(&std::io::stderr())
-            }
+            ColorChoice::Auto => auto_color_enabled(),
             ColorChoice::Always => true,
             ColorChoice::Never => false,
         }
     }
+}
+
+fn auto_color_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some()
+        || std::env::var("CLICOLOR").is_ok_and(|value| value == "0")
+        || std::env::var("TERM").is_ok_and(|value| value == "dumb")
+    {
+        return false;
+    }
+    if std::env::var("CLICOLOR_FORCE").is_ok_and(|value| !value.is_empty() && value != "0") {
+        return true;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+        || std::env::var("CI").is_ok_and(|value| !value.is_empty() && value != "0" && value != "false")
 }
 
 #[cfg(test)]
@@ -128,42 +161,8 @@ mod tests {
     }
 
     #[test]
-    fn test_color_choice_apply_always() {
-        // Save current state
-        let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-
-        ColorChoice::Always.apply();
-        // When set to always, colored output should be enabled
-        assert!(colored::control::SHOULD_COLORIZE.should_colorize());
-
-        // Restore to auto to avoid interfering with other tests
-        colored::control::unset_override();
-
-        // Best effort restoration - may not be exact if initial was based on TTY
-        let _ = initial;
-    }
-
-    #[test]
-    fn test_color_choice_apply_never() {
-        // Save current state
-        let initial = colored::control::SHOULD_COLORIZE.should_colorize();
-
-        ColorChoice::Never.apply();
-        // When set to never, colored output should be disabled
-        assert!(!colored::control::SHOULD_COLORIZE.should_colorize());
-
-        // Restore to auto to avoid interfering with other tests
-        colored::control::unset_override();
-
-        // Best effort restoration - may not be exact if initial was based on TTY
-        let _ = initial;
-    }
-
-    #[test]
-    fn test_color_choice_apply_auto() {
-        ColorChoice::Auto.apply();
-        // When set to auto, the result depends on TTY detection
-        // We just verify it doesn't panic and respects the default behavior
-        let _ = colored::control::SHOULD_COLORIZE.should_colorize();
+    fn explicit_color_choices_have_deterministic_ansi_policy() {
+        assert!(ColorChoice::Always.should_use_ansi());
+        assert!(!ColorChoice::Never.should_use_ansi());
     }
 }

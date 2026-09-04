@@ -1,15 +1,20 @@
 use clap::Args;
-use comfy_table::Cell;
 
 use crate::{
+    cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat, SortBy},
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
+    cli::table::{render as render_table, Cell},
+    kubernetes::{KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage},
     Result,
 };
 
 /// List all releases
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// deployment target whose cluster stores the releases
+    #[arg(long)]
+    pub target: String,
+
     /// Filter by namespace (default: all namespaces)
     #[arg(short, long)]
     pub namespace: Option<String>,
@@ -37,7 +42,7 @@ pub struct ListArgs {
 
 pub async fn execute(args: ListArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);
@@ -74,11 +79,8 @@ pub async fn execute(args: ListArgs) -> Result<()> {
                 return Ok(());
             }
 
-            let mut table = format::create_table();
-
-            // Add headers
-            if matches!(args.output, OutputFormat::Wide) {
-                table.set_header(vec![
+            let headers = if matches!(args.output, OutputFormat::Wide) {
+                vec![
                     "NAME",
                     "NAMESPACE",
                     "REVISION",
@@ -87,35 +89,35 @@ pub async fn execute(args: ListArgs) -> Result<()> {
                     "RESOURCES",
                     "RENDERED",
                     "APPLIED",
-                ]);
+                ]
             } else {
-                table.set_header(vec!["NAME", "NAMESPACE", "REVISION", "STATUS", "AGE", "RESOURCES"]);
-            }
+                vec!["NAME", "NAMESPACE", "REVISION", "STATUS", "AGE", "RESOURCES"]
+            };
 
-            // Add rows
+            let mut rows = Vec::with_capacity(releases.len());
             for release in releases {
                 let mut row = vec![
-                    Cell::new(&release.release_name),
-                    Cell::new(&release.release_namespace),
-                    Cell::new(release.latest_revision),
+                    Cell::plain(&release.release_name),
+                    Cell::plain(&release.release_namespace),
+                    Cell::plain(release.latest_revision),
                     format::color_status(&release.status),
-                    Cell::new(format::format_age(&release.rendered_at)),
-                    Cell::new(release.resource_count),
+                    Cell::plain(format::format_age(&release.rendered_at)),
+                    Cell::plain(release.resource_count),
                 ];
 
                 if matches!(args.output, OutputFormat::Wide) {
-                    row.push(Cell::new(format::format_timestamp(&release.rendered_at)));
-                    row.push(Cell::new(
+                    row.push(Cell::plain(format::format_timestamp(&release.rendered_at)));
+                    row.push(Cell::plain(
                         release
                             .applied_at
                             .map_or_else(|| "-".to_string(), |t| format::format_timestamp(&t)),
                     ));
                 }
 
-                table.add_row(row);
+                rows.push(row);
             }
 
-            println!("{}", table);
+            println!("{}", render_table(&headers, &rows));
         }
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&releases)?;

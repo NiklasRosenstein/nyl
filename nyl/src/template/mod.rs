@@ -6,7 +6,7 @@
 /// - Template context management
 use minijinja::Environment;
 
-use crate::{profiles::Profile, secrets::SecretsConfig, Result};
+use crate::{secrets::SecretsConfig, Result};
 
 pub struct TemplateEngine {
     env: Environment<'static>,
@@ -16,6 +16,14 @@ impl TemplateEngine {
     /// Create a new template engine with custom filters
     pub fn new() -> Self {
         let mut env = Environment::new();
+        env.set_formatter(|out, state, value| {
+            if value.kind() == minijinja::value::ValueKind::Bool {
+                out.write_str(if value.is_true() { "true" } else { "false" })?;
+                Ok(())
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
 
         // Register custom filters
         env.add_filter("b64encode", filters::b64encode);
@@ -48,14 +56,17 @@ impl Default for TemplateEngine {
 pub struct TemplateContext {
     pub values: serde_json::Value,
     pub secrets: serde_json::Value,
-    pub profile: String,
+    /// Environment values explicitly admitted to templates.
+    pub env: serde_json::Map<String, serde_json::Value>,
+    /// Sanitized Cluster exposed as `cluster.*` during target rendering.
+    pub cluster: Option<serde_json::Value>,
+    /// Sanitized DeploymentTarget exposed as `target.*` during target rendering.
+    pub target: Option<serde_json::Value>,
 }
 
 impl TemplateContext {
-    /// Build a template context from profile values, secrets, and selected profile name
-    pub fn build(profile: &Profile, secrets: &SecretsConfig, profile_name: &str) -> Result<Self> {
-        let values = serde_json::to_value(&profile.values)?;
-
+    /// Build a targetless template context from effective values and secrets.
+    pub fn build(values: serde_json::Value, secrets: &SecretsConfig) -> Result<Self> {
         let secret_keys = secrets.keys()?;
         let mut secrets_map = serde_json::Map::new();
         for key in secret_keys {
@@ -66,46 +77,49 @@ impl TemplateContext {
         Ok(Self {
             values,
             secrets: serde_json::Value::Object(secrets_map),
-            profile: profile_name.to_string(),
+            env: Self::filter_env_vars(std::env::vars()),
+            cluster: None,
+            target: None,
         })
+    }
+
+    /// Attach sanitized Cluster and DeploymentTarget resources to this context.
+    #[must_use]
+    pub fn with_gitops_context(mut self, cluster: serde_json::Value, target: serde_json::Value) -> Self {
+        self.cluster = Some(cluster);
+        self.target = Some(target);
+        self
     }
 
     /// Convert context to JSON value for template rendering
     pub fn to_json(&self) -> serde_json::Value {
-        let env = Self::filter_env_vars(std::env::vars());
-
-        serde_json::json!({
-            "values": self.values,
-            "secrets": self.secrets,
-            "profile": self.profile,
-            "env": env,
-        })
+        let mut context = serde_json::Map::from_iter([
+            ("values".to_string(), self.values.clone()),
+            ("secrets".to_string(), self.secrets.clone()),
+            ("env".to_string(), self.env.clone().into()),
+        ]);
+        if let Some(cluster) = &self.cluster {
+            context.insert("cluster".to_string(), cluster.clone());
+        }
+        if let Some(target) = &self.target {
+            context.insert("target".to_string(), target.clone());
+        }
+        context.into()
     }
 
     /// Filter environment variables to only include Nyl inputs.
     ///
     /// This prevents accidental leakage of sensitive CI/runtime secrets into manifests.
-    /// ArgoCD prefixes plugin parameters with `ARGOCD_ENV_`; Nyl exposes their
-    /// `NYL_` names so the same template works locally and in the CMP sidecar.
     fn filter_env_vars<I>(vars: I) -> serde_json::Map<String, serde_json::Value>
     where
         I: Iterator<Item = (String, String)>,
     {
         let mut env = serde_json::Map::new();
-        let mut argocd_env = Vec::new();
 
         for (key, value) in vars {
             if key.starts_with("NYL_") {
                 env.insert(key, serde_json::Value::String(value));
-            } else if let Some(key) = key.strip_prefix("ARGOCD_ENV_") {
-                if key.starts_with("NYL_") {
-                    argocd_env.push((key.to_string(), value));
-                }
             }
-        }
-
-        for (key, value) in argocd_env {
-            env.insert(key, serde_json::Value::String(value));
         }
 
         env
@@ -198,6 +212,14 @@ mod tests {
     }
 
     #[test]
+    fn test_render_bool_uses_yaml_compatible_spelling() {
+        let engine = TemplateEngine::new();
+        let context = serde_json::json!({"enabled": true, "disabled": false});
+        let result = engine.render("{{ enabled }} {{ disabled }}", &context).unwrap();
+        assert_eq!(result, "true false");
+    }
+
+    #[test]
     fn test_invalid_base64_decode() {
         let engine = TemplateEngine::new();
         let context = serde_json::json!({
@@ -216,38 +238,23 @@ mod tests {
             ("NYL_ANOTHER".to_string(), "also_visible".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("NYL_CONFIG".to_string(), "test_config".to_string()),
-            ("ARGOCD_ENV_NYL_REGION".to_string(), "eu-central-1".to_string()),
-            ("ARGOCD_ENV_SECRET_KEY".to_string(), "still-hidden".to_string()),
+            ("CI_TOKEN".to_string(), "hidden".to_string()),
         ];
 
         let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
 
         // Check that only NYL_ prefixed vars are included
-        assert_eq!(filtered.len(), 4);
+        assert_eq!(filtered.len(), 3);
         assert!(filtered.contains_key("NYL_TEST_VAR"));
         assert_eq!(filtered.get("NYL_TEST_VAR").unwrap().as_str().unwrap(), "visible");
         assert!(filtered.contains_key("NYL_ANOTHER"));
         assert_eq!(filtered.get("NYL_ANOTHER").unwrap().as_str().unwrap(), "also_visible");
         assert!(filtered.contains_key("NYL_CONFIG"));
         assert_eq!(filtered.get("NYL_CONFIG").unwrap().as_str().unwrap(), "test_config");
-        assert_eq!(filtered.get("NYL_REGION").unwrap().as_str().unwrap(), "eu-central-1");
 
         // Verify non-NYL_ prefixed vars are excluded
         assert!(!filtered.contains_key("SECRET_KEY"));
         assert!(!filtered.contains_key("PATH"));
-        assert!(!filtered.contains_key("ARGOCD_ENV_NYL_REGION"));
-        assert!(!filtered.contains_key("ARGOCD_ENV_SECRET_KEY"));
-    }
-
-    #[test]
-    fn test_filter_env_vars_prefers_argocd_plugin_value() {
-        let mock_vars = vec![
-            ("ARGOCD_ENV_NYL_IMAGE_TAG".to_string(), "pr-build".to_string()),
-            ("NYL_IMAGE_TAG".to_string(), "inherited".to_string()),
-        ];
-
-        let filtered = TemplateContext::filter_env_vars(mock_vars.into_iter());
-
-        assert_eq!(filtered.get("NYL_IMAGE_TAG").unwrap().as_str().unwrap(), "pr-build");
+        assert!(!filtered.contains_key("CI_TOKEN"));
     }
 }

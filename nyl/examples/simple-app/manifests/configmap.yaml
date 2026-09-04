@@ -2,21 +2,21 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: myapp-config
-  namespace: {% if profile == 'prod' %}production{% elif profile == 'staging' %}staging{% else %}development{% endif %}
+  namespace: {{ values.namespace }}
   labels:
     app: myapp
-    environment: {{ profile }}
+    environment: {{ values.environment }}
 data:
   config.yaml: |
     server:
       port: 8080
-      environment: {{ profile }}
-      debug: {% if profile == 'dev' %}true{% else %}false{% endif %}
+      environment: {{ values.environment }}
+      debug: {{ values.debug }}
 
     logging:
-      level: {% if profile == 'dev' %}debug{% else %}info{% endif %}
+      level: {{ values.logLevel }}
       format: json
 
     features:
       metrics: true
-      tracing: {% if profile == 'prod' %}true{% else %}false{% endif %}
+      tracing: {{ values.tracing }}

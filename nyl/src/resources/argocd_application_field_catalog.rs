@@ -34,7 +34,7 @@ const VALID_APPLICATION_PATH_PATTERNS: &[&str] = &[
 ];
 
 /// Known ArgoCD Application field-path patterns whose values are arrays and can
-/// therefore support `+field` append semantics in NylRelease overrides.
+/// therefore support `+field` append semantics in Release overrides.
 const VALID_APPLICATION_ARRAY_FIELD_PATTERNS: &[&str] = &[
     "metadata.finalizers",
     "spec.source.helm.valueFiles",

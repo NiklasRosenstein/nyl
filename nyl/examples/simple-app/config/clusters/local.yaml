@@ -1,0 +1,16 @@
+apiVersion: gitops.nyl/v1
+kind: Cluster
+metadata:
+  name: local
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.0
+    apiVersions:
+      - v1
+      - apps/v1
+  values:
+    storageClass: standard
+  live:
+    context: kind-kind

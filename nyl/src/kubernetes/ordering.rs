@@ -24,6 +24,13 @@ const PRIORITY_OTHER: u32 = 100;
 pub struct ResourceOrdering;
 
 impl ResourceOrdering {
+    /// Return the apply-order priority for one manifest.
+    pub(crate) fn priority(resource: &Value) -> u32 {
+        extract_gvk(resource)
+            .ok()
+            .map_or(PRIORITY_OTHER, |gvk| Self::get_priority(&gvk))
+    }
+
     /// Sort resources by priority (Namespace → CRD → RBAC → Config → Workload)
     ///
     /// This performs a stable sort, meaning resources with the same priority
@@ -31,9 +38,7 @@ impl ResourceOrdering {
     pub fn sort_by_priority(resources: &mut [Value]) -> Result<()> {
         resources.sort_by_cached_key(|resource| {
             // Extract GVK and get priority
-            extract_gvk(resource)
-                .ok()
-                .map_or(PRIORITY_OTHER, |gvk| Self::get_priority(&gvk))
+            Self::priority(resource)
         });
 
         Ok(())

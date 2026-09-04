@@ -1,15 +1,20 @@
 use clap::Args;
-use comfy_table::Cell;
 
 use crate::{
+    cli::commands::cluster::load_target_kube_config,
     cli::commands::release::{format, OutputFormat},
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseStorage},
+    cli::table::{render as render_table, Cell},
+    kubernetes::{KubernetesReleaseStorage, ReleaseStorage},
     NylError, Result,
 };
 
 /// Show revision history for a release
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
+    /// deployment target whose cluster stores the release
+    #[arg(long)]
+    pub target: String,
+
     /// Release name
     pub name: String,
 
@@ -32,7 +37,7 @@ pub struct HistoryArgs {
 
 pub async fn execute(args: HistoryArgs) -> Result<()> {
     // Create Kubernetes client
-    let config = KubeRsClient::load_kube_config(None, args.context.as_deref()).await?;
+    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
 
     let storage = KubernetesReleaseStorage::new(client);
@@ -58,25 +63,25 @@ pub async fn execute(args: HistoryArgs) -> Result<()> {
     // Output based on format
     match args.output {
         OutputFormat::Table | OutputFormat::Wide => {
-            let mut table = format::create_table();
-
-            table.set_header(vec!["REVISION", "STATUS", "RENDERED", "APPLIED", "RESOURCES"]);
-
+            let mut rows = Vec::with_capacity(releases.len());
             for release in releases {
-                table.add_row(vec![
-                    Cell::new(release.revision),
+                rows.push(vec![
+                    Cell::plain(release.revision),
                     format::color_status(&release.status),
-                    Cell::new(format::format_timestamp(&release.rendered_at)),
-                    Cell::new(
+                    Cell::plain(format::format_timestamp(&release.rendered_at)),
+                    Cell::plain(
                         release
                             .applied_at
                             .map_or_else(|| "-".to_string(), |t| format::format_timestamp(&t)),
                     ),
-                    Cell::new(release.resource_keys.len()),
+                    Cell::plain(release.resource_keys.len()),
                 ]);
             }
 
-            println!("{}", table);
+            println!(
+                "{}",
+                render_table(&["REVISION", "STATUS", "RENDERED", "APPLIED", "RESOURCES"], &rows)
+            );
         }
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&releases)?;

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `publish-tree --require-clean` for strict source-worktree validation
+  and `--allow-dirty` for explicit publication with dirty provenance. By
+  default, dirty worktrees are accepted only when the target matches a clean
+  render of the committed revision.
+
+- Added `ApplicationGroup.spec.releaseCustomization.allowedSyncOptions` for
+  exact, platform-approved Argo CD sync options that Releases may append to
+  their generated Applications.
+
+- Added a warning for every ApplicationGroup source candidate that has no
+  literal `gitops.nyl/v1` `Release` and is not claimed by another Release's
+  `spec.include`.
+
 - Added `--color` global flag to control colored output
   - `auto` (default): Automatically detect if colors should be used based on TTY detection
   - `always`: Always use colors, even when output is redirected
@@ -17,12 +30,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Optimized Git source resolution in ArgoCD plugin context to reuse ArgoCD's local checkout for matching `repoURL` + exact `targetRevision`, falling back to cache/worktree cloning on mismatch
+- **BREAKING**: Removed the Argo CD Config Management Plugin integration,
+  `ApplicationGenerator`, `nyl generate argocd`, and the Argo CD deployment
+  chart. Generated rendered-GitOps Applications use ordinary recursive
+  directory sources.
 
-- **BREAKING**: Restrict `render`, `apply`, and `diff` commands to single file processing
-  - Commands now require a file path argument (e.g., `nyl render manifest.yaml`)
-  - Directory paths are no longer supported and will return a clear error message
-  - This aligns with the NylRelease design where each release is tied to a single file
+- The published container is a shell-friendly CI rendering image containing
+  Nyl, Helm, Git, SOPS, and Kyverno CLI. It has no fixed entrypoint and prints
+  Nyl help by default.
+
+- Tree rendering excludes project secrets and `NYL_*` process environment by
+  default. `render-tree`, `diff-tree`, and `publish-tree` admit those inputs for
+  the trusted central project only when passed `--allow-secret-inputs`.
+
+- Rendered destination Namespaces stay in their workload Application by
+  default. `ApplicationGroup.spec.sharedNamespaces` explicitly assigns a
+  namespace used by multiple Applications to one Release, a dedicated
+  Namespace Application, or external management.
+
+- Rendered GitOps discovery and central render sessions share one parsed
+  `nyl.toml` configuration per project operation.
+
+- **BREAKING**: Restrict `render`, `apply`, and `diff` commands to one entry file
+  - Commands require a file path argument (e.g., `nyl render manifest.yaml`)
+  - A Release can attach additional manifest files with `spec.include`
+  - Directory path arguments are not supported
 
   **Migration Guide:**
 
@@ -37,24 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nyl render manifest.yaml
   nyl apply manifest.yaml
   nyl diff manifest.yaml
-  ```
-
-- **BREAKING**: ArgoCD Nyl plugin now requires `NYL_CMP_TEMPLATE_INPUT` to select a single manifest file
-  - Plugin command no longer falls back to `nyl render .`
-  - `ApplicationGenerator` and `nyl generate` now set `NYL_CMP_TEMPLATE_INPUT` in generated ArgoCD `Application` plugin env
-  - Plugin name is now `nyl-v2` (legacy `nyl`/`nyl-v1` references are no longer supported)
-
-  **Migration Guide:**
-
-  If you manage ArgoCD Applications manually, add:
-  ```yaml
-  spec:
-    source:
-      plugin:
-        name: nyl-v2
-        env:
-          - name: NYL_CMP_TEMPLATE_INPUT
-            value: apps.yaml
   ```
 
 - **BREAKING**: Removed `Root` scope from Kyverno policy annotations
@@ -78,8 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extracted common CLI options into `RenderOptions` struct for consistency across `render`, `apply`, and `diff` commands
 
 - **BREAKING**: Migrated API version from `nyl.io/v1` and `inline.nyl.io/v1` to `nyl.niklasrosenstein.github.com/v1`
-  - All Nyl resources (NylRelease, HelmChart, StatefulSecret, PostProcessor, etc.) now use the new API version
-  - ArgoCD ApplicationGenerator continues to use `argocd.nyl.niklasrosenstein.github.com/v1` (unchanged)
+  - Core rendering resources use the new API version
   - All API versions are now defined as constants in the codebase for consistency
 
   **Migration Guide:**
@@ -97,7 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Or manually change:
   - `apiVersion: nyl.io/v1` → `apiVersion: nyl.niklasrosenstein.github.com/v1`
   - `apiVersion: inline.nyl.io/v1` → `apiVersion: nyl.niklasrosenstein.github.com/v1`
-  - ArgoCD resources (`argocd.nyl.niklasrosenstein.github.com/v1`) remain unchanged
 
 ## [0.1.0] - 2026-01-25
 

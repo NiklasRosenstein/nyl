@@ -1,0 +1,28 @@
+//! Project discovery and compilation support for rendered GitOps workflows.
+
+pub mod argocd;
+pub mod discovery;
+pub mod layout;
+pub mod reconcile;
+pub mod tree;
+
+pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
+pub use crate::render::{RenderSession, RenderedBundle};
+pub(crate) use argocd::merge_sync_options;
+pub use argocd::{build_directory_application, DirectoryApplicationInput};
+pub use discovery::{
+    discover_gitops_inventory, resolve_deployment_target_name, DiscoveredGitOpsResource, GitOpsInventory,
+    GitOpsInventoryKey,
+};
+pub(crate) use layout::render_manifest_layout_with_provenance;
+pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};
+pub use reconcile::{
+    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, ReconcileOptions,
+    RenderIndex, RenderIndexPublication,
+};
+pub use tree::{
+    compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,
+    compile_target_tree_cached_with_observer_and_options, compile_target_tree_cached_with_options,
+    compile_target_tree_with_options, validate_gitops_inventory, CompiledTargetTree, ReleaseProgress,
+    TreeRenderObserver, TreeRenderOptions,
+};
