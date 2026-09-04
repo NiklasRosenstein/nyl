@@ -359,4 +359,4 @@ kyverno apply policy.yaml --resource resource.yaml
 - [Kyverno Documentation](https://kyverno.io/docs/)
 - [CEL Language Definition](https://github.com/google/cel-spec)
 - [Kyverno CLI Documentation](https://kyverno.io/docs/kyverno-cli/)
-- [Nyl Commands](../commands/)
+- [Nyl Commands](/nyl/commands/)

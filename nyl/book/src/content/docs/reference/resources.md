@@ -96,4 +96,4 @@ Processing:
 ## See Also
 
 - [Configuration](/nyl/configuration/)
-- [Commands](../commands/)
+- [Commands](/nyl/commands/)

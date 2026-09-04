@@ -1,4 +1,5 @@
 import { defineConfig } from "astro/config";
+import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
@@ -33,7 +34,7 @@ export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
   markdown: {
-    remarkPlugins: [rewriteNylLinks],
+    processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
   integrations: [
     starlight({
