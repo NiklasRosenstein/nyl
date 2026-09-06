@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "ApplicationDeletionPolicy": {
+      "enum": [
+        "Foreground",
+        "Background",
+        "Orphan"
+      ],
+      "type": "string"
+    },
+    "ArgoCDInstanceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "catalogApplicationDefaults": {
+          "$ref": "#/$defs/CatalogApplicationDefaults",
+          "default": {
+            "applicationDeletionPolicy": "Foreground",
+            "project": "default",
+            "selfPrunePolicy": "Confirm",
+            "syncPolicy": {
+              "syncOptions": [
+                "ApplyOutOfSyncOnly=true",
+                "ServerSideApply=true"
+              ]
+            }
+          }
+        },
+        "clusterRef": {
+          "$ref": "#/$defs/LocalReference"
+        },
+        "namespace": {
+          "default": "argocd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clusterRef"
+      ],
+      "type": "object"
+    },
+    "CatalogApplicationDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "$ref": "#/$defs/ApplicationDeletionPolicy",
+          "default": "Foreground"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "project": {
+          "default": "default",
+          "type": "string"
+        },
+        "selfPrunePolicy": {
+          "$ref": "#/$defs/ManagedResourceDeletionPolicy",
+          "default": "Confirm"
+        },
+        "syncPolicy": {
+          "$ref": "#/$defs/GitOpsSyncPolicy",
+          "default": {
+            "syncOptions": [
+              "ApplyOutOfSyncOnly=true",
+              "ServerSideApply=true"
+            ]
+          }
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsAutomatedSyncPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prune": {
+          "default": false,
+          "type": "boolean"
+        },
+        "selfHeal": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "GitOpsSyncPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "automated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsAutomatedSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "syncOptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ManagedResourceDeletionPolicy": {
+      "enum": [
+        "Automatic",
+        "Confirm",
+        "Retain"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One Argo CD control plane that manages one or more deployment targets.",
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl/v1",
+      "type": "string"
+    },
+    "kind": {
+      "const": "ArgoCDInstance",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/ArgoCDInstanceSpec"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ArgoCDInstance",
+  "type": "object"
+}
