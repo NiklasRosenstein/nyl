@@ -9,6 +9,7 @@ rust = "1.98.0"
 "cargo:cargo-audit" = "latest"
 
 # Kubernetes tools
+kubeconform = "0.8.0"
 kyverno = "1.19.0"
 sops = "3.13.3"
 helm = "4.2.0"

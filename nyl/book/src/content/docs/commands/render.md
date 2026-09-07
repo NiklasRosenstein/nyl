@@ -92,3 +92,9 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 - Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.
 - Bundle and Helm rendering use the shared content-addressed render cache. `diff` and `apply` reuse the same desired-manifest artifacts before performing their live-cluster operations.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution, filter semantics, and online/offline behavior.
+
+## Manifest validation
+
+Use `--validate` to run project-configured validators. See
+[Manifest validation](../manifest-validation/) for automatic validation, captured
+CRD schemas, inherited Cluster contracts, and offline schema vendoring.

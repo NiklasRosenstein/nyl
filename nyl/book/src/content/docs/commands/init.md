@@ -44,7 +44,7 @@ options include:
 --cluster-name <NAME>
 --context <CONTEXT> | --no-context
 --destination-server <URL> | --destination-name <NAME>
---update-cluster | --no-update-cluster
+--capture-cluster | --no-capture-cluster
 --target-name <NAME>
 --revision <REVISION>
 --path-prefix <PATH>
@@ -63,7 +63,7 @@ to every namespace.
 
 An interactive run offers to fetch the cluster's Kubernetes version and API
 versions when its context exists. A non-interactive run performs that network
-operation only with `--update-cluster`.
+operation only with `--capture-cluster`.
 
 `--output -` prints only the multi-document configuration to stdout and does
 not create `nyl.toml`, `gitops.yaml`, or the applications directory. Existing

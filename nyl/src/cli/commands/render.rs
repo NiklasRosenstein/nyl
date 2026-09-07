@@ -19,6 +19,8 @@ use crate::{
 /// Common options for manifest rendering operations (render, apply, diff)
 #[derive(Args, Debug, Clone)]
 pub struct RenderOptions {
+    #[command(flatten)]
+    pub validation: crate::validation::ValidationArgs,
     /// Path to the manifest file
     #[arg(value_name = "FILE")]
     pub path: String,
@@ -108,6 +110,8 @@ pub struct RenderPreflightOptions<'a> {
 
 /// Shared render preflight output for render/diff/apply commands.
 pub struct RenderPreflightResult {
+    pub project_config: ProjectConfig,
+    pub project_root: PathBuf,
     pub manifests: Vec<serde_json::Value>,
     pub release: Option<Release>,
     pub strip_empty_metadata_labels: bool,
@@ -119,6 +123,11 @@ pub struct RenderPreflightResult {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result<RenderPreflightResult> {
+    options.common.validation.check_complete(
+        options.common.only_source_kind.is_some()
+            || !options.common.only_kind.is_empty()
+            || !options.common.exclude_kind.is_empty(),
+    )?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
     let (project_config, project_root, resolved_target) = if options.common.target.is_some() || target_required {
@@ -146,6 +155,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             "--kube-version and --kube-api-versions cannot be used with --target; the Cluster resource is authoritative",
         ));
     }
+    options.common.validation.enabled(&project_config.config.validation)?;
     let explicit_capabilities = match (options.kube_version, options.kube_api_versions.is_empty()) {
         (Some(version), false) if !version.trim().is_empty() => {
             Some((version.to_owned(), options.kube_api_versions.to_vec()))
@@ -234,6 +244,8 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     }
 
     Ok(RenderPreflightResult {
+        project_config,
+        project_root,
         manifests,
         release,
         strip_empty_metadata_labels,
@@ -274,11 +286,21 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         );
     }
 
-    output_manifests(
-        &preflight.manifests,
-        OutputFormat::Yaml,
-        preflight.strip_empty_metadata_labels,
-    )?;
+    let output = prepare_manifests_for_output(&preflight.manifests, preflight.strip_empty_metadata_labels);
+    crate::validation::validate_manifests(
+        &args.common.validation,
+        &preflight.project_config,
+        &preflight.project_root,
+        preflight
+            .resolved_target
+            .as_ref()
+            .map(|target| target.cluster.metadata.name.as_str()),
+        args.kube_version.as_deref(),
+        &output,
+        &args.common.path,
+    )
+    .await?;
+    output_manifests(&output, OutputFormat::Yaml, preflight.strip_empty_metadata_labels)?;
     Ok(())
 }
 

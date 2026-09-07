@@ -296,7 +296,7 @@ fn render_resource_scaffold(
         GitOpsResourceKind::Cluster => {
             let context = cluster_context.unwrap_or(name);
             format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl update cluster {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
+                "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl capture cluster {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
             )
         }
         GitOpsResourceKind::ArgoCDInstance => format!(

@@ -55,6 +55,9 @@ enum Commands {
     /// Inspect GitOps resources declared in the project
     Get(commands::get::GetArgs),
 
+    /// Capture live cluster API contracts into project source
+    Capture(commands::capture::CaptureArgs),
+
     /// Refresh derived information stored in project resources
     Update(commands::update::UpdateArgs),
 
@@ -95,7 +98,8 @@ impl Cli {
             Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
             Commands::Create(args) => commands::create::execute(args),
             Commands::Get(args) => commands::get::execute(args),
-            Commands::Update(args) => commands::update::execute(args).await,
+            Commands::Capture(args) => commands::capture::execute(args).await,
+            Commands::Update(args) => commands::update::execute(args),
             Commands::Delete(args) => commands::delete::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
             Commands::DiffTree(args) => commands::diff_tree::execute(args).await,

@@ -20,6 +20,8 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 #[derive(Args, Debug)]
 pub struct RenderTreeArgs {
     #[command(flatten)]
+    pub validation: crate::validation::ValidationArgs,
+    #[command(flatten)]
     pub cache: TreeCacheArgs,
 
     #[command(flatten)]
@@ -102,6 +104,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         },
     )
     .await?;
+    crate::validation::validate_tree(&args.validation, &inventory, &compiled).await?;
     if args.check {
         let target = target_name.as_str().cyan().bold();
         println!(

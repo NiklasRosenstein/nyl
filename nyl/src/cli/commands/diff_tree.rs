@@ -30,6 +30,8 @@ pub enum DiffTreeBase {
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DiffTreeArgs {
     #[command(flatten)]
+    pub validation: crate::validation::ValidationArgs,
+    #[command(flatten)]
     pub cache: TreeCacheArgs,
 
     #[command(flatten)]
@@ -182,6 +184,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
         options,
     )
     .await?;
+    crate::validation::validate_tree(&args.validation, &inventory, &desired).await?;
     let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
     let selection = DiffSelection::from_args(&args);
     print_comparison_summary(&ComparisonSummary {

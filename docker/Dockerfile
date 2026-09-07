@@ -62,6 +62,18 @@ RUN \
 #: Build the CI rendering image.
 #: -----------------------------
 
+FROM fetch-bin-base AS kubeconform-bin
+# Version and archive digests identify the tested validator distribution.
+ARG KUBECONFORM_VERSION=v0.8.0
+RUN case "$(cat /BINARY_ARCH)" in \
+        amd64) KUBECONFORM_SHA256=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 ;; \
+        arm64) KUBECONFORM_SHA256=1f53fc8e81258197a35e8603054162a5af1de8c5af13746c71ab680d9534ed87 ;; \
+    esac \
+    && curl -fsSL --max-time 120 -o kubeconform.tar.gz \
+        https://github.com/yannh/kubeconform/releases/download/$KUBECONFORM_VERSION/kubeconform-linux-$(cat /BINARY_ARCH).tar.gz \
+    && printf '%s  kubeconform.tar.gz\n' "$KUBECONFORM_SHA256" | sha256sum -c - \
+    && tar -xzf kubeconform.tar.gz -C /usr/local/bin kubeconform
+
 FROM debian:bookworm-slim AS nyl-ci
 RUN apt-get update && \
     apt-get install -y --no-install-recommends bash git ca-certificates && \
@@ -70,6 +82,7 @@ RUN apt-get update && \
 COPY --from=helm-bin /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=sops-bin /usr/local/bin/sops /usr/local/bin/sops
 COPY --from=kyverno-bin /usr/local/bin/kyverno /usr/local/bin/kyverno
+COPY --from=kubeconform-bin /usr/local/bin/kubeconform /usr/local/bin/kubeconform
 COPY --from=nyl-bin /usr/local/bin/nyl /usr/local/bin/nyl
 
 WORKDIR /workspace

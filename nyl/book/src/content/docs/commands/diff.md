@@ -107,3 +107,9 @@ The diff command shows:
 - Normalized mode is recommended for most use cases as it matches kubectl diff behavior.
 - If no previous release state exists, diff still compares desired resources against live state but cannot determine prune candidates; a warning is shown and `to delete` remains incomplete.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
+
+## Manifest validation
+
+Use `--validate` to run project-configured validators. See
+[Manifest validation](../manifest-validation/) for automatic validation, captured
+CRD schemas, inherited Cluster contracts, and offline schema vendoring.

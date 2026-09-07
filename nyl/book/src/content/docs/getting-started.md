@@ -116,13 +116,13 @@ capabilities, then select the target:
 ```bash
 git init
 nyl create cluster local --context kind-kind
-nyl update cluster local
+nyl capture cluster local
 nyl create target dev
 nyl render --target dev apps.yaml
 ```
 
 GitOps resource discovery follows Git visibility. Cluster creation records the
-context without contacting Kubernetes; `nyl update cluster` performs the live
+context without contacting Kubernetes; `nyl capture cluster` performs the live
 capability refresh explicitly.
 
 ## Project Structure

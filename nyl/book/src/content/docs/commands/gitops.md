@@ -171,3 +171,9 @@ See [Rendering, diffing, and publishing](/nyl/deployment-workflows/rendered-mani
 for CI patterns and rendered layout. The
 [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
 documents the configuration model.
+
+## Manifest validation
+
+Use `--validate` to run project-configured validators. See
+[Manifest validation](../manifest-validation/) for automatic validation, captured
+CRD schemas, inherited Cluster contracts, and offline schema vendoring.

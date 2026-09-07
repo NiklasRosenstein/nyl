@@ -15,3 +15,5 @@ pub mod source;
 pub mod update;
 pub mod validate;
 pub mod vendor;
+
+pub mod capture;

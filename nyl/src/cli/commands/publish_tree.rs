@@ -21,6 +21,8 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 #[derive(Args, Debug)]
 pub struct PublishTreeArgs {
     #[command(flatten)]
+    pub validation: crate::validation::ValidationArgs,
+    #[command(flatten)]
     pub cache: TreeCacheArgs,
 
     #[command(flatten)]
@@ -204,6 +206,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         }
         (&inventory, &compiled, dirty)
     };
+    crate::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
     publish_compiled(
         &args,
         publication_inventory,

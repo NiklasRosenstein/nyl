@@ -36,6 +36,8 @@ pub mod resources;
 pub mod secrets;
 pub mod template;
 pub mod util;
+#[doc(hidden)]
+pub mod validation;
 pub mod yaml;
 
 // Re-export commonly used types

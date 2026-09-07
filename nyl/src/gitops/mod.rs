@@ -26,3 +26,5 @@ pub use tree::{
     compile_target_tree_with_options, validate_gitops_inventory, CompiledTargetTree, ReleaseProgress,
     TreeRenderObserver, TreeRenderOptions,
 };
+mod cluster;
+pub use cluster::{resolve_cluster_contract, EffectiveCluster};

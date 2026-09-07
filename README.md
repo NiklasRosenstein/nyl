@@ -29,7 +29,7 @@ cd platform
 git init
 nyl create repository deploy --repo-url https://example.invalid/deploy.git
 nyl create cluster dev --context kind-kind
-nyl update cluster dev
+nyl capture cluster dev
 nyl create target dev
 nyl render --target dev apps.yaml
 ```

@@ -99,6 +99,7 @@ export default defineConfig({
             "commands/create",
             "commands/project-resources",
             "commands/validate",
+            "commands/manifest-validation",
             "commands/render",
             "commands/diff",
             "commands/apply",

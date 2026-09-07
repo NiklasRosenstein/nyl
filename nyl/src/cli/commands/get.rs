@@ -68,7 +68,22 @@ pub fn execute(args: GetArgs) -> Result<()> {
             return Err(NylError::config(format!("{} {name:?} was not found", kind.as_str())));
         }
     }
-    print_resources(kind, &resources);
+    let mut effective_resources = resources.into_iter().cloned().collect::<Vec<_>>();
+    if kind == GitOpsResourceKind::Cluster {
+        for resource in &mut effective_resources {
+            let effective = crate::gitops::resolve_cluster_contract(&inventory, &resource.identity.name)?;
+            if effective.capabilities_source != resource.identity.name
+                || effective.schemas_source != resource.identity.name
+            {
+                eprintln!(
+                    "Cluster {}: capabilities from {}, CRD schemas from {}",
+                    resource.identity.name, effective.capabilities_source, effective.schemas_source
+                );
+            }
+            resource.resource = Some(GitOpsResource::Cluster(effective.cluster));
+        }
+    }
+    print_resources(kind, &effective_resources.iter().collect::<Vec<_>>());
     Ok(())
 }
 
@@ -111,7 +126,12 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
                 .or(cluster.spec.destination.name.as_deref())
                 .unwrap_or("-");
             let context = cluster.spec.live.as_ref().map_or("-", |live| live.context.as_str());
-            let version = cluster.spec.kubernetes.kube_version.as_deref().unwrap_or("-");
+            let version = cluster
+                .spec
+                .kubernetes
+                .as_ref()
+                .and_then(|value| value.kube_version.as_deref())
+                .unwrap_or("-");
             vec![
                 name.clone(),
                 destination.to_owned(),

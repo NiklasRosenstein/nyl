@@ -246,6 +246,21 @@ pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[&str], r
 pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(schema, &["name", "server"], true);
 }
+
+pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
+    schema.insert(
+        "if".into(),
+        json!({
+            "required":["apiContractFrom"],
+            "properties":{"apiContractFrom":{"type":"object","required":["mode"],"properties":{"mode":{"const":"all"}}}}
+        }),
+    );
+    schema.insert("then".into(), json!({"properties":{"kubernetes":{"type":"null"}}}));
+    schema.insert(
+        "else".into(),
+        json!({"required":["kubernetes"],"properties":{"kubernetes":{"not":{"type":"null"}}}}),
+    );
+}
 pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(schema, &["repositoryRef", "repository"], true);
 }

@@ -26,7 +26,7 @@ under the configured `project.gitops_scaffold_path`, which defaults to
 resource identities are never overwritten.
 
 `nyl create cluster` records its local context but does not connect to it. Use
-`nyl update cluster NAME` to refresh stored Kubernetes capabilities.
+`nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 
 ## Create components
 
