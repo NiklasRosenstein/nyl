@@ -1,42 +1,8 @@
 ---
-title: 'Release'
+title: 'Using Release'
 ---
 
-`Release` names one deployment, defines its default namespace, and can group
-multiple manifest files into one render unit. It is removed from rendered
-output.
-
-[View the `Release` JSON schema](/nyl/reference/schemas/release.schema.json).
-
-```yaml
-apiVersion: gitops.nyl/v1
-kind: Release
-metadata:
-  name: api
-  namespace: api
-spec:
-  include:
-    - manifests/*.yaml
-  additionalNamespaces:
-    - monitoring
-  stripEmptyMetadataLabels: argocd
-  argocd:
-    applicationOverride: {}
-```
-
-## Fields
-
-| Field | Required | Default | Description |
-| --- | --- | --- | --- |
-| `metadata.name` | Yes | — | Release and generated Application name. |
-| `metadata.namespace` | Yes | — | Default destination namespace. |
-| `spec.include` | No | `[]` | Additional manifest paths or glob patterns relative to this file. |
-| `spec.additionalNamespaces` | No | `[]` | Extra namespaces available to rendered resources. Ownership follows ApplicationGroup namespace policy. |
-| `spec.stripEmptyMetadataLabels` | No | Project setting | Controls empty `metadata.labels` removal. |
-| `spec.argocd.applicationOverride` | No | — | Partial generated Application override, subject to the ApplicationGroup customization policy. |
-
-Namespace names must be valid Kubernetes namespace names and entries in
-`additionalNamespaces` must be unique.
+See the [Release resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) for the API, example, and field definitions.
 
 ## Multi-file releases
 
@@ -67,7 +33,7 @@ applications/api/
 
 ```yaml
 # applications/api/release.yaml
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -146,5 +112,5 @@ when their command-specific name and namespace inputs are supplied.
 
 See also:
 
-- [ApplicationGroup](/nyl/reference/resources/gitops/application-group/)
+- [ApplicationGroup](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
 - [`nyl release`](/nyl/commands/release/)

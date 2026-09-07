@@ -1,5 +1,5 @@
 # Full example with HTTP Helm repository (Bitnami nginx chart)
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: https://charts.bitnami.com/bitnami#nginx@18.2.4
 metadata:
   name: my-nginx

@@ -5,20 +5,35 @@ use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::config::StripEmptyMetadataLabelsMode;
-use crate::constants::API_VERSION_GITOPS;
+use crate::constants::API_VERSION_K8S_GITOPS;
 use crate::{NylError, Result};
 
 pub const KIND_RELEASE: &str = "Release";
 pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
 
-/// Release resource for specifying release metadata
+/// Defines a Kubernetes workload manifest boundary and its permitted namespace scope.
+///
+/// Nyl extracts this metadata from the output. Included files belong to this Release and cannot declare another Release. GitOps uses the boundary to generate one workload Application.
+///
+/// ## When needed
+///
+/// Required in each workload entry file discovered through an ApplicationGroup. Files included by `spec.include` belong to that Release and must not declare another one.
+///
+/// ## If omitted
+///
+/// ApplicationGroup discovery ignores candidate files without a literal Release document. Direct `nyl render` can render without one; direct `nyl apply` and `nyl diff` require `--name` and `--namespace` when no Release supplies them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Release))]
 pub struct Release {
+    /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
     pub api_version: String,
+    /// Resource kind within the API group.
     pub kind: String,
+    /// Resource identity and metadata.
     pub metadata: ReleaseMetadata,
+    /// Configuration for this resource.
     #[serde(default)]
     pub spec: ReleaseSpec,
 }
@@ -93,7 +108,7 @@ where
 impl Release {
     /// Check if a manifest is a Release resource
     pub fn is_release(manifest: &serde_json::Value) -> bool {
-        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_GITOPS)
+        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_K8S_GITOPS)
             && manifest.get("kind").and_then(|v| v.as_str()) == Some(KIND_RELEASE)
     }
 
@@ -106,7 +121,7 @@ impl Release {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.api_version != API_VERSION_GITOPS || self.kind != KIND_RELEASE {
+        if self.api_version != API_VERSION_K8S_GITOPS || self.kind != KIND_RELEASE {
             return Err(NylError::config("Invalid Release resource envelope"));
         }
         validate_namespace_name("metadata.namespace", &self.metadata.namespace)?;
@@ -128,18 +143,7 @@ impl Release {
 
 pub fn generate_release_schema() -> serde_json::Value {
     let mut schema = serde_json::to_value(schema_for!(Release)).expect("schema serialization should never fail");
-    let properties = schema
-        .get_mut("properties")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("Release schema should have object properties");
-    properties.insert(
-        "apiVersion".to_owned(),
-        serde_json::json!({"const": API_VERSION_GITOPS, "type": "string"}),
-    );
-    properties.insert(
-        "kind".to_owned(),
-        serde_json::json!({"const": KIND_RELEASE, "type": "string"}),
-    );
+    super::schema::set_envelope(&mut schema, API_VERSION_K8S_GITOPS, Some(KIND_RELEASE));
     schema
 }
 
@@ -186,6 +190,7 @@ pub fn extract_release(manifests: &[serde_json::Value]) -> Result<(Option<Releas
     let mut filtered = Vec::new();
 
     for manifest in manifests {
+        super::schema::validate_resource_api(manifest)?;
         if Release::is_release(manifest) {
             if release.is_some() {
                 return Err(NylError::Config("Multiple Release resources found in file".to_string()));
@@ -207,7 +212,7 @@ mod tests {
     #[test]
     fn test_is_release_true() {
         let manifest = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "test",
@@ -221,7 +226,7 @@ mod tests {
     #[test]
     fn test_is_release_false_wrong_kind() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "ConfigMap",
             "metadata": {
                 "name": "test"
@@ -247,7 +252,7 @@ mod tests {
     #[test]
     fn test_from_value_valid() {
         let value = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -256,7 +261,7 @@ mod tests {
         });
 
         let release = Release::from_value(&value).unwrap();
-        assert_eq!(release.api_version, "gitops.nyl/v1");
+        assert_eq!(release.api_version, "k8s.gitops.nyl/v1");
         assert_eq!(release.kind, "Release");
         assert_eq!(release.metadata.name, "myapp");
         assert_eq!(release.metadata.namespace, "production");
@@ -265,7 +270,7 @@ mod tests {
     #[test]
     fn test_from_value_with_spec() {
         let value = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -281,7 +286,7 @@ mod tests {
     #[test]
     fn release_parses_bundle_and_namespace_scope() {
         let release = Release::from_value(&json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {
@@ -297,7 +302,7 @@ mod tests {
     #[test]
     fn release_rejects_duplicate_namespaces_and_include_traversal() {
         let duplicate = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {"additionalNamespaces": ["monitoring", "monitoring"]}
@@ -308,7 +313,7 @@ mod tests {
             .contains("duplicate"));
 
         let traversal = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {"include": ["../shared.yaml"]}
@@ -322,7 +327,7 @@ mod tests {
     #[test]
     fn test_from_value_with_application_override() {
         let value = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -361,7 +366,7 @@ mod tests {
     #[test]
     fn test_from_value_invalid_missing_metadata() {
         let value = json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release"
         });
 
@@ -372,7 +377,7 @@ mod tests {
     fn test_extract_release_with_release() {
         let manifests = vec![
             json!({
-                "apiVersion": "gitops.nyl/v1",
+                "apiVersion": "k8s.gitops.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "myapp",
@@ -423,7 +428,7 @@ mod tests {
     fn test_extract_release_multiple_error() {
         let manifests = vec![
             json!({
-                "apiVersion": "gitops.nyl/v1",
+                "apiVersion": "k8s.gitops.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "app1",
@@ -431,7 +436,7 @@ mod tests {
                 }
             }),
             json!({
-                "apiVersion": "gitops.nyl/v1",
+                "apiVersion": "k8s.gitops.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "app2",
@@ -448,7 +453,7 @@ mod tests {
     #[test]
     fn test_release_rejects_unknown_fields() {
         let yaml = r"
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: test
@@ -464,7 +469,7 @@ unknownField: should-fail
     #[test]
     fn test_release_rejects_non_object_application_override() {
         let yaml = r"
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: test
@@ -482,7 +487,7 @@ spec:
     #[test]
     fn test_release_parses_strip_empty_metadata_labels_override() {
         let yaml = r"
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: test

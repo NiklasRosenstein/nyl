@@ -591,7 +591,7 @@ fn build_documents(config: &GitOpsInitConfig) -> Result<Vec<Value>> {
 
 fn resource(kind: &str, name: &str, spec: Value) -> Value {
     json!({
-        "apiVersion": "gitops.nyl/v1",
+        "apiVersion": crate::resources::GitOpsResourceKind::parse(kind).expect("scaffold kind").api_version(),
         "kind": kind,
         "metadata": {"name": name},
         "spec": spec

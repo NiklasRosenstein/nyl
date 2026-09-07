@@ -1,4 +1,4 @@
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: https://charts.bitnami.com/bitnami#nginx
 metadata:
   name: no-version

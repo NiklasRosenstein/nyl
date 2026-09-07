@@ -39,7 +39,7 @@ nyl render --target dev apps.yaml
 ### Component
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: example/v1/Nginx
 metadata:
   name: my-nginx
@@ -58,7 +58,7 @@ nyl render examples/components/manifests/nginx.yaml --offline --kube-version 1.3
 ### RemoteManifest
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: RemoteManifest
 metadata:
   name: shared-crds

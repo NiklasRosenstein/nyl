@@ -1,6 +1,6 @@
 # Local component path (existing behavior, not a shortcut)
 # This uses the existing component resolution mechanism
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: example/v1/MyComponent
 metadata:
   name: local-component

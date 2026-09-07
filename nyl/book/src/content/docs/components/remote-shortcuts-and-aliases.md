@@ -27,7 +27,7 @@ Remote bases are recognized by prefix:
 HTTP Helm repo:
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: https://charts.bitnami.com/bitnami#nginx@18.2.4
 metadata:
   name: nginx-http
@@ -38,7 +38,7 @@ spec:
 OCI:
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4
 metadata:
   name: nginx-oci
@@ -47,7 +47,7 @@ metadata:
 Git:
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
 metadata:
   name: prometheus

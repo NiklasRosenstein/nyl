@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING**: Kubernetes GitOps kinds (`Cluster`, `DeploymentTarget`,
+  `ArgoCDInstance`, `ApplicationGroup`, `AppProjectDefinition`, and `Release`)
+  require `k8s.gitops.nyl/v1` instead of `gitops.nyl/v1`. `GitRepository` retains
+  `gitops.nyl/v1`. Change `HelmChart` and `RemoteManifest` from
+  `nyl.niklasrosenstein.github.com/v1` to `k8s.nyl/v1`, and component invocations
+  from `components.nyl.niklasrosenstein.github.com/v1` to
+  `components.k8s.nyl/v1`. Update API-qualified component aliases as well.
+  Renamed API versions produce migration errors; no compatibility aliases are
+  accepted. Resource documentation is generated from Rust-derived schemas,
+  including purpose, field descriptions, and examples.
+
 - **BREAKING**: Removed the Argo CD Config Management Plugin integration,
   `ApplicationGenerator`, `nyl generate argocd`, and the Argo CD deployment
   chart. Generated rendered-GitOps Applications use ordinary recursive

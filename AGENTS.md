@@ -305,8 +305,8 @@ src/
 
 ### Rendered GitOps invariants
 
-- Control resources use `gitops.nyl/v1` with a
-  static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Kubernetes control resources use `k8s.gitops.nyl/v1`; shared GitRepository
+  resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.
@@ -419,6 +419,12 @@ See `BENCHMARKS.md` for detailed performance analysis.
 5. **IMPLEMENTATION.md:** Development status and technical details
 
 ### Writing Documentation
+- Resource reference pages and catalog summaries are generated from Rust-derived
+  JSON Schemas. Put purpose and field descriptions in Rust doc comments and
+  examples in schema annotations. Every resource's doc comment includes
+  `## When needed` and `## If omitted` sections; the catalog reads these sections
+  from the schema description. Keep workflow narratives in the Astro guides.
+  Regenerate schemas with `nyl schema all --output-dir nyl/book/public/reference/schemas`.
 - Document all public functions and types
 - Include examples in doc comments
 - Use markdown formatting

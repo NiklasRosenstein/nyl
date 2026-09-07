@@ -1,0 +1,28 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { createResourceMarkdownProcessor } from '../../../lib/resource-markdown.mjs';
+import { resources, summary } from '../../../lib/resources.mjs';
+import { schemaFor } from '../../../lib/schema-documents';
+import { resourceMarkdown } from '../../../lib/schema-reference.mjs';
+
+interface Props { resource: import("../../../lib/resources.mjs").Resource }
+
+export function getStaticPaths() {
+  return resources.map((resource) => ({
+    params: { resource: `${resource.apiVersion}/${resource.slug}` }, props: { resource },
+  }));
+}
+const { resource } = Astro.props;
+const schema = schemaFor(resource);
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const processor = await createResourceMarkdownProcessor(base);
+const rendered = await processor.render(resourceMarkdown(schema));
+const guide = ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'].includes(resource.apiVersion)
+  ? `${base}/deployment-workflows/rendered-manifests/resource-guides/${resource.slug}/`
+  : `${base}/components/resource-guides/${resource.slug}/`;
+---
+<StarlightPage frontmatter={{ title: resource.name, description: summary(schema), editUrl: false }} headings={rendered.metadata.headings.filter((heading) => heading.depth === 2)}>
+  <p class="api-version"><code>{resource.apiVersion}</code>{resource.dynamicKind && <span> · Dynamic kind</span>}</p>
+  <p><a href={`${base}/reference/resources/`}>All resources</a> · <a href={`${base}/reference/schemas/${resource.schema}`}>Download JSON Schema</a> · <a href={guide}>Usage guide</a></p>
+  <Fragment set:html={rendered.code} />
+</StarlightPage>

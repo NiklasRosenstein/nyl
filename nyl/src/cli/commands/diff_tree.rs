@@ -993,7 +993,7 @@ mod tests {
     #[test]
     fn publication_marker_changes_when_ownership_coordinates_change() {
         let target: DeploymentTarget = serde_json::from_value(serde_json::json!({
-            "apiVersion": crate::constants::API_VERSION_GITOPS,
+            "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
@@ -1007,7 +1007,7 @@ mod tests {
         }))
         .unwrap();
         let cluster: Cluster = serde_json::from_value(serde_json::json!({
-            "apiVersion": crate::constants::API_VERSION_GITOPS,
+            "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
             "kind": "Cluster",
             "metadata": {"name": "kasoku"},
             "spec": {

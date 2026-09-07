@@ -1,6 +1,7 @@
 import { defineConfig } from "astro/config";
 import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
+import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
 const authoredDocsBase = "/nyl";
@@ -33,13 +34,14 @@ function rewriteNylLinks() {
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
+  redirects: Object.fromEntries(Object.entries(resourceRedirects).map(([from, to]) => [from, `${basePath}${to}`])),
   markdown: {
     processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
   integrations: [
     starlight({
       title: "Nyl",
-      description: "A fast Kubernetes manifest generator for rendered manifest GitOps and CLI workflows.",
+      description: "A fast Kubernetes manifest generator for rendered GitOps.",
       social: [
         {
           icon: "github",
@@ -55,7 +57,6 @@ export default defineConfig({
             "index",
             "getting-started",
             "deployment-workflows/rendered-manifests",
-            "deployment-workflows/cli-workflows",
           ],
         },
         {
@@ -73,24 +74,8 @@ export default defineConfig({
               ],
             },
             "git-integration",
-            {
-              label: "Commands",
-              items: [
-                "commands",
-                "commands/rendering-pipeline",
-                "commands/gitops",
-                "commands/init",
-                "commands/create",
-                "commands/project-resources",
-                "commands/validate",
-                "commands/render",
-                "commands/diff",
-                "commands/apply",
-                "commands/release",
-                "commands/schema",
-                "commands/vendor",
-              ],
-            },
+            { label: "Direct CLI operations", link: "/deployment-workflows/cli-workflows/" },
+            { label: "Rendering usage guides", collapsed: true, items: [{ autogenerate: { directory: "components/resource-guides" } }] },
           ],
         },
         {
@@ -100,27 +85,33 @@ export default defineConfig({
             "deployment-workflows/rendered-manifests/targets-and-clusters",
             "deployment-workflows/rendered-manifests/rendering-and-publishing",
             "deployment-workflows/rendered-manifests/security",
-            {
-              label: "Reference",
-              items: [
-                "reference/resources/gitops",
-                "reference/resources/gitops/git-repository",
-                "reference/resources/gitops/cluster",
-                "reference/resources/gitops/deployment-target",
-                "reference/resources/gitops/app-project-definition",
-                "reference/resources/gitops/application-group",
-                "reference/resources/gitops/release",
-              ],
-            },
+            "reference/resources/gitops",
+            { label: "Resource usage guides", collapsed: true, items: [{ autogenerate: { directory: "deployment-workflows/rendered-manifests/resource-guides" } }] },
+          ],
+        },
+        {
+          label: "Command Reference",
+          items: [
+            "commands",
+            "commands/rendering-pipeline",
+            "commands/gitops",
+            "commands/init",
+            "commands/create",
+            "commands/project-resources",
+            "commands/validate",
+            "commands/render",
+            "commands/diff",
+            "commands/apply",
+            "commands/release",
+            "commands/schema",
+            "commands/vendor",
           ],
         },
         {
           label: "Reference",
           items: [
-            "reference/resources",
-            "reference/resources/component",
-            "reference/resources/helmchart",
-            "reference/resources/remote-manifest",
+            { label: "Resources", link: "/reference/resources/" },
+            ...resourceSidebar(),
             "reference/kyverno-policies",
           ],
         },

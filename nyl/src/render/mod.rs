@@ -20,7 +20,7 @@ pub use session::{RenderPathMode, RenderRequest, RenderSession, RenderedBundle};
 mod tests {
     use super::*;
     use crate::config::{ProjectConfig, StripEmptyMetadataLabelsMode};
-    use crate::constants::API_VERSION_GITOPS;
+    use crate::constants::API_VERSION_K8S_GITOPS;
     use crate::resources::{Release, ReleaseArgoCdSpec, ReleaseMetadata, ReleaseSpec, RemoteManifest};
     use crate::template::TemplateContext;
     use crate::NylError;
@@ -156,13 +156,7 @@ metadata:
             }
         });
 
-        add_parent_annotations(
-            &mut manifest,
-            "nyl.niklasrosenstein.github.com/v1",
-            "HelmChart",
-            "my-chart",
-            Some("default"),
-        );
+        add_parent_annotations(&mut manifest, "k8s.nyl/v1", "HelmChart", "my-chart", Some("default"));
 
         // Verify annotations were added
         let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
@@ -172,7 +166,7 @@ metadata:
                 .unwrap()
                 .as_str()
                 .unwrap(),
-            "nyl.niklasrosenstein.github.com/v1"
+            "k8s.nyl/v1"
         );
         assert_eq!(
             annotations.get(ANNOTATION_PARENT_KIND).unwrap().as_str().unwrap(),
@@ -190,9 +184,9 @@ metadata:
 
     #[test]
     fn test_is_nyl_like_api_version_exact_match() {
-        assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com/v1"));
-        assert!(is_nyl_like_api_version("components.nyl.niklasrosenstein.github.com/v1"));
-        assert!(is_nyl_like_api_version("argocd.nyl.niklasrosenstein.github.com/v1"));
+        assert!(is_nyl_like_api_version("k8s.nyl/v1"));
+        assert!(is_nyl_like_api_version("components.k8s.nyl/v1"));
+        assert!(is_nyl_like_api_version("argocd.k8s.nyl/v1"));
     }
 
     #[test]
@@ -200,7 +194,7 @@ metadata:
         // Should match anything containing the domain
         assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com/v2"));
         assert!(is_nyl_like_api_version("nyl.niklasrosenstein.github.com"));
-        assert!(is_nyl_like_api_version("foo.nyl.niklasrosenstein.github.com/v1"));
+        assert!(is_nyl_like_api_version("foo.k8s.nyl/v1"));
     }
 
     #[test]
@@ -222,7 +216,7 @@ metadata:
     #[test]
     fn test_is_known_nyl_resource_helm_chart() {
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "HelmChart",
             "metadata": {"name": "test"},
             "spec": {"chart": {"name": "nginx"}}
@@ -233,7 +227,7 @@ metadata:
     #[test]
     fn test_is_known_nyl_resource_component() {
         let resource = serde_json::json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "example/v1/MyComponent",
             "metadata": {"name": "test"},
             "spec": {}
@@ -244,7 +238,7 @@ metadata:
     #[test]
     fn test_is_known_nyl_resource_release() {
         let resource = serde_json::json!({
-            "apiVersion": "gitops.nyl/v1",
+            "apiVersion": "k8s.gitops.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "test", "namespace": "default"}
         });
@@ -254,7 +248,7 @@ metadata:
     #[test]
     fn test_is_known_nyl_resource_remote_manifest() {
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "test"},
             "spec": {"url": "https://example.com/manifests.yaml"}
@@ -266,7 +260,7 @@ metadata:
     fn test_is_known_nyl_resource_unknown() {
         // Unknown Nyl-like resource
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "UnknownKind",
             "metadata": {"name": "test"}
         });
@@ -298,13 +292,7 @@ metadata:
             }
         });
 
-        add_parent_annotations(
-            &mut manifest,
-            "nyl.niklasrosenstein.github.com/v1",
-            "Component",
-            "my-component",
-            None,
-        );
+        add_parent_annotations(&mut manifest, "k8s.nyl/v1", "Component", "my-component", None);
 
         // Verify annotations were added (except namespace)
         let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
@@ -314,7 +302,7 @@ metadata:
                 .unwrap()
                 .as_str()
                 .unwrap(),
-            "nyl.niklasrosenstein.github.com/v1"
+            "k8s.nyl/v1"
         );
         assert_eq!(
             annotations.get(ANNOTATION_PARENT_KIND).unwrap().as_str().unwrap(),
@@ -344,13 +332,7 @@ metadata:
             }
         });
 
-        add_parent_annotations(
-            &mut manifest,
-            "nyl.niklasrosenstein.github.com/v1",
-            "HelmChart",
-            "my-chart",
-            None,
-        );
+        add_parent_annotations(&mut manifest, "k8s.nyl/v1", "HelmChart", "my-chart", None);
 
         let annotations = manifest["metadata"]["annotations"].as_object().unwrap();
         // Original annotation should still be there
@@ -365,7 +347,7 @@ metadata:
                 .unwrap()
                 .as_str()
                 .unwrap(),
-            "nyl.niklasrosenstein.github.com/v1"
+            "k8s.nyl/v1"
         );
     }
 
@@ -382,7 +364,7 @@ metadata:
         let manifests = apply_parent_tracking_annotations(
             manifests,
             true,
-            "nyl.niklasrosenstein.github.com/v1",
+            "k8s.nyl/v1",
             "RemoteManifest",
             "remote-a",
             Some("apps"),
@@ -407,7 +389,7 @@ metadata:
     fn test_needs_helm_rendering_ignores_remote_manifest() {
         let config = test_project_config();
         let resources = vec![serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "https://example.com/manifest.yaml"}
@@ -420,7 +402,7 @@ metadata:
     fn test_needs_helm_rendering_detects_helm_chart() {
         let config = test_project_config();
         let resources = vec![serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "HelmChart",
             "metadata": {"name": "chart"},
             "spec": {"chart": {"name": "nginx"}}
@@ -433,7 +415,7 @@ metadata:
     fn test_is_renderable_resource_helm_chart() {
         let config = test_project_config();
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "HelmChart",
             "metadata": {"name": "test"}
         });
@@ -444,7 +426,7 @@ metadata:
     fn test_is_renderable_resource_component() {
         let config = test_project_config();
         let resource = serde_json::json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "example/v1/Nginx",
             "metadata": {"name": "test"}
         });
@@ -455,7 +437,7 @@ metadata:
     fn test_is_renderable_resource_component_shortcut() {
         let config = test_project_config();
         let resource = serde_json::json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "https://charts.example.com/repo#nginx@1.0.0",
             "metadata": {"name": "test"}
         });
@@ -466,7 +448,7 @@ metadata:
     fn test_is_renderable_resource_remote_manifest() {
         let config = test_project_config();
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "test"},
             "spec": {"url": "https://example.com/manifests.yaml"}
@@ -513,7 +495,7 @@ metadata:
             target: None,
         };
         let resource = serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "http://example.com/manifests.yaml"}
@@ -538,7 +520,7 @@ metadata:
     #[tokio::test]
     async fn test_fetch_remote_manifest_documents_fetches_urls_in_order_and_overrides_namespaces() {
         let remote_manifest = RemoteManifest::from_value(&serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote", "namespace": "target"},
             "spec": {
@@ -586,7 +568,7 @@ metadata:
     #[tokio::test]
     async fn test_fetch_remote_manifest_documents_stops_on_first_failed_url() {
         let remote_manifest = RemoteManifest::from_value(&serde_json::json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -845,7 +827,7 @@ metadata:
     #[test]
     fn test_resolve_strip_empty_metadata_labels_mode_release_override_takes_precedence() {
         let release = Release {
-            api_version: API_VERSION_GITOPS.to_string(),
+            api_version: API_VERSION_K8S_GITOPS.to_string(),
             kind: "Release".to_string(),
             metadata: ReleaseMetadata {
                 name: "nginx".to_string(),
@@ -909,7 +891,7 @@ metadata:
 
     #[test]
     fn test_best_effort_parse_yaml_documents_skips_jinja() {
-        let raw = r"apiVersion: gitops.nyl/v1
+        let raw = r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: my-app
@@ -943,7 +925,7 @@ data:
         let entry = temporary.path().join("release.yaml");
         std::fs::write(
             &entry,
-            r"apiVersion: gitops.nyl/v1
+            r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: example
@@ -994,7 +976,7 @@ spec:
         let entry = temporary.path().join("release.yaml");
         std::fs::write(
             &entry,
-            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['missing/*.yaml']\n",
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['missing/*.yaml']\n",
         )
         .unwrap();
         let context = TemplateContext {
@@ -1011,12 +993,12 @@ spec:
 
         std::fs::write(
             &entry,
-            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['nested.yaml']\n",
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['nested.yaml']\n",
         )
         .unwrap();
         std::fs::write(
             temporary.path().join("nested.yaml"),
-            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: nested\n  namespace: nested\n",
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: nested\n  namespace: nested\n",
         )
         .unwrap();
         assert!(load_release_bundle(&entry, &context)
@@ -1031,7 +1013,7 @@ spec:
         let structural = temporary.path().join("structural.yaml");
         std::fs::write(
             &structural,
-            "{% if values.enabled %}\napiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
+            "{% if values.enabled %}\napiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
         )
         .unwrap();
         assert!(static_release_envelope(&structural).unwrap().is_none());
@@ -1039,7 +1021,7 @@ spec:
         let value_templated = temporary.path().join("value.yaml");
         std::fs::write(
             &value_templated,
-            "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
         )
         .unwrap();
         assert_eq!(

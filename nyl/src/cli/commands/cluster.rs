@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn update_preserves_unrelated_document_content() {
-        let input = "# cluster\napiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  destination:\n    name: prod\n  kubernetes:\n    # generated\n    kubeVersion: old\n    apiVersions: [v1]\n  # cluster facts\n  values:\n    region: eu\n";
+        let input = "# cluster\napiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  destination:\n    name: prod\n  kubernetes:\n    # generated\n    kubeVersion: old\n    apiVersions: [v1]\n  # cluster facts\n  values:\n    region: eu\n";
         let output = replace_kubernetes_block(
             input,
             &ClusterInfo {
@@ -315,8 +315,8 @@ mod tests {
     fn update_edits_only_the_selected_document_in_a_shared_file() {
         let temporary = tempfile::TempDir::new().unwrap();
         let path = temporary.path().join("gitops.yaml");
-        let first = "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: first\nspec:\n  destination:\n    name: first\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
-        let second = "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: second\nspec:\n  destination:\n    name: second\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
+        let first = "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: first\nspec:\n  destination:\n    name: first\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
+        let second = "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: second\nspec:\n  destination:\n    name: second\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
         fs::write(&path, format!("{first}---\n{second}")).unwrap();
         let discovered = DiscoveredGitOpsResource {
             source_path: "gitops.yaml".into(),
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn update_selects_only_the_direct_cluster_kubernetes_block() {
-        let input = "apiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  values:\n    kubernetes:\n      keep: true\n    spec:\n      kubernetes:\n        keep: true\n  destination:\n    name: prod\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
+        let input = "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  values:\n    kubernetes:\n      keep: true\n    spec:\n      kubernetes:\n        keep: true\n  destination:\n    name: prod\n  kubernetes:\n    kubeVersion: old\n    apiVersions: [v1]\n";
         let output = replace_kubernetes_block(
             input,
             &ClusterInfo {

@@ -1,4 +1,4 @@
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: git+https://github.com/prometheus-community/helm-charts#charts/prometheus@prometheus-25.28.0
 metadata:
   name: git-example

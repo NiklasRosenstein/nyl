@@ -60,7 +60,7 @@ echo ""
 # Create test manifest
 echo "Creating test manifest..."
 cat > "${SCRIPT_DIR}/${TEST_NAME}.yaml" <<'EOF'
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: test-filter

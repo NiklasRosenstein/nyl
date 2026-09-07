@@ -47,7 +47,7 @@ components/example/v1/Nginx/
 ## Consume the Component in a Manifest
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: example/v1/Nginx
 metadata:
   name: web

@@ -62,7 +62,7 @@ nyl create application-group workloads
 ## Application source paths
 
 A centrally stored
-[`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/) with
+[`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/) with
 no explicit source derives `applications/<group-name>`. An explicit
 `spec.source.path` can select any other project-relative directory.
 
@@ -92,7 +92,7 @@ nyl update source-locks --check
 Central renderer mode applies the platform project's `nyl.toml` and component
 configuration to the remote source. Remote renderer mode loads configuration
 from `spec.source.rendererConfig.projectPath` in the remote repository. See the
-[ApplicationGroup reference](/nyl/reference/resources/gitops/application-group/#source-selection)
+[ApplicationGroup reference](/nyl/deployment-workflows/rendered-manifests/resource-guides/application-group/#source-selection)
 for the complete source contract and the
 [security guide](/nyl/deployment-workflows/rendered-manifests/security/#remote-source-isolation)
 for its trust boundary.

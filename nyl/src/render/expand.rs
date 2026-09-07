@@ -104,11 +104,19 @@ pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
 
     // Check for similar patterns using Levenshtein distance
     // Extract base domains from the API version constants
-    let nyl_api_versions = [API_VERSION, API_VERSION_COMPONENTS];
+    let nyl_api_versions = [
+        API_VERSION,
+        API_VERSION_COMPONENTS,
+        crate::constants::API_VERSION_GITOPS,
+        crate::constants::API_VERSION_K8S_GITOPS,
+        "nyl.niklasrosenstein.github.com/v1",
+    ];
 
     for api_ver in &nyl_api_versions {
         let known_domain = api_ver.split('/').next().unwrap_or(api_ver);
-        if levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE {
+        if domain.ends_with(&format!(".{known_domain}"))
+            || levenshtein_distance(domain, known_domain) <= MAX_TYPO_DISTANCE
+        {
             return true;
         }
     }
@@ -283,6 +291,7 @@ pub(crate) async fn generate_resource(
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
+    crate::resources::schema::validate_resource_api(resource)?;
     // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());

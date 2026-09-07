@@ -21,9 +21,9 @@ In your project's `renovate.json`:
 
 The preset adds regex managers for:
 
-- `HelmChart` resources (`apiVersion: nyl.niklasrosenstein.github.com/v1`)
+- `HelmChart` resources (`apiVersion: k8s.nyl/v1`)
   - `spec.chart.repository` + `spec.chart.name` + `spec.chart.version`
-- `Component` shortcut resources (`apiVersion: components.nyl.niklasrosenstein.github.com/v1`)
+- `Component` shortcut resources (`apiVersion: components.k8s.nyl/v1`)
   - `kind: https://...#<chart>@<version>`
   - `kind: oci://...@<version>`
   - `kind: git+...#<path>@<ref>`
