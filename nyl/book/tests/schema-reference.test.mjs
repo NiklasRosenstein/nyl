@@ -70,3 +70,36 @@ test('all references render schema examples and resolvable fields', () => {
     assert.ok(markdown.includes('id="field-metadata.name"'));
   }
 });
+
+test('literal choices render inline or as a documented table within the field', async () => {
+  const schema = {
+    $defs: { Policy: { oneOf: [
+      { const: 'Foreground', type: 'string', description: 'Delete **with** workloads.' },
+      { const: 'Orphan', type: 'string', description: 'Keep workloads | keep data.\nUse `manual|cleanup`.' },
+    ] } },
+    properties: {
+      mode: { enum: ['manual', 'automatic'] },
+      policy: { anyOf: [{ $ref: '#/$defs/Policy' }, { type: 'null' }], default: null },
+    },
+  };
+  const { code } = await (await createMarkdownProcessor()).render(schemaReference(schema));
+  assert.match(code, /Allowed values:<\/strong> <code>"manual"<\/code> · <code>"automatic"<\/code>/);
+  assert.match(code, /Optional<\/strong> · string or null/);
+  assert.match(code, /<td><code>"Foreground"<\/code><\/td><td>Delete <strong>with<\/strong> workloads\.<\/td>/);
+  assert.match(code, /<td>Keep workloads \| keep data\.<br>Use <code>manual\|cleanup<\/code>\.<\/td>/);
+  assert.match(code, /<td><code>null<\/code><\/td>/);
+  assert.equal((code.match(/<h3 /g) ?? []).length, 2, 'choices belong to their field, rather than introducing field headings');
+});
+
+test('structured variants expose real field paths and unique anchors in expandable sections', async () => {
+  const schema = schemaFor(resources.find((resource) => resource.name === 'ApplicationGroup'));
+  const { code } = await (await createMarkdownProcessor()).render(schemaReference({ ...schema, properties: { owner: { $ref: '#/$defs/SharedNamespaceOwner' } } }));
+  assert.match(code, /Choose exactly one variant:/);
+  for (const kind of ['Release', 'Dedicated', 'External']) {
+    assert.match(code, new RegExp(`<details><summary>${kind}</summary>[\\s\\S]*?<h3 [^>]*>owner\\.kind</h3>[\\s\\S]*?</details>`));
+  }
+  assert.match(code, /<h3 [^>]*>owner\.release<\/h3>\s*<p><strong>Required<\/strong> · string/);
+  assert.match(code, /The selected workload Release owns the Namespace/);
+  const ids = [...code.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length, 'fields shared by variants must have distinct fragment targets');
+});
