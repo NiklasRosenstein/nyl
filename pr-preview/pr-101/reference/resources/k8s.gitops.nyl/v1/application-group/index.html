@@ -159,24 +159,32 @@
 <p><strong>Optional</strong> · string</p>
 <p><a id="field-spec.applicationDeletionPolicy"></a></p>
 <h3 id="specapplicationdeletionpolicy">spec.applicationDeletionPolicy</h3>
-<p><strong>Optional</strong> · alternatives below</p>
+<p><strong>Optional</strong> · string</p>
 <p>Argo CD Application finalizer policy: foreground cascade, background cascade, or orphan workloads.</p>
 <p><strong>default:</strong> <code>"Foreground"</code></p>
-<p><a id="field-spec.applicationDeletionPolicy%5BForeground%5D"></a></p>
-<h3 id="specapplicationdeletionpolicyforeground">spec.applicationDeletionPolicy[Foreground]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Cascade deletion in the foreground using the Argo CD resources finalizer.</p>
-<p><strong>const:</strong> <code>"Foreground"</code></p>
-<p><a id="field-spec.applicationDeletionPolicy%5BBackground%5D"></a></p>
-<h3 id="specapplicationdeletionpolicybackground">spec.applicationDeletionPolicy[Background]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Cascade deletion in the background using the Argo CD background finalizer.</p>
-<p><strong>const:</strong> <code>"Background"</code></p>
-<p><a id="field-spec.applicationDeletionPolicy%5BOrphan%5D"></a></p>
-<h3 id="specapplicationdeletionpolicyorphan">spec.applicationDeletionPolicy[Orphan]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Omit the finalizer and leave workload resources in place.</p>
-<p><strong>const:</strong> <code>"Orphan"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Foreground"</code></td><td>Cascade deletion in the foreground using the Argo CD resources finalizer.</td></tr><tr><td><code>"Background"</code></td><td>Cascade deletion in the background using the Argo CD background finalizer.</td></tr><tr><td><code>"Orphan"</code></td><td>Omit the finalizer and leave workload resources in place.</td></tr></tbody></table>
 <p><a id="field-spec.applicationNameTemplate"></a></p>
 <h3 id="specapplicationnametemplate">spec.applicationNameTemplate</h3>
 <p><strong>Optional</strong> · string or null</p>
@@ -214,44 +222,60 @@
 <p><strong>default:</strong> <code>true</code></p>
 <p><a id="field-spec.namespace.deletePolicy"></a></p>
 <h3 id="specnamespacedeletepolicy">spec.namespace.deletePolicy</h3>
-<p><strong>Optional</strong> · alternatives below</p>
+<p><strong>Optional</strong> · string</p>
 <p>Namespace deletion policy when the owning Application is deleted.</p>
 <p><strong>default:</strong> <code>"Confirm"</code></p>
-<p><a id="field-spec.namespace.deletePolicy%5BAutomatic%5D"></a></p>
-<h3 id="specnamespacedeletepolicyautomatic">spec.namespace.deletePolicy[Automatic]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Allow pruning or deletion without additional restrictions.</p>
-<p><strong>const:</strong> <code>"Automatic"</code></p>
-<p><a id="field-spec.namespace.deletePolicy%5BConfirm%5D"></a></p>
-<h3 id="specnamespacedeletepolicyconfirm">spec.namespace.deletePolicy[Confirm]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Require confirmation through the Argo CD Prune or Delete sync option.</p>
-<p><strong>const:</strong> <code>"Confirm"</code></p>
-<p><a id="field-spec.namespace.deletePolicy%5BRetain%5D"></a></p>
-<h3 id="specnamespacedeletepolicyretain">spec.namespace.deletePolicy[Retain]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Set the Argo CD Prune or Delete sync option to false.</p>
-<p><strong>const:</strong> <code>"Retain"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Automatic"</code></td><td>Allow pruning or deletion without additional restrictions.</td></tr><tr><td><code>"Confirm"</code></td><td>Require confirmation through the Argo CD Prune or Delete sync option.</td></tr><tr><td><code>"Retain"</code></td><td>Set the Argo CD Prune or Delete sync option to false.</td></tr></tbody></table>
 <p><a id="field-spec.namespace.prunePolicy"></a></p>
 <h3 id="specnamespaceprunepolicy">spec.namespace.prunePolicy</h3>
-<p><strong>Optional</strong> · alternatives below</p>
+<p><strong>Optional</strong> · string</p>
 <p>Namespace pruning policy: Automatic, Confirm, or Retain.</p>
 <p><strong>default:</strong> <code>"Confirm"</code></p>
-<p><a id="field-spec.namespace.prunePolicy%5BAutomatic%5D"></a></p>
-<h3 id="specnamespaceprunepolicyautomatic">spec.namespace.prunePolicy[Automatic]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Allow pruning or deletion without additional restrictions.</p>
-<p><strong>const:</strong> <code>"Automatic"</code></p>
-<p><a id="field-spec.namespace.prunePolicy%5BConfirm%5D"></a></p>
-<h3 id="specnamespaceprunepolicyconfirm">spec.namespace.prunePolicy[Confirm]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Require confirmation through the Argo CD Prune or Delete sync option.</p>
-<p><strong>const:</strong> <code>"Confirm"</code></p>
-<p><a id="field-spec.namespace.prunePolicy%5BRetain%5D"></a></p>
-<h3 id="specnamespaceprunepolicyretain">spec.namespace.prunePolicy[Retain]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Set the Argo CD Prune or Delete sync option to false.</p>
-<p><strong>const:</strong> <code>"Retain"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Automatic"</code></td><td>Allow pruning or deletion without additional restrictions.</td></tr><tr><td><code>"Confirm"</code></td><td>Require confirmation through the Argo CD Prune or Delete sync option.</td></tr><tr><td><code>"Retain"</code></td><td>Set the Argo CD Prune or Delete sync option to false.</td></tr></tbody></table>
 <p><a id="field-spec.outputPath"></a></p>
 <h3 id="specoutputpath">spec.outputPath</h3>
 <p><strong>Optional</strong> · string or null</p>
@@ -335,47 +359,48 @@ one generated workload Application.</p>
 <p>Unknown fields are rejected.</p>
 <p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner"></a></p>
 <h3 id="specsharednamespaceskeyowner">spec.sharedNamespaces[key].owner</h3>
-<p><strong>Required</strong> · alternatives below</p>
-<p>The sole owner of a shared Namespace. Release and Dedicated owners identify the responsible ApplicationGroup.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BRelease%5D"></a></p>
-<h3 id="specsharednamespaceskeyownerrelease">spec.sharedNamespaces[key].owner[Release]</h3>
 <p><strong>Required</strong> · object</p>
+<p>The sole owner of a shared Namespace. Release and Dedicated owners identify the responsible ApplicationGroup.</p>
+<p>Choose exactly one variant:</p>
+<details><summary>Release</summary>
+<p><strong>Type:</strong> object</p>
 <p>The selected workload Release owns the Namespace; other workloads must not render its Namespace object.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BRelease%5D.applicationGroup"></a></p>
-<h3 id="specsharednamespaceskeyownerreleaseapplicationgroup">spec.sharedNamespaces[key].owner[Release].applicationGroup</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-1%5D.applicationGroup"></a></p>
+<h3 id="specsharednamespaceskeyownerapplicationgroup">spec.sharedNamespaces[key].owner.applicationGroup</h3>
 <p><strong>Required</strong> · string</p>
 <p>ApplicationGroup owning the Namespace Application or selected workload Release.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BRelease%5D.kind"></a></p>
-<h3 id="specsharednamespaceskeyownerreleasekind">spec.sharedNamespaces[key].owner[Release].kind</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-1%5D.kind"></a></p>
+<h3 id="specsharednamespaceskeyownerkind">spec.sharedNamespaces[key].owner.kind</h3>
 <p><strong>Required</strong> · string</p>
 <p><strong>const:</strong> <code>"Release"</code></p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BRelease%5D.release"></a></p>
-<h3 id="specsharednamespaceskeyownerreleaserelease">spec.sharedNamespaces[key].owner[Release].release</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-1%5D.release"></a></p>
+<h3 id="specsharednamespaceskeyownerrelease">spec.sharedNamespaces[key].owner.release</h3>
 <p><strong>Required</strong> · string</p>
 <p>Release name within the owning ApplicationGroup.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BDedicated%5D"></a></p>
-<h3 id="specsharednamespaceskeyownerdedicated">spec.sharedNamespaces[key].owner[Dedicated]</h3>
-<p><strong>Required</strong> · object</p>
+</details>
+<details><summary>Dedicated</summary>
+<p><strong>Type:</strong> object</p>
 <p>Generate a dedicated Namespace Application under the selected group; workloads must not render this Namespace.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BDedicated%5D.applicationGroup"></a></p>
-<h3 id="specsharednamespaceskeyownerdedicatedapplicationgroup">spec.sharedNamespaces[key].owner[Dedicated].applicationGroup</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-2%5D.applicationGroup"></a></p>
+<h3 id="specsharednamespaceskeyownerapplicationgroup-1">spec.sharedNamespaces[key].owner.applicationGroup</h3>
 <p><strong>Required</strong> · string</p>
 <p>ApplicationGroup owning the Namespace Application or selected workload Release.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BDedicated%5D.kind"></a></p>
-<h3 id="specsharednamespaceskeyownerdedicatedkind">spec.sharedNamespaces[key].owner[Dedicated].kind</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-2%5D.kind"></a></p>
+<h3 id="specsharednamespaceskeyownerkind-1">spec.sharedNamespaces[key].owner.kind</h3>
 <p><strong>Required</strong> · string</p>
 <p><strong>const:</strong> <code>"Dedicated"</code></p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BExternal%5D"></a></p>
-<h3 id="specsharednamespaceskeyownerexternal">spec.sharedNamespaces[key].owner[External]</h3>
-<p><strong>Required</strong> · object</p>
+</details>
+<details><summary>External</summary>
+<p><strong>Type:</strong> object</p>
 <p>The Namespace is externally owned. Nyl neither synthesizes nor accepts an authored Namespace object.</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BExternal%5D.kind"></a></p>
-<h3 id="specsharednamespaceskeyownerexternalkind">spec.sharedNamespaces[key].owner[External].kind</h3>
+<p><a id="field-spec.sharedNamespaces%5Bkey%5D.owner%5BoneOf-3%5D.kind"></a></p>
+<h3 id="specsharednamespaceskeyownerkind-2">spec.sharedNamespaces[key].owner.kind</h3>
 <p><strong>Required</strong> · string</p>
 <p><strong>const:</strong> <code>"External"</code></p>
+</details>
 <p><a id="field-spec.source"></a></p>
 <h3 id="specsource">spec.source</h3>
 <p><strong>Optional</strong> · object or null</p>
@@ -453,19 +478,28 @@ one generated workload Application.</p>
 <p>Unknown fields are rejected.</p>
 <p><a id="field-spec.source.rendererConfig.mode"></a></p>
 <h3 id="specsourcerendererconfigmode">spec.source.rendererConfig.mode</h3>
-<p><strong>Optional</strong> · alternatives below</p>
+<p><strong>Optional</strong> · string</p>
 <p>Central uses platform configuration; Remote loads the remote project and requires a remote source.</p>
 <p><strong>default:</strong> <code>"Central"</code></p>
-<p><a id="field-spec.source.rendererConfig.mode%5BCentral%5D"></a></p>
-<h3 id="specsourcerendererconfigmodecentral">spec.source.rendererConfig.mode[Central]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Use the central platform project configuration.</p>
-<p><strong>const:</strong> <code>"Central"</code></p>
-<p><a id="field-spec.source.rendererConfig.mode%5BRemote%5D"></a></p>
-<h3 id="specsourcerendererconfigmoderemote">spec.source.rendererConfig.mode[Remote]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Load project configuration from the remote source checkout with restricted inputs.</p>
-<p><strong>const:</strong> <code>"Remote"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Central"</code></td><td>Use the central platform project configuration.</td></tr><tr><td><code>"Remote"</code></td><td>Load project configuration from the remote source checkout with restricted inputs.</td></tr></tbody></table>
 <p><a id="field-spec.source.rendererConfig.projectPath"></a></p>
 <h3 id="specsourcerendererconfigprojectpath">spec.source.rendererConfig.projectPath</h3>
 <p><strong>Optional</strong> · string or null</p>

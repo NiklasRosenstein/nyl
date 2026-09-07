@@ -158,23 +158,35 @@
 <p><strong>Optional</strong> · string</p>
 <p><a id="field-spec.catalogApplication.applicationDeletionPolicy"></a></p>
 <h3 id="speccatalogapplicationapplicationdeletionpolicy">spec.catalogApplication.applicationDeletionPolicy</h3>
-<p><strong>Optional</strong> · null</p>
+<p><strong>Optional</strong> · string or null</p>
 <p>Application deletion override; inherits the instance default when omitted.</p>
-<p><a id="field-spec.catalogApplication.applicationDeletionPolicy%5BForeground%5D"></a></p>
-<h3 id="speccatalogapplicationapplicationdeletionpolicyforeground">spec.catalogApplication.applicationDeletionPolicy[Foreground]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Cascade deletion in the foreground using the Argo CD resources finalizer.</p>
-<p><strong>const:</strong> <code>"Foreground"</code></p>
-<p><a id="field-spec.catalogApplication.applicationDeletionPolicy%5BBackground%5D"></a></p>
-<h3 id="speccatalogapplicationapplicationdeletionpolicybackground">spec.catalogApplication.applicationDeletionPolicy[Background]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Cascade deletion in the background using the Argo CD background finalizer.</p>
-<p><strong>const:</strong> <code>"Background"</code></p>
-<p><a id="field-spec.catalogApplication.applicationDeletionPolicy%5BOrphan%5D"></a></p>
-<h3 id="speccatalogapplicationapplicationdeletionpolicyorphan">spec.catalogApplication.applicationDeletionPolicy[Orphan]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Omit the finalizer and leave workload resources in place.</p>
-<p><strong>const:</strong> <code>"Orphan"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Foreground"</code></td><td>Cascade deletion in the foreground using the Argo CD resources finalizer.</td></tr><tr><td><code>"Background"</code></td><td>Cascade deletion in the background using the Argo CD background finalizer.</td></tr><tr><td><code>"Orphan"</code></td><td>Omit the finalizer and leave workload resources in place.</td></tr><tr><td><code>null</code></td><td></td></tr></tbody></table>
 <p><a id="field-spec.catalogApplication.enabled"></a></p>
 <h3 id="speccatalogapplicationenabled">spec.catalogApplication.enabled</h3>
 <p><strong>Optional</strong> · boolean</p>
@@ -197,23 +209,35 @@
 <p>Argo CD project override; inherits the instance catalog default when omitted.</p>
 <p><a id="field-spec.catalogApplication.selfPrunePolicy"></a></p>
 <h3 id="speccatalogapplicationselfprunepolicy">spec.catalogApplication.selfPrunePolicy</h3>
-<p><strong>Optional</strong> · null</p>
+<p><strong>Optional</strong> · string or null</p>
 <p>Self-pruning override; inherits the instance default when omitted.</p>
-<p><a id="field-spec.catalogApplication.selfPrunePolicy%5BAutomatic%5D"></a></p>
-<h3 id="speccatalogapplicationselfprunepolicyautomatic">spec.catalogApplication.selfPrunePolicy[Automatic]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Allow pruning or deletion without additional restrictions.</p>
-<p><strong>const:</strong> <code>"Automatic"</code></p>
-<p><a id="field-spec.catalogApplication.selfPrunePolicy%5BConfirm%5D"></a></p>
-<h3 id="speccatalogapplicationselfprunepolicyconfirm">spec.catalogApplication.selfPrunePolicy[Confirm]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Require confirmation through the Argo CD Prune or Delete sync option.</p>
-<p><strong>const:</strong> <code>"Confirm"</code></p>
-<p><a id="field-spec.catalogApplication.selfPrunePolicy%5BRetain%5D"></a></p>
-<h3 id="speccatalogapplicationselfprunepolicyretain">spec.catalogApplication.selfPrunePolicy[Retain]</h3>
-<p><strong>Optional</strong> · string</p>
-<p>Set the Argo CD Prune or Delete sync option to false.</p>
-<p><strong>const:</strong> <code>"Retain"</code></p>
+<p><strong>Allowed values:</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>"Automatic"</code></td><td>Allow pruning or deletion without additional restrictions.</td></tr><tr><td><code>"Confirm"</code></td><td>Require confirmation through the Argo CD Prune or Delete sync option.</td></tr><tr><td><code>"Retain"</code></td><td>Set the Argo CD Prune or Delete sync option to false.</td></tr><tr><td><code>null</code></td><td></td></tr></tbody></table>
 <p><a id="field-spec.catalogApplication.syncPolicy"></a></p>
 <h3 id="speccatalogapplicationsyncpolicy">spec.catalogApplication.syncPolicy</h3>
 <p><strong>Optional</strong> · object or null</p>
