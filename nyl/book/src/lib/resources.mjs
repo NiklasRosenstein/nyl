@@ -32,7 +32,7 @@ export function resourceGroups() {
 }
 export function resourceSidebar() {
   return resourceGroups().map((group) => ({
-    label: `${group.label} (${group.apiVersion})`, collapsed: true,
+    label: group.apiVersion, collapsed: true,
     items: group.resources.map((resource) => ({ label: resource.name, link: resource.route })),
   }));
 }

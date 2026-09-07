@@ -41,7 +41,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Nyl",
-      description: "A fast Kubernetes manifest generator for rendered manifest GitOps and CLI workflows.",
+      description: "A fast Kubernetes manifest generator for rendered GitOps.",
       social: [
         {
           icon: "github",
@@ -57,7 +57,6 @@ export default defineConfig({
             "index",
             "getting-started",
             "deployment-workflows/rendered-manifests",
-            "deployment-workflows/cli-workflows",
           ],
         },
         {
@@ -75,24 +74,8 @@ export default defineConfig({
               ],
             },
             "git-integration",
-            {
-              label: "Commands",
-              items: [
-                "commands",
-                "commands/rendering-pipeline",
-                "commands/gitops",
-                "commands/init",
-                "commands/create",
-                "commands/project-resources",
-                "commands/validate",
-                "commands/render",
-                "commands/diff",
-                "commands/apply",
-                "commands/release",
-                "commands/schema",
-                "commands/vendor",
-              ],
-            },
+            { label: "Direct CLI operations", link: "/deployment-workflows/cli-workflows/" },
+            { label: "Rendering usage guides", collapsed: true, items: [{ autogenerate: { directory: "components/resource-guides" } }] },
           ],
         },
         {
@@ -107,11 +90,28 @@ export default defineConfig({
           ],
         },
         {
+          label: "Command Reference",
+          items: [
+            "commands",
+            "commands/rendering-pipeline",
+            "commands/gitops",
+            "commands/init",
+            "commands/create",
+            "commands/project-resources",
+            "commands/validate",
+            "commands/render",
+            "commands/diff",
+            "commands/apply",
+            "commands/release",
+            "commands/schema",
+            "commands/vendor",
+          ],
+        },
+        {
           label: "Reference",
           items: [
             { label: "Resources", link: "/reference/resources/" },
             ...resourceSidebar(),
-            { label: "Rendering usage guides", collapsed: true, items: [{ autogenerate: { directory: "components/resource-guides" } }] },
             "reference/kyverno-policies",
           ],
         },

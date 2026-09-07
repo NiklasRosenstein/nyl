@@ -1,4 +1,5 @@
 import { stringify } from 'yaml';
+import { resourceUsage } from './resources.mjs';
 
 const structural = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'dependentRequired', 'dependentSchemas'];
 const scalar = ['const', 'default', 'format', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minItems', 'maxItems', 'uniqueItems', 'minProperties', 'maxProperties', 'deprecated'];
@@ -111,5 +112,13 @@ export function schemaReference(schema) {
 }
 
 export function resourceMarkdown(schema) {
-  return [schema.description, '## Example', '```yaml\n' + stringify(schema.examples[0]).trimEnd() + '\n```', schemaReference(schema)].join('\n\n');
+  const usage = resourceUsage(schema);
+  const description = schema.description.split(/(?=^## )/m).map((section) => {
+    const heading = section.split('\n', 1)[0].trim();
+    const entry = usage.find(({ label }) => heading === `## ${label}`);
+    if (!entry) return section.trim();
+    const id = entry.label.toLowerCase().replaceAll(' ', '-');
+    return `<details id="${id}"><summary>${entry.label}</summary>\n\n${entry.markdown}\n\n</details>`;
+  }).join('\n\n');
+  return [description, '## Example', '```yaml\n' + stringify(schema.examples[0]).trimEnd() + '\n```', schemaReference(schema)].join('\n\n');
 }

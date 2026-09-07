@@ -26,9 +26,8 @@ const groups = await Promise.all(resourceGroups().map(async (group) => ({
         <td><a href={`${base}${resource.route}`}>{resource.name}</a></td>
         <td>
           <Fragment set:html={resource.purpose} />
-          {resource.usage.map(({ label, html }) => label === 'If omitted'
-            ? <details><summary>{label}</summary><Fragment set:html={html} /></details>
-            : <div class="usage"><strong>{label}</strong><Fragment set:html={html} /></div>)}
+          {resource.usage.map(({ label, html }) =>
+            <details><summary>{label}</summary><Fragment set:html={html} /></details>)}
         </td>
       </tr>)}
     </tbody></table>
@@ -40,7 +39,6 @@ const groups = await Promise.all(resourceGroups().map(async (group) => ({
   table { width: 100%; }
   td { vertical-align: top; }
   td p:first-child { margin-top: 0; }
-  .usage :global(p) { margin-top: 0.25rem; }
   td details { margin-top: 0.75rem; }
   @media (max-width: 50rem) {
     table, tbody, tr, td { display: block; }

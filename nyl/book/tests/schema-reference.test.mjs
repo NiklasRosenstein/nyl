@@ -42,6 +42,7 @@ test('cluster destination schema enforces exactly one non-null destination', () 
 test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.equal(resourceGroups().flatMap((group) => group.resources).length, resources.length);
   assert.equal(new Set(resources.map((resource) => resource.route)).size, resources.length);
+  assert.deepEqual(resourceSidebar().map(({ label }) => label), resourceGroups().map(({ apiVersion }) => apiVersion));
   const links = resourceSidebar().flatMap((group) => group.items.map((item) => item.link));
   assert.deepEqual(links, resources.map((resource) => resource.route));
 });
@@ -73,9 +74,11 @@ test('all references render resource usage, schema examples, and resolvable fiel
     assert.ok(markdown.includes(`apiVersion: ${resource.apiVersion}`));
     assert.ok(markdown.includes('id="field-metadata.name"'));
     const rendered = await processor.render(markdown);
-    for (const heading of ['when-needed', 'if-omitted']) {
-      assert.ok(rendered.metadata.headings.some(({ slug, depth }) => slug === heading && depth === 2), `${resource.name}: missing ${heading} navigation`);
+    for (const { label } of resourceUsage(schemaFor(resource))) {
+      const id = label.toLowerCase().replaceAll(' ', '-');
+      assert.ok(rendered.code.includes(`<details id="${id}"><summary>${label}</summary>`), `${resource.name}: ${label} must be collapsed with a fragment target`);
     }
+    assert.deepEqual(rendered.metadata.headings.filter(({ depth }) => depth === 2).map(({ text }) => text), ['Example', 'Fields']);
   }
 });
 
