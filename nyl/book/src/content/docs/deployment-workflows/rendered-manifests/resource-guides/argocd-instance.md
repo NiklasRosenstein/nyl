@@ -11,11 +11,17 @@ Every target emits a parent Application named `<target>-catalog` unless
 syncs `<pathPrefix>/_nyl/catalog` and therefore manages the generated child
 Applications, AppProjects, and its own manifest.
 
-The catalog requires manual sync by default. When synchronized, it applies only
-out-of-sync resources with Kubernetes server-side apply. Foreground deletion
-cascades to catalog resources, and `selfPrunePolicy: Confirm` annotates the
-parent with `Prune=confirm`. A target can override the name, project, sync
-policy, deletion policy, self-prune policy, labels, and annotations under
+Nyl's catalog defaults apply without any explicit policy configuration:
+
+- Manual synchronization.
+- `ApplyOutOfSyncOnly=true` and `ServerSideApply=true` for synchronization.
+- `applicationDeletionPolicy: Foreground`, so deleting the parent cascades to
+  catalog resources.
+- `selfPrunePolicy: Confirm`, which annotates the parent with `Prune=confirm`.
+
+Set `ArgoCDInstance.spec.catalogApplicationDefaults` to customize these defaults
+for its targets. An individual DeploymentTarget can override the name, project,
+sync policy, deletion policy, self-prune policy, labels, and annotations under
 `spec.catalogApplication`.
 
 Enable automated catalog synchronization explicitly when the publication
