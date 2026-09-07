@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "description": "Project settings in `[project]` section of `nyl.toml`.",
+      "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`.\nValues are component kind targets (local component path or remote shortcut URL).",
+          "type": "object"
+        },
+        "components_search_paths": {
+          "default": [
+            "components"
+          ],
+          "description": "Search paths for local component charts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gitops_scaffold_path": {
+          "default": "config",
+          "description": "Directory where GitOps configuration resources are scaffolded.",
+          "type": "string"
+        },
+        "helm_chart_search_paths": {
+          "default": [
+            "."
+          ],
+          "description": "Search paths for Helm chart names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strip_empty_metadata_labels": {
+          "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
+          "default": "always",
+          "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
+        }
+      },
+      "type": "object"
+    },
+    "StripEmptyMetadataLabelsMode": {
+      "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "argocd",
+          "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
+          "type": "string"
+        }
+      ]
+    },
+    "VendorMode": {
+      "description": "Controls whether remote renderer inputs may use an in-tree vendor snapshot.",
+      "enum": [
+        "disabled",
+        "preferred",
+        "required"
+      ],
+      "type": "string"
+    },
+    "VendorSettings": {
+      "additionalProperties": false,
+      "description": "Project-global remote artifact vendoring settings.",
+      "properties": {
+        "lfs_threshold_bytes": {
+          "default": 1048576,
+          "description": "Text blobs at least this large are tracked through Git LFS.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/VendorMode",
+          "description": "Resolution policy for vendored remote inputs."
+        },
+        "path": {
+          "default": "vendor",
+          "description": "In-tree directory containing the generated lock and artifact blobs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Root structure of `nyl.toml`.",
+  "properties": {
+    "project": {
+      "$ref": "#/$defs/ProjectSettings",
+      "default": {
+        "aliases": {},
+        "components_search_paths": [
+          "components"
+        ],
+        "gitops_scaffold_path": "config",
+        "helm_chart_search_paths": [
+          "."
+        ],
+        "strip_empty_metadata_labels": "always"
+      }
+    },
+    "vendor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VendorSettings"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional project-global artifact vendoring policy."
+    }
+  },
+  "title": "ProjectFile",
+  "type": "object"
+}
