@@ -218,13 +218,17 @@ pub(crate) async fn generate_render_resource(
     )
     .await
     .map_err(|error| error.with_render_provenance(provenance.to_string()))?;
-    Ok(generated
+    generated
         .into_iter()
-        .map(|value| RenderResource {
-            value,
-            provenance: provenance.clone(),
+        .map(|value| {
+            crate::resources::schema::validate_resource_api(&value)
+                .map_err(|error| error.with_render_provenance(provenance.resource(&value).to_string()))?;
+            Ok(RenderResource {
+                value,
+                provenance: provenance.clone(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) fn render_resource_identity(resource: &serde_json::Value) -> String {
