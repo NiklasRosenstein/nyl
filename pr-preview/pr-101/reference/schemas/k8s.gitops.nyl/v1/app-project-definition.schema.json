@@ -75,7 +75,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Defines an Argo CD AppProject manifest or an externally managed project contract.\n\nRendered projects are emitted into the catalog. External projects supply an admission contract without transferring ownership to Nyl.",
+  "description": "Defines an Argo CD AppProject manifest or an externally managed project contract.\n\nRendered projects are emitted into the catalog. External projects supply an admission contract without transferring ownership to Nyl.\n\n## When needed\n\nRequired when an ApplicationGroup uses `spec.projectRef`, including when the Argo CD AppProject is externally managed.\n\n## If omitted\n\nAn ApplicationGroup can use `spec.projectTemplate` to generate its AppProject instead. Exactly one of `projectRef` and `projectTemplate` must be set; Nyl does not assume an existing Argo CD project supplies the required policy contract.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

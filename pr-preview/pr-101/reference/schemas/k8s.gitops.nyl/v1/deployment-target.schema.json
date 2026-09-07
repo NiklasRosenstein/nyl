@@ -380,7 +380,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Binds a Kubernetes Cluster to render values, ApplicationGroup selection, and Git publication coordinates.\n\nA target owns one independently renderable publication slice. It is compiler configuration and does not represent a general infrastructure environment.",
+  "description": "Binds a Kubernetes Cluster to render values, ApplicationGroup selection, and Git publication coordinates.\n\nA target owns one independently renderable publication slice. It is compiler configuration and does not represent a general infrastructure environment.\n\n## When needed\n\nRequired for target-aware rendered GitOps operations. It supplies workload Cluster selection and publication coordinates.\n\n## If omitted\n\nOperations requiring a target fail when none are declared. If exactly one target exists, Nyl selects it without `--target`; with multiple targets, select one explicitly. Target selection never creates a DeploymentTarget.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

@@ -172,7 +172,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Describes a concrete Kubernetes destination and its deterministic rendering capabilities.\n\nCluster values supply reusable facts; target values take precedence. This is compiler configuration and is not emitted as a workload manifest.",
+  "description": "Describes a concrete Kubernetes destination and its deterministic rendering capabilities.\n\nCluster values supply reusable facts; target values take precedence. This is compiler configuration and is not emitted as a workload manifest.\n\n## When needed\n\nRequired for every workload destination and every explicitly configured Argo CD control-plane destination in rendered GitOps.\n\n## If omitted\n\nTarget rendering fails if the referenced Cluster is missing. Omitting `DeploymentTarget.spec.clusterRef` selects a Cluster with the target name; it does not create that Cluster or infer its capabilities from kubeconfig.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

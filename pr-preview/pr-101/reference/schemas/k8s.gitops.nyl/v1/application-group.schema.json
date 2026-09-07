@@ -675,7 +675,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.\n\nLiteral metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.",
+  "description": "Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.\n\nLiteral metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.\n\n## When needed\n\nRequired to select Release entry files and generate their workload Applications in rendered GitOps.\n\n## If omitted\n\nNyl does not infer groups from directories or Release files. Without a selected, enabled ApplicationGroup, a target emits no workload Applications. Direct file rendering does not require an ApplicationGroup.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

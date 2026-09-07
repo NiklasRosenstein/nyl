@@ -38,7 +38,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Expands a chart identified by a dynamic resource kind into Kubernetes manifests.\n\nThe kind is a local component path or remote chart shortcut, not the literal `Component`. The spec supplies chart values; the selected chart defines its input contract.",
+  "description": "Expands a chart identified by a dynamic resource kind into Kubernetes manifests.\n\nThe kind is a local component path or remote chart shortcut, not the literal `Component`. The spec supplies chart values; the selected chart defines its input contract.\n\n## When needed\n\nUse this optional resource to invoke a chart through a local component kind or a remote chart shortcut.\n\n## If omitted\n\nCharts in component search paths are not rendered until invoked. A HelmChart can render a chart through explicit coordinates instead; authored Kubernetes manifests need no component invocation.",
   "examples": [
     {
       "apiVersion": "components.k8s.nyl/v1",

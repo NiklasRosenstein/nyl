@@ -134,7 +134,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Fetches HTTPS YAML or JSON documents and expands them into Kubernetes manifests.\n\nFetched documents enter the recursive render pipeline. Namespace overriding applies when explicitly requested.",
+  "description": "Fetches HTTPS YAML or JSON documents and expands them into Kubernetes manifests.\n\nFetched documents enter the recursive render pipeline. Namespace overriding applies when explicitly requested.\n\n## When needed\n\nUse this optional resource to fetch HTTPS YAML or JSON documents into the render pipeline.\n\n## If omitted\n\nNyl does not fetch remote manifests automatically. Other authored resources render normally without a RemoteManifest.",
   "examples": [
     {
       "apiVersion": "k8s.nyl/v1",

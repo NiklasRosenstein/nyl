@@ -200,7 +200,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Defines an Argo CD control plane and the catalog defaults for its deployment targets.\n\nThis is compiler configuration. Targets sharing an instance must use unambiguous generated Application and AppProject names.",
+  "description": "Defines an Argo CD control plane and the catalog defaults for its deployment targets.\n\nThis is compiler configuration. Targets sharing an instance must use unambiguous generated Application and AppProject names.\n\n## When needed\n\nDeclare one to configure a shared or remote Argo CD control plane, a different namespace, or shared catalog defaults.\n\n## If omitted\n\nWhen no ArgoCDInstance resources are declared, each target uses an implicit instance in its workload Cluster, in namespace `argocd`, with the catalog defaults. Leave `spec.argocdRef` unset in this case. Once any explicit instance exists, every DeploymentTarget must set `spec.argocdRef.name` to a declared instance.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",
