@@ -17,6 +17,33 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 **Task Runner:** mise  
 **Documentation:** Astro/Starlight
 
+## Roadmap and Architectural Decisions
+
+- Read [ROADMAP.md](ROADMAP.md) before work that affects Nyl's scope,
+  orchestration architecture, state model, driver contracts, or public workflow.
+  It is a shared frame of reference, not a fully authoritative specification or
+  authorization to implement unrelated milestones. Explicit user instructions
+  and verified implementation constraints take precedence.
+- Before committing to a key architectural decision that diverges from the
+  roadmap, double-check the decision against the relevant code, contracts,
+  user goals, and operational failure modes. Use the advisor skill for an
+  independent, focused review when available; otherwise perform a separate
+  deliberate review. Routine implementation details do not need this process.
+- After that check, update ROADMAP.md in the same body of work to describe the
+  current direction, its rationale and constraints, affected milestones, and
+  any remaining open decisions. Do not leave a known architectural divergence
+  documented as the intended plan. Ask the user only when a material product
+  choice or authorization remains unresolved; divergence alone does not require
+  permission.
+- Keep the roadmap's progress and next step accurate. Mark completion only when
+  its acceptance criteria are met, and distinguish proposals from implemented
+  capabilities. Preserve milestone identifiers where practical for references
+  from issues and pull requests.
+- Describe the current direction directly. Do not add "previously planned",
+  superseded alternatives, or a chronological decision log to ROADMAP.md.
+  Historical reasoning belongs in commit messages, pull requests, or dedicated
+  decision notes; the roadmap records the selected direction and why it fits.
+
 ## Repository Structure
 
 ```
