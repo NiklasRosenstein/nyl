@@ -157,8 +157,8 @@ mod tests {
     fn updates_only_the_selected_document_in_a_shared_file() {
         let temporary = tempfile::TempDir::new().unwrap();
         let path = temporary.path().join("gitops.yaml");
-        let first = "apiVersion: gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: first\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
-        let second = "apiVersion: gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: second\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
+        let first = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: first\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
+        let second = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: second\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
         fs::write(&path, format!("{first}---\n{second}")).unwrap();
         let discovered = DiscoveredGitOpsResource {
             source_path: "gitops.yaml".into(),

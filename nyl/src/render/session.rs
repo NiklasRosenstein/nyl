@@ -831,11 +831,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::constants::{API_VERSION, API_VERSION_GITOPS};
+    use crate::constants::{API_VERSION, API_VERSION_K8S_GITOPS};
 
     fn target() -> DeploymentTarget {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": API_VERSION_GITOPS,
+            "apiVersion": API_VERSION_K8S_GITOPS,
             "kind": "DeploymentTarget",
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
@@ -852,7 +852,7 @@ mod tests {
 
     fn cluster() -> Cluster {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": API_VERSION_GITOPS,
+            "apiVersion": API_VERSION_K8S_GITOPS,
             "kind": "Cluster",
             "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
             "spec": {
@@ -871,13 +871,13 @@ mod tests {
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
         let pinned = serde_json::json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "https://charts.example.com/#workload@1.2.3",
             "metadata": {"name": "workload"},
             "spec": {}
         });
         let unpinned = serde_json::json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "https://charts.example.com/#workload",
             "metadata": {"name": "workload"},
             "spec": {}
@@ -968,7 +968,7 @@ data:
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
-            r#"apiVersion: gitops.nyl/v1
+            r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: {{ target.metadata.name }}
@@ -1010,7 +1010,7 @@ data:
         fs::write(
             temp.path().join("app.yaml"),
             format!(
-                r#"apiVersion: gitops.nyl/v1
+                r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: strict-values
@@ -1046,7 +1046,7 @@ spec:
         fs::write(
             temp.path().join("bad.yaml"),
             format!(
-                r"apiVersion: gitops.nyl/v1
+                r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: strict-values
@@ -1077,7 +1077,7 @@ spec:
 
         assert!(error.contains("Source: bad.yaml (document 2)"), "{error}");
         assert!(
-            error.contains("Resource: nyl.niklasrosenstein.github.com/v1 HelmChart strict-values/strict-values"),
+            error.contains("Resource: k8s.nyl/v1 HelmChart strict-values/strict-values"),
             "{error}"
         );
         assert!(error.contains("chart: chart"), "{error}");

@@ -8,7 +8,7 @@ For most teams, the default workflow is:
 
 1. Define local component charts under `components/<apiVersion>/<kind>/`.
 2. Reference those components from manifests with:
-   - `apiVersion: components.nyl.niklasrosenstein.github.com/v1`
+   - `apiVersion: components.k8s.nyl/v1`
    - `kind: <apiVersion>/<kind>`
 3. Put Helm values into `spec`.
 
@@ -33,7 +33,7 @@ spec:
 Example:
 
 ```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: example/v1/Nginx
 metadata:
   name: web
@@ -53,4 +53,4 @@ See:
 - [Authoring Local Components](/nyl/components/authoring-local-components/)
 - [Resolution & Lookup Rules](/nyl/components/resolution-and-lookup/)
 - [Remote Shortcuts & Aliases](/nyl/components/remote-shortcuts-and-aliases/)
-- [Component resource reference](/nyl/reference/resources/component/)
+- [Component resource reference](/nyl/reference/resources/components.k8s.nyl/v1/component/)

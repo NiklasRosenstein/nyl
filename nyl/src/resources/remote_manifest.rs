@@ -4,6 +4,7 @@
 /// them into the normal render pipeline.
 use std::collections::HashMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::API_VERSION;
@@ -11,8 +12,9 @@ use crate::resources::ObjectMetadata;
 use crate::{NylError, Result};
 
 /// RemoteManifest specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::remote_manifest_constraints)]
 pub struct RemoteManifestSpec {
     /// Single HTTPS URL to fetch (mutually exclusive with `urls`)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,9 +30,12 @@ pub struct RemoteManifestSpec {
     pub override_namespace: bool,
 }
 
-/// RemoteManifest resource
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Fetches HTTPS YAML or JSON documents and expands them into Kubernetes manifests.
+///
+/// Fetched documents enter the recursive render pipeline. Namespace overriding applies when explicitly requested.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::RemoteManifest))]
 pub struct RemoteManifest {
     /// API version (must be core Nyl API version)
     #[serde(rename = "apiVersion")]
@@ -174,7 +179,7 @@ mod tests {
     #[test]
     fn test_is_remote_manifest_true() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "https://example.com/manifests.yaml"}
@@ -195,7 +200,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_empty_url() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "   "}
@@ -208,7 +213,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_non_https_url() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "http://example.com/manifests.yaml"}
@@ -221,7 +226,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_neither_url_nor_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {}
@@ -234,7 +239,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_both_url_and_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -250,7 +255,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_params_without_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -266,7 +271,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_empty_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"urls": []}
@@ -279,7 +284,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_non_https_in_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"urls": ["https://example.com/a.yaml", "http://example.com/b.yaml"]}
@@ -292,7 +297,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_accepts_urls_with_params() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -310,7 +315,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_validate_rejects_unresolved_placeholder_in_urls() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -326,7 +331,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_override_namespace_defaults_to_false() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "https://example.com/manifests.yaml"}
@@ -338,7 +343,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_override_namespace_true() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -353,7 +358,7 @@ mod tests {
     #[test]
     fn test_remote_manifest_from_value_rejects_unknown_fields() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "https://example.com/manifests.yaml", "unknownField": true}
@@ -404,7 +409,7 @@ mod tests {
     #[test]
     fn test_validate_rejects_params_value_with_braces() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {
@@ -420,7 +425,7 @@ mod tests {
     #[test]
     fn test_resolve_urls_from_url() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"url": "https://example.com/manifests.yaml"}
@@ -433,7 +438,7 @@ mod tests {
     #[test]
     fn test_resolve_urls_trims_whitespace() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {"urls": ["  https://example.com/a.yaml  ", " https://example.com/b.yaml "]}
@@ -446,7 +451,7 @@ mod tests {
     #[test]
     fn test_resolve_urls_from_urls_with_params() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "RemoteManifest",
             "metadata": {"name": "remote"},
             "spec": {

@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "ReleaseArgoCdSpec": {
+      "additionalProperties": false,
+      "description": "ArgoCD-specific options for Release.",
+      "properties": {
+        "applicationOverride": {
+          "additionalProperties": true,
+          "description": "Optional partial ArgoCD Application override.\n\nMust be an object if provided.",
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ReleaseMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata for Release",
+      "properties": {
+        "name": {
+          "description": "Release name",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Target namespace for the release",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "namespace"
+      ],
+      "type": "object"
+    },
+    "ReleaseSpec": {
+      "additionalProperties": false,
+      "description": "Rendering and GitOps options for a Release.",
+      "properties": {
+        "additionalNamespaces": {
+          "description": "Additional namespaces that rendered resources may explicitly target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "argocd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReleaseArgoCdSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ArgoCD-specific options."
+        },
+        "include": {
+          "description": "Additional manifest files, resolved relative to the Release file.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stripEmptyMetadataLabels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StripEmptyMetadataLabelsMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
+        }
+      },
+      "type": "object"
+    },
+    "StripEmptyMetadataLabelsMode": {
+      "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "argocd",
+          "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Defines a Kubernetes workload manifest boundary and its permitted namespace scope.\n\nNyl extracts this metadata from the output. Included files belong to this Release and cannot declare another Release. GitOps uses the boundary to generate one workload Application.",
+  "examples": [
+    {
+      "apiVersion": "k8s.gitops.nyl/v1",
+      "kind": "Release",
+      "metadata": {
+        "name": "workloads",
+        "namespace": "workloads"
+      },
+      "spec": {
+        "include": [
+          "manifests/*.yaml"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "k8s.gitops.nyl/v1",
+      "description": "API group and version defining this resource.",
+      "type": "string"
+    },
+    "kind": {
+      "const": "Release",
+      "description": "Resource kind within the API group.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ReleaseMetadata",
+      "description": "Resource identity and metadata."
+    },
+    "spec": {
+      "$ref": "#/$defs/ReleaseSpec",
+      "default": {},
+      "description": "Configuration for this resource."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata"
+  ],
+  "title": "Release",
+  "type": "object"
+}

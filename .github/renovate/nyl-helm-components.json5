@@ -7,7 +7,7 @@
       "description": "HelmChart resource with HTTP(S) Helm repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*(?<repoUrl>https?://[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<depName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?ms)^apiVersion:\\s*k8s\\.nyl/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*(?<repoUrl>https?://[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<depName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "helm",
       "registryUrlTemplate": "{{{repoUrl}}}"
@@ -17,7 +17,7 @@
       "description": "HelmChart resource with OCI repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*oci://(?<repoPath>[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<chartName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?ms)^apiVersion:\\s*k8s\\.nyl/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*oci://(?<repoPath>[^\\s\"']+)\\s*\\n\\s*name:\\s*[\"']?(?<chartName>[^\\s\"']+)[\"']?\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "docker",
       "depNameTemplate": "{{{repoPath}}}/{{{chartName}}}"
@@ -27,7 +27,7 @@
       "description": "HelmChart resource with Git repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?ms)^apiVersion:\\s*nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*git\\+(?<depName>[^\\s\"']+)\\s*\\n(?:\\s*name:\\s*[\"']?(?<chartPath>[^\\s\"']+)[\"']?\\s*\\n)?\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?ms)^apiVersion:\\s*k8s\\.nyl/v1\\s*\\nkind:\\s*HelmChart\\b[\\s\\S]*?\\n\\s*repository:\\s*git\\+(?<depName>[^\\s\"']+)\\s*\\n(?:\\s*name:\\s*[\"']?(?<chartPath>[^\\s\"']+)[\"']?\\s*\\n)?\\s*version:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "git-tags"
     },
@@ -36,7 +36,7 @@
       "description": "Component shortcut kind with HTTP(S) Helm repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?(?<repoUrl>https?://[^\\s\"'#]+)#(?<depName>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?m)^apiVersion:\\s*components\\.k8s\\.nyl/v1\\s*\\nkind:\\s*[\"']?(?<repoUrl>https?://[^\\s\"'#]+)#(?<depName>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "helm",
       "registryUrlTemplate": "{{{repoUrl}}}"
@@ -46,7 +46,7 @@
       "description": "Component shortcut kind with OCI repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?oci://(?<repoPath>[^\\s\"'@]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?m)^apiVersion:\\s*components\\.k8s\\.nyl/v1\\s*\\nkind:\\s*[\"']?oci://(?<repoPath>[^\\s\"'@]+)@(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "docker",
       "depNameTemplate": "{{{repoPath}}}"
@@ -56,7 +56,7 @@
       "description": "Component shortcut kind with Git repository",
       "fileMatch": ["(^|/).*\\.ya?ml$"],
       "matchStrings": [
-        "(?m)^apiVersion:\\s*components\\.nyl\\.niklasrosenstein\\.github\\.com/v1\\s*\\nkind:\\s*[\"']?git\\+(?<depName>[^\\s\"'#]+)#(?<chartPath>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
+        "(?m)^apiVersion:\\s*components\\.k8s\\.nyl/v1\\s*\\nkind:\\s*[\"']?git\\+(?<depName>[^\\s\"'#]+)#(?<chartPath>[^\\s\"'@#]+)@(?<currentValue>[^\\s\"']+)[\"']?"
       ],
       "datasourceTemplate": "git-tags"
     },

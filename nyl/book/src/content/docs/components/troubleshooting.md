@@ -10,7 +10,7 @@ Symptom:
 
 Checks:
 
-1. Confirm `apiVersion` is exactly `components.nyl.niklasrosenstein.github.com/v1` for Component resources.
+1. Confirm `apiVersion` is exactly `components.k8s.nyl/v1` for Component resources.
 2. Confirm `kind` matches `<apiVersion>/<kind>` directory layout.
 3. Confirm `Chart.yaml` exists at `<components_search_path>/<kind>/Chart.yaml`.
 4. Confirm `components_search_paths` are valid from the `nyl.toml` location.

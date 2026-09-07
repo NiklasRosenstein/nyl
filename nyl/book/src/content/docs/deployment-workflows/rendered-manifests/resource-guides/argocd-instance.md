@@ -1,36 +1,8 @@
 ---
-title: 'ArgoCDInstance'
+title: 'Using ArgoCDInstance'
 ---
 
-`ArgoCDInstance` models one Argo CD control plane independently from the
-workload clusters it manages. Several DeploymentTargets can reference the same
-instance while deploying to different Clusters.
-
-## Example
-
-```yaml
-apiVersion: gitops.nyl/v1
-kind: ArgoCDInstance
-metadata:
-  name: central
-spec:
-  clusterRef:
-    name: management
-  namespace: argocd
-  catalogApplicationDefaults:
-    project: default
-    syncPolicy:
-      syncOptions:
-        - ApplyOutOfSyncOnly=true
-        - ServerSideApply=true
-    applicationDeletionPolicy: Foreground
-    selfPrunePolicy: Confirm
-```
-
-`spec.clusterRef` identifies the Cluster where Argo CD runs. This is distinct
-from a DeploymentTarget's workload `clusterRef`. `spec.namespace`, defaulting to
-`argocd`, is the namespace containing generated AppProjects and the parent
-catalog Application. It is also that parent's destination namespace.
+See the [ArgoCDInstance resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/) for the API, example, and field definitions.
 
 ## Catalog defaults
 
@@ -76,7 +48,3 @@ kubectl apply -f deploy/<target>/_nyl/catalog/applications/argocd/<target>-catal
 ```
 
 Use the actual rendered output path and configured namespace when they differ.
-
-## Schema
-
-[`argocd-instance.schema.json`](/nyl/reference/schemas/argocd-instance.schema.json)

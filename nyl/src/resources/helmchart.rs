@@ -1,6 +1,7 @@
 /// HelmChart resource definition
 ///
 /// Represents a declarative Helm chart deployment
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,7 +10,7 @@ use crate::constants::API_VERSION;
 /// Reference to a Helm chart
 ///
 /// Supports Git, OCI, traditional Helm repositories, and local filesystem paths
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ChartRef {
     /// Repository URL for Git, OCI, or traditional Helm repositories
@@ -58,7 +59,7 @@ pub struct ChartRef {
 }
 
 /// Kubernetes object metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectMetadata {
     /// Resource name
@@ -90,7 +91,7 @@ impl ObjectMetadata {
 }
 
 /// HelmChart specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HelmChartSpec {
     /// Reference to the chart
@@ -116,13 +117,14 @@ impl Default for HelmChartSpec {
     }
 }
 
-/// HelmChart resource
+/// Expands a local or remote Helm chart into Kubernetes manifests.
 ///
-/// This is a Kubernetes-style resource that represents a Helm chart deployment
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Nyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::HelmChart))]
 pub struct HelmChart {
-    /// API version (e.g., "nyl.niklasrosenstein.github.com/v1")
+    /// API version (e.g., "k8s.nyl/v1")
     #[serde(rename = "apiVersion")]
     pub api_version: String,
 
@@ -226,7 +228,7 @@ mod tests {
 
         let helm_chart = HelmChart::new("my-app", chart_ref);
 
-        assert_eq!(helm_chart.api_version, "nyl.niklasrosenstein.github.com/v1");
+        assert_eq!(helm_chart.api_version, "k8s.nyl/v1");
         assert_eq!(helm_chart.kind, "HelmChart");
         assert_eq!(helm_chart.metadata.name, "my-app");
         assert_eq!(helm_chart.spec.chart.name, Some("./charts/app".to_string()));
@@ -270,7 +272,7 @@ mod tests {
             .with_values(values);
 
         let yaml = serde_norway::to_string(&helm_chart).unwrap();
-        assert!(yaml.contains("apiVersion: nyl.niklasrosenstein.github.com/v1"));
+        assert!(yaml.contains("apiVersion: k8s.nyl/v1"));
         assert!(yaml.contains("kind: HelmChart"));
         assert!(yaml.contains("name: nginx-app"));
         assert!(yaml.contains("replicaCount: 2"));
@@ -291,7 +293,7 @@ mod tests {
     #[test]
     fn test_helm_chart_spec_include_crds_explicit_false() {
         let yaml = r"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test
@@ -307,7 +309,7 @@ spec:
     #[test]
     fn test_helm_chart_spec_include_crds_explicit_true() {
         let yaml = r"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test
@@ -323,7 +325,7 @@ spec:
     #[test]
     fn test_helm_chart_spec_include_crds_omitted_is_none() {
         let yaml = r"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test
@@ -364,7 +366,7 @@ unknownField: value
     #[test]
     fn test_helm_chart_rejects_unknown_fields() {
         let yaml = r"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test

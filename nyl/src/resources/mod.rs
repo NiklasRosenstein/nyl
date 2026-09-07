@@ -9,6 +9,7 @@ mod kyverno;
 mod path_glob;
 mod release;
 mod remote_manifest;
+pub mod schema;
 
 pub use argocd_application_field_catalog::{
     is_supported_application_array_field_path, is_supported_application_field_path,

@@ -56,7 +56,7 @@ users:
         fs::create_dir(temp.path().join("config")).unwrap();
         fs::write(
             temp.path().join("config/target.yaml"),
-            r#"apiVersion: gitops.nyl/v1
+            r#"apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 metadata:
   name: test
@@ -67,7 +67,7 @@ spec:
     kubeVersion: 1.30.0
     apiVersions: [v1]
 ---
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: test

@@ -1,50 +1,8 @@
 ---
-title: 'RemoteManifest'
+title: 'Using RemoteManifest'
 ---
 
-`RemoteManifest` fetches YAML/JSON documents from one or more remote HTTPS URLs and feeds
-them into Nyl's normal render pipeline.
-
-## API Version
-
-- `nyl.niklasrosenstein.github.com/v1`
-
-## Schema
-
-Single URL (legacy form):
-
-```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: RemoteManifest
-metadata:
-  name: <name>
-spec:
-  url: https://example.com/path/manifests.yaml
-  overrideNamespace: false
-```
-
-Multiple URLs with parameter substitution:
-
-```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: RemoteManifest
-metadata:
-  name: <name>
-spec:
-  params:
-    version: 1.2.3
-  urls:
-    - https://example.com/v{version}/crd-a.yaml
-    - https://example.com/v{version}/crd-b.yaml
-  overrideNamespace: false
-```
-
-### Fields
-
-- `spec.url` (mutually exclusive with `spec.urls`): Single HTTPS URL containing one or more YAML/JSON documents.
-- `spec.urls` (mutually exclusive with `spec.url`): List of HTTPS URL templates. Each entry may contain `{key}` placeholders resolved from `spec.params`.
-- `spec.params` (optional, requires `spec.urls`): Map of parameter names to string values used for `{key}` substitution in `spec.urls` URLs.
-- `spec.overrideNamespace` (optional, default `false`): when `true`, fetched resources that already have `metadata.namespace` will have that value replaced with `RemoteManifest.metadata.namespace`.
+See the [RemoteManifest resource reference](/nyl/reference/resources/k8s.nyl/v1/remote-manifest/) for the API, example, and field definitions.
 
 ## Behavior
 
@@ -66,7 +24,7 @@ spec:
 ### Single URL
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: RemoteManifest
 metadata:
   name: shared-crds
@@ -77,7 +35,7 @@ spec:
 ### Multiple URLs with a shared version parameter
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: RemoteManifest
 metadata:
   name: gateway-api-crds

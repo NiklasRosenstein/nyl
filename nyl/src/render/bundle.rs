@@ -86,6 +86,9 @@ pub(crate) struct StaticReleaseEnvelope {
 pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleaseEnvelope>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
+    for document in best_effort_parse_yaml_documents(&raw) {
+        crate::resources::schema::validate_resource_api(&document)?;
+    }
     Ok(best_effort_parse_yaml_documents(&raw)
         .iter()
         .find(|document| Release::is_release(document))

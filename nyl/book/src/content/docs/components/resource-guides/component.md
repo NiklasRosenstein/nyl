@@ -1,35 +1,8 @@
 ---
-title: 'Component'
+title: 'Using Component'
 ---
 
-`Component` is a chart-backed resource format identified by:
-
-- `apiVersion: components.nyl.niklasrosenstein.github.com/v1`
-- dynamic `kind` (not a fixed literal)
-
-Unlike fixed resource kinds, `kind` encodes either:
-
-- a local component path (`<apiVersion>/<kind>`)
-- a remote shortcut (`<base>[#<name>][@<version>]`)
-
-## Resource Shape
-
-```yaml
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
-kind: example/v1/Nginx
-metadata:
-  name: web
-  namespace: default
-spec:
-  replicaCount: 2
-```
-
-## Semantics
-
-- `kind`: chart target (local or remote shortcut)
-- `metadata.name`: Helm release name
-- `metadata.namespace`: Helm release namespace (defaults to `default`)
-- `spec`: Helm values payload
+See the [Component resource reference](/nyl/reference/resources/components.k8s.nyl/v1/component/) for the API, example, and field definitions.
 
 ## Local Resolution
 

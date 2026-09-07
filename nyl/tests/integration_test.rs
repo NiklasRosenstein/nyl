@@ -11,7 +11,7 @@ fn create_gitops_target_fixture(temp: &TempDir) {
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
         temp.path().join("config/clusters/kasoku.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -29,7 +29,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/targets/production.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: production
@@ -297,7 +297,7 @@ fn delete_refuses_to_break_remaining_resource_references() {
     let temp = TempDir::new().unwrap();
     git2::Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
-    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
+    let resources = "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: https://git.example.invalid/deploy.git\n---\napiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: primary\nspec:\n  destination:\n    name: primary\n  kubernetes:\n    apiVersions: []\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: primary\nspec:\n  publication:\n    repositoryRef:\n      name: deploy\n    revision: deploy/primary\n";
     let path = temp.path().join("gitops.yaml");
     fs::write(&path, resources).unwrap();
 
@@ -398,7 +398,7 @@ fn test_render_command_expands_release_includes() {
     fs::create_dir(temp.path().join("manifests")).unwrap();
     fs::write(
         temp.path().join("release.yaml"),
-        "apiVersion: gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: [manifests/*.yaml]\n",
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: [manifests/*.yaml]\n",
     )
     .unwrap();
     fs::write(

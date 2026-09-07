@@ -1,0 +1,81 @@
+{
+  "$defs": {
+    "ObjectMetadata": {
+      "additionalProperties": false,
+      "description": "Kubernetes object metadata",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations",
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace (optional)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Expands a chart identified by a dynamic resource kind into Kubernetes manifests.\n\nThe kind is a local component path or remote chart shortcut, not the literal `Component`. The spec supplies chart values; the selected chart defines its input contract.",
+  "examples": [
+    {
+      "apiVersion": "components.k8s.nyl/v1",
+      "kind": "app/v1/WebService",
+      "metadata": {
+        "name": "workloads",
+        "namespace": "workloads"
+      },
+      "spec": {
+        "replicaCount": 2
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "components.k8s.nyl/v1",
+      "description": "API group and version for chart-backed component invocations.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Relative path under `components/` that identifies the Helm chart",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ObjectMetadata",
+      "description": "Helm release name, namespace, labels, and annotations."
+    },
+    "spec": {
+      "default": {},
+      "description": "Helm values — defaults to an empty object when omitted"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata"
+  ],
+  "title": "Component",
+  "type": "object"
+}

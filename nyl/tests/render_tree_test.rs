@@ -47,7 +47,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/clusters/kasoku.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -64,7 +64,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/targets/production.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: production
@@ -88,7 +88,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/projects/workloads.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: AppProjectDefinition
 metadata:
   name: workloads
@@ -113,7 +113,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/application-groups/workloads.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: workloads
@@ -131,7 +131,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("applications/workloads/api.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -279,7 +279,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
         "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 2)\n# Nyl-Provenance: Resource: v1 ConfigMap api/api"
     ));
     assert!(resources.contains(
-        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)\n# Nyl-Provenance: Resource: gitops.nyl/v1 Release api/api\n# Nyl-Provenance: Generated: Namespace \"api\" for Release \"api\""
+        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)\n# Nyl-Provenance: Resource: k8s.gitops.nyl/v1 Release api/api\n# Nyl-Provenance: Generated: Namespace \"api\" for Release \"api\""
     ));
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
@@ -504,13 +504,13 @@ fn warm_target_cache_reports_the_rendering_work_it_avoids() {
     .unwrap();
     fs::write(
         fixture.path().join("applications/workloads/helm.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: helm
   namespace: helm
 ---
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: Test
 metadata:
   name: helm
@@ -724,7 +724,7 @@ fn changing_one_release_reuses_unchanged_release_artifacts() {
     let worker = fixture.path().join("applications/workloads/worker.yaml");
     fs::write(
         &worker,
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -787,13 +787,13 @@ fn rerendered_release_reuses_unchanged_helm_output() {
     let release = fixture.path().join("applications/workloads/helm.yaml");
     fs::write(
         &release,
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: helm
   namespace: helm
 ---
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: Test
 metadata:
   name: helm
@@ -843,7 +843,7 @@ fn explicit_argocd_instances_are_strict_and_drive_the_catalog() {
     fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
     fs::write(
         fixture.path().join("config/argocd-instances/central.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: ArgoCDInstance
 metadata:
   name: central
@@ -955,7 +955,7 @@ fn shared_argocd_instances_require_explicit_cross_target_names() {
     fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
     fs::write(
         fixture.path().join("config/argocd-instances/central.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: ArgoCDInstance
 metadata:
   name: central
@@ -973,7 +973,7 @@ spec:
     fs::write(production_path, production).unwrap();
     fs::write(
         fixture.path().join("config/targets/staging.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: staging
@@ -1128,7 +1128,7 @@ fn validation_rejects_overlapping_target_prefixes_on_one_revision() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: overlap
@@ -1168,7 +1168,7 @@ spec:
     .unwrap();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: overlap
@@ -1216,7 +1216,7 @@ spec:
     .unwrap();
     fs::write(
         fixture.path().join("config/targets/overlap.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: overlap
@@ -1246,7 +1246,7 @@ fn application_groups_cannot_override_the_target_cluster_destination() {
     let fixture = fixture();
     fs::write(
         fixture.path().join("config/application-groups/named-cluster.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: named-cluster
@@ -1320,7 +1320,7 @@ fn one_dedicated_application_owns_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1372,7 +1372,7 @@ fn one_release_can_own_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1425,7 +1425,7 @@ fn external_shared_namespace_is_not_managed() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1581,7 +1581,7 @@ fn shared_namespace_requires_explicit_policy() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1622,7 +1622,7 @@ fn non_owner_release_cannot_render_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1665,7 +1665,7 @@ fn external_namespace_cannot_be_rendered_by_a_release() {
     fs::write(group_path, group).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/api.yaml"),
-        r"apiVersion: gitops.nyl/v1
+        r"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -1950,7 +1950,7 @@ metadata:
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/coredns.yaml"),
-        r#"apiVersion: gitops.nyl/v1
+        r#"apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: coredns

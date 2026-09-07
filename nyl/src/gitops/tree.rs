@@ -1376,7 +1376,7 @@ fn resolve_argocd_instance(
         return Ok(EffectiveArgoCDInstance {
             identity: format!("implicit:{}", target.metadata.name),
             resource: ArgoCDInstance {
-                api_version: crate::constants::API_VERSION_GITOPS.to_owned(),
+                api_version: crate::constants::API_VERSION_K8S_GITOPS.to_owned(),
                 kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
                 metadata: crate::resources::GitOpsResourceMetadata {
                     name: format!("{}-implicit", target.metadata.name),
@@ -2155,7 +2155,7 @@ fn warn_unclaimed_group_manifests(
         tracing::warn!(
             application_group = %group.metadata.name,
             manifest = %display_path.display(),
-            "ApplicationGroup ignored manifest because it contains no literal gitops.nyl/v1 Release and is not included by another Release"
+            "ApplicationGroup ignored manifest because it contains no literal k8s.gitops.nyl/v1 Release and is not included by another Release"
         );
     }
 }

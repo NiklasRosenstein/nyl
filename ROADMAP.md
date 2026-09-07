@@ -121,6 +121,13 @@ and hosts. It does not require a Kubernetes destination. Keep DeploymentTarget's
 Kubernetes meaning rather than making non-Kubernetes units supply cluster or
 Argo CD configuration.
 
+Kubernetes compiler resources use `k8s.gitops.nyl/v1`; HelmChart and
+RemoteManifest use `k8s.nyl/v1`, and chart-backed component invocations use
+`components.k8s.nyl/v1`. Shared GitRepository resources use `gitops.nyl/v1`.
+Resource reference pages and catalog summaries derive from the Rust-generated
+JSON Schemas. M1 defines additional orchestration APIs independently of these
+Kubernetes contracts.
+
 Separate authoring membership, unit identity, and native resource ownership.
 Stable identities and incarnation fences protect against stale operations after
 deletion and recreation. Different unit names do not imply disjoint native

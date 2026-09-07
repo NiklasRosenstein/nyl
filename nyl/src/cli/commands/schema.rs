@@ -1,13 +1,13 @@
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::{
-    resources::{
-        generate_gitops_aggregate_schema, generate_gitops_resource_schema, generate_release_schema, GitOpsResourceKind,
-        RELEASE_SCHEMA_FILENAME,
-    },
+    resources::schema::{schema_artifacts, ResourceKind},
     NylError, Result,
 };
+
+/// Resource selector accepted by the schema CLI.
+pub type SchemaResourceKind = ResourceKind;
 
 /// Generate project and resource schemas.
 #[derive(Args, Debug)]
@@ -21,62 +21,41 @@ enum SchemaCommand {
     /// Generate JSON schema for nyl.toml project configuration.
     Config,
 
-    /// Generate JSON schema for one GitOps resource kind.
+    /// Generate JSON schema for one resource kind.
     Resource {
         #[arg(value_enum)]
         kind: SchemaResourceKind,
+        /// Require this exact API version for the selected resource.
+        #[arg(long)]
+        api_version: Option<String>,
     },
 
     /// Generate the aggregate schema for all GitOps resource kinds.
     Gitops,
 
-    /// Write all project and GitOps schemas to a directory.
+    /// Write all project and resource schemas to a directory.
     All {
         #[arg(long)]
         output_dir: PathBuf,
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum SchemaResourceKind {
-    #[value(name = "GitRepository", alias = "git-repository", alias = "repository")]
-    GitRepository,
-    #[value(name = "Cluster", alias = "cluster")]
-    Cluster,
-    #[value(name = "ArgoCDInstance", alias = "argocd-instance", alias = "argocd")]
-    ArgoCDInstance,
-    #[value(name = "DeploymentTarget", alias = "deployment-target", alias = "target")]
-    DeploymentTarget,
-    #[value(name = "AppProjectDefinition", alias = "app-project-definition", alias = "project")]
-    AppProjectDefinition,
-    #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
-    ApplicationGroup,
-    #[value(name = "Release", alias = "release")]
-    Release,
-}
-
-impl SchemaResourceKind {
-    fn gitops_kind(self) -> Option<GitOpsResourceKind> {
-        match self {
-            Self::GitRepository => Some(GitOpsResourceKind::GitRepository),
-            Self::Cluster => Some(GitOpsResourceKind::Cluster),
-            Self::ArgoCDInstance => Some(GitOpsResourceKind::ArgoCDInstance),
-            Self::DeploymentTarget => Some(GitOpsResourceKind::DeploymentTarget),
-            Self::AppProjectDefinition => Some(GitOpsResourceKind::AppProjectDefinition),
-            Self::ApplicationGroup => Some(GitOpsResourceKind::ApplicationGroup),
-            Self::Release => None,
-        }
-    }
-}
-
 pub fn execute(args: SchemaArgs) -> Result<()> {
     match args.command {
         SchemaCommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
-        SchemaCommand::Resource { kind } => print_schema(&match kind.gitops_kind() {
-            Some(kind) => generate_gitops_resource_schema(kind),
-            None => generate_release_schema(),
-        }),
-        SchemaCommand::Gitops => print_schema(&generate_gitops_aggregate_schema()),
+        SchemaCommand::Resource { kind, api_version } => {
+            if let Some(api_version) = api_version {
+                if api_version != kind.api_version() {
+                    return Err(NylError::config(format!(
+                        "{} is defined in {}, not {api_version}",
+                        kind.name(),
+                        kind.api_version()
+                    )));
+                }
+            }
+            print_schema(&kind.schema())
+        }
+        SchemaCommand::Gitops => print_schema(&crate::resources::generate_gitops_aggregate_schema()),
         SchemaCommand::All { output_dir } => write_all_schemas(&output_dir),
     }
 }
@@ -96,27 +75,13 @@ fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
 }
 
 fn write_all_schemas(output_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(output_dir)?;
-    write_schema(
-        &output_dir.join("nyl.schema.json"),
-        &crate::config::schema::generate_project_config_schema(),
-    )?;
-    for kind in GitOpsResourceKind::all() {
-        write_schema(
-            &output_dir.join(kind.schema_filename()),
-            &generate_gitops_resource_schema(kind),
-        )?;
+    for (path, schema) in schema_artifacts() {
+        let path = output_dir.join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serialize_schema(&schema)?)?;
+        println!("Generated {}", path.display());
     }
-    write_schema(&output_dir.join(RELEASE_SCHEMA_FILENAME), &generate_release_schema())?;
-    write_schema(
-        &output_dir.join("gitops-resource.schema.json"),
-        &generate_gitops_aggregate_schema(),
-    )?;
-    Ok(())
-}
-
-fn write_schema(path: &Path, schema: &serde_json::Value) -> Result<()> {
-    std::fs::write(path, serialize_schema(schema)?)?;
-    println!("Generated {}", path.display());
     Ok(())
 }

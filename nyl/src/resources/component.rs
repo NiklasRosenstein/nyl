@@ -4,6 +4,7 @@
 /// configured `components/` directory.  The `kind` field encodes the relative
 /// path to the chart directory (e.g. `myapiversion/v1/MyComponent`), and the
 /// `spec` is forwarded directly as Helm values.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::API_VERSION_COMPONENTS;
@@ -13,16 +14,21 @@ fn default_spec() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
-/// Component resource
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Expands a chart identified by a dynamic resource kind into Kubernetes manifests.
+///
+/// The kind is a local component path or remote chart shortcut, not the literal `Component`. The spec supplies chart values; the selected chart defines its input contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Component))]
 pub struct NylComponent {
+    /// API group and version for chart-backed component invocations.
     #[serde(rename = "apiVersion")]
     pub api_version: String,
 
     /// Relative path under `components/` that identifies the Helm chart
     pub kind: String,
 
+    /// Helm release name, namespace, labels, and annotations.
     pub metadata: ObjectMetadata,
 
     /// Helm values — defaults to an empty object when omitted
@@ -169,7 +175,7 @@ mod tests {
     #[test]
     fn test_is_nyl_component_positive() {
         let manifest = json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "example/v1/Nginx",
             "metadata": { "name": "my-nginx", "namespace": "default" },
             "spec": { "replicas": 3 }
@@ -180,7 +186,7 @@ mod tests {
     #[test]
     fn test_is_nyl_component_negative_wrong_api_version() {
         let manifest = json!({
-            "apiVersion": "nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "example/v1/Nginx",
             "metadata": { "name": "my-nginx" }
         });
@@ -201,14 +207,14 @@ mod tests {
     #[test]
     fn test_deserialize_full() {
         let manifest = json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "example/v1/Nginx",
             "metadata": { "name": "my-nginx", "namespace": "default" },
             "spec": { "replicas": 3, "image": "nginx:latest" }
         });
 
         let component: NylComponent = serde_json::from_value(manifest).unwrap();
-        assert_eq!(component.api_version, "components.nyl.niklasrosenstein.github.com/v1");
+        assert_eq!(component.api_version, "components.k8s.nyl/v1");
         assert_eq!(component.kind, "example/v1/Nginx");
         assert_eq!(component.metadata.name, "my-nginx");
         assert_eq!(component.metadata.namespace, Some("default".to_string()));
@@ -219,7 +225,7 @@ mod tests {
     #[test]
     fn test_round_trip() {
         let manifest = json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "libs/v2/Redis",
             "metadata": { "name": "my-redis", "namespace": "infra" },
             "spec": { "port": 6379 }
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn test_spec_defaults_to_empty_object_when_omitted() {
         let manifest = json!({
-            "apiVersion": "components.nyl.niklasrosenstein.github.com/v1",
+            "apiVersion": "components.k8s.nyl/v1",
             "kind": "example/v1/Nginx",
             "metadata": { "name": "no-spec" }
         });
@@ -394,7 +400,7 @@ mod tests {
     #[test]
     fn test_nyl_component_rejects_unknown_fields() {
         let yaml = r"
-apiVersion: components.nyl.niklasrosenstein.github.com/v1
+apiVersion: components.k8s.nyl/v1
 kind: MyComponent
 metadata:
   name: test

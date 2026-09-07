@@ -23,7 +23,7 @@ changes.
 Prefix a repository with `git+` and select the chart directory with `name`:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: application

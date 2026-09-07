@@ -1,6 +1,7 @@
 import { defineConfig } from "astro/config";
 import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
+import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
 const authoredDocsBase = "/nyl";
@@ -33,6 +34,7 @@ function rewriteNylLinks() {
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
+  redirects: Object.fromEntries(Object.entries(resourceRedirects).map(([from, to]) => [from, `${basePath}${to}`])),
   markdown: {
     processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
@@ -100,27 +102,16 @@ export default defineConfig({
             "deployment-workflows/rendered-manifests/targets-and-clusters",
             "deployment-workflows/rendered-manifests/rendering-and-publishing",
             "deployment-workflows/rendered-manifests/security",
-            {
-              label: "Reference",
-              items: [
-                "reference/resources/gitops",
-                "reference/resources/gitops/git-repository",
-                "reference/resources/gitops/cluster",
-                "reference/resources/gitops/deployment-target",
-                "reference/resources/gitops/app-project-definition",
-                "reference/resources/gitops/application-group",
-                "reference/resources/gitops/release",
-              ],
-            },
+            "reference/resources/gitops",
+            { label: "Resource usage guides", collapsed: true, items: [{ autogenerate: { directory: "deployment-workflows/rendered-manifests/resource-guides" } }] },
           ],
         },
         {
           label: "Reference",
           items: [
-            "reference/resources",
-            "reference/resources/component",
-            "reference/resources/helmchart",
-            "reference/resources/remote-manifest",
+            { label: "Resources", link: "/reference/resources/" },
+            ...resourceSidebar(),
+            { label: "Rendering usage guides", collapsed: true, items: [{ autogenerate: { directory: "components/resource-guides" } }] },
             "reference/kyverno-policies",
           ],
         },

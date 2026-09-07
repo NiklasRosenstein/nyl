@@ -1,4 +1,4 @@
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: prod

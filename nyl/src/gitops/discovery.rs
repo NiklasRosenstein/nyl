@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use git2::{Repository, Status, StatusOptions};
 
 use crate::config::ProjectConfig;
-use crate::constants::API_VERSION_GITOPS;
+use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::resources::{
     parse_gitops_resource, parse_gitops_resource_identity, GitOpsResource, GitOpsResourceIdentity, GitOpsResourceKind,
 };
@@ -279,14 +279,15 @@ fn discover_file_resources(
         if !advertises_gitops_api(document) {
             continue;
         }
+        let scanned_identity = scan_static_identity(document)?;
         if advertises_release_kind(document) {
             continue;
         }
 
         let contextual_path = PathBuf::from(format!("{}#document-{}", relative_path.display(), document_index + 1));
-        let identity = scan_static_identity(document)?.ok_or_else(|| {
+        let identity = scanned_identity.ok_or_else(|| {
             NylError::config(format!(
-                "Document {} in {} advertises {API_VERSION_GITOPS} but has no valid static envelope",
+                "Document {} in {} advertises {API_VERSION_K8S_GITOPS} but has no valid static envelope",
                 document_index + 1,
                 relative_path.display()
             ))
@@ -403,7 +404,7 @@ fn parse_complete_resource(document: &str, contextual_path: &Path) -> Result<Git
     }
     parse_gitops_resource(&parsed_documents[0])?.ok_or_else(|| {
         NylError::config(format!(
-            "Document {} advertises {API_VERSION_GITOPS} but is not a GitOps resource",
+            "Document {} advertises {API_VERSION_K8S_GITOPS} but is not a GitOps resource",
             contextual_path.display()
         ))
     })
@@ -448,16 +449,9 @@ fn scan_static_identity(document: &str) -> Result<Option<GitOpsResourceIdentity>
             }
         }
     }
-    if api_version.as_deref() != Some(API_VERSION_GITOPS) {
-        return Ok(None);
-    }
-    let kind_text = kind.ok_or_else(|| NylError::config("GitOps resource kind must be a static string"))?;
-    let kind = GitOpsResourceKind::parse(&kind_text)
-        .ok_or_else(|| NylError::config(format!("Unsupported {API_VERSION_GITOPS} kind {kind_text:?}")))?;
-    let name = name.ok_or_else(|| NylError::config(format!("{kind_text} metadata.name must be a static string")))?;
     parse_gitops_resource_identity(&serde_json::json!({
-        "apiVersion": API_VERSION_GITOPS,
-        "kind": kind.as_str(),
+        "apiVersion": api_version,
+        "kind": kind,
         "metadata": {"name": name},
     }))
 }
@@ -510,7 +504,7 @@ fn advertises_gitops_api(document: &str) -> bool {
         let Some((key, value)) = line.split_once(':') else {
             return false;
         };
-        key.trim() == "apiVersion" && parse_static_scalar(value) == API_VERSION_GITOPS
+        key.trim() == "apiVersion" && matches!(parse_static_scalar(value), API_VERSION_GITOPS | API_VERSION_K8S_GITOPS)
     })
 }
 
@@ -604,7 +598,7 @@ mod tests {
     use super::*;
     use crate::resources::{GitOpsResource, GitOpsResourceKind};
 
-    const TARGET: &str = r"apiVersion: gitops.nyl/v1
+    const TARGET: &str = r"apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: production
@@ -710,7 +704,7 @@ spec:
         fs::write(
             temporary.path().join("group.yaml"),
             r"{% if values.enabled %}
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: ApplicationGroup
 metadata:
   name: optional
@@ -804,7 +798,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: gitops.nyl/v1
+            r"apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -828,7 +822,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: gitops.nyl/v1
+            r"apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -866,7 +860,11 @@ spec:
         let (temporary, _repository) = project();
         let content = format!(
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: unrelated\n---\n{}",
-            TARGET.replacen("apiVersion: gitops.nyl/v1", "apiVersion: \"gitops.nyl/v1\" # static", 1)
+            TARGET.replacen(
+                "apiVersion: k8s.gitops.nyl/v1",
+                "apiVersion: \"k8s.gitops.nyl/v1\" # static",
+                1
+            )
         );
         fs::write(temporary.path().join("resources.yaml"), content).unwrap();
 

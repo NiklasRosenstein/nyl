@@ -1,13 +1,16 @@
 //! Constants for Nyl API versions
 
 /// API version for HelmChart, RemoteManifest, and inline rendering resources.
-pub const API_VERSION: &str = "nyl.niklasrosenstein.github.com/v1";
+pub const API_VERSION: &str = "k8s.nyl/v1";
 
-/// API version for local rendered-GitOps configuration resources.
+/// API version for shared Git repository resources.
 pub const API_VERSION_GITOPS: &str = "gitops.nyl/v1";
 
+/// API version for Kubernetes rendered-GitOps configuration resources.
+pub const API_VERSION_K8S_GITOPS: &str = "k8s.gitops.nyl/v1";
+
 /// API version for Component resources
-pub const API_VERSION_COMPONENTS: &str = "components.nyl.niklasrosenstein.github.com/v1";
+pub const API_VERSION_COMPONENTS: &str = "components.k8s.nyl/v1";
 
 /// Label name for release identification in Kubernetes secrets
 pub const LABEL_RELEASE: &str = "nyl.niklasrosenstein.github.com/release";

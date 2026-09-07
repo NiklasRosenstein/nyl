@@ -85,7 +85,7 @@ version: 1.0.0
     fs::write(
         chart_dir.join("templates").join("nested.yaml"),
         r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: nested-chart
@@ -101,7 +101,7 @@ spec:
     fs::write(
         temp.path().join("test.yaml"),
         r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: top-chart
@@ -230,7 +230,7 @@ spec:
     fs::write(
         temp.path().join("test.yaml"),
         r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: my-nginx

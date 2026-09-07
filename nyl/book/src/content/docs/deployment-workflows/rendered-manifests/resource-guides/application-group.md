@@ -1,68 +1,8 @@
 ---
-title: 'ApplicationGroup'
+title: 'Using ApplicationGroup'
 ---
 
-`ApplicationGroup` labels participate in target selection, selects `Release` sources, assigns an Argo CD
-project, and defines platform-owned Application and Namespace policy.
-
-## Example
-
-```yaml
-apiVersion: gitops.nyl/v1
-kind: ApplicationGroup
-metadata:
-  name: workloads
-  labels:
-    environment: production
-spec:
-  projectTemplate:
-    destinationNamespaces:
-      - workloads
-  applicationNamespace: argocd
-  source:
-    path: applications/workloads
-  destinationNamespace: workloads
-  namespace:
-    create: true
-    prunePolicy: Confirm
-    deletePolicy: Confirm
-  sharedNamespaces:
-    monitoring:
-      owner:
-        kind: Release
-        applicationGroup: workloads
-        release: metrics
-    kube-system:
-      owner:
-        kind: External
-  applicationDeletionPolicy: Foreground
-  releaseCustomization:
-    allowedSyncOptions:
-      - RespectIgnoreDifferences=false
-    allowedPaths:
-      - metadata.annotations.**
-    deniedPaths:
-      - spec.project
-      - spec.source.**
-      - spec.destination.**
-```
-
-## Core fields
-
-| Field | Required | Default | Description |
-| --- | --- | --- | --- |
-| `metadata.name` | Yes | — | Group identity and default output directory. |
-| `metadata.labels` | No | `{}` | Labels for the control resource itself. |
-| `spec.enabled` | No | `true` | Enables the group. May be structurally templated per target. |
-| `spec.projectRef` | Conditional | — | Local AppProjectDefinition identity. |
-| `spec.projectTemplate` | Conditional | — | Constrained AppProject generated for this group and target. Exactly one project source is required. |
-| `spec.applicationNamespace` | Yes | — | Namespace containing generated Argo CD Applications. |
-| `spec.destinationNamespace` | No | Release namespace | Destination namespace for generated Applications. |
-| `spec.outputPath` | No | Group name | Relative directory below the target prefix. |
-| `spec.applicationNameTemplate` | No | Release name | Template for generated Application names; receives `release`. |
-| `spec.labels` | No | `{}` | Labels added to generated Applications. |
-| `spec.annotations` | No | `{}` | Annotations added to generated Applications. |
-| `spec.sharedNamespaces` | No | `{}` | Explicit ownership policy for namespaces consumed by more than one workload Application. |
+See the [ApplicationGroup resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/) for the API, example, and field definitions.
 
 `DeploymentTarget.spec.applicationGroupSelector.matchLabels` matches the group's
 static metadata labels. An empty target selector matches every group. After
@@ -105,42 +45,17 @@ explicit. Argo CD's AppProject admission remains the authorization boundary.
 `applications/<group-name>`, while `_application-group.yaml` derives its
 containing directory.
 
-| Field | Required | Default | Description |
-| --- | --- | --- | --- |
-| `source.path` | For explicit sources | — | Normalized project-relative path. For remote sources, relative to the checkout. |
-| `source.repositoryRef.name` | For referenced remote sources | — | Local GitRepository identity. |
-| `source.repository` | For inline remote sources | — | Inline `repoURL` and optional `publishURL`. |
-| `source.revision` | For remote sources | — | Human-readable Git revision updated by `nyl update source-locks`. |
-| `source.commit` | For remote sources | — | Authoritative full immutable commit lock. |
-| `source.include` | No | `['*.yaml', '*.yml']` | Relative glob patterns included from the source. |
-| `source.exclude` | No | `[]` | Relative glob patterns excluded after inclusion. |
-| `source.recursive` | No | `true` | Searches below the source directory when enabled. |
-| `source.rendererConfig.mode` | No | `Central` | `Central` uses platform configuration; `Remote` loads the remote project. |
-| `source.rendererConfig.projectPath` | No | `.` | Remote project root; valid only in `Remote` mode. |
-
 `repositoryRef` and `repository` are mutually exclusive. A repository makes the
 source remote and requires both `revision` and `commit`. `Remote` renderer mode
 requires a remote source. Run `nyl update source-locks` to refresh commit locks.
 
 Source selectors identify candidate entry files. Nyl renders only candidates
-containing a literal, parseable `gitops.nyl/v1` Release document; other files
+containing a literal, parseable `k8s.gitops.nyl/v1` Release document; other files
 are ignored. It warns for each candidate that has no literal Release and is not
 claimed by another Release's `spec.include`. Use `Release.spec.include` to
 attach additional relative files or glob matches to that release.
 
 ## Sync and lifecycle policy
-
-| Field | Required | Default | Description |
-| --- | --- | --- | --- |
-| `spec.syncPolicy.automated` | No | — | Its presence enables Argo CD automated sync unless `enabled` is `false`. |
-| `spec.syncPolicy.automated.enabled` | No | — | Explicitly enables or disables automated sync. Omission enables it when `automated` is present. |
-| `spec.syncPolicy.automated.prune` | No | `false` | Enables automated pruning. |
-| `spec.syncPolicy.automated.selfHeal` | No | `false` | Enables automated self-healing. |
-| `spec.syncPolicy.syncOptions` | No | `[ApplyOutOfSyncOnly=true, ServerSideApply=true]` | Argo CD Application sync options. An explicit value with the same option key overrides the generated default. |
-| `spec.applicationDeletionPolicy` | No | `Foreground` | `Foreground`, `Background`, or `Orphan`. |
-| `spec.namespace.create` | No | `true` | Synthesizes missing destination and additional Namespaces. |
-| `spec.namespace.prunePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
-| `spec.namespace.deletePolicy` | No | `Confirm` | `Automatic`, `Confirm`, or `Retain`. |
 
 Foreground and Background add the corresponding Argo CD resources finalizer.
 Orphan omits it. For Namespace policy, `Confirm` writes `Prune=confirm` or
@@ -161,12 +76,6 @@ overrides this default when the platform deliberately delegates ownership.
 Every other namespace consumed by more than one workload Application must have
 an identical `spec.sharedNamespaces.<namespace>.owner` declaration in every
 contributing ApplicationGroup. The owner kinds are:
-
-| Owner kind | Required fields | Behavior |
-| --- | --- | --- |
-| `Release` | `applicationGroup`, `release` | The selected workload Application owns the Namespace object. Nyl synthesizes it when it is that Release's destination or additional namespace and namespace creation is enabled. |
-| `Dedicated` | `applicationGroup` | Nyl synthesizes the Namespace in a separate generated Application using the selected group's project, destination, metadata, sync, and lifecycle policy. |
-| `External` | — | Nyl emits no Namespace object. Use this for namespaces managed outside the rendered tree, such as `kube-system`. |
 
 `Release` ownership rejects Namespace objects rendered by other Releases.
 `Dedicated` and `External` ownership reject Namespace objects rendered by any
@@ -190,7 +99,7 @@ options that a Release may merge with `spec.syncPolicy.+syncOptions` in its
 Application override:
 
 ```yaml
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: api

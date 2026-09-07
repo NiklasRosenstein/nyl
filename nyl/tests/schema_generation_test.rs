@@ -11,7 +11,7 @@ fn resource_schema_cli_accepts_canonical_kind_and_alias() {
             .args(["schema", "resource", kind])
             .assert()
             .success()
-            .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
+            .stdout(predicate::str::contains("\"const\": \"k8s.gitops.nyl/v1\""))
             .stdout(predicate::str::contains("\"const\": \"DeploymentTarget\""));
     }
 }
@@ -47,7 +47,7 @@ fn resource_schema_cli_supports_release() {
         .args(["schema", "resource", "Release"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
+        .stdout(predicate::str::contains("\"const\": \"k8s.gitops.nyl/v1\""))
         .stdout(predicate::str::contains("\"const\": \"Release\""))
         .stdout(predicate::str::contains("\"additionalNamespaces\""))
         .stdout(predicate::str::contains("\"include\""));
@@ -91,4 +91,32 @@ fn all_schema_cli_writes_the_complete_set() {
         let _: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert!(contents.ends_with('\n'));
     }
+}
+
+#[test]
+fn rendering_schema_cli_supports_api_qualification_and_dynamic_kinds() {
+    for (kind, api) in [
+        ("HelmChart", "k8s.nyl/v1"),
+        ("RemoteManifest", "k8s.nyl/v1"),
+        ("Component", "components.k8s.nyl/v1"),
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+            .args(["schema", "resource", kind, "--api-version", api])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let schema: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(schema["properties"]["apiVersion"]["const"], api);
+        assert!(schema["description"].as_str().unwrap().contains("Kubernetes"));
+        if kind == "Component" {
+            assert!(schema["properties"]["kind"].get("const").is_none());
+        }
+    }
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .args(["schema", "resource", "Cluster", "--api-version", "gitops.nyl/v1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("k8s.gitops.nyl/v1"));
 }

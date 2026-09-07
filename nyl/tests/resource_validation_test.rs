@@ -7,7 +7,7 @@ use std::path::PathBuf;
 fn test_unknown_field_in_helmchart() {
     // Create a HelmChart with an unknown field
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test-app
@@ -39,7 +39,7 @@ spec:
 fn test_unknown_field_in_nested_struct() {
     // Create a HelmChart with an unknown field in the chart spec
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test-app
@@ -70,7 +70,7 @@ spec:
 fn test_type_mismatch_error() {
     // Create a HelmChart with a type mismatch (metadata should be object, not string)
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata: "this should be an object not a string"
 spec:
@@ -94,7 +94,7 @@ spec:
 fn test_release_unknown_field() {
     // Create a Release with an unknown field
     let yaml = r#"
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: my-release
@@ -121,7 +121,7 @@ metadata:
 fn test_valid_manifest_succeeds() {
     // Create a valid HelmChart
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test-app
@@ -145,7 +145,7 @@ spec:
 fn test_error_message_has_helpful_hint() {
     // Test that the error message provides actionable hints
     let yaml = r#"
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: test-app

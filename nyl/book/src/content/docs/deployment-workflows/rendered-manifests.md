@@ -11,17 +11,17 @@ run Nyl in the reconciliation path.
 
 Kubernetes-shaped configuration resources describe the deployment:
 
-1. A [`GitRepository`](/nyl/reference/resources/gitops/git-repository/) names
+1. A [`GitRepository`](/nyl/reference/resources/gitops.nyl/v1/git-repository/) names
    credential-free read and write coordinates.
-2. A [`Cluster`](/nyl/reference/resources/gitops/cluster/) records one concrete
+2. A [`Cluster`](/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/) records one concrete
    destination and the Kubernetes capabilities used for offline rendering.
-3. A [`DeploymentTarget`](/nyl/reference/resources/gitops/deployment-target/) binds that
+3. A [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/) binds that
    Cluster to deployment values and a publication repository, revision, and
    path prefix.
-4. An optional [`ArgoCDInstance`](/nyl/reference/resources/gitops/argocd-instance/)
+4. An optional [`ArgoCDInstance`](/nyl/reference/resources/k8s.gitops.nyl/v1/argocd-instance/)
    separates the Argo CD control plane from workload destinations and owns
    parent-catalog defaults.
-5. An [`ApplicationGroup`](/nyl/reference/resources/gitops/application-group/)
+5. An [`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
    declares source releases and generated Application and Namespace policy. It
    references an AppProjectDefinition or uses `projectTemplate` to generate one.
 

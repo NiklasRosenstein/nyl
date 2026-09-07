@@ -1,46 +1,8 @@
 ---
-title: 'HelmChart'
+title: 'Using HelmChart'
 ---
 
-The HelmChart resource enables declarative Helm chart deployment with templating support. Charts can be referenced from local paths, chart names, or Git repositories.
-
-Use `HelmChart` when you want explicit chart fields in `spec.chart.*`.  
-Use [`Component`](/nyl/reference/resources/component/) when you want compact chart-backed resources with dynamic `kind` and optional [alias indirection](/nyl/components/remote-shortcuts-and-aliases/).
-
-> **Note**: Git chart references are fully supported. Repositories are cloned automatically to a local cache. See the [Git Integration](/nyl/git-integration/) guide for details.
-
-## Related: Components
-
-Component resources provide a compact chart-backed format and support local component paths, remote shortcut syntax, and alias-based indirection.
-
-For component syntax, examples, and pattern selection, see:
-
-- [Component resource reference](/nyl/reference/resources/component/)
-- [Remote Shortcuts & Aliases](/nyl/components/remote-shortcuts-and-aliases/)
-
-## Resource Definition
-
-```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
-kind: HelmChart
-metadata:
-  name: string              # Helm release name
-  namespace: string         # Target namespace (optional, defaults to "default")
-spec:
-  chart:                    # Chart reference (choose one method)
-    # Universal fields:
-    repository: string      # Repository URL (Git, OCI, or Helm)
-    name: string            # Universal name field (context-dependent)
-    version: string         # Chart version or Git reference
-
-    # Repository types (indicated by protocol prefix):
-    # - Git: repository starts with "git+" (e.g., "git+https://...")
-    # - OCI: repository starts with "oci://" (e.g., "oci://ghcr.io/...")
-    # - Helm: plain HTTPS URL (e.g., "https://charts.example.com")
-    # - Local: no repository, name is filesystem path
-
-  values: object            # Chart-specific values (overlaid by render values)
-```
+See the [HelmChart resource reference](/nyl/reference/resources/k8s.nyl/v1/helm-chart/) for the API, example, and field definitions.
 
 ## Chart Reference Methods
 
@@ -49,7 +11,7 @@ spec:
 Reference a chart by filesystem path (absolute or relative) using the `name` field:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -64,7 +26,7 @@ spec:
 Reference a chart by name (without path separators), searched in configured search paths:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -85,7 +47,7 @@ helm_chart_search_paths = ["./charts", "/opt/helm-charts"]
 Reference a chart from a Git repository using the `git+` protocol prefix:
 
 ```yaml
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: nginx
@@ -164,7 +126,7 @@ kind: Namespace
 metadata:
   name: production
 ---
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: myapp
@@ -236,13 +198,13 @@ spec:
 ## Complete Example
 
 ```yaml
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: Release
 metadata:
   name: myapp
   namespace: production
 ---
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: myapp
@@ -275,7 +237,7 @@ Use the same chart with different values per environment:
 
 ```yaml
 # base manifest
-apiVersion: nyl.niklasrosenstein.github.com/v1
+apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: myapp
@@ -289,7 +251,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: gitops.nyl/v1
+apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: production
@@ -319,4 +281,4 @@ nyl render --target production app.yaml
 
 - [Git Integration](/nyl/git-integration/) - Git repository management
 - [Configuration](/nyl/configuration/) - Search paths and settings
-- [Release](/nyl/reference/resources/gitops/release/) - Release metadata
+- [Release](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) - Release metadata
