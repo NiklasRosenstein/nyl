@@ -109,11 +109,6 @@ description = "Generate API docs"
 dir = "nyl"
 run = "cargo doc --no-deps --open"
 
-[tasks.size-check]
-description = "Check binary size"
-dir = "nyl"
-run = "ls -lh target/release/nyl && du -h target/release/nyl"
-
 [tasks.clean]
 description = "Clean build artifacts"
 dir = "nyl"

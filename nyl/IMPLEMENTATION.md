@@ -64,7 +64,7 @@ cargo bench
 - `docs-build`, `docs-serve` - Documentation
 - `dist-build`, `dist-plan` - Release builds
 - `coverage`, `security-audit` - Quality checks
-- `flamegraph`, `size-check` - Performance analysis
+- `flamegraph` - Performance analysis
 
 ### 4. ✅ Created Examples Directory
 **Status**: Complete
