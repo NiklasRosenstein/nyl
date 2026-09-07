@@ -91,7 +91,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Expands a local or remote Helm chart into Kubernetes manifests.\n\nNyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.",
+  "description": "Expands a local or remote Helm chart into Kubernetes manifests.\n\nNyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.\n\n## When needed\n\nUse this optional resource to render a Helm chart with explicit chart coordinates and values.\n\n## If omitted\n\nNyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither.",
   "examples": [
     {
       "apiVersion": "k8s.nyl/v1",

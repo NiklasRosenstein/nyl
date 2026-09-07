@@ -13,6 +13,16 @@ export const groupLabels = {
   'components.k8s.nyl/v1': 'Kubernetes components',
 };
 export function summary(schema) { return schema.description.split(/\n\s*\n/)[0]; }
+/** Resource-level usage sections authored in Rust doc comments and carried by the schema description. */
+export function resourceUsage(schema) {
+  const sections = schema.description.split(/^## /m).slice(1);
+  return ['When needed', 'If omitted'].map((label) => {
+    const matches = sections.filter((section) => section.split('\n', 1)[0].trim() === label);
+    const markdown = matches[0]?.slice(matches[0].indexOf('\n') + 1).trim();
+    if (matches.length !== 1 || !markdown) throw new Error(`${schema.title}: expected one nonempty "${label}" section in the resource description`);
+    return { label, markdown };
+  });
+}
 export function resourceGroups() {
   return [...new Set(resources.map((resource) => resource.apiVersion))].map((apiVersion) => ({
     apiVersion,

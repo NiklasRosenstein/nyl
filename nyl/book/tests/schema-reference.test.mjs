@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
-import { resources, resourceGroups, resourceSidebar, summary } from '../src/lib/resources.mjs';
+import { resources, resourceGroups, resourceSidebar, resourceUsage, summary } from '../src/lib/resources.mjs';
 import { fieldAnchor, resourceMarkdown, schemaReference } from '../src/lib/schema-reference.mjs';
+
+import { createResourceMarkdownProcessor } from '../src/lib/resource-markdown.mjs';
 
 const root = new URL('../public/reference/schemas/', import.meta.url);
 const schemaFor = (resource) => JSON.parse(readFileSync(new URL(resource.schema, root), 'utf8'));
@@ -14,6 +16,7 @@ test('every resource has an accurate, documented schema and valid example', () =
   for (const resource of resources) {
     const schema = schemaFor(resource);
     assert.ok(summary(schema).length > 20, resource.name);
+    assert.deepEqual(resourceUsage(schema).map(({ label }) => label), ['When needed', 'If omitted']);
     assert.equal(schema.properties.apiVersion.const, resource.apiVersion);
     assert.ok(schema.examples.length, resource.name);
     const validate = ajv.compile(schema);
@@ -63,11 +66,16 @@ test('field references retain nested descriptions, sibling annotations, alternat
   assert.ok(rendered.code.includes('Chosen <strong>item</strong>'));
 });
 
-test('all references render schema examples and resolvable fields', () => {
+test('all references render resource usage, schema examples, and resolvable fields', async () => {
+  const processor = await createMarkdownProcessor();
   for (const resource of resources) {
     const markdown = resourceMarkdown(schemaFor(resource));
     assert.ok(markdown.includes(`apiVersion: ${resource.apiVersion}`));
     assert.ok(markdown.includes('id="field-metadata.name"'));
+    const rendered = await processor.render(markdown);
+    for (const heading of ['when-needed', 'if-omitted']) {
+      assert.ok(rendered.metadata.headings.some(({ slug, depth }) => slug === heading && depth === 2), `${resource.name}: missing ${heading} navigation`);
+    }
   }
 });
 
@@ -102,4 +110,27 @@ test('structured variants expose real field paths and unique anchors in expandab
   assert.match(code, /The selected workload Release owns the Namespace/);
   const ids = [...code.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(ids).size, ids.length, 'fields shared by variants must have distinct fragment targets');
+});
+
+
+test('resource prose links use the deployment base and preserve code and existing links', async () => {
+  for (const base of ['/nyl/', '/nyl/pr-preview/pr-101/']) {
+    const processor = await createResourceMarkdownProcessor(base);
+    const { code } = await processor.render([
+      'ApplicationGroup and AppProjectDefinition refer to a GitRepository. Releases belong to groups.',
+      '`ApplicationGroup.spec` and `[GitRepository]` remain code.',
+      '[Cluster](https://example.com/cluster) uses an authored link.',
+      '## DeploymentTarget',
+      '```yaml\nkind: ApplicationGroup\n```',
+    ].join('\n\n'));
+    for (const name of ['ApplicationGroup', 'AppProjectDefinition', 'GitRepository', 'Release']) {
+      const resource = resources.find((resource) => resource.name === name);
+      const text = name === 'Release' ? 'Releases' : name;
+      assert.ok(code.includes(`<a href="${base.slice(0, -1)}${resource.route}">${text}</a>`));
+    }
+    assert.ok(code.includes('<code>ApplicationGroup.spec</code>'));
+    assert.ok(code.includes('<a href="https://example.com/cluster">Cluster</a>'));
+    assert.ok(code.includes('<h2 id="deploymenttarget">DeploymentTarget</h2>'));
+    assert.equal((code.match(/<a /g) ?? []).length, 5, 'code samples and authored links retain their boundaries');
+  }
 });

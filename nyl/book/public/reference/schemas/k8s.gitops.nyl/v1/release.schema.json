@@ -100,7 +100,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Defines a Kubernetes workload manifest boundary and its permitted namespace scope.\n\nNyl extracts this metadata from the output. Included files belong to this Release and cannot declare another Release. GitOps uses the boundary to generate one workload Application.",
+  "description": "Defines a Kubernetes workload manifest boundary and its permitted namespace scope.\n\nNyl extracts this metadata from the output. Included files belong to this Release and cannot declare another Release. GitOps uses the boundary to generate one workload Application.\n\n## When needed\n\nRequired in each workload entry file discovered through an ApplicationGroup. Files included by `spec.include` belong to that Release and must not declare another one.\n\n## If omitted\n\nApplicationGroup discovery ignores candidate files without a literal Release document. Direct `nyl render` can render without one; direct `nyl apply` and `nyl diff` require `--name` and `--namespace` when no Release supplies them.",
   "examples": [
     {
       "apiVersion": "k8s.gitops.nyl/v1",

@@ -14,6 +14,14 @@ pub const RELEASE_SCHEMA_FILENAME: &str = "release.schema.json";
 /// Defines a Kubernetes workload manifest boundary and its permitted namespace scope.
 ///
 /// Nyl extracts this metadata from the output. Included files belong to this Release and cannot declare another Release. GitOps uses the boundary to generate one workload Application.
+///
+/// ## When needed
+///
+/// Required in each workload entry file discovered through an ApplicationGroup. Files included by `spec.include` belong to that Release and must not declare another one.
+///
+/// ## If omitted
+///
+/// ApplicationGroup discovery ignores candidate files without a literal Release document. Direct `nyl render` can render without one; direct `nyl apply` and `nyl diff` require `--name` and `--namespace` when no Release supplies them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Release))]

@@ -44,7 +44,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Names reusable, credential-free Git read and publication coordinates.\n\nThis is shared compiler configuration referenced by Kubernetes GitOps resources; it is not emitted as a workload manifest.",
+  "description": "Names reusable, credential-free Git read and publication coordinates.\n\nThis is shared compiler configuration referenced by Kubernetes GitOps resources; it is not emitted as a workload manifest.\n\n## When needed\n\nRequired when a publication, remote ApplicationGroup source, or AppProjectDefinition refers to a named GitRepository.\n\n## If omitted\n\nPublications and remote sources can use inline `repository` coordinates instead. Local ApplicationGroup sources need no repository. Named references must resolve to a declared GitRepository; Nyl does not infer one from the current Git remote.",
   "examples": [
     {
       "apiVersion": "gitops.nyl/v1",

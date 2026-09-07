@@ -17,6 +17,14 @@ fn default_spec() -> serde_json::Value {
 /// Expands a chart identified by a dynamic resource kind into Kubernetes manifests.
 ///
 /// The kind is a local component path or remote chart shortcut, not the literal `Component`. The spec supplies chart values; the selected chart defines its input contract.
+///
+/// ## When needed
+///
+/// Use this optional resource to invoke a chart through a local component kind or a remote chart shortcut.
+///
+/// ## If omitted
+///
+/// Charts in component search paths are not rendered until invoked. A HelmChart can render a chart through explicit coordinates instead; authored Kubernetes manifests need no component invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Component))]

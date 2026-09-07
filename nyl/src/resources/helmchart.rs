@@ -120,6 +120,14 @@ impl Default for HelmChartSpec {
 /// Expands a local or remote Helm chart into Kubernetes manifests.
 ///
 /// Nyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.
+///
+/// ## When needed
+///
+/// Use this optional resource to render a Helm chart with explicit chart coordinates and values.
+///
+/// ## If omitted
+///
+/// Nyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::HelmChart))]

@@ -33,6 +33,14 @@ pub struct RemoteManifestSpec {
 /// Fetches HTTPS YAML or JSON documents and expands them into Kubernetes manifests.
 ///
 /// Fetched documents enter the recursive render pipeline. Namespace overriding applies when explicitly requested.
+///
+/// ## When needed
+///
+/// Use this optional resource to fetch HTTPS YAML or JSON documents into the render pipeline.
+///
+/// ## If omitted
+///
+/// Nyl does not fetch remote manifests automatically. Other authored resources render normally without a RemoteManifest.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::RemoteManifest))]

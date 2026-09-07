@@ -35,6 +35,14 @@ pub struct GitOpsResourceMetadata {
 /// Names reusable, credential-free Git read and publication coordinates.
 ///
 /// This is shared compiler configuration referenced by Kubernetes GitOps resources; it is not emitted as a workload manifest.
+///
+/// ## When needed
+///
+/// Required when a publication, remote ApplicationGroup source, or AppProjectDefinition refers to a named GitRepository.
+///
+/// ## If omitted
+///
+/// Publications and remote sources can use inline `repository` coordinates instead. Local ApplicationGroup sources need no repository. Named references must resolve to a declared GitRepository; Nyl does not infer one from the current Git remote.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::GitRepository))]
@@ -64,6 +72,14 @@ pub struct GitRepositorySpec {
 /// Describes a concrete Kubernetes destination and its deterministic rendering capabilities.
 ///
 /// Cluster values supply reusable facts; target values take precedence. This is compiler configuration and is not emitted as a workload manifest.
+///
+/// ## When needed
+///
+/// Required for every workload destination and every explicitly configured Argo CD control-plane destination in rendered GitOps.
+///
+/// ## If omitted
+///
+/// Target rendering fails if the referenced Cluster is missing. Omitting `DeploymentTarget.spec.clusterRef` selects a Cluster with the target name; it does not create that Cluster or infer its capabilities from kubeconfig.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Cluster))]
@@ -130,6 +146,14 @@ pub struct ClusterLiveConfiguration {
 /// Defines an Argo CD control plane and the catalog defaults for its deployment targets.
 ///
 /// This is compiler configuration. Targets sharing an instance must use unambiguous generated Application and AppProject names.
+///
+/// ## When needed
+///
+/// Declare one to configure a shared or remote Argo CD control plane, a different namespace, or shared catalog defaults.
+///
+/// ## If omitted
+///
+/// When no ArgoCDInstance resources are declared, each target uses an implicit instance in its workload Cluster, in namespace `argocd`, with the catalog defaults. Leave `spec.argocdRef` unset in this case. Once any explicit instance exists, every DeploymentTarget must set `spec.argocdRef.name` to a declared instance.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::ArgoCDInstance))]
@@ -198,6 +222,14 @@ impl Default for CatalogApplicationDefaults {
 /// Binds a Kubernetes Cluster to render values, ApplicationGroup selection, and Git publication coordinates.
 ///
 /// A target owns one independently renderable publication slice. It is compiler configuration and does not represent a general infrastructure environment.
+///
+/// ## When needed
+///
+/// Required for target-aware rendered GitOps operations. It supplies workload Cluster selection and publication coordinates.
+///
+/// ## If omitted
+///
+/// Operations requiring a target fail when none are declared. If exactly one target exists, Nyl selects it without `--target`; with multiple targets, select one explicitly. Target selection never creates a DeploymentTarget.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::DeploymentTarget))]
@@ -318,6 +350,14 @@ pub struct InlineGitRepository {
 /// Defines an Argo CD AppProject manifest or an externally managed project contract.
 ///
 /// Rendered projects are emitted into the catalog. External projects supply an admission contract without transferring ownership to Nyl.
+///
+/// ## When needed
+///
+/// Required when an ApplicationGroup uses `spec.projectRef`, including when the Argo CD AppProject is externally managed.
+///
+/// ## If omitted
+///
+/// An ApplicationGroup can use `spec.projectTemplate` to generate its AppProject instead. Exactly one of `projectRef` and `projectTemplate` must be set; Nyl does not assume an existing Argo CD project supplies the required policy contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::AppProjectDefinition))]
@@ -356,6 +396,14 @@ pub enum AppProjectManagement {
 /// Selects Kubernetes Releases and defines their Argo CD Application, project, and namespace policies.
 ///
 /// Literal metadata labels participate in target selection; the spec is rendered afterward. This is compiler configuration, not a workload manifest.
+///
+/// ## When needed
+///
+/// Required to select Release entry files and generate their workload Applications in rendered GitOps.
+///
+/// ## If omitted
+///
+/// Nyl does not infer groups from directories or Release files. Without a selected, enabled ApplicationGroup, a target emits no workload Applications. Direct file rendering does not require an ApplicationGroup.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::ApplicationGroup))]
