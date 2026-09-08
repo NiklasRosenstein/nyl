@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "GitRepositorySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "publishURL": {
+          "description": "Optional Git write URL. Publication uses `repoURL` when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repoURL": {
+          "description": "Credential-free Git read URL used by renderers and generated Applications.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Names reusable, credential-free Git read and publication coordinates.\n\nThis is shared compiler configuration referenced by Kubernetes GitOps resources; it is not emitted as a workload manifest.\n\n## When needed\n\nRequired when a publication, remote ApplicationGroup source, or AppProjectDefinition refers to a named GitRepository.\n\n## If omitted\n\nPublications and remote sources can use inline `repository` coordinates instead. Local ApplicationGroup sources need no repository. Named references must resolve to a declared GitRepository; Nyl does not infer one from the current Git remote.",
+  "examples": [
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "kind": "GitRepository",
+      "metadata": {
+        "name": "deploy"
+      },
+      "spec": {
+        "repoURL": "https://github.com/example/deploy.git"
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl/v1",
+      "description": "API group and version defining this resource.",
+      "type": "string"
+    },
+    "kind": {
+      "const": "GitRepository",
+      "description": "Resource kind within the API group.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Resource identity and metadata."
+    },
+    "spec": {
+      "$ref": "#/$defs/GitRepositorySpec",
+      "description": "Configuration for this resource."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "GitRepository",
+  "type": "object"
+}
