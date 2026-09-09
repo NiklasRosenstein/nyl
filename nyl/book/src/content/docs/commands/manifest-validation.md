@@ -61,7 +61,8 @@ ordering or compatibility with resources outside the validated input.
 
 ## Capture cluster CRD schemas
 
-CRD capture is an explicit live read:
+CRD capture is an explicit live read. Pass `--crds` on each capture, or enable it
+by default in `nyl.toml`:
 
 ```toml
 [capture.cluster]
@@ -80,6 +81,11 @@ schemas for every served CRD version. `--check` compares the enabled capture
 outputs with the live cluster without writing. `--no-crds` refreshes capabilities
 while preserving schema files; it does not certify those schemas as current.
 Capturing schemas requires permission to list CRDs.
+
+A capture with CRDs replaces that Cluster's schema inventory with the served
+CRD versions currently in the cluster, removing entries for deleted CRDs and
+versions that are no longer served. Unreferenced schema blobs remain on disk
+until `nyl vendor --prune`; blobs referenced by another Cluster are retained.
 
 Snapshots use `vendor.path`, or `vendor/` when that setting is absent:
 

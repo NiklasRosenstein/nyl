@@ -241,13 +241,7 @@ async fn fetch_cluster_info(
         ));
         let api: kube::Api<kube::api::DynamicObject> = kube::Api::all_with(raw, &resource);
         let listed = api.list(&kube::api::ListParams::default()).await?;
-        Some(
-            listed
-                .items
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-        )
+        Some(crd_list_documents(listed)?)
     } else {
         None
     };
@@ -258,6 +252,21 @@ async fn fetch_cluster_info(
         },
         crds,
     ))
+}
+
+fn crd_list_documents(list: kube::api::ObjectList<kube::api::DynamicObject>) -> Result<Vec<serde_json::Value>> {
+    list.items
+        .into_iter()
+        .map(|mut item| {
+            // Kubernetes list items may omit type metadata; the CRD endpoint determines it.
+            item.types.get_or_insert_with(
+                kube::api::TypeMeta::resource::<
+                    k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
+                >,
+            );
+            serde_json::to_value(item).map_err(NylError::from)
+        })
+        .collect()
 }
 
 fn get_target<'a>(inventory: &'a GitOpsInventory, name: &str) -> Result<&'a DeploymentTarget> {
@@ -488,6 +497,34 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("spec.kubernetes is required"));
         assert!(!directory.path().join("vendor").exists());
+    }
+
+    #[tokio::test]
+    async fn test_capture_crd_list_items_without_type_metadata() {
+        let directory = capture_fixture();
+        let mut stub = capture_stub("integer");
+        let mut resource = stub.resources.remove(0);
+        resource.as_object_mut().unwrap().remove("apiVersion");
+        resource.as_object_mut().unwrap().remove("kind");
+        let list = serde_json::from_value(serde_json::json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinitionList",
+            "metadata": {},
+            "items": [resource]
+        }))
+        .unwrap();
+        stub.resources = crd_list_documents(list).unwrap();
+        capture_with_client(capture_args(false), directory.path(), &stub)
+            .await
+            .unwrap();
+        let root = directory.path().join("vendor");
+        let index = crate::validation::store::read_cluster_index(&root, "staging")
+            .unwrap()
+            .unwrap();
+        let schema = &index.crds["widgets.example.com"].versions["v1"];
+        let captured: serde_json::Value =
+            serde_json::from_slice(&crate::validation::store::read_blob(&root, &schema.strict).unwrap()).unwrap();
+        assert_eq!(captured["properties"]["spec"]["properties"]["count"]["type"], "integer");
     }
 
     #[tokio::test]
