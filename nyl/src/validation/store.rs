@@ -271,6 +271,7 @@ pub fn lock(root: &Path) -> Result<fs::File> {
 }
 
 /// Verify all source snapshots and collect their roots before deleting any blob.
+/// Return the number of unreferenced blobs, deleting them only when `prune` is true.
 pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
     let _lock = if prune { Some(lock(root)?) } else { None };
     let mut referenced = BTreeSet::new();
@@ -298,9 +299,9 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
     for hash in &referenced {
         read_blob(root, hash)?;
     }
-    let mut removed = 0;
+    let mut unreferenced = 0;
     let directory = safe_path(root, Path::new("schemas/blobs"))?;
-    if prune && directory.exists() {
+    if directory.exists() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             if entry.file_type()?.is_symlink() {
@@ -313,12 +314,14 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
                 && !referenced.contains(name)
             {
                 validate_digest(name)?;
-                fs::remove_file(path)?;
-                removed += 1;
+                if prune {
+                    fs::remove_file(path)?;
+                }
+                unreferenced += 1;
             }
         }
     }
-    Ok(removed)
+    Ok(unreferenced)
 }
 
 #[cfg(test)]
@@ -359,7 +362,9 @@ mod tests {
         assert_eq!(first.crds, second.crds);
         let refs = &first.crds["widgets.example.com"].versions["v1"];
         assert_ne!(refs.strict, refs.permissive);
-        write_blob(directory.path(), b"{\"unused\":true}").unwrap();
+        let unused = write_blob(directory.path(), b"{\"unused\":true}").unwrap();
+        assert_eq!(check_and_prune(directory.path(), false).unwrap(), 1);
+        read_blob(directory.path(), &unused).unwrap();
         assert_eq!(check_and_prune(directory.path(), true).unwrap(), 1);
         std::fs::remove_file(cluster_index_path(directory.path(), "staging").unwrap()).unwrap();
         assert_eq!(check_and_prune(directory.path(), true).unwrap(), 0);

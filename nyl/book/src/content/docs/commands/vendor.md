@@ -39,6 +39,10 @@ LFS pointer files that have not been materialized, and checks the generated
 not referenced by any configured target; a targeted check leaves entries for
 other targets alone.
 
+When artifact or schema files are not referenced by the vendor lock or schema
+indexes, the check prints their count and suggests `nyl vendor --prune`.
+These unused files do not make the check fail and are left untouched.
+
 ## `nyl vendor --prune`
 
 Delete artifact files that are not referenced by `vendor/lock.yaml`:

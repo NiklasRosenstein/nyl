@@ -299,6 +299,61 @@ fn vendor_commands_resolve_relative_project_and_vendor_paths() {
 }
 
 #[test]
+fn vendor_check_reports_prunable_files_without_modifying_snapshot() {
+    use sha2::{Digest, Sha256};
+
+    let fixture = fixture();
+    fs::write(fixture.path().join("nyl.toml"), "[vendor]\nmode='required'\n").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .arg("vendor")
+        .assert()
+        .success();
+
+    let vendor = fixture.path().join("vendor");
+    fs::write(vendor.join("artifacts/unused.yaml"), "unused artifact").unwrap();
+    let schemas = vendor.join("schemas/blobs");
+    fs::create_dir_all(&schemas).unwrap();
+    let digest = hex::encode(Sha256::digest(b"{}"));
+    fs::write(schemas.join(format!("{digest}.json")), b"{}").unwrap();
+    let before = read_tree(&vendor);
+    for selection in [vec![], vec!["--target", "production"]] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["vendor", "--check"])
+            .args(selection)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Vendor snapshot is complete and valid"))
+            .stdout(predicate::str::contains(
+                "Hint: 2 unreferenced vendor artifact(s) can be pruned; run 'nyl vendor --prune'",
+            ));
+        assert_eq!(read_tree(&vendor), before);
+    }
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["vendor", "--prune"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 2 unreferenced vendor artifact(s)"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["vendor", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hint:").not());
+}
+
+#[test]
 fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
     let fixture = fixture();
     let output = TempDir::new().unwrap();

@@ -366,6 +366,19 @@ impl DirectoryVendorWriter {
     }
 
     pub fn prune(&self) -> Result<usize> {
+        let paths = self.unreferenced_paths()?;
+        for path in &paths {
+            fs::remove_file(path)?;
+        }
+        Ok(paths.len())
+    }
+
+    /// Count artifact files absent from the vendor lock without modifying the snapshot.
+    pub fn unreferenced_count(&self) -> Result<usize> {
+        Ok(self.unreferenced_paths()?.len())
+    }
+
+    fn unreferenced_paths(&self) -> Result<Vec<PathBuf>> {
         let store = DirectoryVendorStore::load(self.root.clone())?;
         let referenced = store
             .lock
@@ -375,17 +388,16 @@ impl DirectoryVendorWriter {
             .collect::<std::collections::BTreeSet<_>>();
         let artifacts = self.root.join("artifacts");
         if !artifacts.is_dir() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
-        let mut removed = 0;
+        let mut paths = Vec::new();
         for entry in walkdir::WalkDir::new(&artifacts).follow_links(false) {
             let entry = entry.map_err(|error| NylError::config(format!("Failed to inspect vendor tree: {error}")))?;
             if entry.file_type().is_file() && !referenced.contains(entry.path()) {
-                fs::remove_file(entry.path())?;
-                removed += 1;
+                paths.push(entry.into_path());
             }
         }
-        Ok(removed)
+        Ok(paths)
     }
 
     fn write_attributes(&self, lock: &VendorLock) -> Result<()> {
@@ -999,6 +1011,13 @@ mod tests {
         let resolver = ArtifactResolver::new(project.path(), &config, None).unwrap();
         let vendored = resolver.lookup(&request).unwrap().unwrap();
         assert_eq!(vendored.origin, ArtifactOrigin::Vendor);
+        assert_eq!(writer.unreferenced_count().unwrap(), 0);
+        let unused = project.path().join("vendor/artifacts/unused.yaml");
+        fs::write(&unused, "unused").unwrap();
+        assert_eq!(writer.unreferenced_count().unwrap(), 1);
+        assert!(unused.is_file());
+        assert_eq!(writer.prune().unwrap(), 1);
+        assert!(vendored.path.is_file());
     }
 
     #[test]
