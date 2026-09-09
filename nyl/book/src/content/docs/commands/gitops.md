@@ -94,6 +94,25 @@ Rendering or comparison errors leave existing output files untouched.
 `--fail-on-diff` writes the complete diff and all requested reports before
 returning a non-zero status when changes exist.
 
+YAML files (`.yaml` and `.yml`) are parsed and serialized on both sides before
+comparison. Mapping keys are sorted recursively; comments (including provenance),
+quoting, indentation, and empty or null documents do not produce differences.
+Document order, list order, scalar types, and string contents remain significant.
+Embedded configuration strings are compared as text, with multiline values shown
+as literal blocks when they can preserve the contents safely.
+
+The patch, statistics, and `--fail-on-diff` all use this normalized comparison.
+Other files are compared as raw bytes. If either side of a YAML file cannot be
+normalized, both sides of that file are compared as raw bytes as well.
+
+Use `--raw` to include formatting and comment changes and produce a text patch
+applicable to the original files. Normalized patches describe normalized content;
+their line numbers and blob hashes refer to that content, not the stored files.
+
+```bash
+nyl diff-tree --target production --raw --output rendered.diff
+```
+
 ### Statistics and report exports
 
 The complete report includes comparison context, file and line counts, and
@@ -106,8 +125,8 @@ nyl diff-tree --target production --stats-files
 ```
 
 Line counts use the same line comparisons as the patch, excluding patch headers
-and context. Replacements count as deletions plus insertions; provenance comments
-count as ordinary lines. Counts respect the selected catalog or Application
+and context. Replacements count as deletions plus insertions. Comments count as
+ordinary lines in raw comparisons. Counts respect the selected catalog or Application
 view. Empty-file additions and deletions count as file changes with zero changed
 lines. Invalid UTF-8 or NUL-containing files are binary: their changes produce
 patch notices, and their line counts are unavailable. Aggregate line counts

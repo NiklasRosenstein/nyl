@@ -218,6 +218,11 @@ written to stderr, including the desired source commit and the resolved
 published or source baseline commit. Stdout and `--output` contain only unified
 diff bytes; no differences produce zero bytes.
 
+YAML comparisons normalize mapping order and presentation, so formatting and
+comment changes do not affect the patch, statistics, or `--fail-on-diff`.
+Use `--raw` for byte comparisons and text patches applicable to stored files.
+See the [comparison rules](/nyl/commands/gitops/#nyl-diff-tree) for details.
+
 Use `--catalog` for generated Applications and AppProjects, `--applications`
 for every workload Application and payload, or repeat
 `--application <namespace>/<name>` for a focused review. Application views are

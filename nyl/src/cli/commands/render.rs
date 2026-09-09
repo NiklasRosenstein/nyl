@@ -347,7 +347,7 @@ fn output_manifests(
                 if i > 0 {
                     println!("---");
                 }
-                let yaml = crate::yaml::serialize_yaml_document(manifest).map_err(NylError::YamlEmit)?;
+                let yaml = crate::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
                 print!("{}", yaml);
             }
         }

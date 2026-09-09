@@ -25,6 +25,42 @@ pub fn serialize_yaml_document<T: serde::Serialize>(value: &T) -> Result<String,
     )
 }
 
+/// Serialize a JSON-shaped manifest with readable multiline values.
+///
+/// Literal blocks preserve embedded configuration line by line. Strings that need
+/// escaping remain quoted, and long single-line strings are not folded.
+pub fn serialize_yaml_value(value: &serde_json::Value) -> Result<String, serde_saphyr::SerializeError> {
+    serde_saphyr::to_string_with_options(
+        &ReadableValue(value),
+        serde_saphyr::ser_options! { prefer_block_scalars: true, folded_wrap_chars: usize::MAX },
+    )
+}
+
+struct ReadableValue<'a>(&'a serde_json::Value);
+
+impl serde::Serialize for ReadableValue<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        use serde_json::Value;
+
+        match self.0 {
+            // Remove once serde-saphyr preserves newline-only block scalars on roundtrip.
+            Value::String(text) if !text.is_empty() && text.bytes().all(|b| b == b'\n') => {
+                serde_saphyr::DoubleQuoted(text).serialize(serializer)
+            }
+            Value::Array(values) => serializer.collect_seq(values.iter().map(ReadableValue)),
+            Value::Object(values) => {
+                let mut map = serializer.serialize_map(Some(values.len()))?;
+                for (key, value) in values {
+                    map.serialize_entry(key, &ReadableValue(value))?;
+                }
+                map.end()
+            }
+            value => value.serialize(serializer),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,9 +172,55 @@ items:
     }
 
     fn assert_roundtrip(value: serde_json::Value) {
-        let yaml = serialize_yaml_document(&value).unwrap();
-        let parsed = parse_yaml_value_k8s_compatible(&yaml).unwrap();
-        assert_eq!(parsed, value, "serialized YAML:\n{yaml}");
+        for yaml in [
+            serialize_yaml_document(&value).unwrap(),
+            serialize_yaml_value(&value).unwrap(),
+        ] {
+            let parsed = parse_yaml_value_k8s_compatible(&yaml).unwrap();
+            assert_eq!(parsed, value, "serialized YAML:\n{yaml}");
+        }
+    }
+
+    #[test]
+    fn test_serialize_yaml_value_uses_lossless_literal_blocks() {
+        let config = "dbs:\n  - path: /var/lib/grafana/grafana.db\n";
+        let value = serde_json::json!({"data": {"litestream.yml": config, "blank": "\n"}});
+        let yaml = serialize_yaml_value(&value).unwrap();
+        assert!(
+            yaml.contains("  litestream.yml: |\n    dbs:\n      - path: /var/lib/grafana/grafana.db\n"),
+            "{yaml}"
+        );
+        assert_eq!(parse_yaml_value_k8s_compatible(&yaml).unwrap(), value);
+
+        for text in ["first\nsecond", "first\nsecond\n", "first\nsecond\n\n"] {
+            for value in [serde_json::json!(text), serde_json::json!([text, {"nested": text}])] {
+                assert_roundtrip(value);
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiline_values_preserve_indentation_and_trailing_whitespace() {
+        let lines = [
+            "",
+            " ",
+            "  ",
+            "\t",
+            "text",
+            " text",
+            "text ",
+            "text\t",
+            "---",
+            "# comment",
+        ];
+        for first in lines {
+            for second in lines {
+                for ending in ["", "\n", "\n\n"] {
+                    let text = format!("{first}\n{second}{ending}");
+                    assert_roundtrip(serde_json::json!({"value": text, "nested": [text]}));
+                }
+            }
+        }
     }
 
     #[test]

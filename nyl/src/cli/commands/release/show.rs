@@ -148,7 +148,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
                 if let Some(obj) = value.as_object_mut() {
                     obj.remove("manifest");
                 }
-                let yaml = crate::yaml::serialize_yaml_document(&value)?;
+                let yaml = crate::yaml::serialize_yaml_value(&value)?;
                 print!("{}", yaml);
             }
         }

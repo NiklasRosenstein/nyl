@@ -354,7 +354,7 @@ fn write_values_file(values: &serde_json::Value) -> Result<tempfile::NamedTempFi
     let mut temp_file =
         tempfile::NamedTempFile::new().map_err(|e| NylError::Config(format!("Failed to create temp file: {}", e)))?;
 
-    let yaml = crate::yaml::serialize_yaml_document(values)
+    let yaml = crate::yaml::serialize_yaml_value(values)
         .map_err(|e| NylError::Config(format!("Failed to serialize values: {}", e)))?;
 
     temp_file

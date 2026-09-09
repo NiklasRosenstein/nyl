@@ -411,7 +411,7 @@ async fn prepare_partition(
             let path = stage.join("manifests").join(format!("{number}.yaml"));
             store::atomic_write(
                 &path,
-                crate::yaml::serialize_yaml_document(&document.manifest)
+                crate::yaml::serialize_yaml_value(&document.manifest)
                     .map_err(NylError::YamlEmit)?
                     .as_bytes(),
             )?;

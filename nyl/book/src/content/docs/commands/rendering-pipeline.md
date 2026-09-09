@@ -27,7 +27,9 @@ perform their live-cluster work even when desired-manifest rendering is reused.
 
 Nyl preserves manifest keys, values, and types when its YAML output is parsed
 again. Comments, quoting style, and whitespace outside string values are not
-preserved. Multiline strings may be emitted with escaped newlines.
+preserved. Multiline manifest values use literal blocks when their contents can
+be preserved safely; values requiring escaping use quoted strings. Long
+single-line strings are not folded.
 
 Quote strings that resemble YAML booleans, numbers, or null, such as `"no"`,
 `"123"`, and `"null"`. Mapping keys are strings and retain their spelling.
