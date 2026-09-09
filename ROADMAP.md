@@ -241,6 +241,11 @@ Preserve `nyl render`, `diff`, `apply`, `render-tree`, and `publish-tree` with t
 Kubernetes meanings. Ordinary usage must not require understanding receipts,
 execution leases, or orchestration storage.
 
+`nyl comment upsert` publishes supplied Markdown as a sticky PR/MR comment on
+GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
+comment keys and authenticated account ownership require no orchestration state
+or Nyl project configuration.
+
 The working CLI design uses an explicit `nyl orchestrate` group. Names and flags
 are proposals to validate in M1/M2:
 

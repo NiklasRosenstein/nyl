@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod cluster;
+pub mod comment;
 pub mod create;
 pub mod delete;
 pub mod diff;

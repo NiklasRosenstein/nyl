@@ -130,8 +130,14 @@ nyl diff-tree --target production \
   --no-stats-stderr
 ```
 
-Nyl writes these artifacts locally; a CI step can post `comment.md` as a sticky
-PR comment. Add `--fail-on-diff` if the job should fail when changes exist; the
+Nyl writes these artifacts locally. Post the Markdown as a sticky PR/MR comment
+with [`nyl comment upsert`](/nyl/commands/comment/):
+
+```bash
+nyl comment upsert --key gitops/production --body-file artifacts/comment.md
+```
+
+Add `--fail-on-diff` if the job should fail when changes exist; the
 artifacts are still written before that failure.
 
 Paths resolve against the invocation directory. `PATH=-` selects stdout, so
