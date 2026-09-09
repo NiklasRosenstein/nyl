@@ -2718,6 +2718,11 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     let checkout = TempDir::new().unwrap();
     let repository = git2::build::RepoBuilder::new()
         .branch("deploy/production")
+        .remote_create(|repository, name, url| {
+            // Published file hashes and raw diffs require the committed bytes on every platform.
+            repository.config()?.set_bool("core.autocrlf", false)?;
+            repository.remote(name, url)
+        })
         .clone(destination.path().to_str().unwrap(), checkout.path())
         .unwrap();
     let root = checkout.path().join("production");
