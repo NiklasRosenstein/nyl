@@ -1,5 +1,79 @@
 {
   "$defs": {
+    "CaptureSettings": {
+      "additionalProperties": false,
+      "description": "Defaults for explicit live capture commands.",
+      "properties": {
+        "cluster": {
+          "$ref": "#/$defs/ClusterCaptureSettings",
+          "default": {
+            "crds": false
+          },
+          "description": "Cluster capture defaults."
+        }
+      },
+      "type": "object"
+    },
+    "ClusterCaptureSettings": {
+      "additionalProperties": false,
+      "description": "Optional cluster API schema capture.",
+      "properties": {
+        "crds": {
+          "default": false,
+          "description": "Capture schemas for all served CRD versions.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "KubeconformSettings": {
+      "additionalProperties": false,
+      "description": "Kubeconform's schema inputs and bounded execution policy.",
+      "properties": {
+        "builtin_schema_revision": {
+          "default": null,
+          "description": "Immutable commit of yannh/kubernetes-json-schema. Omitted uses Nyl's pinned revision.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_locations": {
+          "default": [],
+          "description": "Ordered local schema lookup templates, relative to nyl.toml.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skip": {
+          "default": [],
+          "description": "Explicit apiVersion/kind exclusions. Skipped resources appear in the summary.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strict": {
+          "default": true,
+          "description": "Reject unknown properties and duplicate YAML keys.",
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Maximum duration in seconds for one validator invocation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vendor_builtin_schemas": {
+          "default": false,
+          "description": "Require built-in schemas materialized by nyl vendor; never download during validation.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ProjectSettings": {
       "additionalProperties": false,
       "description": "Project settings in `[project]` section of `nyl.toml`.",
@@ -65,6 +139,29 @@
         }
       ]
     },
+    "ValidationSettings": {
+      "additionalProperties": false,
+      "description": "Project-wide validation policy. Named validator sections select implementations.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Run configured validators automatically on rendering commands.",
+          "type": "boolean"
+        },
+        "kubeconform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KubeconformSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Configure kubeconform schema validation."
+        }
+      },
+      "type": "object"
+    },
     "VendorMode": {
       "description": "Controls whether remote renderer inputs may use an in-tree vendor snapshot.",
       "enum": [
@@ -105,6 +202,15 @@
   "additionalProperties": false,
   "description": "Root structure of `nyl.toml`.",
   "properties": {
+    "capture": {
+      "$ref": "#/$defs/CaptureSettings",
+      "default": {
+        "cluster": {
+          "crds": false
+        }
+      },
+      "description": "Defaults for explicit cluster capture."
+    },
     "project": {
       "$ref": "#/$defs/ProjectSettings",
       "default": {
@@ -118,6 +224,13 @@
         ],
         "strip_empty_metadata_labels": "always"
       }
+    },
+    "validation": {
+      "$ref": "#/$defs/ValidationSettings",
+      "default": {
+        "enabled": false
+      },
+      "description": "Final rendered-manifest validation policy."
     },
     "vendor": {
       "anyOf": [
