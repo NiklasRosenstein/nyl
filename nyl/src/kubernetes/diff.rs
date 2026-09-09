@@ -51,7 +51,7 @@ impl DiffEngine {
         Self::normalize(&mut normalized);
 
         // Convert to YAML with consistent formatting
-        serde_norway::to_string(&normalized)
+        crate::yaml::serialize_yaml_document(&normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))
     }
 
@@ -155,9 +155,9 @@ impl DiffEngine {
         let live_normalized = Self::normalize_with_server(live, None).await?;
 
         // Convert to YAML and generate unified diff
-        let desired_yaml = serde_norway::to_string(&desired_normalized)
+        let desired_yaml = crate::yaml::serialize_yaml_document(&desired_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
-        let live_yaml = serde_norway::to_string(&live_normalized)
+        let live_yaml = crate::yaml::serialize_yaml_document(&live_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
 
         // Generate unified diff
@@ -205,9 +205,9 @@ impl DiffEngine {
         let live_normalized = Self::normalize_with_server(live, None).await?;
 
         // Convert to YAML for comparison
-        let desired_yaml = serde_norway::to_string(&desired_normalized)
+        let desired_yaml = crate::yaml::serialize_yaml_document(&desired_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
-        let live_yaml = serde_norway::to_string(&live_normalized)
+        let live_yaml = crate::yaml::serialize_yaml_document(&live_normalized)
             .map_err(|e| crate::NylError::Config(format!("Failed to serialize resource to YAML: {}", e)))?;
 
         Ok(desired_yaml == live_yaml)

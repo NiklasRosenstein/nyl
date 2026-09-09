@@ -196,10 +196,10 @@ mod tests {
             ..Default::default()
         };
 
-        let yaml = serde_norway::to_string(&chart_ref).unwrap();
+        let yaml = crate::yaml::serialize_yaml_document(&chart_ref).unwrap();
         assert!(yaml.contains("name: ./charts/mychart"));
 
-        let deserialized: ChartRef = serde_norway::from_str(&yaml).unwrap();
+        let deserialized: ChartRef = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(deserialized.name, Some("./charts/mychart".to_string()));
     }
 
@@ -211,7 +211,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
         };
 
-        let yaml = serde_norway::to_string(&chart_ref).unwrap();
+        let yaml = crate::yaml::serialize_yaml_document(&chart_ref).unwrap();
         assert!(yaml.contains("repository"));
         assert!(yaml.contains("nginx"));
     }
@@ -279,14 +279,14 @@ mod tests {
             .with_namespace("default")
             .with_values(values);
 
-        let yaml = serde_norway::to_string(&helm_chart).unwrap();
+        let yaml = crate::yaml::serialize_yaml_document(&helm_chart).unwrap();
         assert!(yaml.contains("apiVersion: k8s.nyl/v1"));
         assert!(yaml.contains("kind: HelmChart"));
         assert!(yaml.contains("name: nginx-app"));
         assert!(yaml.contains("replicaCount: 2"));
 
         // Round-trip
-        let deserialized: HelmChart = serde_norway::from_str(&yaml).unwrap();
+        let deserialized: HelmChart = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(deserialized.metadata.name, "nginx-app");
         assert_eq!(deserialized.spec.chart.name, Some("./charts/nginx".to_string()));
     }
@@ -310,7 +310,7 @@ spec:
     name: mychart
   includeCrds: false
 ";
-        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        let result: HelmChart = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(result.spec.include_crds, Some(false));
     }
 
@@ -326,7 +326,7 @@ spec:
     name: mychart
   includeCrds: true
 ";
-        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        let result: HelmChart = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(result.spec.include_crds, Some(true));
     }
 
@@ -341,7 +341,7 @@ spec:
   chart:
     name: mychart
 ";
-        let result: HelmChart = serde_norway::from_str(yaml).unwrap();
+        let result: HelmChart = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(result.spec.include_crds, None);
     }
 
@@ -354,7 +354,7 @@ spec:
                 ..Default::default()
             },
         );
-        let yaml = serde_norway::to_string(&helm_chart).unwrap();
+        let yaml = crate::yaml::serialize_yaml_document(&helm_chart).unwrap();
         assert!(!yaml.contains("includeCrds"));
     }
 
@@ -365,7 +365,7 @@ name: mychart
 version: "1.0.0"
 unknownField: value
 "#;
-        let result: std::result::Result<ChartRef, _> = serde_norway::from_str(yaml);
+        let result: std::result::Result<ChartRef, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"));
@@ -383,7 +383,7 @@ spec:
     name: mychart
   unknownField: value
 ";
-        let result: std::result::Result<HelmChart, _> = serde_norway::from_str(yaml);
+        let result: std::result::Result<HelmChart, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"));

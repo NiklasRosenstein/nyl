@@ -829,7 +829,7 @@ mod tests {
     }
 
     fn application_yaml(namespace: &str, name: &str, path: &str) -> Vec<u8> {
-        serde_yaml::to_string(&serde_json::json!({
+        crate::yaml::serialize_yaml_document(&serde_json::json!({
             "apiVersion": "argoproj.io/v1alpha1",
             "kind": "Application",
             "metadata": {"namespace": namespace, "name": name},

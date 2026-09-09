@@ -88,7 +88,7 @@ pub async fn execute(args: HistoryArgs) -> Result<()> {
             println!("{}", json);
         }
         OutputFormat::Yaml => {
-            let yaml = serde_norway::to_string(&releases)?;
+            let yaml = crate::yaml::serialize_yaml_document(&releases)?;
             print!("{}", yaml);
         }
     }

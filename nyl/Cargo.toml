@@ -25,11 +25,8 @@ minijinja = { version = "2.5", features = ["builtins", "custom_syntax"] }
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
 
-# YAML - Using serde_norway (YAML 1.2, actively maintained)
-serde_norway = "0.9"
-serde_yaml = "0.9"
-# Kubernetes scalar handling requires the libyml event API and YAML 1.1 string quoting.
-serde_yml = "=0.0.12"
+# YAML
+serde-saphyr = { version = "1.2", default-features = false, features = ["serialize", "deserialize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1"

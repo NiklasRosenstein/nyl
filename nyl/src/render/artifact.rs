@@ -220,7 +220,7 @@ impl DirectoryVendorStore {
     pub fn load(root: PathBuf) -> Result<Self> {
         let lock_path = root.join("lock.yaml");
         let lock = match fs::read_to_string(&lock_path) {
-            Ok(contents) => serde_norway::from_str::<VendorLock>(&contents).map_err(|error| {
+            Ok(contents) => serde_saphyr::from_str::<VendorLock>(&contents).map_err(|error| {
                 NylError::config(format!("Failed to parse vendor lock {}: {error}", lock_path.display()))
             })?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => VendorLock::default(),
@@ -311,7 +311,7 @@ impl DirectoryVendorWriter {
                 "Vendored binary or large artifacts are configured for Git LFS, but 'git lfs version' failed"
             );
         }
-        let serialized = serde_norway::to_string(&lock)
+        let serialized = crate::yaml::serialize_yaml_document(&lock)
             .map_err(|error| NylError::config(format!("Failed to serialize vendor lock: {error}")))?;
         atomic_replace(
             &self.root.join("lock.yaml"),

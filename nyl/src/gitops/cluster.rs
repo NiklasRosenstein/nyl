@@ -92,7 +92,7 @@ mod tests {
         }
         std::fs::write(
             directory.join(format!("{name}.yaml")),
-            serde_norway::to_string(&value).unwrap(),
+            crate::yaml::serialize_yaml_document(&value).unwrap(),
         )
         .unwrap();
     }
