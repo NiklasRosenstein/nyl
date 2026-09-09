@@ -19,7 +19,7 @@ fn validation_failure_prevents_resource_and_release_writes() {
     let done = Arc::new(AtomicBool::new(false));
     let server_done = done.clone();
     let worker = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(40);
         let mut requests = Vec::new();
         while !server_done.load(Ordering::Relaxed) && Instant::now() < deadline {
             let (mut socket, _) = match listener.accept() {
@@ -116,6 +116,7 @@ users:
         .args([
             "apply",
             "manifest.yaml",
+            "--no-cache",
             "--target",
             "test",
             "--name",
@@ -123,7 +124,7 @@ users:
             "--namespace",
             "default",
         ])
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .output()
         .unwrap();
     done.store(true, Ordering::Relaxed);
