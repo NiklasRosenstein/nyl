@@ -39,6 +39,13 @@
             "overridePackageName": "rust",
             "versioning": "semver",
             "groupName": "Rust toolchain"
+        },
+        {
+            "description": "Update the Helm version used by mise, CI tests, and the CI image in one PR",
+            "matchManagers": ["mise", "custom.regex"],
+            "matchDepNames": ["helm"],
+            "groupName": "Helm toolchain",
+            "separateMajorMinor": false
         }
     ],
     "customManagers": [
