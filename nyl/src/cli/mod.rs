@@ -98,7 +98,7 @@ impl Cli {
             Commands::Update(args) => commands::update::execute(args).await,
             Commands::Delete(args) => commands::delete::execute(args),
             Commands::Diff(args) => commands::diff::execute(args).await,
-            Commands::DiffTree(args) => commands::diff_tree::execute(args).await,
+            Commands::DiffTree(args) => commands::diff_tree::execute_with_color(args, self.color).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
             Commands::Schema(args) => commands::schema::execute(args),
             Commands::Init(args) => commands::init::execute(*args).await,

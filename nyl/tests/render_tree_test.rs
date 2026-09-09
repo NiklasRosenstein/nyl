@@ -2223,8 +2223,8 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .stderr(predicate::str::contains("Source baseline"))
         .stderr(predicate::str::contains(format!("Revision          {source_commit}")))
         .stderr(predicate::str::contains(format!("Commit            {source_commit}")))
-        .stderr(predicate::str::contains("  Desired publication\n    Repository"))
-        .stderr(predicate::str::contains("  Baseline publication\n    Repository"));
+        .stderr(predicate::str::contains("  Desired publication\n    Cluster"))
+        .stderr(predicate::str::contains("  Baseline publication\n    Cluster"));
 
     let application_source = fixture.path().join("applications/workloads/api.yaml");
     let changed = fs::read_to_string(&application_source)
@@ -2247,7 +2247,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .success()
         .stdout(predicate::str::contains("+  environment: changed"))
         .stderr(predicate::str::contains("Working tree      dirty"))
-        .stderr(predicate::str::contains("Rendered differences: 1 file(s)"));
+        .stderr(predicate::str::contains("1 changed · 0 added · 1 modified · 0 deleted"));
 
     Command::cargo_bin("nyl")
         .unwrap()
@@ -2278,7 +2278,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .stderr(predicate::str::contains(
             "View                Applications argocd-production/api",
         ))
-        .stderr(predicate::str::contains("Wrote rendered diff"));
+        .stderr(predicate::str::contains("1 changed · 0 added · 1 modified · 0 deleted"));
     let application_diff_contents = fs::read_to_string(&application_diff).unwrap();
     assert!(application_diff_contents.contains("workloads/api/resources.yaml"));
     assert!(application_diff_contents.contains("+  environment: changed"));
@@ -2453,4 +2453,309 @@ fn publish_tree_cleanliness_overrides_are_mutually_exclusive() {
         .stderr(predicate::str::contains(
             "the argument '--allow-dirty' cannot be used with '--require-clean'",
         ));
+}
+
+#[test]
+fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
+    let (fixture, _destination, _seed, source_commit) = publication_fixture();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+    let application = fixture.path().join("applications/workloads/api.yaml");
+    let changed = fs::read_to_string(&application)
+        .unwrap()
+        .replace("environment: '{{ values.environment }}'", "environment: changed");
+    fs::write(application, changed).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .env("CI", "true")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("TERM", "xterm")
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--progress",
+            "off",
+            "--stats-files",
+            "--output",
+            "artifacts/rendered.diff",
+            "--stats-output",
+            "text:artifacts/report.txt",
+            "--stats-output",
+            "markdown:artifacts/comment.md",
+            "--stats-output",
+            "json:artifacts/report.json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("\x1b[32m+1\x1b[0m"))
+        .stderr(predicate::str::contains("Render statistics"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.path().join("artifacts/report.json")).unwrap()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["comparison"]["target"], "production");
+    assert_eq!(
+        json["comparison"]["desired_source"]["commit"],
+        source_commit.to_string()
+    );
+    assert_eq!(json["comparison"]["desired_source"]["dirty"], true);
+    assert_eq!(json["comparison"]["baseline"]["mode"], "published");
+    assert_eq!(json["diff"]["files_changed"], 1);
+    assert_eq!(json["diff"]["lines_added"], 1);
+    assert_eq!(json["diff"]["lines_removed"], 1);
+    assert_eq!(json["diff"]["files"][0]["path"], "workloads/api/resources.yaml");
+    assert_eq!(json["render"]["sources"]["git_ref_refresh"], 1);
+    for path in ["artifacts/report.txt", "artifacts/comment.md", "artifacts/report.json"] {
+        let contents = fs::read_to_string(fixture.path().join(path)).unwrap();
+        assert!(!contents.contains('\x1b'), "{path} must be ANSI-free in auto mode");
+    }
+    let markdown = fs::read_to_string(fixture.path().join("artifacts/comment.md")).unwrap();
+    assert!(markdown.contains("| workloads/api/resources\\.yaml | modified | +1 | −1 |"));
+    assert!(markdown.contains("### Render statistics"));
+    #[cfg(unix)]
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--stats-output",
+            "markdown:-",
+            "--output",
+            "/dev/null",
+            "--progress",
+            "off",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("## Rendered tree comparison\n"))
+        .stdout(predicate::str::contains(
+            "1 changed · 0 added · 1 modified · 0 deleted; **+1 −1 lines**.",
+        ))
+        .stderr(predicate::str::contains("Rendered tree comparison"));
+    assert!(fs::read_to_string(fixture.path().join("artifacts/rendered.diff"))
+        .unwrap()
+        .contains("+  environment: changed"));
+
+    let result = Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--progress",
+            "off",
+            "--no-stats-stderr",
+            "--output",
+            "artifacts/rendered.diff",
+            "--stats-output",
+            "json:-",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Rendered tree comparison").not())
+        .stderr(predicate::str::contains("Render statistics").not())
+        .get_output()
+        .stdout
+        .clone();
+    let copied: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(copied["diff"], json["diff"]);
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--progress",
+            "off",
+            "--no-stats-stderr",
+            "--color",
+            "always",
+            "--output",
+            "artifacts/failure.diff",
+            "--fail-on-diff",
+            "--stats-output",
+            "text:artifacts/colored.txt",
+            "--stats-output",
+            "json:artifacts/failure.json",
+            "--stats-output",
+            "markdown:artifacts/failure.md",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("has rendered differences"));
+    assert!(fs::read_to_string(fixture.path().join("artifacts/colored.txt"))
+        .unwrap()
+        .contains("\x1b[32m+1\x1b[0m"));
+    let failed: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.path().join("artifacts/failure.json")).unwrap()).unwrap();
+    assert_eq!(failed["diff"], json["diff"]);
+    assert!(!fs::read_to_string(fixture.path().join("artifacts/failure.md"))
+        .unwrap()
+        .contains('\x1b'));
+    assert!(fs::read_to_string(fixture.path().join("artifacts/failure.diff"))
+        .unwrap()
+        .contains("+  environment: changed"));
+
+    for selection in [&["--catalog"][..], &["--application", "argocd-production/api"][..]] {
+        let output = Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args([
+                "diff-tree",
+                "--progress",
+                "off",
+                "--no-stats-stderr",
+                "--output",
+                "artifacts/selected.diff",
+                "--stats-output",
+                "json:-",
+            ])
+            .args(selection)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let selected: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(selected["diff"]["has_changes"], selection[0] == "--application");
+        if selection[0] == "--catalog" {
+            assert_eq!(selected["diff"]["files"], serde_json::json!([]));
+            assert_eq!(selected["diff"]["lines_added"], 0);
+            assert!(fs::read(fixture.path().join("artifacts/selected.diff"))
+                .unwrap()
+                .is_empty());
+        } else {
+            assert_eq!(selected["diff"], json["diff"]);
+        }
+    }
+
+    let source_output = Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--against",
+            "source",
+            "--source-ref",
+            &source_commit.to_string(),
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+            "--progress",
+            "off",
+            "--no-stats-stderr",
+            "--output",
+            "artifacts/source.diff",
+            "--stats-output",
+            "json:-",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let source: serde_json::Value = serde_json::from_slice(&source_output).unwrap();
+    assert_eq!(source["comparison"]["baseline"]["mode"], "source");
+    assert_eq!(source["comparison"]["baseline"]["commit"], source_commit.to_string());
+    assert_eq!(source["diff"], json["diff"]);
+}
+
+#[test]
+fn diff_tree_rejects_output_conflicts_before_rendering() {
+    let temp = TempDir::new().unwrap();
+    for args in [
+        vec!["--stats-output", "json:-"],
+        vec!["--output", "report", "--stats-output", "text:./report"],
+        vec!["--stats-output", "json:report", "--stats-output", "markdown:./report"],
+        vec!["--stats-output", "yaml:report"],
+    ] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(temp.path())
+            .timeout(std::time::Duration::from_secs(10))
+            .arg("diff-tree")
+            .args(args)
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty());
+    }
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn diff_tree_failed_comparisons_preserve_reports_and_report_write_failures() {
+    let (fixture, _destination, _seed, source_commit) = publication_fixture();
+    fs::write(fixture.path().join("report.json"), "preserve me").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--against",
+            "source",
+            "--source-ref",
+            &source_commit.to_string(),
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+            "--application",
+            "missing/app",
+            "--stats-output",
+            "json:report.json",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("report.json")).unwrap(),
+        "preserve me"
+    );
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--against",
+            "source",
+            "--source-ref",
+            &source_commit.to_string(),
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+            "--no-stats-stderr",
+            "--progress",
+            "off",
+            "--output",
+            "artifacts/rendered.diff",
+            "--stats-output",
+            "json:report.json/impossible",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("report.json")).unwrap(),
+        "preserve me"
+    );
 }
