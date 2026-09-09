@@ -15,7 +15,7 @@ use crate::gitops::{
 };
 use crate::{NylError, Result};
 
-use report::{Report, ReportFormat, ReportOutput, TreeDiff};
+use report::{DiffMode, Report, ReportFormat, ReportOutput, TreeDiff};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
@@ -56,6 +56,9 @@ pub struct DiffTreeArgs {
     /// Write the unified diff to a file instead of stdout.
     #[arg(short, long, default_value = "-")]
     pub output: PathBuf,
+    /// Compare original bytes, including YAML formatting and comments.
+    #[arg(long)]
+    pub raw: bool,
     /// Include per-file line counts in text and Markdown reports.
     #[arg(long)]
     stats_files: bool,
@@ -153,6 +156,7 @@ struct ComparisonFiles {
 }
 
 struct ComparisonSummary<'a> {
+    mode: DiffMode,
     target: &'a str,
     desired_source_repository: Option<&'a str>,
     desired_source_commit: Option<&'a str>,
@@ -192,9 +196,11 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
     let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
     let selection = DiffSelection::from_args(&args);
     let comparison = comparison_files(&selection, &baseline, &desired)?;
-    let diff = TreeDiff::between(&comparison.base, &comparison.desired)?;
+    let mode = if args.raw { DiffMode::Raw } else { DiffMode::Normalized };
+    let diff = TreeDiff::between(&comparison.base, &comparison.desired, mode)?;
     let report = Report::new(
         &ComparisonSummary {
+            mode,
             target: &target_name,
             desired_source_repository: desired_source_repository.as_deref(),
             desired_source_commit: desired_source_commit.as_deref(),

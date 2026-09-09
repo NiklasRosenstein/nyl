@@ -2701,6 +2701,83 @@ fn publish_tree_cleanliness_overrides_are_mutually_exclusive() {
 }
 
 #[test]
+fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    let source_path = fixture.path().join("applications/workloads/api.yaml");
+    let source = fs::read_to_string(&source_path).unwrap();
+    fs::write(&source_path, format!("{source}  config: |\n    first\n    second\n")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Multiline configuration");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+
+    let checkout = TempDir::new().unwrap();
+    let repository = git2::build::RepoBuilder::new()
+        .branch("deploy/production")
+        .clone(destination.path().to_str().unwrap(), checkout.path())
+        .unwrap();
+    let root = checkout.path().join("production");
+    let path = root.join("workloads/api/resources.yaml");
+    let rendered = fs::read_to_string(&path).unwrap();
+    assert!(rendered.contains("config: |\n    first\n    second\n"), "{rendered}");
+    let documents = nyl::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
+    let quoted = documents
+        .iter()
+        .map(|document| nyl::yaml::serialize_yaml_document(document).unwrap())
+        .collect::<Vec<_>>()
+        .join("---\n");
+    fs::write(path, &quoted).unwrap();
+    let index_path = root.join("_nyl/index.json");
+    let mut index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    index["files"]["workloads/api/resources.yaml"] = nyl::gitops::reconcile::sha256(quoted.as_bytes()).into();
+    fs::write(index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    commit_all(&repository, "Quoted publication configuration");
+    repository
+        .find_remote("origin")
+        .unwrap()
+        .push(&["refs/heads/deploy/production:refs/heads/deploy/production"], None)
+        .unwrap();
+
+    for raw in [false, true] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args([
+                "diff-tree",
+                "--target",
+                "production",
+                "--fail-on-diff",
+                "--progress",
+                "off",
+                "--output",
+                "comparison.diff",
+                "--stats-output",
+                "json:comparison.json",
+            ]);
+        if raw {
+            command.arg("--raw");
+            command.assert().failure();
+        } else {
+            command.assert().success();
+        }
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.path().join("comparison.json")).unwrap()).unwrap();
+        assert_eq!(report["comparison"]["mode"], if raw { "raw" } else { "normalized" });
+        assert_eq!(report["diff"]["has_changes"], raw);
+        assert_eq!(report["diff"]["files_changed"], usize::from(raw));
+        assert_eq!(
+            !fs::read(fixture.path().join("comparison.diff")).unwrap().is_empty(),
+            raw
+        );
+    }
+}
+
+#[test]
 fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
     let (fixture, _destination, _seed, source_commit) = publication_fixture();
     Command::cargo_bin("nyl")

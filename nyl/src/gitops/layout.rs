@@ -269,7 +269,7 @@ fn serialize_documents(
                 yaml.push('\n');
             }
         }
-        let document = crate::yaml::serialize_yaml_document(&resource)
+        let document = crate::yaml::serialize_yaml_value(&resource)
             .map_err(|error| NylError::config(format!("Failed to serialize rendered manifest: {error}")))?;
         yaml.push_str(&document);
         if !yaml.ends_with('\n') {

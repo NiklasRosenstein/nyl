@@ -64,7 +64,7 @@ fn apply_kyverno_policies_internal(
     let mut policy_files = Vec::new();
     for (idx, policy) in policies.iter().enumerate() {
         let policy_file = policies_dir.join(format!("policy-{}.yaml", idx));
-        let policy_yaml = crate::yaml::serialize_yaml_document(policy).map_err(NylError::YamlEmit)?;
+        let policy_yaml = crate::yaml::serialize_yaml_value(policy).map_err(NylError::YamlEmit)?;
         fs::write(&policy_file, policy_yaml)
             .map_err(|e| NylError::Config(format!("Failed to write policy file: {}", e)))?;
         policy_files.push(policy_file);
@@ -103,7 +103,7 @@ fn write_manifests_to_file(path: &Path, manifests: &[&serde_json::Value]) -> Res
         if i > 0 {
             writeln!(file, "---").map_err(|e| NylError::Config(format!("Failed to write separator to file: {}", e)))?;
         }
-        let yaml = crate::yaml::serialize_yaml_document(manifest).map_err(NylError::YamlEmit)?;
+        let yaml = crate::yaml::serialize_yaml_value(manifest).map_err(NylError::YamlEmit)?;
         write!(file, "{}", yaml).map_err(|e| NylError::Config(format!("Failed to write manifest to file: {}", e)))?;
     }
 

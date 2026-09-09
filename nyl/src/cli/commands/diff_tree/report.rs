@@ -153,13 +153,47 @@ pub(super) struct TreeDiff {
     pub stats: DiffStats,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DiffMode {
+    Normalized,
+    Raw,
+}
+
+impl DiffMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normalized => "normalized YAML",
+            Self::Raw => "raw bytes",
+        }
+    }
+}
+
 impl TreeDiff {
-    pub fn between(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBuf, Vec<u8>>) -> Result<Self> {
+    pub fn between(
+        base: &BTreeMap<PathBuf, Vec<u8>>,
+        desired: &BTreeMap<PathBuf, Vec<u8>>,
+        mode: DiffMode,
+    ) -> Result<Self> {
         let mut patch = String::new();
         let mut stats = DiffStats::default();
         for path in base.keys().chain(desired.keys()).collect::<BTreeSet<_>>() {
-            let old = base.get(path);
-            let new = desired.get(path);
+            let old = base.get(path).map(Vec::as_slice);
+            let new = desired.get(path).map(Vec::as_slice);
+            if old == new {
+                continue;
+            }
+            // Normalize both sides together; an unreadable document keeps the raw comparison.
+            let normalized = if mode == DiffMode::Normalized
+                && matches!(path.extension().and_then(|s| s.to_str()), Some("yaml" | "yml"))
+            {
+                normalize_yaml(old.unwrap_or_default()).zip(normalize_yaml(new.unwrap_or_default()))
+            } else {
+                None
+            };
+            let (old, new) = normalized.as_ref().map_or((old, new), |(a, b)| {
+                (old.map(|_| a.as_slice()), new.map(|_| b.as_slice()))
+            });
             if old == new {
                 continue;
             }
@@ -200,8 +234,8 @@ impl TreeDiff {
             .unwrap();
             let old_label = if old.is_none() { "/dev/null" } else { &a };
             let new_label = if new.is_none() { "/dev/null" } else { &b };
-            let old_bytes = old.map_or(&[][..], Vec::as_slice);
-            let new_bytes = new.map_or(&[][..], Vec::as_slice);
+            let old_bytes = old.unwrap_or_default();
+            let new_bytes = new.unwrap_or_default();
             let text = std::str::from_utf8(old_bytes)
                 .ok()
                 .zip(std::str::from_utf8(new_bytes).ok())
@@ -245,7 +279,21 @@ impl TreeDiff {
     }
 }
 
-fn blob_id(bytes: Option<&Vec<u8>>) -> Result<git2::Oid> {
+fn normalize_yaml(bytes: &[u8]) -> Option<Vec<u8>> {
+    let input = std::str::from_utf8(bytes).ok().filter(|text| !text.contains('\0'))?;
+    let documents = crate::yaml::parse_yaml_documents_k8s_compatible(input).ok()?;
+    let mut output = String::new();
+    for mut document in documents {
+        document.sort_all_objects();
+        if !output.is_empty() {
+            output.push_str("---\n");
+        }
+        output.push_str(&crate::yaml::serialize_yaml_value(&document).ok()?);
+    }
+    Some(output.into_bytes())
+}
+
+fn blob_id(bytes: Option<&[u8]>) -> Result<git2::Oid> {
     bytes.map_or(Ok(git2::Oid::ZERO_SHA1), |bytes| {
         git2::Oid::hash_object(git2::ObjectType::Blob, bytes).map_err(|error| NylError::Git(error.into()))
     })
@@ -282,6 +330,7 @@ pub(super) struct Report {
 
 #[derive(Serialize)]
 struct Comparison {
+    mode: DiffMode,
     target: String,
     selection: Selection,
     desired_source: Source,
@@ -392,6 +441,7 @@ impl Report {
         Self {
             schema_version: 1,
             comparison: Comparison {
+                mode: summary.mode,
                 target: summary.target.to_owned(),
                 selection,
                 desired_source: Source {
@@ -500,6 +550,7 @@ impl Report {
             }
         }
         let destination = &self.comparison.diff_output;
+        writeln!(output, "  {:<20}{}", "Comparison", self.comparison.mode.label()).unwrap();
         writeln!(
             output,
             "  {:<20}{}\n",
@@ -567,6 +618,7 @@ impl Report {
         let mut output = format!("## Rendered tree comparison\n\n| Field | Value |\n| --- | --- |\n| Deployment target | {} |\n| View | {} |\n| Diff output | {} |\n",
             markdown_value(&self.comparison.target), markdown_value(&self.comparison.selection.description()),
             markdown_value(if self.comparison.diff_output == "-" { "stdout" } else { &self.comparison.diff_output }));
+        writeln!(output, "| Comparison | {} |", self.comparison.mode.label()).unwrap();
         for (heading, fields) in self.context_sections() {
             writeln!(output, "\n### {heading}\n\n| Field | Value |\n| --- | --- |").unwrap();
             for (label, value) in fields {
@@ -668,6 +720,7 @@ mod tests {
         Report {
             schema_version: 1,
             comparison: Comparison {
+                mode: DiffMode::Normalized,
                 target: "production".into(),
                 selection: Selection::Tree,
                 desired_source: Source {
@@ -698,6 +751,92 @@ mod tests {
     }
 
     #[test]
+    fn test_normalized_diff_ignores_yaml_presentation() {
+        let base = tree(&[("resources.yaml", b"# Nyl-Provenance: Resource: v1 ConfigMap app/config\nkind: ConfigMap\ndata:\n  config: |\n    first\n    second\nmetadata: {name: config, labels: {z: last, a: first}}\n---\n# empty\n")]);
+        let desired = tree(&[("resources.yaml", b"metadata:\n  labels: {a: first, z: last}\n  name: 'config'\ndata: {config: \"first\\nsecond\\n\"}\nkind: ConfigMap\n")]);
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Normalized).unwrap();
+        assert!(diff.patch.is_empty());
+        assert!(!diff.stats.has_changes);
+        assert_eq!(
+            (
+                diff.stats.files_changed,
+                diff.stats.lines_added,
+                diff.stats.lines_removed
+            ),
+            (0, 0, 0)
+        );
+        assert!(
+            TreeDiff::between(&base, &desired, DiffMode::Raw)
+                .unwrap()
+                .stats
+                .has_changes
+        );
+    }
+
+    #[test]
+    fn test_normalized_diff_preserves_values_and_order() {
+        for (old, new) in [
+            ("items: [one, two]\n", "items: [two, one]\n"),
+            ("name: first\n---\nname: second\n", "name: second\n---\nname: first\n"),
+            ("value: 'true'\n", "value: true\n"),
+            ("value: '1'\n", "value: 1\n"),
+            ("value: ''\n", "value: null\n"),
+            ("value: \"\\n\"\n", "value: ''\n"),
+            ("value: \"line\\n\"\n", "value: line\n"),
+            ("value: \"line \\n\"\n", "value: \"line\\n\"\n"),
+            ("value: \"a: 1\\nb: 2\\n\"\n", "value: \"b: 2\\na: 1\\n\"\n"),
+        ] {
+            let diff = TreeDiff::between(
+                &tree(&[("resources.yml", old.as_bytes())]),
+                &tree(&[("resources.yml", new.as_bytes())]),
+                DiffMode::Normalized,
+            )
+            .unwrap();
+            assert!(diff.stats.has_changes, "{old:?} versus {new:?}");
+            assert_eq!(diff.stats.files_modified, 1);
+            assert!(!diff.patch.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_normalized_diff_shows_embedded_config_line_changes() {
+        let base = tree(&[("resources.yaml", b"data:\n  config: |\n    first\n    old\n    last\n")]);
+        let desired = tree(&[("resources.yaml", b"data: {config: \"first\\nnew\\nlast\\n\"}\n")]);
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Normalized).unwrap();
+        assert_eq!((diff.stats.lines_added, diff.stats.lines_removed), (1, 1));
+        assert!(diff.patch.contains("-    old\n+    new\n"), "{}", diff.patch);
+    }
+
+    #[test]
+    fn test_normalized_diff_keeps_raw_comparison_for_unreadable_yaml_and_other_files() {
+        for (path, old, new) in [
+            ("resources.yaml", b"value: [\n".as_slice(), b"value: 1\n".as_slice()),
+            ("resources.yml", b"value: 1\n", b"value: [\n"),
+            ("resources.yaml", b"\xff", b"\xfe"),
+            ("resources.yaml", b"old\0", b"new\0"),
+            ("README.md", b"# old\n", b"# new\n"),
+            ("value.json", b"{\"a\":1}\n", b"{ \"a\": 1 }\n"),
+        ] {
+            let base = tree(&[(path, old)]);
+            let desired = tree(&[(path, new)]);
+            let normalized = TreeDiff::between(&base, &desired, DiffMode::Normalized).unwrap();
+            let raw = TreeDiff::between(&base, &desired, DiffMode::Raw).unwrap();
+            assert!(normalized.stats.has_changes);
+            assert_eq!(normalized.patch, raw.patch);
+        }
+    }
+
+    #[test]
+    fn test_normalized_diff_tracks_file_presence_even_without_resources() {
+        let base = tree(&[("deleted.yaml", b"# empty\n")]);
+        let desired = tree(&[("added.yaml", b"")]);
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Normalized).unwrap();
+        assert_eq!((diff.stats.files_added, diff.stats.files_deleted), (1, 1));
+        assert_eq!((diff.stats.lines_added, diff.stats.lines_removed), (0, 0));
+        assert!(diff.stats.has_changes);
+    }
+
+    #[test]
     fn test_diff_counts_share_patch_line_operations() {
         let base = tree(&[
             ("deleted", b"one\ntwo\n"),
@@ -709,7 +848,7 @@ mod tests {
             ("modified", b"context\nnew\n"),
             ("same", b"same\n"),
         ]);
-        let diff = TreeDiff::between(&base, &desired).unwrap();
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Raw).unwrap();
         assert_eq!(
             (
                 diff.stats.files_added,
@@ -751,12 +890,21 @@ mod tests {
             ("line", "line\n"),
             ("line\r\n", "line\n"),
         ] {
-            let diff =
-                TreeDiff::between(&tree(&[("file", old.as_bytes())]), &tree(&[("file", new.as_bytes())])).unwrap();
+            let diff = TreeDiff::between(
+                &tree(&[("file", old.as_bytes())]),
+                &tree(&[("file", new.as_bytes())]),
+                DiffMode::Raw,
+            )
+            .unwrap();
             assert_eq!((diff.stats.lines_added, diff.stats.lines_removed), (1, 1));
             assert!(diff.stats.has_changes);
         }
-        let diff = TreeDiff::between(&tree(&[("file", b"line")]), &tree(&[("file", b"line\n")])).unwrap();
+        let diff = TreeDiff::between(
+            &tree(&[("file", b"line")]),
+            &tree(&[("file", b"line\n")]),
+            DiffMode::Raw,
+        )
+        .unwrap();
         assert!(diff.patch.contains("\\ No newline at end of file"));
     }
 
@@ -769,7 +917,7 @@ mod tests {
             ("same-binary", b"\xff"),
             ("nul", b"x\0y"),
         ]);
-        let diff = TreeDiff::between(&base, &desired).unwrap();
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Raw).unwrap();
         assert!(diff.stats.has_changes);
         assert_eq!(diff.stats.files_changed, 4);
         assert_eq!(diff.stats.binary_files, 2);
@@ -801,7 +949,7 @@ mod tests {
         for (path, bytes) in &base {
             std::fs::write(temp.path().join(path), bytes).unwrap();
         }
-        let diff = TreeDiff::between(&base, &desired).unwrap();
+        let diff = TreeDiff::between(&base, &desired, DiffMode::Raw).unwrap();
         assert_cmd::Command::new("git")
             .current_dir(temp.path())
             .timeout(std::time::Duration::from_secs(10))
@@ -821,7 +969,7 @@ mod tests {
     #[test]
     fn test_zero_diff_is_a_complete_report() {
         let base = tree(&[("empty", b""), ("text", b"line\n"), ("binary", b"\xff")]);
-        let diff = TreeDiff::between(&base, &base).unwrap();
+        let diff = TreeDiff::between(&base, &base, DiffMode::Normalized).unwrap();
         assert!(diff.patch.is_empty());
         assert!(!diff.stats.has_changes);
         let report = report(diff.stats);
@@ -838,7 +986,7 @@ mod tests {
     fn test_formats_preserve_counts_and_escape_paths() {
         let path = "a|b`<tag>&[link](url)\n.yaml";
         let report = report(
-            TreeDiff::between(&BTreeMap::new(), &tree(&[(path, b"new\n")]))
+            TreeDiff::between(&BTreeMap::new(), &tree(&[(path, b"new\n")]), DiffMode::Raw)
                 .unwrap()
                 .stats,
         );

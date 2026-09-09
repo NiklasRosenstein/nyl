@@ -2484,7 +2484,7 @@ fn collect_leaf_paths(value: &Value, segments: &mut Vec<String>, output: &mut Ve
 }
 
 fn insert_yaml(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, value: &Value) -> Result<()> {
-    let mut yaml = crate::yaml::serialize_yaml_document(value)
+    let mut yaml = crate::yaml::serialize_yaml_value(value)
         .map_err(|error| NylError::config(format!("Failed to serialize {}: {error}", path.display())))?
         .into_bytes();
     if !yaml.ends_with(b"\n") {
