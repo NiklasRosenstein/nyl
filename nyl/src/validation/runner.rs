@@ -529,8 +529,7 @@ impl PartitionSchemas {
                     partition.destination
                 )));
             }
-            let url = resolver.builtin_url(gvk, &partition.version)?;
-            match resolver.builtin(&url).await? {
+            match resolver.builtin_resource(gvk, &partition.version).await? {
                 Some(schema) => schema,
                 None => {
                     return Err(NylError::validation(format!(
@@ -1033,6 +1032,99 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_crd_shared_definitions_vendor_and_validate_recursively_offline() {
+        let (directory, mut config, mut partition) = fixture();
+        let root = directory.path().join("vendor");
+        let definition = "io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.v1.CustomResourceDefinition";
+        let schema_ref = "#/definitions/JSONSchemaProps";
+        for strict in [true, false] {
+            let settings = config.config.validation.kubeconform.as_mut().unwrap();
+            settings.schema_locations.clear();
+            settings.strict = strict;
+            let mut resolver = SchemaResolver::new(directory.path(), root.clone(), settings, true, false).unwrap();
+            let url = resolver
+                .builtin_url("apiextensions.k8s.io/v1/CustomResourceDefinition", &partition.version)
+                .unwrap();
+            let url = reqwest::Url::parse(&url).unwrap().join("_definitions.json").unwrap();
+            let definitions = json!({"definitions": {
+                definition: {
+                    "type":"object", "required":["spec"], "additionalProperties": !strict,
+                    "properties":{
+                        "apiVersion":{"type":"string"}, "kind":{"type":"string"},
+                        "metadata":{"type":"object"},
+                        "spec":{"type":"object", "required":["schema"], "properties":{
+                            "schema":{"$ref":schema_ref}
+                        }}
+                    }
+                },
+                "JSONSchemaProps": {
+                    "type":"object", "additionalProperties":!strict,
+                    "properties":{
+                        "type":{"type":"string"},
+                        "properties":{"type":"object","additionalProperties":{"$ref":schema_ref}},
+                        "default":{}
+                    }
+                }
+            }});
+            let hash = store::write_blob(&root, &store::json_bytes(&definitions).unwrap()).unwrap();
+            let index = store::BuiltinIndex {
+                version: 1,
+                schemas: BTreeMap::from([(url.to_string(), hash.clone())]),
+            };
+            store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+            let valid = json!({
+                "apiVersion":"apiextensions.k8s.io/v1", "kind":"CustomResourceDefinition",
+                "metadata":{"name":"widgets.example.com"},
+                "spec":{"schema":{"type":"object","properties":{
+                    "count":{"type":"integer", "default":{"arbitrary":"application data"}}
+                }}}
+            });
+            partition.documents = vec![document(valid.clone())];
+            let stage = TempDir::new().unwrap();
+            prepare_partition(
+                &ValidationArgs::default(),
+                &partition,
+                &mut resolver,
+                stage.path(),
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolver.observed_builtins.get(url.as_str()), Some(&hash));
+            validate_partitions(
+                &ValidationArgs::default(),
+                &config,
+                directory.path(),
+                std::slice::from_ref(&partition),
+            )
+            .await
+            .unwrap();
+            partition.documents[0].manifest["spec"]["schema"]["properties"]["count"]["type"] = json!(42);
+            assert!(validate_partitions(
+                &ValidationArgs::default(),
+                &config,
+                directory.path(),
+                std::slice::from_ref(&partition)
+            )
+            .await
+            .is_err());
+            partition.documents[0].manifest = valid;
+            partition.documents[0].manifest["spec"]["schema"]["properties"]["count"]["unknown"] = json!(true);
+            assert_eq!(
+                validate_partitions(
+                    &ValidationArgs::default(),
+                    &config,
+                    directory.path(),
+                    std::slice::from_ref(&partition)
+                )
+                .await
+                .is_err(),
+                strict
+            );
+        }
     }
 
     #[tokio::test]

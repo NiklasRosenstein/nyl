@@ -29,6 +29,12 @@ validators automatically for `render`, `diff`, `apply`, `render-tree`,
 `--no-validate` suppresses automatic validation. Requesting validation without a
 configured validator is an error.
 
+`strict = true` rejects unknown fields as well as duplicate YAML keys. Captured
+CRD schemas retain both strict and permissive variants so this setting can change
+without recapturing. Both variants validate declared constraints; permissive mode
+allows extra fields where the schema does not explicitly constrain them. Strict
+mode respects fields that explicitly preserve unknown properties.
+
 ```bash
 nyl render-tree --target production --output-dir rendered --validate
 nyl diff-tree --target production --validate
@@ -98,7 +104,10 @@ vendor/
 The cluster inventory identifies served versions and references shared schema
 blobs. Equal schema content is stored once across clusters. Volatile resource
 metadata and status are excluded. Commit the inventories and blobs with the
-Cluster configuration.
+Cluster configuration. Capture and vendoring generate `schemas/.gitattributes`
+to treat blobs as binary in Git, suppressing text diffs and merges and preserving
+the exact bytes required by their hashes. Blobs remain JSON in ordinary Git;
+inventories remain diffable.
 
 A snapshot includes its source capabilities fingerprint. Validation rejects a
 mismatch and instructs recapture, including when a capture was interrupted
@@ -187,6 +196,10 @@ The effective Kubernetes version selects the version directory within that
 registry snapshot. The kubeconform executable version and registry revision are
 independent pins. A project can set `builtin_schema_revision` to a full commit
 SHA when it needs a different registry snapshot.
+
+CustomResourceDefinition schemas use the registry's shared definitions because
+their recursive schemas are not available as standalone files. Their complete
+reference graph uses the selected Kubernetes version and strictness policy.
 
 By default, built-ins are downloaded into a disposable cache. To require
 committed schemas during validation:

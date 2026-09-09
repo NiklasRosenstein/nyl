@@ -97,6 +97,23 @@ impl<'a> SchemaResolver<'a> {
         Ok(format!("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{revision}/v{version}-standalone{strict}/{}{suffix}.json", kind.to_lowercase()))
     }
 
+    /// Resolve native resources, retaining references for recursive CRD schemas.
+    pub async fn builtin_resource(&mut self, gvk: &str, version: &str) -> Result<Option<SchemaDocument>> {
+        let url = self.builtin_url(gvk, version)?;
+        let (api, kind) = resource_parts(gvk)?;
+        if let Some(api_version) = api.strip_prefix("apiextensions.k8s.io/") {
+            if matches!(kind, "CustomResourceDefinition" | "CustomResourceDefinitionList") {
+                // Recursive CRD schemas exist in shared definitions, not standalone files.
+                let definition = format!("io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.{api_version}.{kind}");
+                return Ok(Some(SchemaDocument {
+                    value: serde_json::json!({"$ref": format!("_definitions.json#/definitions/{definition}")}),
+                    origin: Origin::Builtin(url),
+                }));
+            }
+        }
+        self.builtin(&url).await
+    }
+
     pub async fn builtin(&mut self, url: &str) -> Result<Option<SchemaDocument>> {
         if let Some(hash) = self.observed_builtins.get(url) {
             return Ok(Some(SchemaDocument {
