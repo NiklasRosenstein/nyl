@@ -227,6 +227,9 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
     }
     if let Some(contents) = terminal_report {
         let mut stderr = io::stderr().lock();
+        if args.output == Path::new("-") && !diff.patch.is_empty() {
+            stderr.write_all(b"\n")?;
+        }
         stderr.write_all(contents.as_bytes())?;
         stderr.flush()?;
     }
