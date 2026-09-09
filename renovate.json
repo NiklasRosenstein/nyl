@@ -39,12 +39,6 @@
             "overridePackageName": "rust",
             "versioning": "semver",
             "groupName": "Rust toolchain"
-        },
-        {
-            "description": "Nyl requires the parser event API and Kubernetes-compatible string quoting provided by serde_yml 0.0.12",
-            "matchManagers": ["cargo"],
-            "matchPackageNames": ["serde_yml"],
-            "allowedVersions": "<0.0.13"
         }
     ],
     "customManagers": [

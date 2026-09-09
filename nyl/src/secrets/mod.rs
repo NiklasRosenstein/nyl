@@ -180,7 +180,7 @@ impl SecretsConfig {
             serde_json::from_str(&contents)
                 .map_err(|e| NylError::Config(format!("Failed to parse secrets JSON: {}", e)))?
         } else {
-            serde_norway::from_str(&contents)
+            serde_saphyr::from_str(&contents)
                 .map_err(|e| NylError::Config(format!("Failed to parse secrets YAML: {}", e)))?
         };
 
@@ -269,7 +269,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let secrets_path = temp.path().join("nyl-secrets.yaml");
 
-        fs::write(&secrets_path, "type: null\n").unwrap();
+        fs::write(&secrets_path, "type: 'null'\n").unwrap();
 
         let config = SecretsConfig::load_from_file(&secrets_path).unwrap();
         assert_eq!(config.file, Some(secrets_path));
@@ -309,9 +309,9 @@ mod tests {
     }
 
     #[test]
-    fn test_secret_provider_config_deserialization() {
-        let yaml = "type: null\n";
-        let config: SecretProviderConfig = serde_norway::from_str(yaml).unwrap();
+    fn test_secret_provider_config_roundtrip() {
+        let yaml = crate::yaml::serialize_yaml_document(&SecretProviderConfig::default()).unwrap();
+        let config: SecretProviderConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert!(matches!(config, SecretProviderConfig::Null(_)));
     }
 }

@@ -112,7 +112,7 @@ fn test_secrets_config_integration() {
     let temp = TempDir::new().unwrap();
     let secrets_path = temp.path().join("nyl-secrets.yaml");
 
-    fs::write(&secrets_path, "type: null\n").unwrap();
+    fs::write(&secrets_path, "type: 'null'\n").unwrap();
 
     let mut config = SecretsConfig::load(Some(secrets_path.clone())).unwrap();
     assert_eq!(config.file, Some(secrets_path));

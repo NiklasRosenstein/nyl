@@ -476,9 +476,9 @@ mod tests {
     async fn test_capture_requires_local_capabilities_before_contacting_cluster() {
         let directory = capture_fixture();
         let path = directory.path().join("cluster.yaml");
-        let mut value: serde_json::Value = serde_norway::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut value: serde_json::Value = serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         value["spec"].as_object_mut().unwrap().remove("kubernetes");
-        fs::write(path, serde_norway::to_string(&value).unwrap()).unwrap();
+        fs::write(path, crate::yaml::serialize_yaml_document(&value).unwrap()).unwrap();
         let failed = StubCapture {
             fail: true,
             ..capture_stub("integer")

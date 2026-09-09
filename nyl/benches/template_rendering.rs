@@ -1,6 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use nyl::template::TemplateEngine;
-use serde::Deserialize;
 use serde_json::json;
 use std::hint::black_box;
 
@@ -108,7 +107,7 @@ data:
 
     c.bench_function("yaml_parse_single_doc", |b| {
         b.iter(|| {
-            let result: Result<serde_json::Value, _> = serde_norway::from_str(black_box(yaml_content));
+            let result: Result<serde_json::Value, _> = serde_saphyr::from_str(black_box(yaml_content));
             let _ = black_box(result);
         });
     });
@@ -134,9 +133,7 @@ metadata:
 
     c.bench_function("yaml_parse_multi_doc", |b| {
         b.iter(|| {
-            let docs: Vec<serde_json::Value> = serde_norway::Deserializer::from_str(black_box(yaml_content))
-                .map(|de| serde_json::Value::deserialize(de).unwrap())
-                .collect::<Vec<_>>();
+            let docs: Vec<serde_json::Value> = serde_saphyr::from_multiple(black_box(yaml_content)).unwrap();
             black_box(docs);
         });
     });
@@ -164,7 +161,7 @@ fn bench_json_serialization(c: &mut Criterion) {
 
     c.bench_function("json_to_yaml_serialization", |b| {
         b.iter(|| {
-            let yaml = serde_norway::to_string(black_box(&data)).unwrap();
+            let yaml = nyl::yaml::serialize_yaml_document(black_box(&data)).unwrap();
             black_box(yaml);
         });
     });

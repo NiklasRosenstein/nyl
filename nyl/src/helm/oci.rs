@@ -285,7 +285,7 @@ impl OciChartPuller {
             .filter(|path| {
                 std::fs::read_to_string(path.join("Chart.yaml"))
                     .ok()
-                    .and_then(|contents| serde_norway::from_str::<serde_json::Value>(&contents).ok())
+                    .and_then(|contents| serde_saphyr::from_str::<serde_json::Value>(&contents).ok())
                     .and_then(|chart| chart.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
                     .as_deref()
                     == Some(chart_name)

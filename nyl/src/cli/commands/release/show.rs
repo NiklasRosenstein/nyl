@@ -140,7 +140,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
         }
         OutputFormat::Yaml => {
             if args.manifest {
-                let yaml = serde_norway::to_string(&release)?;
+                let yaml = crate::yaml::serialize_yaml_document(&release)?;
                 print!("{}", yaml);
             } else {
                 // Create a filtered version without manifest
@@ -148,7 +148,7 @@ pub async fn execute(args: ShowArgs) -> Result<()> {
                 if let Some(obj) = value.as_object_mut() {
                     obj.remove("manifest");
                 }
-                let yaml = serde_norway::to_string(&value)?;
+                let yaml = crate::yaml::serialize_yaml_document(&value)?;
                 print!("{}", yaml);
             }
         }

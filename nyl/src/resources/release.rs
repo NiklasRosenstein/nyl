@@ -460,7 +460,7 @@ metadata:
   namespace: default
 unknownField: should-fail
 ";
-        let result: std::result::Result<Release, _> = serde_norway::from_str(yaml);
+        let result: std::result::Result<Release, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown field"));
@@ -478,7 +478,7 @@ spec:
   argocd:
     applicationOverride: hello
 ";
-        let result: std::result::Result<Release, _> = serde_norway::from_str(yaml);
+        let result: std::result::Result<Release, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("applicationOverride must be a YAML/JSON object"));
@@ -495,7 +495,7 @@ metadata:
 spec:
   stripEmptyMetadataLabels: argocd
 ";
-        let release: Release = serde_norway::from_str(yaml).unwrap();
+        let release: Release = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(
             release.spec.strip_empty_metadata_labels,
             Some(StripEmptyMetadataLabelsMode::Argocd)

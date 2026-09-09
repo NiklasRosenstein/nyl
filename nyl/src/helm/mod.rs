@@ -387,7 +387,7 @@ fn chart_has_dependencies(chart_path: &Path) -> Result<bool> {
 
     // Parse as YAML and check for dependencies field
     let yaml: serde_json::Value =
-        serde_norway::from_str(&content).map_err(|e| NylError::Config(format!("Failed to parse Chart.yaml: {}", e)))?;
+        serde_saphyr::from_str(&content).map_err(|e| NylError::Config(format!("Failed to parse Chart.yaml: {}", e)))?;
 
     Ok(yaml.get("dependencies").is_some())
 }
