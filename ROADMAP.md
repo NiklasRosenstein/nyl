@@ -128,6 +128,14 @@ Resource reference pages and catalog summaries derive from the Rust-generated
 JSON Schemas. M1 defines additional orchestration APIs independently of these
 Kubernetes contracts.
 
+Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
+contract from another declared Cluster. Effective capabilities drive both
+rendering and validation; destinations, values, and live connection settings
+remain local. `nyl capture cluster` refreshes committed capabilities and optional
+CRD schema snapshots. Project-configured validators check final artifacts before
+render output, diff calculation, application, or publication. These operations
+remain independently usable without orchestration state.
+
 Separate authoring membership, unit identity, and native resource ownership.
 Stable identities and incarnation fences protect against stale operations after
 deletion and recreation. Different unit names do not imply disjoint native

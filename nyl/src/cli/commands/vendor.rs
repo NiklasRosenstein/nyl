@@ -82,7 +82,8 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
     let _reporter = cache.reporter();
-    compile_targets(&inventory, &targets, &cache, args.progress).await?;
+    let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
+    crate::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
     let result = writer.sync(&cache.observed_artifacts(), !args.target.is_empty())?;
     let count = result.artifacts.to_string().cyan().bold();
     println!(
@@ -97,7 +98,8 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_check();
-    compile_targets(&inventory, &targets, &cache, args.progress).await?;
+    let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
+    crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
     let count = cache.observed_artifacts().len().to_string().cyan().bold();
     println!("✓ Vendor snapshot is complete and valid ({count} artifacts)");
@@ -107,7 +109,8 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
 fn prune(path: &Path) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
-    let removed = writer.prune()?;
+    let schema_root = crate::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let removed = crate::validation::store::check_and_prune(&schema_root, true)? + writer.prune()?;
     println!("✓ Pruned {removed} unreferenced vendor artifact(s)");
     Ok(())
 }
@@ -117,12 +120,13 @@ async fn compile_targets(
     targets: &[String],
     cache: &GitOpsCache,
     progress: TreeProgressArgs,
-) -> Result<()> {
+) -> Result<Vec<crate::gitops::CompiledTargetTree>> {
+    let mut compiled = Vec::new();
     for target in targets {
         let mut observer = TreeProgressReporter::new(progress, (targets.len() > 1).then(|| target.clone()));
-        compile_target_tree_cached_with_observer(inventory, target, cache, &mut observer).await?;
+        compiled.push(compile_target_tree_cached_with_observer(inventory, target, cache, &mut observer).await?);
     }
-    Ok(())
+    Ok(compiled)
 }
 
 fn selected_targets(inventory: &crate::gitops::GitOpsInventory, requested: &[String]) -> Result<Vec<String>> {

@@ -26,9 +26,9 @@ render workloads, resolve remote sources, or contact Kubernetes.
 Refresh `Cluster.spec.kubernetes` from the live cluster:
 
 ```bash
-nyl update cluster primary
-nyl update cluster primary --context admin@primary
-nyl update cluster primary --check
+nyl capture cluster primary
+nyl capture cluster primary --context admin@primary
+nyl capture cluster primary --check
 ```
 
 The explicit context wins over `Cluster.spec.live.context`. The update changes

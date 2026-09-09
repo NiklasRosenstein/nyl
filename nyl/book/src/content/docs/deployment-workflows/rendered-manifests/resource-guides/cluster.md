@@ -37,8 +37,8 @@ server-based destination. The conventional
 local kubeconfig endpoint.
 
 ```bash
-nyl update cluster primary
-nyl update cluster primary --check
+nyl capture cluster primary
+nyl capture cluster primary --check
 ```
 
 See the [`get and update` command reference](/nyl/commands/project-resources/) for details.

@@ -48,6 +48,7 @@ pub struct ApplyArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: ApplyArgs) -> Result<()> {
+    args.common.validation.check_complete(args.append_release)?;
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
@@ -95,6 +96,20 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     // Sort in place so the recorded release manifest is stored in the same order it
     // is applied (and consistent with `release rollback`, which also stores sorted).
     ResourceOrdering::sort_by_priority(&mut desired_manifests)?;
+
+    crate::validation::validate_manifests(
+        &args.common.validation,
+        &preflight.project_config,
+        &preflight.project_root,
+        preflight
+            .resolved_target
+            .as_ref()
+            .map(|target| target.cluster.metadata.name.as_str()),
+        None,
+        &desired_manifests,
+        &args.common.path,
+    )
+    .await?;
 
     // 4. Apply manifests
     let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests).await?;

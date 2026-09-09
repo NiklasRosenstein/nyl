@@ -120,6 +120,11 @@ jobs:
         with:
           version: latest
 
+      - name: Install pinned kubeconform
+        uses: jdx/mise-action@v3
+        with:
+          install_args: kubeconform
+
       - name: Run tests
         working-directory: nyl
         run: cargo test --all-features
@@ -236,6 +241,7 @@ jobs:
           docker run --rm nyl-ci:test git --version
           docker run --rm nyl-ci:test sops --version
           docker run --rm nyl-ci:test kyverno version
+          docker run --rm nyl-ci:test kubeconform -v
 
       - name: Build and optionally push image
         uses: docker/build-push-action@v6

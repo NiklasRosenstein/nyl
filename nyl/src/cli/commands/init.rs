@@ -8,7 +8,7 @@ use dialoguer::{Confirm, Input};
 use git2::Repository;
 use serde_json::{json, Value};
 
-use crate::cli::commands::cluster::{self, ClusterUpdateArgs};
+use crate::cli::commands::cluster::{self, ClusterCaptureArgs};
 use crate::config::ProjectConfig;
 use crate::resources::{parse_gitops_resource, validate_repository_coordinates};
 use crate::util::path_for_display;
@@ -24,7 +24,7 @@ pub struct InitArgs {
     /// Create only the project configuration and conventional directories.
     #[arg(long, conflicts_with_all = [
         "output", "repository_name", "repo_url", "publish_url", "cluster_name", "context",
-        "no_context", "destination_server", "destination_name", "update_cluster", "no_update_cluster",
+        "no_context", "destination_server", "destination_name", "capture_cluster", "no_capture_cluster",
         "target_name", "revision", "path_prefix", "argocd_namespace", "project_name", "allowed_namespaces",
         "allowed_cluster_resources", "applications_path", "applications_name", "skip_applications", "yes"
     ])]
@@ -68,11 +68,11 @@ pub struct GitOpsInitArgs {
     /// Argo CD destination cluster name.
     destination_name: Option<String>,
     /// Fetch Kubernetes capabilities after writing the configuration.
-    #[arg(long, conflicts_with = "no_update_cluster")]
-    update_cluster: bool,
+    #[arg(long, conflicts_with = "no_capture_cluster")]
+    capture_cluster: bool,
     /// Do not offer to fetch Kubernetes capabilities.
     #[arg(long)]
-    no_update_cluster: bool,
+    no_capture_cluster: bool,
     #[arg(long)]
     /// DeploymentTarget name. Defaults to the Cluster name.
     target_name: Option<String>,
@@ -130,7 +130,7 @@ struct GitOpsInitConfig {
     allowed_cluster_resources: Vec<(String, String)>,
     applications_path: Option<PathBuf>,
     applications_name: Option<String>,
-    update_cluster: bool,
+    capture_cluster: bool,
 }
 
 pub async fn execute(args: InitArgs) -> Result<()> {
@@ -243,12 +243,14 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
             path_for_display(&config.project_root.join("nyl.toml")).display()
         );
     }
-    if config.update_cluster {
-        cluster::update_from_dir(
-            ClusterUpdateArgs {
+    if config.capture_cluster {
+        cluster::capture_from_dir(
+            ClusterCaptureArgs {
                 name: config.cluster_name,
                 context: config.context,
                 check: false,
+                crds: false,
+                no_crds: false,
             },
             &config.project_root,
         )
@@ -290,8 +292,8 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
     }
 
     let stdout = args.output == Path::new("-");
-    if stdout && args.update_cluster {
-        return Err(NylError::config("--update-cluster cannot be used with --output -"));
+    if stdout && args.capture_cluster {
+        return Err(NylError::config("--capture-cluster cannot be used with --output -"));
     }
     let output = if stdout {
         args.output.clone()
@@ -452,9 +454,9 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
             .collect::<Result<Vec<_>>>()?
     };
 
-    let update_cluster = if args.no_update_cluster || context.is_none() || stdout {
+    let capture_cluster = if args.no_capture_cluster || context.is_none() || stdout {
         false
-    } else if args.update_cluster {
+    } else if args.capture_cluster {
         true
     } else if interactive {
         Confirm::new()
@@ -491,7 +493,7 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         allowed_cluster_resources,
         applications_path,
         applications_name,
-        update_cluster,
+        capture_cluster,
     })
 }
 
@@ -711,7 +713,7 @@ mod tests {
             allowed_cluster_resources: vec![(String::new(), "Namespace".to_owned())],
             applications_path: Some(PathBuf::from("applications")),
             applications_name: Some("applications".to_owned()),
-            update_cluster: false,
+            capture_cluster: false,
         }
     }
 

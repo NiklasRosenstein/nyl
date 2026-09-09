@@ -1,5 +1,32 @@
 {
   "$defs": {
+    "ClusterApiContractFrom": {
+      "additionalProperties": false,
+      "description": "The source and extent of an explicitly borrowed API contract.",
+      "properties": {
+        "clusterRef": {
+          "$ref": "#/$defs/LocalReference",
+          "description": "Project-local Cluster providing the contract. References must be acyclic."
+        },
+        "mode": {
+          "$ref": "#/$defs/ClusterApiContractMode",
+          "description": "`schemas` borrows CRD schemas; `all` also borrows Kubernetes capabilities."
+        }
+      },
+      "required": [
+        "clusterRef",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "ClusterApiContractMode": {
+      "description": "Which parts of a Cluster's API contract are inherited.",
+      "enum": [
+        "schemas",
+        "all"
+      ],
+      "type": "string"
+    },
     "ClusterDestination": {
       "additionalProperties": false,
       "description": "Argo CD's identity for a concrete cluster.",
@@ -116,14 +143,62 @@
     },
     "ClusterSpec": {
       "additionalProperties": false,
+      "else": {
+        "properties": {
+          "kubernetes": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "kubernetes"
+        ]
+      },
+      "if": {
+        "properties": {
+          "apiContractFrom": {
+            "properties": {
+              "mode": {
+                "const": "all"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "apiContractFrom"
+        ]
+      },
       "properties": {
+        "apiContractFrom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClusterApiContractFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Borrow a declared Cluster's captured API contract. Destination, values, and live settings remain local."
+        },
         "destination": {
           "$ref": "#/$defs/ClusterDestination",
           "description": "Exactly one concrete Argo CD destination, identified by server URL or registered cluster name."
         },
         "kubernetes": {
-          "$ref": "#/$defs/ClusterKubernetesCapabilities",
-          "description": "Committed Kubernetes capabilities for deterministic offline rendering. Target rendering requires a version and at least one API version."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClusterKubernetesCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed Kubernetes capabilities for deterministic offline rendering. Required unless apiContractFrom.mode is all; omit when inheriting all capabilities. Target rendering requires an effective version and at least one API version."
         },
         "live": {
           "anyOf": [
@@ -143,9 +218,15 @@
         }
       },
       "required": [
-        "destination",
-        "kubernetes"
+        "destination"
       ],
+      "then": {
+        "properties": {
+          "kubernetes": {
+            "type": "null"
+          }
+        }
+      },
       "type": "object"
     },
     "GitOpsResourceMetadata": {
@@ -161,6 +242,19 @@
         },
         "name": {
           "description": "Project-local identity. Must be a Kubernetes DNS subdomain and remain static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Project-local name of the referenced resource; its kind and API group are determined by the containing field.",
           "type": "string"
         }
       },

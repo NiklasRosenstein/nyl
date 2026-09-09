@@ -64,6 +64,7 @@ pub struct DiffArgs {
 }
 
 pub async fn execute(args: DiffArgs) -> Result<()> {
+    args.common.validation.check_complete(args.append_release)?;
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
@@ -93,18 +94,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     }
 
     // 2. Determine release name and namespace
-    let (release_name, release_namespace) = if let Some(ref release) = release {
-        (release.metadata.name.clone(), release.metadata.namespace.clone())
-    } else {
-        // Require CLI flags if no Release
-        let name = args
-            .name
-            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
-        let namespace = args
-            .namespace
-            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
-        (name, namespace)
-    };
+    let (release_name, release_namespace) = release_identity(release.as_ref(), args.name, args.namespace)?;
 
     // Resolve missing namespaces with release namespace hint for diff/apply parity.
     resolve_manifest_namespaces(&kube_client, &mut desired_manifests, Some(&release_namespace)).await?;
@@ -146,6 +136,20 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         desired_manifests
     };
 
+    crate::validation::validate_manifests(
+        &args.common.validation,
+        &preflight.project_config,
+        &preflight.project_root,
+        preflight
+            .resolved_target
+            .as_ref()
+            .map(|target| target.cluster.metadata.name.as_str()),
+        None,
+        &desired_manifests,
+        &args.common.path,
+    )
+    .await?;
+
     // 7. Compute diff against LIVE cluster state
     let diff_result =
         compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode).await?;
@@ -186,6 +190,18 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Exit 0 otherwise
     Ok(())
+}
+
+fn release_identity(
+    release: Option<&crate::resources::Release>,
+    name: Option<String>,
+    namespace: Option<String>,
+) -> Result<(String, String)> {
+    if let Some(release) = release {
+        return Ok((release.metadata.name.clone(), release.metadata.namespace.clone()));
+    }
+    let missing = || NylError::config("No Release resource found. Specify --name and --namespace");
+    Ok((name.ok_or_else(missing)?, namespace.ok_or_else(missing)?))
 }
 
 /// Extract component name from manifests (use first resource name)

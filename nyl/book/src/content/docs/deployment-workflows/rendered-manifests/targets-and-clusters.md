@@ -69,12 +69,12 @@ Inspect and refresh committed capabilities from a live cluster with:
 
 ```bash
 nyl get clusters
-nyl update cluster primary
-nyl update cluster primary --check
+nyl capture cluster primary
+nyl capture cluster primary --check
 ```
 
-`cluster update` changes only `spec.kubernetes`, sorting and deduplicating API
-versions. `--check` reports drift without writing. The explicit `--context`
+`capture cluster` refreshes `spec.kubernetes`, sorting and deduplicating API
+versions. With CRD capture enabled it also writes the cluster schema snapshot. `--check` reports drift without writing. The explicit `--context`
 wins over `Cluster.spec.live.context`; without either, Nyl uses the current
 kubeconfig context.
 

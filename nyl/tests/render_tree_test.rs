@@ -234,6 +234,251 @@ fn publication_fixture() -> (TempDir, TempDir, TempDir, git2::Oid) {
     (fixture, destination, seed, source_commit)
 }
 
+fn configure_validation(root: &std::path::Path, data_type: &str) {
+    fs::write(root.join("nyl.toml"),
+        "[validation]\nenabled=true\n[validation.kubeconform]\nvendor_builtin_schemas=true\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
+    for (group, kind, version) in [
+        ("v1", "configmap", "v1"),
+        ("v1", "namespace", "v1"),
+        ("argoproj.io", "application", "v1alpha1"),
+        ("argoproj.io", "appproject", "v1alpha1"),
+    ] {
+        let directory = root.join("schemas").join(group);
+        fs::create_dir_all(&directory).unwrap();
+        let schema = if kind == "configmap" {
+            serde_json::json!({"type":"object","properties":{"data":{"type":"object","additionalProperties":{"type":data_type}}}})
+        } else {
+            serde_json::json!({"type":"object"})
+        };
+        fs::write(
+            directory.join(format!("{kind}_{version}.json")),
+            serde_json::to_vec(&schema).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn vendor_commands_resolve_relative_project_and_vendor_paths() {
+    let fixture = fixture();
+    for vendor_path in ["vendor", "third-party"] {
+        let vendor_config = format!("[vendor]\nmode='required'\npath='{vendor_path}'\n");
+        fs::write(fixture.path().join("nyl.toml"), &vendor_config).unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .arg("vendor")
+            .assert()
+            .success();
+        assert!(fixture.path().join(vendor_path).join("lock.yaml").is_file());
+        configure_validation(fixture.path(), "string");
+        let config = fs::read_to_string(fixture.path().join("nyl.toml")).unwrap();
+        fs::write(fixture.path().join("nyl.toml"), format!("{config}\n{vendor_config}")).unwrap();
+        for args in [["vendor", "."], ["vendor", "--check"]] {
+            Command::cargo_bin("nyl")
+                .unwrap()
+                .current_dir(fixture.path())
+                .timeout(std::time::Duration::from_secs(30))
+                .args(args)
+                .assert()
+                .success();
+        }
+        let output = TempDir::new().unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--output-dir"])
+            .arg(output.path())
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("0 failed"));
+        assert!(fixture.path().join(vendor_path).join("schemas/builtins.json").is_file());
+    }
+}
+
+#[test]
+fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
+    let fixture = fixture();
+    let output = TempDir::new().unwrap();
+    configure_validation(fixture.path(), "string");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render-tree", "--target", "production", "--output-dir"])
+        .arg(output.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 failed"));
+    let before = read_tree(output.path());
+    // Only the validation schema changes; the compiled resource bytes stay identical.
+    fs::write(
+        fixture.path().join("schemas/v1/configmap_v1.json"),
+        r#"{"type":"object","properties":{"data":{"type":"object","additionalProperties":{"type":"integer"}}}}"#,
+    )
+    .unwrap();
+    for check in [false, true] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--target", "production", "--output-dir"])
+            .arg(output.path());
+        if check {
+            command.arg("--check");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("failed kubeconform validation"));
+    }
+    assert_eq!(read_tree(output.path()), before);
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["diff-tree", "--target", "production", "--catalog"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("failed kubeconform validation"));
+}
+
+#[test]
+fn validation_prevents_invalid_publication_even_when_output_is_already_published() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    configure_validation(fixture.path(), "string");
+    let source = Repository::open(fixture.path()).unwrap();
+    commit_all(&source, "Configure validation");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+    let remote = Repository::open_bare(destination.path()).unwrap();
+    let before = remote
+        .find_reference("refs/heads/deploy/production")
+        .unwrap()
+        .target()
+        .unwrap();
+    configure_validation(fixture.path(), "integer");
+    commit_all(&source, "Require integer ConfigMap values in fixture");
+    for dry_run in [false, true] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["publish-tree", "--target", "production"]);
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("failed kubeconform validation"));
+    }
+    assert_eq!(
+        remote
+            .find_reference("refs/heads/deploy/production")
+            .unwrap()
+            .target()
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn validation_render_overrides_and_complete_scope_are_explicit() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "integer");
+    let arguments = [
+        "render",
+        "applications/workloads/api.yaml",
+        "--offline",
+        "--target",
+        "production",
+    ];
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(arguments)
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("failed kubeconform validation"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(arguments)
+        .arg("--no-validate")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("kind: ConfigMap"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(arguments)
+        .args(["--use-desired-crds", "--only-kind", "ConfigMap"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with resource filters"));
+    fs::write(fixture.path().join("nyl.toml"), "").unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(arguments)
+        .arg("--validate")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no validators configured"));
+}
+
+#[test]
+fn inherited_cluster_capabilities_render_without_production_access() {
+    let fixture = fixture();
+    fs::write(fixture.path().join("config/clusters/production.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: production\nspec:\n  destination:\n    server: https://production.invalid\n  apiContractFrom:\n    clusterRef:\n      name: kasoku\n    mode: all\n").unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path)
+        .unwrap()
+        .replace("name: kasoku", "name: production");
+    fs::write(target_path, target).unwrap();
+    let manifest_path = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(&manifest_path,
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: capabilities\ndata:\n  version: '{{ cluster.spec.kubernetes.kubeVersion }}'\n  server: '{{ cluster.spec.destination.server }}'\n").unwrap();
+    let mut command = Command::cargo_bin("nyl").unwrap();
+    command
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render", "--offline", "--target", "production"])
+        .arg(&manifest_path);
+    command
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1.31.4"))
+        .stdout(predicate::str::contains("https://production.invalid"));
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    fs::write(
+        &cluster_path,
+        fs::read_to_string(&cluster_path).unwrap().replace("1.31.4", "1.32.0"),
+    )
+    .unwrap();
+    command.assert().success().stdout(predicate::str::contains("1.32.0"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["capture", "cluster", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("capture source Cluster kasoku"));
+}
+
 fn published_commit<'repo>(repository: &'repo Repository, branch: &str) -> git2::Commit<'repo> {
     repository
         .find_reference(&format!("refs/heads/{branch}"))

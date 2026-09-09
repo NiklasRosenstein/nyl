@@ -54,3 +54,10 @@ are absent from the resulting lock. It cannot be combined with `--target` or
 See [Remote artifact vendoring](/nyl/configuration/#remote-artifact-vendoring)
 for the modes and [Rendering, Diffing, and Publishing](/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/#vendored-remote-inputs)
 for resolution and Git LFS behavior.
+
+## Validation schemas
+
+With `validation.kubeconform.vendor_builtin_schemas = true`, vendoring also
+materializes required built-in schemas. Cluster captures are read-only inputs
+whose referenced blobs survive pruning. See
+[Manifest validation](../manifest-validation/) for the offline workflow.

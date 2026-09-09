@@ -809,19 +809,24 @@ fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> R
 }
 
 fn required_cluster_capabilities(cluster: &Cluster) -> Result<(String, Vec<String>)> {
-    let kube_version = cluster.spec.kubernetes.kube_version.clone().ok_or_else(|| {
+    let capabilities = cluster
+        .spec
+        .kubernetes
+        .as_ref()
+        .ok_or_else(|| NylError::config("Cluster API contract must be resolved before rendering"))?;
+    let kube_version = capabilities.kube_version.clone().ok_or_else(|| {
         NylError::config(format!(
             "Cluster {:?} requires spec.kubernetes.kubeVersion for target rendering",
             cluster.metadata.name
         ))
     })?;
-    if cluster.spec.kubernetes.api_versions.is_empty() {
+    if capabilities.api_versions.is_empty() {
         return Err(NylError::config(format!(
             "Cluster {:?} requires non-empty spec.kubernetes.apiVersions for target rendering",
             cluster.metadata.name
         )));
     }
-    Ok((kube_version, cluster.spec.kubernetes.api_versions.clone()))
+    Ok((kube_version, capabilities.api_versions.clone()))
 }
 
 #[cfg(test)]

@@ -127,6 +127,12 @@ impl Default for ProjectSettings {
 pub struct ProjectFile {
     pub project: ProjectSettings,
 
+    /// Final rendered-manifest validation policy.
+    pub validation: crate::validation::ValidationSettings,
+
+    /// Defaults for explicit cluster capture.
+    pub capture: crate::validation::CaptureSettings,
+
     /// Optional project-global artifact vendoring policy.
     pub vendor: Option<VendorSettings>,
 }
@@ -521,6 +527,7 @@ strip_empty_metadata_labels = "argocd"
                     ..ProjectSettings::default()
                 },
                 vendor: None,
+                ..ProjectFile::default()
             },
         };
 

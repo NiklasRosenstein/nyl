@@ -178,6 +178,9 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
         .count();
     for discovered in inventory.resources.values() {
         match discovered.resource.as_ref() {
+            Some(GitOpsResource::Cluster(cluster)) => {
+                super::resolve_cluster_contract(inventory, &cluster.metadata.name)?;
+            }
             Some(GitOpsResource::DeploymentTarget(target)) => {
                 resolve_cluster(inventory, target.cluster_name())?;
                 resolve_argocd_instance(inventory, target, instance_count)?;
@@ -425,6 +428,9 @@ async fn compile_target_tree_inner(
         cluster_path,
         argocd.cluster_path.clone(),
     ]);
+    for name in [cluster.metadata.name.as_str(), argocd.cluster.metadata.name.as_str()] {
+        inputs.extend(super::resolve_cluster_contract(inventory, name)?.inputs);
+    }
     if let Some(path) = &argocd.source_path {
         inputs.insert(path.clone());
     }
@@ -726,6 +732,27 @@ fn prepare_target_cache(
             "vendor-lock",
             &std::fs::read(lock).unwrap_or_else(|_| b"missing".to_vec()),
         );
+    }
+    for name in [
+        inputs.cluster.metadata.name.as_str(),
+        inputs.argocd.cluster.metadata.name.as_str(),
+    ] {
+        let contract = super::resolve_cluster_contract(inventory, name)?;
+        recorder.record_value(format!("cluster-contract-inputs:{name}"), &contract.inputs)?;
+        for discovered in inventory
+            .resources
+            .values()
+            .filter(|resource| contract.inputs.contains(&resource.source_path))
+        {
+            if let Some(GitOpsResource::Cluster(declared)) = &discovered.resource {
+                let mut declared = declared.clone();
+                declared.spec.live = None;
+                recorder.record_value(
+                    format!("cluster-contract-declaration:{}", declared.metadata.name),
+                    &declared,
+                )?;
+            }
+        }
     }
     record_target_control_dependencies(&mut recorder, inputs, groups)?;
     for prepared in groups {
@@ -1657,10 +1684,8 @@ fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, 
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, name)
         .ok_or_else(|| NylError::config(format!("Cluster {name:?} was not found")))?;
-    let Some(GitOpsResource::Cluster(cluster)) = &discovered.resource else {
-        return Err(NylError::config(format!("Cluster {name:?} must be static")));
-    };
-    Ok((cluster.clone(), discovered.source_path.clone()))
+    let effective = super::resolve_cluster_contract(inventory, name)?;
+    Ok((effective.cluster, discovered.source_path.clone()))
 }
 
 fn resolve_project(inventory: &GitOpsInventory, project_ref: &str) -> Result<()> {

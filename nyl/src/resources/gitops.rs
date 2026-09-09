@@ -97,11 +97,16 @@ pub struct Cluster {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::cluster_contract_constraints)]
 pub struct ClusterSpec {
     /// Exactly one concrete Argo CD destination, identified by server URL or registered cluster name.
     pub destination: ClusterDestination,
-    /// Committed Kubernetes capabilities for deterministic offline rendering. Target rendering requires a version and at least one API version.
-    pub kubernetes: ClusterKubernetesCapabilities,
+    /// Committed Kubernetes capabilities for deterministic offline rendering. Required unless apiContractFrom.mode is all; omit when inheriting all capabilities. Target rendering requires an effective version and at least one API version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kubernetes: Option<ClusterKubernetesCapabilities>,
+    /// Borrow a declared Cluster's captured API contract. Destination, values, and live settings remain local.
+    #[serde(rename = "apiContractFrom", skip_serializing_if = "Option::is_none")]
+    pub api_contract_from: Option<ClusterApiContractFrom>,
     /// Cluster facts merged recursively with target values; target values win.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
@@ -133,6 +138,25 @@ pub struct ClusterKubernetesCapabilities {
     /// API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry.
     #[serde(default, rename = "apiVersions", skip_serializing_if = "Vec::is_empty")]
     pub api_versions: Vec<String>,
+}
+
+/// The source and extent of an explicitly borrowed API contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterApiContractFrom {
+    /// Project-local Cluster providing the contract. References must be acyclic.
+    #[serde(rename = "clusterRef")]
+    pub cluster_ref: LocalReference,
+    /// `schemas` borrows CRD schemas; `all` also borrows Kubernetes capabilities.
+    pub mode: ClusterApiContractMode,
+}
+
+/// Which parts of a Cluster's API contract are inherited.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterApiContractMode {
+    Schemas,
+    All,
 }
 
 /// Local-only connection settings for live operations against a cluster.
@@ -930,7 +954,28 @@ impl Cluster {
             &self.metadata,
         )?;
         self.spec.destination.validate()?;
-        self.spec.kubernetes.validate()?;
+        if let Some(reference) = &self.spec.api_contract_from {
+            validate_static_required("spec.apiContractFrom.clusterRef.name", &reference.cluster_ref.name)?;
+        }
+        let inherits_all = self
+            .spec
+            .api_contract_from
+            .as_ref()
+            .is_some_and(|reference| reference.mode == ClusterApiContractMode::All);
+        match (&self.spec.kubernetes, inherits_all) {
+            (Some(_), true) => {
+                return Err(NylError::config(
+                    "spec.kubernetes must be omitted when spec.apiContractFrom.mode is all",
+                ))
+            }
+            (None, false) => {
+                return Err(NylError::config(
+                    "spec.kubernetes is required unless spec.apiContractFrom.mode is all",
+                ))
+            }
+            (Some(capabilities), false) => capabilities.validate()?,
+            (None, true) => {}
+        }
         if let Some(live) = &self.spec.live {
             validate_static_required("spec.live.context", &live.context)?;
         }
@@ -1574,8 +1619,11 @@ mod tests {
             parsed.spec.destination.server.as_deref(),
             Some("https://kubernetes.default.svc")
         );
-        assert_eq!(parsed.spec.kubernetes.kube_version.as_deref(), Some("1.31.4"));
-        assert_eq!(parsed.spec.kubernetes.api_versions, ["apps/v1", "v1"]);
+        assert_eq!(
+            parsed.spec.kubernetes.as_ref().unwrap().kube_version.as_deref(),
+            Some("1.31.4")
+        );
+        assert_eq!(parsed.spec.kubernetes.as_ref().unwrap().api_versions, ["apps/v1", "v1"]);
         assert_eq!(parsed.spec.values["nested"]["unrestricted"], true);
         assert_eq!(parsed.spec.live.unwrap().context, "kasoku");
     }
@@ -1587,8 +1635,8 @@ mod tests {
         let GitOpsResource::Cluster(parsed) = parse_gitops_resource(&value).unwrap().unwrap() else {
             panic!("expected cluster");
         };
-        assert!(parsed.spec.kubernetes.kube_version.is_none());
-        assert!(parsed.spec.kubernetes.api_versions.is_empty());
+        assert!(parsed.spec.kubernetes.as_ref().unwrap().kube_version.is_none());
+        assert!(parsed.spec.kubernetes.as_ref().unwrap().api_versions.is_empty());
     }
 
     #[test]

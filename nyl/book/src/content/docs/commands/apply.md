@@ -88,3 +88,9 @@ nyl apply --target production --no-release manifest.yaml
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
+
+## Manifest validation
+
+Use `--validate` to run project-configured validators. See
+[Manifest validation](../manifest-validation/) for automatic validation, captured
+CRD schemas, inherited Cluster contracts, and offline schema vendoring.
