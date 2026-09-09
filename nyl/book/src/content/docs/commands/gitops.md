@@ -80,8 +80,8 @@ nyl diff-tree \
 
 The command identifies the desired source commit and exact baseline repository,
 revision, resolved commit, path, selected view, and output destination on
-stderr. Stdout contains only multi-file unified diff bytes; a comparison with
-no differences produces no stdout. Use `--output` to write the same bytes
+stderr. By default, stdout contains only multi-file unified diff bytes; a
+comparison with no differences produces no stdout. Use `--output` to write the same bytes
 atomically to a file instead:
 
 ```bash
@@ -90,8 +90,107 @@ nyl diff-tree --target production --output rendered.diff --fail-on-diff
 ```
 
 A successful comparison with no differences creates an empty output file.
-Errors leave an existing output file untouched, and `--fail-on-diff` writes the
-complete diff before returning a non-zero status.
+Rendering or comparison errors leave existing output files untouched.
+`--fail-on-diff` writes the complete diff and all requested reports before
+returning a non-zero status when changes exist.
+
+### Statistics and report exports
+
+The complete report includes comparison context, file and line counts, and
+render/cache/source statistics. Totals distinguish added, modified, and deleted
+files. `--stats-files` includes a path-sorted table with each file's status and
+added/removed line counts in human-readable reports:
+
+```bash
+nyl diff-tree --target production --stats-files
+```
+
+Line counts use the same line comparisons as the patch, excluding patch headers
+and context. Replacements count as deletions plus insertions; provenance comments
+count as ordinary lines. Counts respect the selected catalog or Application
+view. Empty-file additions and deletions count as file changes with zero changed
+lines. Invalid UTF-8 or NUL-containing files are binary: their changes produce
+patch notices, and their line counts are unavailable. Aggregate line counts
+cover text changes only. File moves count as additions and deletions.
+
+Use repeatable `--stats-output FORMAT:PATH` options to export `text`, `markdown`,
+and/or `json` reports independently of the patch. Exports copy the report; add
+`--no-stats-stderr` to suppress the stderr copy. Progress and errors remain on
+stderr; `--progress off` disables render progress. Formatter preferences are
+command-line options only.
+
+For example, prepare a Markdown PR comment and JSON for subsequent processing:
+
+```bash
+nyl diff-tree --target production \
+  --output artifacts/rendered.diff \
+  --stats-files \
+  --stats-output markdown:artifacts/comment.md \
+  --stats-output json:artifacts/stats.json \
+  --no-stats-stderr
+```
+
+Nyl writes these artifacts locally; a CI step can post `comment.md` as a sticky
+PR comment. Add `--fail-on-diff` if the job should fail when changes exist; the
+artifacts are still written before that failure.
+
+Paths resolve against the invocation directory. `PATH=-` selects stdout, so
+redirect the diff to a file when exporting a report to stdout:
+
+```bash
+nyl diff-tree --output rendered.diff --stats-output json:- --no-stats-stderr
+```
+
+Multiple outputs cannot share stdout or the same file. Nyl creates missing
+parent directories and atomically replaces each output file. A write failure
+returns an error; multiple output files are not a single transaction, so files
+already written remain available. A successful zero-change comparison writes an
+empty patch and a complete report with zero counts and an empty file list.
+
+Text reports on stderr follow `--color auto|always|never`: automatic color on a
+TTY or in CI, respecting `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM`.
+Added lines are green and removed lines red. Text file exports are plain in
+auto mode; `--color always` retains ANSI styling. Markdown and JSON never contain
+formatter ANSI sequences.
+
+### JSON report contract
+
+JSON always includes every changed file, independently of `--stats-files`. The
+report has `schema_version: 1` and these top-level objects:
+
+- `comparison`: `target`, `selection`, `desired_source`, `baseline`,
+  `desired_publication`, and `diff_output` (`-` means stdout).
+- `diff`: `has_changes`, `files_changed`, `files_added`, `files_modified`,
+  `files_deleted`, `binary_files`, `lines_added`, `lines_removed`, and `files`.
+  Each file has `path`, `status` (`added`, `modified`, or `deleted`), `binary`,
+  `lines_added`, and `lines_removed`. Binary line counts are `null`.
+- `render`: `layers`, `target_reuse`, `release_helm_renders_avoided`, and `sources`.
+  Statistics aggregate the complete invocation, including both renders for a
+  source comparison.
+
+`selection.mode` is `tree`, `catalog`, or `applications`; the last includes an
+`applications` array of explicit selectors, empty for all workload Applications.
+`desired_source` contains nullable `repository` and `commit`, plus `dirty`.
+`baseline.mode` is `published` or `source`; both include the resolved `commit`
+and a `publication`. A source baseline also includes `repository` and `revision`.
+Publication objects contain `cluster`, sanitized `repository`, nullable
+`publish_url`, `revision`, and `path_prefix` (empty means repository root).
+Reports contain comparison metadata and counts, not manifest contents.
+
+Render `layers` keys are `target`, `release`, and `helm`; each entry has `outcomes`
+and `bypass_reasons` count maps. Outcomes are `hit`, `miss`, `invalidated`,
+`bypassed`, `refreshed`, `stored`, and `corrupt`. `target_reuse` is nullable; when
+present it contains `releases` and `helm_renders` avoided by target reuse.
+`release_helm_renders_avoided` counts Helm renders avoided by release reuse.
+`sources` is a count map with snake_case operation keys: `remote_manifest_download`,
+`remote_manifest_reuse`, `helm_chart_pull`, `helm_chart_reuse`, `git_source_reuse`,
+`vendor_artifact_reuse`, `git_repository_clone`, `git_repository_reuse`,
+`git_ref_refresh`, `git_worktree_create`, and `git_worktree_reuse`. Absent count-map
+entries mean zero. Bypass-reason strings are descriptive, not stable identifiers.
+Consumers should ignore additional fields; incompatible changes require a new
+schema version.
+
+### Selecting files
 
 Limit the comparison to the generated catalog, all workload Applications, or
 specific Argo CD Application identities:
@@ -113,7 +212,7 @@ with the Application filters.
 
 Source-derived whole-tree diffs also compare the cluster, repository, revision,
 and path prefix through a synthetic `_nyl/publication.json` diff entry. Scoped
-views leave those coordinates in the stderr summary. Mutable comparison refs
+views leave those coordinates in the comparison report. Mutable comparison refs
 must refresh successfully; cached refs are not accepted as current state.
 
 ## `nyl update source-locks`

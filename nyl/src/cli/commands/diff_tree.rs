@@ -1,12 +1,12 @@
+mod report;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
-use colored::Colorize;
 use git2::Repository;
-use similar::TextDiff;
 
 use crate::git::GitManager;
 use crate::gitops::{
@@ -14,6 +14,8 @@ use crate::gitops::{
     GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::{NylError, Result};
+
+use report::{Report, ReportFormat, ReportOutput, TreeDiff};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
@@ -52,6 +54,15 @@ pub struct DiffTreeArgs {
     /// Write the unified diff to a file instead of stdout.
     #[arg(short, long, default_value = "-")]
     pub output: PathBuf,
+    /// Include per-file line counts in text and Markdown reports.
+    #[arg(long)]
+    stats_files: bool,
+    /// Export a complete report (repeatable). Formats: text, markdown, json. PATH=- selects stdout.
+    #[arg(long, value_name = "FORMAT:PATH")]
+    stats_output: Vec<ReportOutput>,
+    /// Suppress the default stderr report; progress and errors remain on stderr.
+    #[arg(long)]
+    no_stats_stderr: bool,
     /// Compare only the generated Argo CD catalog.
     #[arg(long, conflicts_with_all = ["applications", "application"])]
     pub catalog: bool,
@@ -125,18 +136,6 @@ impl DiffSelection {
             Self::Tree
         }
     }
-
-    fn description(&self) -> String {
-        match self {
-            Self::Tree => "entire rendered tree".to_owned(),
-            Self::Catalog => "Argo CD catalog".to_owned(),
-            Self::Applications(applications) if applications.is_empty() => "all Applications".to_owned(),
-            Self::Applications(applications) => format!(
-                "Applications {}",
-                applications.iter().cloned().collect::<Vec<_>>().join(", ")
-            ),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -162,13 +161,18 @@ struct ComparisonSummary<'a> {
     output: &'a Path,
 }
 
+/// Compare rendered trees with the automatic report color policy.
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
+    execute_with_color(args, crate::cli::ColorChoice::Auto).await
+}
+
+pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {
+    report::validate_outputs(&args.output, &args.stats_output)?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let (desired_source_commit, desired_dirty) = super::render_tree::source_state(&inventory.project_root)?;
     let desired_source_repository = source_repository_url(&inventory.project_root)?;
     let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
-    let _cache_reporter = cache.reporter();
     let desired_phase = matches!(args.against, DiffTreeBase::Source).then(|| "Desired".to_string());
     let mut desired_progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
@@ -184,37 +188,49 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     .await?;
     let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
     let selection = DiffSelection::from_args(&args);
-    print_comparison_summary(&ComparisonSummary {
-        target: &target_name,
-        desired_source_repository: desired_source_repository.as_deref(),
-        desired_source_commit: desired_source_commit.as_deref(),
-        desired_dirty,
-        desired: &desired,
-        baseline: &baseline,
-        selection: &selection,
-        output: &args.output,
-    });
     let comparison = comparison_files(&selection, &baseline, &desired)?;
-    let diff = if tree_hashes(&comparison.base) == tree_hashes(&comparison.desired) {
-        String::new()
+    let diff = TreeDiff::between(&comparison.base, &comparison.desired)?;
+    let report = Report::new(
+        &ComparisonSummary {
+            target: &target_name,
+            desired_source_repository: desired_source_repository.as_deref(),
+            desired_source_commit: desired_source_commit.as_deref(),
+            desired_dirty,
+            desired: &desired,
+            baseline: &baseline,
+            selection: &selection,
+            output: &args.output,
+        },
+        diff.stats,
+        cache.stats(),
+    );
+    let exports = args
+        .stats_output
+        .iter()
+        .map(|destination| {
+            let ansi = match color {
+                crate::cli::ColorChoice::Always => true,
+                crate::cli::ColorChoice::Never => false,
+                crate::cli::ColorChoice::Auto => destination.path == Path::new("-") && color.should_use_ansi(),
+            };
+            report.format(destination.format, args.stats_files, ansi)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let terminal_report = if args.no_stats_stderr {
+        None
     } else {
-        format_tree_diff(&comparison.base, &comparison.desired)
+        Some(report.format(ReportFormat::Text, args.stats_files, color.should_use_ansi())?)
     };
-    write_diff_output(&args.output, diff.as_bytes())?;
-    if diff.is_empty() {
-        eprintln!("Deployment target {target_name} has no rendered differences");
-        return Ok(());
+    write_diff_output(&args.output, diff.patch.as_bytes())?;
+    for (destination, contents) in args.stats_output.iter().zip(exports) {
+        write_diff_output(&destination.path, contents.as_bytes())?;
     }
-    let changed_files = changed_file_count(&comparison.base, &comparison.desired);
-    if args.output == Path::new("-") {
-        eprintln!("Rendered differences: {changed_files} file(s)");
-    } else {
-        eprintln!(
-            "✓ Wrote rendered diff to {} ({changed_files} file(s))",
-            args.output.display()
-        );
+    if let Some(contents) = terminal_report {
+        let mut stderr = io::stderr().lock();
+        stderr.write_all(contents.as_bytes())?;
+        stderr.flush()?;
     }
-    if args.fail_on_diff {
+    if args.fail_on_diff && report.diff.has_changes {
         Err(NylError::validation(format!(
             "deployment target {:?} has rendered differences",
             target_name
@@ -541,15 +557,6 @@ fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn changed_file_count(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBuf, Vec<u8>>) -> usize {
-    base.keys()
-        .chain(desired.keys())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|path| base.get(*path) != desired.get(*path))
-        .count()
-}
-
 fn published_tree(compiled: &crate::gitops::CompiledTargetTree, cache: &GitOpsCache) -> Result<PublishedBaseline> {
     let mut manager = git_manager(cache)?;
     let checkout = manager
@@ -677,91 +684,6 @@ fn source_repository_url(project_root: &Path) -> Result<Option<String>> {
         .and_then(|remote| remote.url().ok().map(crate::util::sanitize_url)))
 }
 
-fn print_comparison_summary(summary: &ComparisonSummary<'_>) {
-    let desired_state = if summary.desired_dirty {
-        "dirty".yellow().bold().to_string()
-    } else {
-        "clean".green().to_string()
-    };
-    let mut lines = vec![
-        "Rendered tree comparison".bold().to_string(),
-        comparison_field("Deployment target", summary.target.cyan().bold()),
-        comparison_field("View", summary.selection.description()),
-        format!("  {}", "Desired source".cyan().bold()),
-        comparison_detail(
-            "Repository",
-            summary.desired_source_repository.unwrap_or("<local Git repository>"),
-        ),
-        comparison_detail("Commit", summary.desired_source_commit.unwrap_or("<uncommitted>")),
-        comparison_detail("Working tree", desired_state),
-    ];
-    match summary.baseline {
-        ResolvedBaseline::Published(baseline) => {
-            lines.push(format!("  {}", "Published baseline".cyan().bold()));
-            lines.push(comparison_detail(
-                "Repository",
-                crate::util::sanitize_url(&summary.desired.repository.repo_url),
-            ));
-            lines.push(comparison_detail(
-                "Revision",
-                summary.desired.target.spec.publication.revision.cyan(),
-            ));
-            lines.push(comparison_detail("Commit", baseline.commit));
-            lines.push(comparison_detail("Path", publication_path(summary.desired).cyan()));
-        }
-        ResolvedBaseline::Source(baseline) => {
-            lines.push(format!("  {}", "Source baseline".cyan().bold()));
-            lines.push(comparison_detail(
-                "Repository",
-                crate::util::sanitize_url(&baseline.repository),
-            ));
-            lines.push(comparison_detail("Revision", baseline.revision.cyan()));
-            lines.push(comparison_detail("Commit", baseline.commit));
-            push_publication_summary(&mut lines, "Desired publication", summary.desired);
-            push_publication_summary(&mut lines, "Baseline publication", &baseline.compiled);
-        }
-    }
-    if summary.output == Path::new("-") {
-        lines.push(comparison_field("Diff output", "stdout".cyan()));
-    } else {
-        lines.push(comparison_field(
-            "Diff output",
-            summary.output.display().to_string().cyan(),
-        ));
-    }
-    eprintln!("{}\n", lines.join("\n"));
-}
-
-fn push_publication_summary(lines: &mut Vec<String>, label: &str, compiled: &crate::gitops::CompiledTargetTree) {
-    lines.push(format!("  {}", label.cyan().bold()));
-    lines.push(comparison_detail(
-        "Repository",
-        crate::util::sanitize_url(&compiled.repository.repo_url),
-    ));
-    lines.push(comparison_detail(
-        "Revision",
-        compiled.target.spec.publication.revision.cyan(),
-    ));
-    lines.push(comparison_detail("Path", publication_path(compiled).cyan()));
-}
-
-fn comparison_field(label: &str, value: impl std::fmt::Display) -> String {
-    format!("  {label:<20}{value}")
-}
-
-fn comparison_detail(label: &str, value: impl std::fmt::Display) -> String {
-    format!("    {label:<18}{value}")
-}
-
-fn publication_path(compiled: &crate::gitops::CompiledTargetTree) -> &str {
-    let path = compiled.target.publication_path_prefix();
-    if path.is_empty() {
-        "."
-    } else {
-        path
-    }
-}
-
 fn git_manager(cache: &GitOpsCache) -> Result<GitManager> {
     if let Some(cache_root) = cache.external_cache_root() {
         Ok(GitManager::with_cache_dir(cache_root).with_render_cache(Some(cache.clone())))
@@ -832,13 +754,6 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
     })
 }
 
-fn tree_hashes(files: &BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<&Path, String> {
-    files
-        .iter()
-        .map(|(path, bytes)| (path.as_path(), crate::gitops::reconcile::sha256(bytes)))
-        .collect()
-}
-
 fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
     let relative = path
         .strip_prefix(root)
@@ -860,31 +775,6 @@ fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn format_tree_diff(base: &BTreeMap<PathBuf, Vec<u8>>, desired: &BTreeMap<PathBuf, Vec<u8>>) -> String {
-    let paths = base.keys().chain(desired.keys()).cloned().collect::<BTreeSet<_>>();
-    let mut output = String::new();
-    for path in paths {
-        let old = base
-            .get(&path)
-            .map_or("", |bytes| std::str::from_utf8(bytes).unwrap_or("<binary>\n"));
-        let new = desired
-            .get(&path)
-            .map_or("", |bytes| std::str::from_utf8(bytes).unwrap_or("<binary>\n"));
-        if old == new {
-            continue;
-        }
-        let path = path.to_string_lossy().replace('\\', "/");
-        output.push_str(
-            &TextDiff::from_lines(old, new)
-                .unified_diff()
-                .context_radius(3)
-                .header(&format!("a/{path}"), &format!("b/{path}"))
-                .to_string(),
-        );
-    }
-    output
 }
 
 #[cfg(test)]
@@ -969,25 +859,6 @@ mod tests {
         )]);
         let error = derive_application_views(&escaping, "production").unwrap_err();
         assert!(error.to_string().contains("outside publication path prefix"));
-    }
-
-    #[test]
-    fn formats_added_modified_and_removed_files() {
-        let base = BTreeMap::from([
-            (PathBuf::from("removed.yaml"), b"old\n".to_vec()),
-            (PathBuf::from("same.yaml"), b"same\n".to_vec()),
-            (PathBuf::from("changed.yaml"), b"old\n".to_vec()),
-        ]);
-        let desired = BTreeMap::from([
-            (PathBuf::from("added.yaml"), b"new\n".to_vec()),
-            (PathBuf::from("same.yaml"), b"same\n".to_vec()),
-            (PathBuf::from("changed.yaml"), b"new\n".to_vec()),
-        ]);
-        let diff = format_tree_diff(&base, &desired);
-        assert!(diff.contains("a/added.yaml"));
-        assert!(diff.contains("a/changed.yaml"));
-        assert!(diff.contains("a/removed.yaml"));
-        assert!(!diff.contains("same.yaml"));
     }
 
     #[test]

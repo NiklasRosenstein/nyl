@@ -12,6 +12,15 @@ pub mod source_context;
 pub use fs::{find_config_file, path_for_display, resolve_path, resolve_paths};
 pub use source_context::SourceContext;
 
+/// Style one value without changing process-wide color policy.
+pub(crate) fn ansi_style(value: impl std::fmt::Display, code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\x1b[{code}m{value}\x1b[0m")
+    } else {
+        value.to_string()
+    }
+}
+
 /// Recursively merge JSON objects, replacing arrays and scalar values.
 pub fn deep_merge_value(base: Option<serde_json::Value>, overlay: serde_json::Value) -> serde_json::Value {
     match (base, overlay) {

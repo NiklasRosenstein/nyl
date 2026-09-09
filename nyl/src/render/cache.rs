@@ -6,8 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::util::ansi_style;
 use clap::Args;
-use colored::Colorize;
 use getrandom::fill as fill_random;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,8 @@ pub enum CacheMode {
 }
 
 /// Rendering layer that performed one observable cache action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheLayer {
     Target,
     Release,
@@ -61,7 +62,8 @@ pub enum CacheLayer {
 }
 
 /// External source operation performed while rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceOperation {
     RemoteManifestDownload,
     RemoteManifestReuse,
@@ -77,7 +79,8 @@ pub enum SourceOperation {
 }
 
 /// Outcome of one cache lookup or publication decision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheOutcome {
     Hit,
     Miss,
@@ -89,7 +92,11 @@ pub enum CacheOutcome {
 }
 
 /// Aggregated cache activity for one rendering command.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Serializes as layer outcome/bypass-reason maps, optional target reuse counts,
+/// release-level avoided Helm renders, and source-operation counts. Enum keys
+/// use snake_case; absent map entries represent zero observed operations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CacheStats {
     layers: BTreeMap<CacheLayer, CacheLayerStats>,
     target_reuse: Option<TargetReuse>,
@@ -97,13 +104,13 @@ pub struct CacheStats {
     sources: BTreeMap<SourceOperation, usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 struct TargetReuse {
     releases: usize,
     helm_renders: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 struct CacheLayerStats {
     outcomes: BTreeMap<CacheOutcome, usize>,
     bypass_reasons: BTreeMap<String, usize>,
@@ -124,7 +131,7 @@ impl CacheStats {
         self.layers.is_empty() && self.sources.is_empty()
     }
 
-    fn has_reportable_work(&self) -> bool {
+    pub(crate) fn has_reportable_work(&self) -> bool {
         self.target_reuse.is_some()
             || self.layers.values().any(CacheLayerStats::has_reportable_work)
             || !self.sources.is_empty()
@@ -134,17 +141,20 @@ impl CacheStats {
         self.sources.get(&operation).copied().unwrap_or_default()
     }
 
-    fn source_lines(&self) -> Vec<String> {
+    fn source_lines(&self, color: bool) -> Vec<String> {
         let mut lines = Vec::new();
         let remote_manifests = self.source_count(SourceOperation::RemoteManifestDownload);
         let reused_remote_manifests = self.source_count(SourceOperation::RemoteManifestReuse);
         if remote_manifests + reused_remote_manifests > 0 {
             lines.push(stat_line(
                 "Remote manifests",
-                styled_work_counts(&[
-                    (reused_remote_manifests, "reused", true),
-                    (remote_manifests, "downloaded", false),
-                ]),
+                styled_work_counts(
+                    color,
+                    &[
+                        (reused_remote_manifests, "reused", true),
+                        (remote_manifests, "downloaded", false),
+                    ],
+                ),
             ));
         }
         let helm_pulls = self.source_count(SourceOperation::HelmChartPull);
@@ -152,21 +162,21 @@ impl CacheStats {
         if helm_pulls + helm_reuses > 0 {
             lines.push(stat_line(
                 "Helm charts",
-                styled_work_counts(&[(helm_reuses, "reused", true), (helm_pulls, "pulled", false)]),
+                styled_work_counts(color, &[(helm_reuses, "reused", true), (helm_pulls, "pulled", false)]),
             ));
         }
         let vendor_reuses = self.source_count(SourceOperation::VendorArtifactReuse);
         if vendor_reuses > 0 {
             lines.insert(
                 0,
-                stat_line("Vendor artifacts", styled_count(vendor_reuses, "used", true)),
+                stat_line("Vendor artifacts", styled_count(color, vendor_reuses, "used", true)),
             );
         }
         let git_source_reuses = self.source_count(SourceOperation::GitSourceReuse);
         if git_source_reuses > 0 {
             lines.push(stat_line(
                 "Git sources",
-                styled_count(git_source_reuses, "reused", true),
+                styled_count(color, git_source_reuses, "reused", true),
             ));
         }
         let repository_clones = self.source_count(SourceOperation::GitRepositoryClone);
@@ -175,19 +185,22 @@ impl CacheStats {
         if repository_clones + repository_reuses + ref_refreshes > 0 {
             lines.push(stat_line(
                 "Git repositories",
-                styled_work_counts(&[
-                    (repository_clones, "cloned", false),
-                    (repository_reuses, "reused", true),
-                    (
-                        ref_refreshes,
-                        if ref_refreshes == 1 {
-                            "ref refreshed"
-                        } else {
-                            "refs refreshed"
-                        },
-                        false,
-                    ),
-                ]),
+                styled_work_counts(
+                    color,
+                    &[
+                        (repository_clones, "cloned", false),
+                        (repository_reuses, "reused", true),
+                        (
+                            ref_refreshes,
+                            if ref_refreshes == 1 {
+                                "ref refreshed"
+                            } else {
+                                "refs refreshed"
+                            },
+                            false,
+                        ),
+                    ],
+                ),
             ));
         }
         let worktree_creations = self.source_count(SourceOperation::GitWorktreeCreate);
@@ -195,85 +208,100 @@ impl CacheStats {
         if worktree_creations + worktree_reuses > 0 {
             lines.push(stat_line(
                 "Git worktrees",
-                styled_work_counts(&[
-                    (worktree_creations, "created", false),
-                    (worktree_reuses, "reused", true),
-                ]),
+                styled_work_counts(
+                    color,
+                    &[
+                        (worktree_creations, "created", false),
+                        (worktree_reuses, "reused", true),
+                    ],
+                ),
             ));
         }
         lines
     }
 }
 
-impl fmt::Display for CacheStats {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut lines = vec!["Render statistics".bold().to_string()];
+impl CacheStats {
+    /// Format render activity using an explicit ANSI policy for this destination.
+    pub fn format_with_color(&self, color: bool) -> String {
+        let mut lines = vec![ansi_style("Render statistics", "1", color)];
         let mut cache_lines = Vec::new();
-        if let Some(reuse) = &self.target_reuse {
-            cache_lines.push(stat_line("Target tree", styled_outcome("reused", true)));
-            if reuse.releases > 0 {
-                cache_lines.push(stat_line(
-                    "Release renders",
-                    styled_count(reuse.releases, "avoided", true),
-                ));
-            }
-            if reuse.helm_renders > 0 {
-                cache_lines.push(stat_line(
-                    "Helm renders",
-                    styled_count(reuse.helm_renders, "avoided", true),
-                ));
-            }
-        } else {
-            if let Some(stats) = self
-                .layers
-                .get(&CacheLayer::Target)
-                .filter(|stats| stats.has_reportable_work())
-            {
-                let mut value = styled_outcome("rebuilt", false);
+        if let Some(stats) = self
+            .layers
+            .get(&CacheLayer::Target)
+            .filter(|stats| stats.has_reportable_work())
+        {
+            let reused = stats.count(CacheOutcome::Hit);
+            let rebuilt = stats.completed_work();
+            let mut value = match (reused, rebuilt) {
+                (1, 0) => styled_outcome(color, "reused", true),
+                (0, 1) => styled_outcome(color, "rebuilt", false),
+                _ => styled_work_counts(color, &[(reused, "reused", true), (rebuilt, "rebuilt", false)]),
+            };
+            append_bypass_reasons(&mut value, stats);
+            cache_lines.push(stat_line("Target tree", value));
+        }
+        let avoided_releases = self.target_reuse.as_ref().map_or(0, |reuse| reuse.releases);
+        let release_stats = self.layers.get(&CacheLayer::Release);
+        if avoided_releases > 0 || release_stats.is_some_and(CacheLayerStats::has_reportable_work) {
+            let mut value = styled_work_counts(
+                color,
+                &[
+                    (avoided_releases, "avoided", true),
+                    (
+                        release_stats.map_or(0, |stats| stats.count(CacheOutcome::Hit)),
+                        "reused",
+                        true,
+                    ),
+                    (
+                        release_stats.map_or(0, CacheLayerStats::completed_work),
+                        "rendered",
+                        false,
+                    ),
+                ],
+            );
+            if let Some(stats) = release_stats {
                 append_bypass_reasons(&mut value, stats);
-                cache_lines.push(stat_line("Target tree", value));
             }
-            if let Some(stats) = self
-                .layers
-                .get(&CacheLayer::Release)
-                .filter(|stats| stats.has_reportable_work())
-            {
-                let mut value = styled_work_counts(&[
-                    (stats.count(CacheOutcome::Hit), "reused", true),
-                    (stats.completed_work(), "rendered", false),
-                ]);
-                append_bypass_reasons(&mut value, stats);
-                cache_lines.push(stat_line("Release renders", value));
-            }
-            let avoided_helm = self.release_helm_renders_avoided;
-            if avoided_helm > 0
-                || self
-                    .layers
-                    .get(&CacheLayer::Helm)
-                    .is_some_and(CacheLayerStats::has_reportable_work)
-            {
-                let stats = self.layers.get(&CacheLayer::Helm);
-                let mut value = styled_work_counts(&[
+            cache_lines.push(stat_line("Release renders", value));
+        }
+        let avoided_helm =
+            self.release_helm_renders_avoided + self.target_reuse.as_ref().map_or(0, |reuse| reuse.helm_renders);
+        let helm_stats = self.layers.get(&CacheLayer::Helm);
+        if avoided_helm > 0 || helm_stats.is_some_and(CacheLayerStats::has_reportable_work) {
+            let mut value = styled_work_counts(
+                color,
+                &[
                     (avoided_helm, "avoided", true),
-                    (stats.map_or(0, |stats| stats.count(CacheOutcome::Hit)), "reused", true),
-                    (stats.map_or(0, CacheLayerStats::completed_work), "rendered", false),
-                ]);
-                if let Some(stats) = stats {
-                    append_bypass_reasons(&mut value, stats);
-                }
-                cache_lines.push(stat_line("Helm renders", value));
+                    (
+                        helm_stats.map_or(0, |stats| stats.count(CacheOutcome::Hit)),
+                        "reused",
+                        true,
+                    ),
+                    (helm_stats.map_or(0, CacheLayerStats::completed_work), "rendered", false),
+                ],
+            );
+            if let Some(stats) = helm_stats {
+                append_bypass_reasons(&mut value, stats);
             }
+            cache_lines.push(stat_line("Helm renders", value));
         }
         if !cache_lines.is_empty() {
-            lines.push(format!("  {}", "Cache".cyan().bold()));
+            lines.push(format!("  {}", ansi_style("Cache", "1;36", color)));
             lines.extend(cache_lines);
         }
-        let source_lines = self.source_lines();
+        let source_lines = self.source_lines(color);
         if !source_lines.is_empty() {
-            lines.push(format!("  {}", "Sources".cyan().bold()));
+            lines.push(format!("  {}", ansi_style("Sources", "1;36", color)));
             lines.extend(source_lines);
         }
-        write!(formatter, "{}", lines.join("\n"))
+        lines.join("\n")
+    }
+}
+
+impl fmt::Display for CacheStats {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.format_with_color(colored::control::SHOULD_COLORIZE.should_colorize()))
     }
 }
 
@@ -295,29 +323,29 @@ impl CacheLayerStats {
     }
 }
 
-fn styled_outcome(outcome: &str, positive: bool) -> String {
+fn styled_outcome(color: bool, outcome: &str, positive: bool) -> String {
     if positive {
-        outcome.green().to_string()
+        ansi_style(outcome, "32", color)
     } else {
         outcome.to_string()
     }
 }
 
-fn styled_count(count: usize, outcome: &str, positive: bool) -> String {
+fn styled_count(color: bool, count: usize, outcome: &str, positive: bool) -> String {
     format!(
         "{} {}",
-        count.to_string().cyan().bold(),
-        styled_outcome(outcome, positive)
+        ansi_style(count, "1;36", color),
+        styled_outcome(color, outcome, positive)
     )
 }
 
-fn styled_work_counts(counts: &[(usize, &str, bool)]) -> String {
+fn styled_work_counts(color: bool, counts: &[(usize, &str, bool)]) -> String {
     counts
         .iter()
         .filter(|(count, _, _)| *count > 0)
-        .map(|(count, outcome, positive)| styled_count(*count, outcome, *positive))
+        .map(|(count, outcome, positive)| styled_count(color, *count, outcome, *positive))
         .collect::<Vec<_>>()
-        .join(&format!(" {} ", "·".dimmed()))
+        .join(&format!(" {} ", ansi_style("·", "2", color)))
 }
 
 fn append_bypass_reasons(value: &mut String, stats: &CacheLayerStats) {
@@ -667,7 +695,9 @@ impl RenderCache {
         );
         let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         stats.observe(CacheLayer::Target, CacheOutcome::Hit, &[]);
-        stats.target_reuse = Some(TargetReuse { releases, helm_renders });
+        let reuse = stats.target_reuse.get_or_insert_with(TargetReuse::default);
+        reuse.releases += releases;
+        reuse.helm_renders += helm_renders;
     }
 
     pub fn observe_release_hit(&self, helm_renders: usize) {
@@ -1001,21 +1031,43 @@ mod tests {
     use super::*;
 
     fn plain_stats(stats: &CacheStats) -> String {
-        let rendered = stats.to_string();
-        let mut plain = String::with_capacity(rendered.len());
-        let mut characters = rendered.chars().peekable();
-        while let Some(character) = characters.next() {
-            if character == '\u{1b}' && characters.next_if_eq(&'[').is_some() {
-                for control in characters.by_ref() {
-                    if ('@'..='~').contains(&control) {
-                        break;
-                    }
-                }
-            } else {
-                plain.push(character);
-            }
-        }
-        plain
+        stats.format_with_color(false)
+    }
+
+    #[test]
+    fn test_complete_statistics_aggregate_target_reuse_and_rendered_work() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cache = RenderCache::with_root(temp.path(), CacheMode::Default).unwrap();
+        cache.observe_target_hit(2, 3);
+        cache.observe_target_hit(4, 5);
+        cache.observe(CacheLayer::Target, CacheOutcome::Stored, &[]);
+        cache.observe_release_hit(7);
+        cache.observe(
+            CacheLayer::Release,
+            CacheOutcome::Bypassed,
+            &["uncacheable input".into()],
+        );
+        cache.observe(CacheLayer::Helm, CacheOutcome::Stored, &[]);
+        cache.observe_source(SourceOperation::GitRefRefresh);
+        let stats = cache.stats();
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            json["target_reuse"],
+            serde_json::json!({"releases": 6, "helm_renders": 8})
+        );
+        assert_eq!(
+            json["layers"]["target"]["outcomes"],
+            serde_json::json!({"hit": 2, "stored": 1})
+        );
+        assert_eq!(json["layers"]["release"]["bypass_reasons"]["uncacheable input"], 1);
+        assert_eq!(json["release_helm_renders_avoided"], 7);
+        assert_eq!(json["sources"]["git_ref_refresh"], 1);
+        let plain = stats.format_with_color(false);
+        assert!(plain.contains("Target tree         2 reused · 1 rebuilt"));
+        assert!(plain.contains("Release renders     6 avoided · 1 reused · 1 rendered"));
+        assert!(plain.contains("Helm renders        15 avoided · 1 rendered"));
+        assert!(!plain.contains('\x1b'));
+        assert!(stats.format_with_color(true).contains("\x1b[32mreused\x1b[0m"));
     }
 
     #[test]
