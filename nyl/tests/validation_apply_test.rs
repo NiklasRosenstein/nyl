@@ -16,10 +16,12 @@ fn validation_failure_prevents_resource_and_release_writes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());
+    // Allow CLI startup and validator execution on CI; the mock API must outlive the command.
+    let command_timeout = Duration::from_secs(60);
     let done = Arc::new(AtomicBool::new(false));
     let server_done = done.clone();
     let worker = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + command_timeout + Duration::from_secs(10);
         let mut requests = Vec::new();
         while !server_done.load(Ordering::Relaxed) && Instant::now() < deadline {
             let (mut socket, _) = match listener.accept() {
@@ -123,7 +125,7 @@ users:
             "--namespace",
             "default",
         ])
-        .timeout(Duration::from_secs(10))
+        .timeout(command_timeout)
         .output()
         .unwrap();
     done.store(true, Ordering::Relaxed);
