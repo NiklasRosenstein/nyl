@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Main error type for nyl
 #[derive(Error, Debug)]
 pub enum NylError {
+    #[error("Comment error: {0}")]
+    Comment(String),
+
     #[error("Template rendering error: {0}\nHint: Check template syntax and variable names. Ensure all referenced variables are defined by the selected target.")]
     Template(#[from] minijinja::Error),
 

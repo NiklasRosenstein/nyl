@@ -40,6 +40,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Maintain sticky pull request and merge request comments
+    Comment(commands::comment::CommentArgs),
+
     /// Render Kubernetes manifests to stdout
     Render(commands::render::RenderArgs),
 
@@ -93,6 +96,7 @@ impl Cli {
     /// Execute the CLI command
     pub async fn execute(self) -> Result<()> {
         match self.command {
+            Commands::Comment(args) => commands::comment::execute(args).await,
             Commands::Render(args) => commands::render::execute(args).await,
             Commands::RenderTree(args) => commands::render_tree::execute(args).await,
             Commands::PublishTree(args) => commands::publish_tree::execute(args).await,

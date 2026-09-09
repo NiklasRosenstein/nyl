@@ -95,6 +95,7 @@ export default defineConfig({
             "commands",
             "commands/rendering-pipeline",
             "commands/gitops",
+            "commands/comment",
             "commands/init",
             "commands/create",
             "commands/project-resources",

@@ -224,9 +224,10 @@ for every workload Application and payload, or repeat
 derived from each generated Application's plain-directory source path, so they
 follow customized rendered layouts without changing `_nyl/index.json`.
 
-Forge-specific CI can post the diff to a pull or merge request and update a
-marker comment on later pipelines. Comment ownership and forge API calls remain
-outside Nyl.
+[`nyl comment upsert`](/nyl/commands/comment/) posts a Markdown report to a pull
+or merge request on GitHub, GitLab, or Forgejo. Use a stable `--key` to update
+the same authenticated account's comment on later pipelines. Report generation
+and posting are separate commands.
 
 ## Publish from the protected branch
 
