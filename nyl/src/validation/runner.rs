@@ -211,8 +211,10 @@ pub fn tree_partitions(inventory: &GitOpsInventory, compiled: &CompiledTargetTre
             workload
         };
         let partition = partitions.get_mut(destination).expect("destination was inserted");
-        for (index, document) in serde_norway::Deserializer::from_slice(bytes).enumerate() {
-            let manifest = Value::deserialize(document)?;
+        for (index, manifest) in serde_saphyr::from_slice_multiple::<Value>(bytes)?
+            .into_iter()
+            .enumerate()
+        {
             if !manifest.is_null() {
                 partition.documents.push(ValidationDocument {
                     manifest,

@@ -23,6 +23,17 @@ inputs. `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
 
+## YAML Data Preservation
+
+Nyl preserves manifest keys, values, and types when its YAML output is parsed
+again. Comments, quoting style, and whitespace outside string values are not
+preserved. Multiline strings may be emitted with escaped newlines.
+
+Quote strings that resemble YAML booleans, numbers, or null, such as `"no"`,
+`"123"`, and `"null"`. Mapping keys are strings and retain their spelling.
+Duplicate mapping keys are rejected. YAML aliases are expanded within parser
+resource limits. Empty and null documents are omitted from manifest streams.
+
 ## Namespace Resolution (Online Mode)
 
 In online mode, Nyl connects to Kubernetes and resolves missing `metadata.namespace` for namespaced resources.

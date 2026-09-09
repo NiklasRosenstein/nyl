@@ -1,220 +1,28 @@
-use serde::de::Error as _;
-use serde_yml::libyml::parser::{Event, Parser, Scalar, ScalarStyle};
-use std::borrow::Cow;
+//! YAML input and output for JSON-shaped manifests.
+//!
+//! Scalar resolution, key handling, escaping, and parser budgets belong to serde-saphyr.
+//! Serialization must preserve keys, values, and types when parsed again.
 
-enum Frame {
-    Sequence(Vec<serde_json::Value>),
-    Mapping {
-        map: serde_json::Map<String, serde_json::Value>,
-        pending_key: Option<String>,
-    },
-}
-
-/// Parse a YAML multi-document stream into JSON values using Kubernetes-compatible scalar handling.
-///
-/// Compatibility rule: Kubernetes-style scalar coercion is applied only to plain (unquoted) scalars.
+/// Parse a YAML manifest stream, omitting empty and null documents.
 pub fn parse_yaml_documents_k8s_compatible(
     input: &str,
-) -> std::result::Result<Vec<serde_json::Value>, serde_yaml::Error> {
-    let mut parser = Parser::new(Cow::Borrowed(input.as_bytes()));
-    let mut documents = Vec::new();
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut root: Option<serde_json::Value> = None;
-
-    loop {
-        let (event, mark) = parser
-            .parse_next_event()
-            .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
-
-        match event {
-            Event::StreamStart | Event::DocumentStart => {}
-            Event::StreamEnd => break,
-            Event::DocumentEnd => {
-                if let Some(value) = root.take() {
-                    if !value.is_null() {
-                        documents.push(value);
-                    }
-                }
-                stack.clear();
-            }
-            Event::Alias(_) => {
-                return Err(serde_yaml::Error::custom(format!(
-                    "YAML aliases are not supported (line {}, column {})",
-                    mark.line() + 1,
-                    mark.column() + 1
-                )));
-            }
-            Event::Scalar(scalar) => {
-                let value = parse_scalar_value(scalar)?;
-                insert_value(value, &mut stack, &mut root)?;
-            }
-            Event::SequenceStart(_) => stack.push(Frame::Sequence(Vec::new())),
-            Event::MappingStart(_) => stack.push(Frame::Mapping {
-                map: serde_json::Map::new(),
-                pending_key: None,
-            }),
-            Event::SequenceEnd | Event::MappingEnd => {
-                let frame = stack
-                    .pop()
-                    .ok_or_else(|| serde_yaml::Error::custom("Unexpected YAML container end event"))?;
-
-                let value = match frame {
-                    Frame::Sequence(values) => serde_json::Value::Array(values),
-                    Frame::Mapping { map, pending_key } => {
-                        if pending_key.is_some() {
-                            return Err(serde_yaml::Error::custom("YAML mapping ended with a dangling key"));
-                        }
-                        serde_json::Value::Object(map)
-                    }
-                };
-
-                insert_value(value, &mut stack, &mut root)?;
-            }
-        }
-    }
-
-    Ok(documents)
+) -> Result<Vec<serde_json::Value>, serde_saphyr::DeserializeError> {
+    let documents = serde_saphyr::from_multiple::<serde_json::Value>(input)?;
+    Ok(documents.into_iter().filter(|value| !value.is_null()).collect())
 }
 
-/// Parse a single YAML document into JSON using Kubernetes-compatible scalar handling.
-pub fn parse_yaml_value_k8s_compatible(input: &str) -> std::result::Result<serde_json::Value, serde_yaml::Error> {
-    let mut docs = parse_yaml_documents_k8s_compatible(input)?;
-
-    match docs.len() {
-        0 => Ok(serde_json::Value::Null),
-        1 => Ok(docs.remove(0)),
-        _ => Err(serde_yaml::Error::custom(
-            "deserializing from YAML containing more than one document is not supported",
-        )),
-    }
+/// Parse one YAML document into JSON using the library's scalar resolution.
+pub fn parse_yaml_value_k8s_compatible(input: &str) -> Result<serde_json::Value, serde_saphyr::DeserializeError> {
+    serde_saphyr::from_str(input)
 }
 
-/// Serialize a JSON value to YAML for manifest output.
-///
-/// Uses a serializer that quotes YAML-ambiguous strings like `no`, `yes`, and `on`.
-pub fn serialize_yaml_document(value: &serde_json::Value) -> std::result::Result<String, serde_yml::Error> {
-    serde_yml::to_string(value)
-}
-
-fn insert_value(
-    value: serde_json::Value,
-    stack: &mut [Frame],
-    root: &mut Option<serde_json::Value>,
-) -> std::result::Result<(), serde_yaml::Error> {
-    if let Some(frame) = stack.last_mut() {
-        match frame {
-            Frame::Sequence(values) => values.push(value),
-            Frame::Mapping { map, pending_key } => {
-                if let Some(key) = pending_key.take() {
-                    map.insert(key, value);
-                } else {
-                    let key = mapping_key_to_string(value)
-                        .ok_or_else(|| serde_yaml::Error::custom("YAML mapping keys must be scalar values"))?;
-                    *pending_key = Some(key);
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    if root.is_some() {
-        return Err(serde_yaml::Error::custom("YAML document contains multiple root values"));
-    }
-    *root = Some(value);
-    Ok(())
-}
-
-fn mapping_key_to_string(value: serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(s) => Some(s),
-        serde_json::Value::Bool(v) => Some(v.to_string()),
-        serde_json::Value::Number(v) => Some(v.to_string()),
-        serde_json::Value::Null => Some("null".to_string()),
-        _ => None,
-    }
-}
-
-fn parse_scalar_value(scalar: Scalar<'_>) -> std::result::Result<serde_json::Value, serde_yaml::Error> {
-    let text = String::from_utf8(scalar.value.into_vec())
-        .map_err(|e| serde_yaml::Error::custom(format!("invalid UTF-8 scalar: {e}")))?;
-
-    if scalar.style == ScalarStyle::Plain {
-        if let Some(value) = parse_k8s_plain_scalar(&text) {
-            return Ok(value);
-        }
-    }
-
-    Ok(serde_json::Value::String(text))
-}
-
-fn parse_k8s_plain_scalar(input: &str) -> Option<serde_json::Value> {
-    let trimmed = input.trim();
-
-    // In YAML, an empty plain scalar denotes null.
-    if trimmed.is_empty() {
-        return Some(serde_json::Value::Null);
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-
-    match lower.as_str() {
-        "y" | "yes" | "true" | "on" => return Some(serde_json::Value::Bool(true)),
-        "n" | "no" | "false" | "off" => return Some(serde_json::Value::Bool(false)),
-        "null" | "~" => return Some(serde_json::Value::Null),
-        _ => {}
-    }
-
-    parse_k8s_integer(trimmed).or_else(|| parse_k8s_float(trimmed))
-}
-
-fn parse_k8s_integer(input: &str) -> Option<serde_json::Value> {
-    let normalized = input.replace('_', "");
-    if normalized.is_empty() {
-        return None;
-    }
-
-    let (sign, rest) = if let Some(r) = normalized.strip_prefix('+') {
-        (1_i8, r)
-    } else if let Some(r) = normalized.strip_prefix('-') {
-        (-1_i8, r)
-    } else {
-        (1_i8, normalized.as_str())
-    };
-
-    let (radix, digits) = if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
-        (16, hex)
-    } else if let Some(oct) = rest.strip_prefix("0o").or_else(|| rest.strip_prefix("0O")) {
-        (8, oct)
-    } else if let Some(bin) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
-        (2, bin)
-    } else {
-        (10, rest)
-    };
-
-    if digits.is_empty() {
-        return None;
-    }
-
-    let unsigned = u64::from_str_radix(digits, radix).ok()?;
-    if sign < 0 {
-        let signed = -(i128::from(unsigned));
-        let signed = i64::try_from(signed).ok()?;
-        Some(serde_json::Value::Number(serde_json::Number::from(signed)))
-    } else {
-        Some(serde_json::Value::Number(serde_json::Number::from(unsigned)))
-    }
-}
-
-fn parse_k8s_float(input: &str) -> Option<serde_json::Value> {
-    let normalized = input.replace('_', "");
-    let has_float_markers = normalized.contains('.') || normalized.contains('e') || normalized.contains('E');
-    if !has_float_markers {
-        return None;
-    }
-
-    let float = normalized.parse::<f64>().ok()?;
-    let number = serde_json::Number::from_f64(float)?;
-    Some(serde_json::Value::Number(number))
+/// Serialize data to YAML while preserving string contents through a parse roundtrip.
+pub fn serialize_yaml_document<T: serde::Serialize>(value: &T) -> Result<String, serde_saphyr::SerializeError> {
+    serde_saphyr::to_string_with_options(
+        value,
+        // Quoted multiline strings preserve whitespace, including newline-only values.
+        serde_saphyr::ser_options! { prefer_block_scalars: false },
+    )
 }
 
 #[cfg(test)]
@@ -293,8 +101,12 @@ items:
         });
 
         let yaml = serialize_yaml_document(&value).unwrap();
-        assert!(yaml.contains("- 'no'"));
-        assert!(yaml.contains("- 'on'"));
+        for text in ["no", "on"] {
+            assert!(
+                yaml.contains(&format!("'{text}'")) || yaml.contains(&format!("\"{text}\"")),
+                "{yaml}"
+            );
+        }
     }
 
     #[test]
@@ -321,5 +133,136 @@ items:
         let docs = parse_yaml_documents_k8s_compatible(&yaml).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0], original);
+    }
+
+    fn assert_roundtrip(value: serde_json::Value) {
+        let yaml = serialize_yaml_document(&value).unwrap();
+        let parsed = parse_yaml_value_k8s_compatible(&yaml).unwrap();
+        assert_eq!(parsed, value, "serialized YAML:\n{yaml}");
+    }
+
+    #[test]
+    fn test_roundtrip_string_keys_and_values() {
+        let strings = [
+            "",
+            "no",
+            "yes",
+            "on",
+            "off",
+            "n",
+            "y",
+            "true",
+            "false",
+            "NO",
+            "Yes",
+            "ON",
+            "Off",
+            "yEs",
+            "TrUe",
+            "NuLl",
+            "null",
+            "~",
+            "0",
+            "-0",
+            "+1",
+            "001",
+            "010",
+            "08",
+            "0x10",
+            "0X10",
+            "0o10",
+            "0O10",
+            "0b10",
+            "0B10",
+            "1_000",
+            "1__0",
+            "_1",
+            "1_",
+            "1.5",
+            "1e3",
+            "1E-3",
+            "1e999",
+            ".inf",
+            "-.inf",
+            ".nan",
+            "18446744073709551615",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "18446744073709551616",
+            "2026-09-09",
+            "0:20",
+            "é",
+            "\n",
+            "\n\n",
+            " \n",
+            "\n ",
+            "\n  \n",
+            "a\nb\n",
+            "a\nb",
+            "a\n\nb\n\n",
+            "a\tb",
+            "a\rb",
+            "a\0b",
+            "a\u{1b}b",
+            "quote's",
+            "\\path\\file",
+            " a ",
+            ": ",
+            "# comment",
+            "---",
+            "...",
+            "<<",
+        ];
+        for text in strings {
+            assert_roundtrip(serde_json::json!({text: [text, {"value": text}]}));
+        }
+        for ch in (0..=0xff)
+            .chain([0x2028, 0x2029, 0xfeff, 0x0010_ffff])
+            .filter_map(char::from_u32)
+        {
+            for text in [
+                ch.to_string(),
+                format!("a{ch}z"),
+                format!("{ch}start"),
+                format!("end{ch}"),
+            ] {
+                assert_roundtrip(serde_json::json!({text.clone(): text}));
+            }
+        }
+        for text in ["word ".repeat(100), "\n".repeat(100), "  indented\n\n".repeat(30)] {
+            assert_roundtrip(serde_json::json!({text.clone(): text}));
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_numeric_boundaries_and_nested_values() {
+        assert_roundtrip(serde_json::json!([
+            u64::MAX, i64::MIN, f64::MAX, f64::MIN_POSITIVE, f64::from_bits(1), -0.0,
+            null, true, false, [], {}, {"nested": [null, {"1__0": "1_"}]}
+        ]));
+        // A deterministic spread of floating-point bit patterns covers exponents and mantissas.
+        let mut seed = 0x3a87_196a_d5b0_42f1_u64;
+        for _ in 0..1024 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let float = f64::from_bits(seed);
+            if float.is_finite() {
+                assert_roundtrip(serde_json::json!([float, seed, seed.cast_signed()]));
+            }
+        }
+    }
+
+    #[test]
+    fn test_manifest_stream_preserves_documents_and_omits_nulls() {
+        let values = vec![serde_json::json!({"1__0": "1_"}), serde_json::json!({"text": "\n"})];
+        let stream = format!(
+            "---\n# empty\n---\n{}---\nnull\n---\n{}",
+            serialize_yaml_document(&values[0]).unwrap(),
+            serialize_yaml_document(&values[1]).unwrap(),
+        );
+        assert_eq!(parse_yaml_documents_k8s_compatible(&stream).unwrap(), values);
+        assert!(parse_yaml_value_k8s_compatible(&stream).is_err());
+        assert_roundtrip(serde_json::Value::Null);
     }
 }

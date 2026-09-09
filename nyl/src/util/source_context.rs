@@ -30,8 +30,7 @@ impl SourceContext {
     /// This wraps YAML parsing to provide better error messages
     /// with file context and field path information.
     pub fn parse_yaml_documents(&self, yaml: &str) -> Result<Vec<serde_json::Value>> {
-        crate::yaml::parse_yaml_documents_k8s_compatible(yaml)
-            .map_err(|e| self.enhance_serde_yaml_error(e, "YAML parsing"))
+        crate::yaml::parse_yaml_documents_k8s_compatible(yaml).map_err(|e| self.enhance_yaml_error(e, "YAML parsing"))
     }
 
     /// Parse a single YAML/JSON value with source context
@@ -40,13 +39,13 @@ impl SourceContext {
         T: serde::de::DeserializeOwned,
     {
         let parsed = crate::yaml::parse_yaml_value_k8s_compatible(yaml)
-            .map_err(|e| self.enhance_serde_yaml_error(e, "resource parsing"))?;
+            .map_err(|e| self.enhance_yaml_error(e, "resource parsing"))?;
 
         serde_json::from_value(parsed).map_err(|e| self.enhance_serde_json_error(e, "resource parsing"))
     }
 
     /// Enhance a serde error with file context and helpful hints
-    fn enhance_serde_yaml_error(&self, error: serde_yaml::Error, context: &str) -> NylError {
+    fn enhance_yaml_error(&self, error: serde_saphyr::DeserializeError, context: &str) -> NylError {
         let error_msg = error.to_string();
         let classification = Self::classify_error(&error_msg);
         let location_suffix = if let Some(location) = error.location() {
