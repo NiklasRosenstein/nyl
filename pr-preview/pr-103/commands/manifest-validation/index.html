@@ -98,7 +98,9 @@ validates the resources submitted in that invocation.</p>
 <p>Diagnostics and summaries go to stderr, preserving manifest and diff stdout.
 Invalid resources, missing schemas, tool failures, and timeouts fail the command.
 Explicit <code dir="auto">skip</code> entries use <code dir="auto">apiVersion/kind</code>, such as <code dir="auto">example.com/v1/Widget</code>;
-the summary reports skipped resources. Schema validation does not execute CEL,
+the summary reports skipped resources. Lists are expanded for schema discovery
+and validation, with item paths retained in diagnostics. A skipped List excludes
+its entire contents. Schema validation does not execute CEL,
 admission webhooks, or conversion webhooks, and does not establish deployment
 ordering or compatibility with resources outside the validated input.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="capture-cluster-crd-schemas">Capture cluster CRD schemas</h2><a class="sl-anchor-link" href="#capture-cluster-crd-schemas"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Capture cluster CRD schemas”</span></a></div>
@@ -177,6 +179,9 @@ committed schemas during validation:</p>
 including catalog destinations and schema dependencies. In this mode validation
 fails on missing vendored schemas and never downloads a fallback. A targetless
 render must also have all of its required built-ins available locally.</p>
+<p><code dir="auto">nyl vendor</code> repairs missing or corrupt builtin schema blobs from the cache or
+pinned registry. <code dir="auto">nyl vendor --refresh</code> fetches required builtins and their
+dependencies again; validation and <code dir="auto">--check</code> reject damaged blobs without repair.</p>
 <p><code dir="auto">nyl vendor</code> does not access clusters or refresh captures. <code dir="auto">--prune</code> preserves
 blobs referenced by every captured Cluster, including inherited sources, and
 aborts schema pruning if an inventory is malformed.</p>
