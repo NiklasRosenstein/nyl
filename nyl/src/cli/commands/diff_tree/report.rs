@@ -12,7 +12,7 @@ use crate::render::cache::CacheStats;
 use crate::util::{ansi_style, sanitize_url};
 use crate::{NylError, Result};
 
-use super::{ComparisonSummary, DiffSelection, ResolvedBaseline};
+use super::{is_null_output, ComparisonSummary, DiffSelection, ResolvedBaseline};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ReportFormat {
@@ -55,6 +55,9 @@ pub(super) fn validate_outputs(diff: &Path, reports: &[ReportOutput]) -> Result<
     #[cfg(unix)]
     let mut identities = BTreeSet::new();
     for path in std::iter::once(diff).chain(reports.iter().map(|output| output.path.as_path())) {
+        if is_null_output(path) {
+            continue;
+        }
         if path == Path::new("-") {
             if stdout {
                 return Err(NylError::config(

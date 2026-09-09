@@ -141,8 +141,16 @@ redirect the diff to a file when exporting a report to stdout:
 nyl diff-tree --output rendered.diff --stats-output json:- --no-stats-stderr
 ```
 
-Multiple outputs cannot share stdout or the same file. Nyl creates missing
-parent directories and atomically replaces each output file. A write failure
+On Unix, `/dev/null` discards an output. For example, display just the Markdown
+report on stdout while discarding the patch:
+
+```bash
+nyl diff-tree --stats-output markdown:- --output /dev/null --no-stats-stderr
+```
+
+Multiple outputs may use `/dev/null`, but cannot share stdout or the same regular
+file. Nyl creates missing parent directories and atomically replaces each output
+file. A write failure
 returns an error; multiple output files are not a single transaction, so files
 already written remain available. A successful zero-change comparison writes an
 empty patch and a complete report with zero counts and an empty file list.

@@ -540,7 +540,17 @@ fn files_beneath(files: &BTreeMap<PathBuf, Vec<u8>>, prefix: &Path) -> BTreeMap<
         .collect()
 }
 
+/// Unix null-device destinations discard bytes without replacing the device or an alias.
+fn is_null_output(output: &Path) -> bool {
+    output != Path::new("-")
+        && cfg!(unix)
+        && (output == Path::new("/dev/null") || output.canonicalize().is_ok_and(|path| path == Path::new("/dev/null")))
+}
+
 fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
+    if is_null_output(output) {
+        return Ok(());
+    }
     if output == Path::new("-") {
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
@@ -784,6 +794,34 @@ fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::resources::{Cluster, DeploymentTarget, InlineGitRepository};
+
+    #[cfg(unix)]
+    #[test]
+    fn null_outputs_discard_bytes_and_preserve_symlink_aliases() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let alias = temp.path().join("null");
+        std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
+        report::validate_outputs(
+            Path::new("/dev/null"),
+            &[
+                ReportOutput {
+                    format: ReportFormat::Text,
+                    path: "/dev/null".into(),
+                },
+                ReportOutput {
+                    format: ReportFormat::Json,
+                    path: alias.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        for destination in [Path::new("/dev/null"), alias.as_path()] {
+            write_diff_output(destination, b"discarded output\n").unwrap();
+            write_diff_output(destination, b"").unwrap();
+        }
+        assert_eq!(fs::read_link(&alias).unwrap(), Path::new("/dev/null"));
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 
     fn application_yaml(namespace: &str, name: &str, path: &str) -> Vec<u8> {
         serde_yaml::to_string(&serde_json::json!({

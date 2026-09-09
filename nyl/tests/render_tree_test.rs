@@ -2523,6 +2523,29 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
     let markdown = fs::read_to_string(fixture.path().join("artifacts/comment.md")).unwrap();
     assert!(markdown.contains("| workloads/api/resources\\.yaml | modified | +1 | −1 |"));
     assert!(markdown.contains("### Render statistics"));
+    #[cfg(unix)]
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--stats-output",
+            "markdown:-",
+            "--output",
+            "/dev/null",
+            "--progress",
+            "off",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("## Rendered tree comparison\n"))
+        .stdout(predicate::str::contains(
+            "1 changed · 0 added · 1 modified · 0 deleted; **+1 −1 lines**.",
+        ))
+        .stderr(predicate::str::contains("Rendered tree comparison"));
     assert!(fs::read_to_string(fixture.path().join("artifacts/rendered.diff"))
         .unwrap()
         .contains("+  environment: changed"));
