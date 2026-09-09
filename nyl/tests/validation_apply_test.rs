@@ -30,6 +30,8 @@ fn validation_failure_prevents_resource_and_release_writes() {
                 }
                 Err(error) => panic!("{error}"),
             };
+            // Windows sockets inherit the listener's nonblocking mode.
+            socket.set_nonblocking(false).unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
             let mut reader = BufReader::new(&socket);
             let mut first = String::new();
