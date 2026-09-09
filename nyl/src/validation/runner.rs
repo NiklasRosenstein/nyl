@@ -345,6 +345,34 @@ async fn validate_partitions(
         })?
 }
 
+/// Flatten validation inputs while keeping item paths for diagnostics and desired CRD discovery.
+fn expand_documents(documents: &[ValidationDocument], skip: &[String]) -> Result<Vec<ValidationDocument>> {
+    fn expand(manifest: &Value, source: String, skip: &[String], output: &mut Vec<ValidationDocument>) -> Result<()> {
+        let kind = manifest.get("kind").and_then(Value::as_str).unwrap_or("");
+        let api = manifest.get("apiVersion").and_then(Value::as_str).unwrap_or("");
+        if kind.eq_ignore_ascii_case("list") && !skip.contains(&format!("{api}/{kind}")) {
+            let items = manifest
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| NylError::validation(format!("{source}: List requires an items array")))?;
+            for (index, item) in items.iter().enumerate() {
+                expand(item, format!("{source}.items[{index}]"), skip, output)?;
+            }
+        } else {
+            output.push(ValidationDocument {
+                manifest: manifest.clone(),
+                source,
+            });
+        }
+        Ok(())
+    }
+    let mut output = Vec::new();
+    for document in documents {
+        expand(&document.manifest, document.source.clone(), skip, &mut output)?;
+    }
+    Ok(output)
+}
+
 async fn prepare_partition(
     args: &ValidationArgs,
     partition: &ValidationPartition,
@@ -352,11 +380,12 @@ async fn prepare_partition(
     stage: &Path,
     builtin_only: bool,
 ) -> Result<(BTreeMap<PathBuf, (String, String)>, usize)> {
-    let inputs = PartitionSchemas::new(args, partition, resolver)?;
+    let documents = expand_documents(&partition.documents, &resolver.settings.skip)?;
+    let inputs = PartitionSchemas::new(args, partition, resolver, &documents)?;
     let mut files = BTreeMap::new();
     let mut resolved = BTreeSet::new();
     let mut skipped = 0;
-    for (number, document) in partition.documents.iter().enumerate() {
+    for (number, document) in documents.iter().enumerate() {
         let api = document
             .manifest
             .get("apiVersion")
@@ -411,11 +440,15 @@ struct PartitionSchemas {
 }
 
 impl PartitionSchemas {
-    fn new(args: &ValidationArgs, partition: &ValidationPartition, resolver: &SchemaResolver<'_>) -> Result<Self> {
+    fn new(
+        args: &ValidationArgs,
+        partition: &ValidationPartition,
+        resolver: &SchemaResolver<'_>,
+        documents: &[ValidationDocument],
+    ) -> Result<Self> {
         let desired = if args.use_desired_crds {
             schemas::extract_crds(
-                &partition
-                    .documents
+                &documents
                     .iter()
                     .map(|document| document.manifest.clone())
                     .collect::<Vec<_>>(),
@@ -515,12 +548,14 @@ pub async fn vendor_schemas(
     compiled: &[CompiledTargetTree],
     check: bool,
     preserve: bool,
+    refresh: bool,
 ) -> Result<()> {
     let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
     let settings = inventory.project_config.config.validation.kubeconform.as_ref();
     if let Some(settings) = settings.filter(|settings| settings.vendor_builtin_schemas) {
         let _lock = if check { None } else { Some(store::lock(&root)?) };
-        let mut resolver = SchemaResolver::new(&inventory.project_root, root.clone(), settings, !check, check)?;
+        let mut resolver =
+            SchemaResolver::new(&inventory.project_root, root.clone(), settings, !check, check)?.with_refresh(refresh);
         for tree in compiled {
             for partition in tree_partitions(inventory, tree)? {
                 let stage = tempfile::TempDir::new()?;
@@ -626,6 +661,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_crd_exclusive_and_inclusive_numeric_bounds_in_both_modes() {
+        let (directory, mut config, mut partition) = fixture();
+        let args = ValidationArgs {
+            use_desired_crds: true,
+            ..ValidationArgs::default()
+        };
+        for strict in [true, false] {
+            config.config.validation.kubeconform.as_mut().unwrap().strict = strict;
+            for exclusive in [true, false] {
+                let mut definition = crd("number");
+                definition["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+                    ["count"] = json!({
+                    "type":"number", "minimum":0, "maximum":2,
+                    "exclusiveMinimum":exclusive, "exclusiveMaximum":exclusive
+                });
+                partition.documents.truncate(1);
+                partition.documents.push(document(definition));
+                for count in [1, 0, 2, -1, 3] {
+                    partition.documents[0].manifest["spec"]["count"] = json!(count);
+                    let result =
+                        validate_partitions(&args, &config, directory.path(), std::slice::from_ref(&partition)).await;
+                    let expected = if exclusive {
+                        count == 1
+                    } else {
+                        (0..=2).contains(&count)
+                    };
+                    assert_eq!(
+                        result.is_ok(),
+                        expected,
+                        "strict={strict}, exclusive={exclusive}, count={count}: {result:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_items_supply_desired_crds_and_keep_item_diagnostics() {
+        let (directory, mut config, mut partition) = fixture();
+        let widget =
+            json!({"apiVersion":"example.com/v1","kind":"Widget","metadata":{"name":"test"},"spec":{"count":"new"}});
+        partition.documents = vec![document(
+            json!({"apiVersion":"v1","kind":"List","metadata":{"name":"batch"},
+            "items":[crd("string"), {"apiVersion":"v1","kind":"List","items":[widget]}]}),
+        )];
+        let args = ValidationArgs {
+            use_desired_crds: true,
+            ..ValidationArgs::default()
+        };
+        validate_partitions(&args, &config, directory.path(), std::slice::from_ref(&partition))
+            .await
+            .unwrap();
+        let settings = config.config.validation.kubeconform.as_ref().unwrap();
+        let mut resolver = SchemaResolver::new(
+            directory.path(),
+            directory.path().join("vendor"),
+            settings,
+            false,
+            false,
+        )
+        .unwrap();
+        let stage = TempDir::new().unwrap();
+        let (files, skipped) = prepare_partition(&args, &partition, &mut resolver, stage.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(skipped, 0);
+        assert!(files.values().any(|(source, _)| source.ends_with(".items[1].items[0]")));
+        partition.documents[0].manifest["items"][1]["items"][0]["spec"]["count"] = json!(123);
+        assert!(
+            validate_partitions(&args, &config, directory.path(), std::slice::from_ref(&partition))
+                .await
+                .is_err()
+        );
+        config.config.validation.kubeconform.as_mut().unwrap().skip = vec!["example.com/v1/Widget".into()];
+        validate_partitions(&args, &config, directory.path(), std::slice::from_ref(&partition))
+            .await
+            .unwrap();
+        config.config.validation.kubeconform.as_mut().unwrap().skip = vec!["v1/List".into()];
+        validate_partitions(&args, &config, directory.path(), &[partition])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_converted_crd_composition_nullable_enum_and_embedded_metadata() {
         let (directory, config, mut partition) = fixture();
         let mut definition = crd("integer");
@@ -678,6 +798,107 @@ mod tests {
                 .is_err(),
                 "accepted invalid {field}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fragment_targets_stage_all_dependencies_and_preserve_literal_defaults() {
+        let (directory, config, mut partition) = fixture();
+        let schemas = directory.path().join("schemas/example.com");
+        std::fs::rename(schemas.join("widget_v1.json"), schemas.join("definition.json")).unwrap();
+        std::fs::write(
+            schemas.join("widget_v1.json"),
+            serde_json::to_vec(&json!({
+                "$ref":"#/components/schemas/%57idget",
+                "default":{"$ref":"https://example.invalid/literal-not-a-schema"},
+                "components":{"schemas":{"Widget":{"allOf":[
+                    {"$ref":"import.json#/schemas/A"}, {"$ref":"import.json#/schemas/B"},
+                    {"properties":{"next":{"$ref":"#/components/schemas/Widget"}}}
+                ]}}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("import.json"),
+            serde_json::to_vec(&json!({"schemas":{
+                "A":{"$ref":"definition.json"}, "B":{"$ref":"#/schemas/Constraint"},
+                "Constraint":{"properties":{"spec":{"properties":{"count":{"minimum":1}}}}}
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        validate_partitions(
+            &ValidationArgs::default(),
+            &config,
+            directory.path(),
+            std::slice::from_ref(&partition),
+        )
+        .await
+        .unwrap();
+        partition.documents[0].manifest["spec"]["count"] = json!(0);
+        assert!(
+            validate_partitions(&ValidationArgs::default(), &config, directory.path(), &[partition])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fragment_references_respect_nested_schema_resource_scopes() {
+        let (directory, config, mut partition) = fixture();
+        let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"spec":{
+            "$id":"spec.json", "$ref":"#/$defs/Spec", "$defs":{
+                "Spec":{"type":"object","properties":{"count":{"type":"integer"}}}
+            }
+        }}});
+        std::fs::write(
+            directory.path().join("schemas/example.com/widget_v1.json"),
+            serde_json::to_vec(&schema).unwrap(),
+        )
+        .unwrap();
+        validate_partitions(
+            &ValidationArgs::default(),
+            &config,
+            directory.path(),
+            std::slice::from_ref(&partition),
+        )
+        .await
+        .unwrap();
+        partition.documents[0].manifest["spec"]["count"] = json!("invalid");
+        assert!(
+            validate_partitions(&ValidationArgs::default(), &config, directory.path(), &[partition])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fragment_dependencies_cannot_escape_the_project() {
+        let (directory, config, partition) = fixture();
+        let outside = TempDir::new().unwrap();
+        let external = outside.path().join("schema.json");
+        std::fs::write(&external, b"{}").unwrap();
+        for reference in [
+            reqwest::Url::from_file_path(&external).unwrap().to_string(),
+            "https://example.invalid/schema.json".to_owned(),
+        ] {
+            let schema =
+                json!({"$ref":"#/components/schemas/Widget", "components":{"schemas":{"Widget":{"$ref":reference}}}});
+            std::fs::write(
+                directory.path().join("schemas/example.com/widget_v1.json"),
+                serde_json::to_vec(&schema).unwrap(),
+            )
+            .unwrap();
+            let error = validate_partitions(
+                &ValidationArgs::default(),
+                &config,
+                directory.path(),
+                std::slice::from_ref(&partition),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("must stay within the project"));
         }
     }
 

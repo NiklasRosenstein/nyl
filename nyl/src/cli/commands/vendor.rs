@@ -83,7 +83,7 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
     let _reporter = cache.reporter();
     let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
-    crate::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty()).await?;
+    crate::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
     let result = writer.sync(&cache.observed_artifacts(), !args.target.is_empty())?;
     let count = result.artifacts.to_string().cyan().bold();
     println!(
@@ -99,7 +99,7 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_check();
     let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
-    crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty()).await?;
+    crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
     let count = cache.observed_artifacts().len().to_string().cyan().bold();
     println!("✓ Vendor snapshot is complete and valid ({count} artifacts)");

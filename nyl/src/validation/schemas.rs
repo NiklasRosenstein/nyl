@@ -184,6 +184,25 @@ fn convert_node(schema: &mut Value, strict: bool, structural: bool) -> Result<()
         object.remove("format");
         object.insert("type".into(), json!(["integer", "string"]));
     }
+    // CRDs use boolean OpenAPI bounds; Draft 7 puts the bound in the exclusive keyword.
+    for (exclusive, inclusive) in [("exclusiveMinimum", "minimum"), ("exclusiveMaximum", "maximum")] {
+        if let Some(flag) = object.remove(exclusive) {
+            match flag {
+                Value::Bool(true) => {
+                    let bound = object
+                        .remove(inclusive)
+                        .ok_or_else(|| NylError::validation(format!("CRD schema {exclusive} requires {inclusive}")))?;
+                    object.insert(exclusive.into(), bound);
+                }
+                Value::Bool(false) => {}
+                _ => {
+                    return Err(NylError::validation(format!(
+                        "CRD schema {exclusive} must be a boolean"
+                    )))
+                }
+            }
+        }
+    }
     let nullable = object.remove("nullable").and_then(|value| value.as_bool()) == Some(true);
     for key in ["properties", "patternProperties", "definitions", "$defs"] {
         if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {

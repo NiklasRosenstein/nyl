@@ -149,6 +149,10 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
             args.name, reference.cluster_ref.name
         )));
     }
+    let stored =
+        cluster.spec.kubernetes.as_ref().ok_or_else(|| {
+            NylError::config("spec.kubernetes is required for a Cluster with no inherited API contract")
+        })?;
     let capture_crds = !args.no_crds && (args.crds || inventory.project_config.config.capture.cluster.crds);
     let (info, crds) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -160,11 +164,6 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
         kube_version: Some(info.kube_version.clone()),
         api_versions: info.api_versions.clone(),
     };
-    let stored = cluster
-        .spec
-        .kubernetes
-        .as_ref()
-        .expect("local Cluster has capabilities");
     let differs = store::capabilities_fingerprint(stored)? != store::capabilities_fingerprint(&capabilities)?;
     let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
     let prepared = crds
@@ -471,6 +470,24 @@ mod tests {
                     "schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":kind}}}}}}}]}
             })],
         }
+    }
+
+    #[tokio::test]
+    async fn test_capture_requires_local_capabilities_before_contacting_cluster() {
+        let directory = capture_fixture();
+        let path = directory.path().join("cluster.yaml");
+        let mut value: serde_json::Value = serde_norway::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["spec"].as_object_mut().unwrap().remove("kubernetes");
+        fs::write(path, serde_norway::to_string(&value).unwrap()).unwrap();
+        let failed = StubCapture {
+            fail: true,
+            ..capture_stub("integer")
+        };
+        let error = capture_with_client(capture_args(false), directory.path(), &failed)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("spec.kubernetes is required"));
+        assert!(!directory.path().join("vendor").exists());
     }
 
     #[tokio::test]

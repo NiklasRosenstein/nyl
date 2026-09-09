@@ -79,10 +79,11 @@ pub fn capabilities_fingerprint(capabilities: &ClusterKubernetesCapabilities) ->
 }
 
 pub fn vendor_root(project: &Path, config: &ProjectConfig) -> Result<PathBuf> {
+    // Config paths retain the source filename's spelling; discovery may canonicalize the root.
     let relative = match config.vendor() {
         Some(settings) => settings
             .path
-            .strip_prefix(project)
+            .strip_prefix(config.file.as_deref().and_then(Path::parent).unwrap_or(project))
             .map_err(|_| NylError::config("Schema vendor directory must be beneath the project root"))?,
         None => Path::new("vendor"),
     };

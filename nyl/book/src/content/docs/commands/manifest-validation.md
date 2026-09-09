@@ -53,7 +53,9 @@ validates the resources submitted in that invocation.
 Diagnostics and summaries go to stderr, preserving manifest and diff stdout.
 Invalid resources, missing schemas, tool failures, and timeouts fail the command.
 Explicit `skip` entries use `apiVersion/kind`, such as `example.com/v1/Widget`;
-the summary reports skipped resources. Schema validation does not execute CEL,
+the summary reports skipped resources. Lists are expanded for schema discovery
+and validation, with item paths retained in diagnostics. A skipped List excludes
+its entire contents. Schema validation does not execute CEL,
 admission webhooks, or conversion webhooks, and does not establish deployment
 ordering or compatibility with resources outside the validated input.
 
@@ -202,6 +204,10 @@ Vendoring materializes built-ins required by the selected target renders,
 including catalog destinations and schema dependencies. In this mode validation
 fails on missing vendored schemas and never downloads a fallback. A targetless
 render must also have all of its required built-ins available locally.
+
+`nyl vendor` repairs missing or corrupt builtin schema blobs from the cache or
+pinned registry. `nyl vendor --refresh` fetches required builtins and their
+dependencies again; validation and `--check` reject damaged blobs without repair.
 
 `nyl vendor` does not access clusters or refresh captures. `--prune` preserves
 blobs referenced by every captured Cluster, including inherited sources, and

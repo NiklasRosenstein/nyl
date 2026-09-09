@@ -259,6 +259,46 @@ fn configure_validation(root: &std::path::Path, data_type: &str) {
 }
 
 #[test]
+fn vendor_commands_resolve_relative_project_and_vendor_paths() {
+    let fixture = fixture();
+    for vendor_path in ["vendor", "third-party"] {
+        let vendor_config = format!("[vendor]\nmode='required'\npath='{vendor_path}'\n");
+        fs::write(fixture.path().join("nyl.toml"), &vendor_config).unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .arg("vendor")
+            .assert()
+            .success();
+        assert!(fixture.path().join(vendor_path).join("lock.yaml").is_file());
+        configure_validation(fixture.path(), "string");
+        let config = fs::read_to_string(fixture.path().join("nyl.toml")).unwrap();
+        fs::write(fixture.path().join("nyl.toml"), format!("{config}\n{vendor_config}")).unwrap();
+        for args in [["vendor", "."], ["vendor", "--check"]] {
+            Command::cargo_bin("nyl")
+                .unwrap()
+                .current_dir(fixture.path())
+                .timeout(std::time::Duration::from_secs(30))
+                .args(args)
+                .assert()
+                .success();
+        }
+        let output = TempDir::new().unwrap();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--output-dir"])
+            .arg(output.path())
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("0 failed"));
+        assert!(fixture.path().join(vendor_path).join("schemas/builtins.json").is_file());
+    }
+}
+
+#[test]
 fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
     let fixture = fixture();
     let output = TempDir::new().unwrap();
