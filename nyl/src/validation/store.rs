@@ -251,8 +251,22 @@ pub fn read_builtins(root: &Path) -> Result<BuiltinIndex> {
     }
 }
 
+/// Exclusive schema-store lock released when its guard is dropped.
+pub struct SchemaStoreLock {
+    file: fs::File,
+}
+
+impl Drop for SchemaStoreLock {
+    fn drop(&mut self) {
+        // Closing alone can retain the lock while a spawned child holds an inherited descriptor.
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!("Cannot unlock schema store: {error}");
+        }
+    }
+}
+
 /// Serialize capture, builtin inventory updates, and pruning across processes.
-pub fn lock(root: &Path) -> Result<fs::File> {
+pub fn lock(root: &Path) -> Result<SchemaStoreLock> {
     let path = safe_path(root, Path::new("schemas/.lock"))?;
     fs::create_dir_all(path.parent().expect("schema lock has parent"))?;
     let ignore = safe_path(root, Path::new("schemas/.gitignore"))?;
@@ -267,7 +281,7 @@ pub fn lock(root: &Path) -> Result<fs::File> {
         .open(path)?;
     file.try_lock()
         .map_err(|error| NylError::config(format!("Schema store is in use; retry: {error}")))?;
-    Ok(file)
+    Ok(SchemaStoreLock { file })
 }
 
 /// Verify all source snapshots and collect their roots before deleting any blob.
@@ -370,6 +384,22 @@ mod tests {
         assert_eq!(check_and_prune(directory.path(), true).unwrap(), 0);
         read_blob(directory.path(), &refs.strict).unwrap();
         read_blob(directory.path(), &refs.permissive).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_lock_releases_while_a_duplicated_descriptor_remains_open() {
+        let directory = TempDir::new().unwrap();
+        let held = lock(directory.path()).unwrap();
+        // A duplicate shares the lock just like a descriptor inherited during process spawn.
+        let duplicate = held.file.try_clone().unwrap();
+        assert!(lock(directory.path()).is_err());
+        drop(held);
+        let reacquired = lock(directory.path()).unwrap();
+        drop(duplicate);
+        assert!(lock(directory.path()).is_err());
+        drop(reacquired);
+        lock(directory.path()).unwrap();
     }
 
     #[test]

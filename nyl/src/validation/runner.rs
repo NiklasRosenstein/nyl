@@ -519,8 +519,13 @@ impl PartitionSchemas {
                 if builtin_only {
                     return Ok(None);
                 }
+                let capture_hint = partition
+                    .schema_source
+                    .as_deref()
+                    .map(|source| format!("run nyl capture cluster {source} --crds or "))
+                    .unwrap_or_default();
                 return Err(NylError::validation(format!(
-                    "no schema for {gvk} in destination {}; capture its schema source or configure schema_locations",
+                    "no schema for {gvk} in destination {}; {capture_hint}configure schema_locations",
                     partition.destination
                 )));
             }
@@ -529,9 +534,9 @@ impl PartitionSchemas {
                 Some(schema) => schema,
                 None => {
                     return Err(NylError::validation(format!(
-                    "no schema for {gvk} in destination {}; capture its schema source or configure schema_locations",
-                    partition.destination
-                )))
+                        "no schema for {gvk} in destination {}; configure schema_locations",
+                        partition.destination
+                    )))
                 }
             }
         };
@@ -1028,6 +1033,37 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_missing_crd_schema_guidance_uses_resolved_source() {
+        let (directory, config, mut partition) = fixture();
+        partition.documents = vec![document(json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+            "metadata": {"name": "test"}
+        }))];
+        for source in [Some("production"), Some("staging"), None] {
+            partition.schema_source = source.map(str::to_owned);
+            let error = validate_partitions(
+                &ValidationArgs::default(),
+                &config,
+                directory.path(),
+                std::slice::from_ref(&partition),
+            )
+            .await
+            .unwrap_err();
+            let hint = match source {
+                Some(source) => format!("run nyl capture cluster {source} --crds or configure schema_locations"),
+                None => "configure schema_locations".into(),
+            };
+            assert_eq!(
+                match error {
+                    NylError::Validation(message) => message,
+                    error => panic!("Expected validation error: {error}"),
+                },
+                format!("no schema for argoproj.io/v1alpha1/Application in destination production; {hint}")
+            );
+        }
     }
 
     #[tokio::test]
