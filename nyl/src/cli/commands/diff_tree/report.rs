@@ -805,7 +805,8 @@ mod tests {
         assert_cmd::Command::new("git")
             .current_dir(temp.path())
             .timeout(std::time::Duration::from_secs(10))
-            .arg("apply")
+            // Preserve rendered bytes regardless of the user's Git line-ending settings.
+            .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply"])
             .write_stdin(diff.patch)
             .assert()
             .success();
