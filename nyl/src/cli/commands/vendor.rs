@@ -101,8 +101,13 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
     let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
     crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
+    let schema_root = crate::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let unreferenced = writer.unreferenced_count()? + crate::validation::store::check_and_prune(&schema_root, false)?;
     let count = cache.observed_artifacts().len().to_string().cyan().bold();
     println!("✓ Vendor snapshot is complete and valid ({count} artifacts)");
+    if unreferenced > 0 {
+        println!("Hint: {unreferenced} unreferenced vendor artifact(s) can be pruned; run 'nyl vendor --prune'");
+    }
     Ok(())
 }
 
