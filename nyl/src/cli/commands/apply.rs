@@ -825,4 +825,32 @@ mod tests {
 
         assert!(keys_to_prune(&live, &current_keys).is_empty());
     }
+
+    #[test]
+    fn test_large_release_manifest_can_be_read_and_appended() {
+        let manifests: Vec<_> = (0..1_025)
+            .map(|index| {
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": format!("config-{index}"), "namespace": "default"},
+                })
+            })
+            .collect();
+        let stored = manifests_to_yaml(&manifests).unwrap();
+        assert_eq!(
+            crate::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap(),
+            manifests
+        );
+
+        let mut updated = manifests[0].clone();
+        updated["data"] = json!({"revision": "updated"});
+        let appended = merge_append_manifest(&[updated.clone()], &stored).unwrap();
+        let restored = crate::yaml::parse_yaml_documents_k8s_compatible(&appended).unwrap();
+        assert_eq!(restored.len(), manifests.len());
+        assert!(restored.contains(&updated));
+        for manifest in &manifests[1..] {
+            assert!(restored.contains(manifest));
+        }
+    }
 }
