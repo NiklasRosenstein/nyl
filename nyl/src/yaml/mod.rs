@@ -7,8 +7,8 @@
 pub fn parse_yaml_documents_k8s_compatible(
     input: &str,
 ) -> Result<Vec<serde_json::Value>, serde_saphyr::DeserializeError> {
-    let documents = serde_saphyr::from_multiple::<serde_json::Value>(input)?;
-    Ok(documents.into_iter().filter(|value| !value.is_null()).collect())
+    // Each document keeps its own complexity budget, including in stored release streams.
+    serde_saphyr::read(&mut input.as_bytes()).collect()
 }
 
 /// Parse one YAML document into JSON using the library's scalar resolution.
@@ -251,6 +251,13 @@ items:
                 assert_roundtrip(serde_json::json!([float, seed, seed.cast_signed()]));
             }
         }
+    }
+
+    #[test]
+    fn test_manifest_stream_enforces_document_complexity_limits() {
+        let nested = format!("{}0{}", "[".repeat(100), "]".repeat(100));
+        let stream = format!("kind: ConfigMap\n---\n{nested}\n");
+        assert!(parse_yaml_documents_k8s_compatible(&stream).is_err());
     }
 
     #[test]

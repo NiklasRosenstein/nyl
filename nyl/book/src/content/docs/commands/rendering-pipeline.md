@@ -32,7 +32,9 @@ preserved. Multiline strings may be emitted with escaped newlines.
 Quote strings that resemble YAML booleans, numbers, or null, such as `"no"`,
 `"123"`, and `"null"`. Mapping keys are strings and retain their spelling.
 Duplicate mapping keys are rejected. YAML aliases are expanded within parser
-resource limits. Empty and null documents are omitted from manifest streams.
+resource limits. Manifest streams apply complexity limits per document, so
+combining many resources does not impose a fixed document-count ceiling. Empty
+and null documents are omitted from manifest streams.
 
 ## Namespace Resolution (Online Mode)
 

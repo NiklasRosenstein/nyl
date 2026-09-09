@@ -211,16 +211,11 @@ pub fn tree_partitions(inventory: &GitOpsInventory, compiled: &CompiledTargetTre
             workload
         };
         let partition = partitions.get_mut(destination).expect("destination was inserted");
-        for (index, manifest) in serde_saphyr::from_slice_multiple::<Value>(bytes)?
-            .into_iter()
-            .enumerate()
-        {
-            if !manifest.is_null() {
-                partition.documents.push(ValidationDocument {
-                    manifest,
-                    source: format!("{} (document {})", path.display(), index + 1),
-                });
-            }
+        for (index, manifest) in serde_saphyr::read::<_, Value>(&mut bytes.as_slice()).enumerate() {
+            partition.documents.push(ValidationDocument {
+                manifest: manifest?,
+                source: format!("{} (document {})", path.display(), index + 1),
+            });
         }
     }
     Ok(partitions.into_values().collect())
