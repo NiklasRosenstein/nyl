@@ -12,6 +12,19 @@ use tempfile::TempDir;
 const TOKEN: &str = "test-token-do-not-print";
 const KEY: &str = "gitops/kasoku";
 
+fn isolated_command() -> Command {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    command.env_clear();
+    // Winsock needs SystemRoot to load its service providers.
+    #[cfg(windows)]
+    command.env(
+        "SystemRoot",
+        std::env::var_os("SystemRoot").expect("Windows must define SystemRoot"),
+    );
+    command.timeout(Duration::from_secs(20));
+    command
+}
+
 fn body(key: &str, markdown: &str) -> String {
     format!("<!-- nyl-comment:v1:{} -->\n\n{markdown}", hex::encode(key))
 }
@@ -203,9 +216,8 @@ impl Forge {
     }
 
     fn command(&self, key: &str) -> Command {
-        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+        let mut command = isolated_command();
         command
-            .env_clear()
             .env("GH_TOKEN", TOKEN)
             .env("GITLAB_TOKEN", TOKEN)
             .env("FORGEJO_TOKEN", TOKEN)
@@ -228,8 +240,7 @@ impl Forge {
                 key,
                 "--body-file",
                 "-",
-            ])
-            .timeout(Duration::from_secs(20));
+            ]);
         command
     }
 
@@ -452,8 +463,7 @@ fn test_ci_detection_reads_file_without_a_nyl_project() {
     let temp = TempDir::new().unwrap();
     let file = temp.path().join("report.md");
     std::fs::write(&file, "# File report\n").unwrap();
-    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
-        .env_clear()
+    isolated_command()
         .env("GITLAB_CI", "true")
         .env("CI_SERVER_URL", &forge.url)
         .env("CI_MERGE_REQUEST_PROJECT_ID", "23")
@@ -463,7 +473,6 @@ fn test_ci_detection_reads_file_without_a_nyl_project() {
         .current_dir(temp.path())
         .args(["comment", "upsert", "--key", KEY, "--body-file"])
         .arg(file)
-        .timeout(Duration::from_secs(20))
         .assert()
         .success()
         .stdout(predicates::str::contains(
@@ -487,8 +496,7 @@ fn test_actions_context_uses_pr_base_repository_and_authenticated_bot() {
         )
         .unwrap();
         let prefix = if provider == "github" { "GITHUB" } else { "FORGEJO" };
-        Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
-            .env_clear()
+        isolated_command()
             .env(format!("{prefix}_ACTIONS"), "true")
             .env(format!("{prefix}_SERVER_URL"), &forge.url)
             .env(format!("{prefix}_REPOSITORY"), "fork/repo")
@@ -498,7 +506,6 @@ fn test_actions_context_uses_pr_base_repository_and_authenticated_bot() {
             .current_dir(temp.path())
             .args(["comment", "upsert", "--key", KEY, "--body-file", "-"])
             .write_stdin("Report")
-            .timeout(Duration::from_secs(20))
             .assert()
             .success();
         assert_eq!(forge.state.lock().unwrap().comments[0]["body"], body(KEY, "Report"));
