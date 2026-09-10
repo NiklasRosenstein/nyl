@@ -41,7 +41,9 @@ async fn main() {
 
     // Execute command
     if let Err(e) = cli.execute().await {
-        tracing::error!("{e}");
+        if !matches!(e, nyl::NylError::ValidationReported(_)) {
+            tracing::error!("{e}");
+        }
         std::process::exit(1);
     }
 }

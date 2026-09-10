@@ -293,7 +293,7 @@ fn vendor_commands_resolve_relative_project_and_vendor_paths() {
             .arg(output.path())
             .assert()
             .success()
-            .stderr(predicate::str::contains("0 failed"));
+            .stderr(predicate::str::contains("0 invalid, 0 errors"));
         assert!(fixture.path().join(vendor_path).join("schemas/builtins.json").is_file());
     }
 }
@@ -354,7 +354,7 @@ fn vendor_check_reports_prunable_files_without_modifying_snapshot() {
 }
 
 #[test]
-fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
+fn validation_failure_writes_inspectable_tree_and_rechecks_cached_artifacts() {
     let fixture = fixture();
     let output = TempDir::new().unwrap();
     configure_validation(fixture.path(), "string");
@@ -366,30 +366,46 @@ fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
         .arg(output.path())
         .assert()
         .success()
-        .stderr(predicate::str::contains("0 failed"));
+        .stderr(predicate::str::contains("0 invalid, 0 errors"));
     let before = read_tree(output.path());
-    // Only the validation schema changes; the compiled resource bytes stay identical.
     fs::write(
         fixture.path().join("schemas/v1/configmap_v1.json"),
         r#"{"type":"object","properties":{"data":{"type":"object","additionalProperties":{"type":"integer"}}}}"#,
     )
     .unwrap();
-    for check in [false, true] {
-        let mut command = Command::cargo_bin("nyl").unwrap();
-        command
+    let manifest = fixture.path().join("applications/workloads/api.yaml");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("\ndata:\n", "\ndata:\n  inspection: available\n"),
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render-tree", "--check", "--output-dir"])
+        .arg(output.path())
+        .assert()
+        .failure();
+    assert_eq!(read_tree(output.path()), before);
+
+    let fresh_output = TempDir::new().unwrap();
+    for destination in [output.path(), fresh_output.path(), fresh_output.path()] {
+        Command::cargo_bin("nyl")
+            .unwrap()
             .current_dir(fixture.path())
             .timeout(std::time::Duration::from_secs(30))
             .args(["render-tree", "--target", "production", "--output-dir"])
-            .arg(output.path());
-        if check {
-            command.arg("--check");
-        }
-        command
+            .arg(destination)
             .assert()
             .failure()
-            .stderr(predicate::str::contains("failed kubeconform validation"));
+            .stderr(predicate::str::contains("1 invalid"));
+        let resources = fs::read_to_string(destination.join("production/workloads/api/resources.yaml")).unwrap();
+        assert!(resources.contains("inspection: available"));
+        assert!(destination.join("production/_nyl/index.json").is_file());
     }
-    assert_eq!(read_tree(output.path()), before);
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
@@ -398,7 +414,7 @@ fn validation_blocks_tree_writes_and_rechecks_cached_artifacts() {
         .assert()
         .failure()
         .stdout("")
-        .stderr(predicate::str::contains("failed kubeconform validation"));
+        .stderr(predicate::str::contains("1 invalid"));
 }
 
 #[test]
@@ -431,10 +447,7 @@ fn validation_prevents_invalid_publication_even_when_output_is_already_published
         if dry_run {
             command.arg("--dry-run");
         }
-        command
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("failed kubeconform validation"));
+        command.assert().failure().stderr(predicate::str::contains("1 invalid"));
     }
     assert_eq!(
         remote
@@ -464,8 +477,8 @@ fn validation_render_overrides_and_complete_scope_are_explicit() {
         .args(arguments)
         .assert()
         .failure()
-        .stdout("")
-        .stderr(predicate::str::contains("failed kubeconform validation"));
+        .stdout(predicate::str::contains("kind: ConfigMap"))
+        .stderr(predicate::str::contains("1 invalid"));
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
@@ -3140,4 +3153,203 @@ fn diff_tree_failed_comparisons_preserve_reports_and_report_write_failures() {
         fs::read_to_string(fixture.path().join("report.json")).unwrap(),
         "preserve me"
     );
+}
+
+#[test]
+fn validation_json_stdout_is_complete_and_preserves_cached_provenance() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "string");
+    let output = TempDir::new().unwrap();
+    let mut previous = None;
+    for check in [false, true] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--output-dir"])
+            .arg(output.path())
+            .args(["--validation-output", "json:-", "--no-validation-stderr"]);
+        if check {
+            command.arg("--check");
+        }
+        let result = command.assert().success();
+        let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+        assert_eq!(report["version"], 1);
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["status"], "valid");
+        let resources = report["resources"].as_array().unwrap();
+        assert_eq!(report["summary"]["valid"].as_u64().unwrap() as usize, resources.len());
+        let configmap = resources.iter().find(|r| r["resource"]["kind"] == "ConfigMap").unwrap();
+        assert_eq!(configmap["provenance"][0]["type"], "source");
+        assert_eq!(configmap["provenance"][0]["path"], "applications/workloads/api.yaml");
+        assert_eq!(configmap["provenance"][0]["document"], 2);
+        assert!(resources.iter().any(|r| r["provenance"][0]["type"] == "generated"));
+        if let Some(previous) = previous {
+            assert_eq!(report, previous);
+        }
+        previous = Some(report);
+    }
+}
+
+#[test]
+fn validation_remote_provenance_survives_artifact_and_tree_cache_hits() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "string");
+    let remote = TempDir::new().unwrap();
+    let repository = Repository::init(remote.path()).unwrap();
+    fs::create_dir(remote.path().join("releases")).unwrap();
+    fs::copy(
+        fixture.path().join("applications/workloads/api.yaml"),
+        remote.path().join("releases/api.yaml"),
+    )
+    .unwrap();
+    commit_all(&repository, "Remote release");
+    let commit = repository.head().unwrap().target().unwrap().to_string();
+    let url = reqwest::Url::from_directory_path(remote.path()).unwrap().to_string();
+    let group = fixture.path().join("config/application-groups/workloads.yaml");
+    fs::write(
+        &group,
+        format!(
+            "{}\n  source:\n    repository: {{repoURL: '{url}'}}\n    revision: HEAD\n    commit: '{commit}'\n    path: releases\n",
+            fs::read_to_string(&group).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        let result = Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--output-dir"])
+            .arg(output.path())
+            .args(["--validation-output", "json:-", "--no-validation-stderr"])
+            .assert()
+            .success();
+        let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+        let resources = report["resources"].as_array().unwrap();
+        for kind in ["ConfigMap", "Namespace"] {
+            let resource = resources.iter().find(|r| r["resource"]["kind"] == kind).unwrap();
+            let frames = resource["provenance"].as_array().unwrap();
+            assert_eq!(frames[0]["repository"], url);
+            assert_eq!(frames[0]["revision"], commit);
+            assert_eq!(frames[1]["path"], "releases/api.yaml");
+            if kind == "Namespace" {
+                assert!(frames.iter().any(|frame| frame["type"] == "generated"));
+            }
+        }
+        if let Some(previous) = previous {
+            assert_eq!(report, previous);
+        }
+        previous = Some(report);
+    }
+}
+
+#[test]
+fn validation_reports_export_findings_and_skipped_resources_without_losing_render_output() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "integer");
+    let config = fixture.path().join("nyl.toml");
+    fs::write(
+        &config,
+        format!("{}\nskip=['v1/Namespace']\n", fs::read_to_string(&config).unwrap()),
+    )
+    .unwrap();
+    let output = TempDir::new().unwrap();
+    let reports = TempDir::new().unwrap();
+    let json = reports.path().join("validation.json");
+    let text = reports.path().join("validation.txt");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("CI", "true")
+        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render-tree", "--output-dir"])
+        .arg(output.path())
+        .arg("--validation-output")
+        .arg(format!("json:{}", json.display()))
+        .arg("--validation-output")
+        .arg(format!("text:{}", text.display()))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "\x1b[1;36mkubeconform · kasoku · Kubernetes 1.31.4\x1b[0m",
+        ))
+        .stderr(predicate::str::contains("\x1b[1;31mFAIL\x1b[0m"))
+        .stderr(predicate::str::contains(
+            "\x1b[1m/data/environment\x1b[0m: got string, want integer",
+        ));
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&json).unwrap()).unwrap();
+    assert_eq!(report["status"], "invalid");
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["summary"]["invalid"], 1);
+    assert!(report["summary"]["skipped"].as_u64().unwrap() > 0);
+    let resources = report["resources"].as_array().unwrap();
+    let invalid = resources.iter().find(|r| r["status"] == "invalid").unwrap();
+    assert_eq!(invalid["findings"][0]["path"], "/data/environment");
+    assert_eq!(invalid["schemaOrigin"]["type"], "local");
+    assert_eq!(invalid["renderedLocation"]["path"], "workloads/api/resources.yaml");
+    assert!(output.path().join("production/workloads/api/resources.yaml").is_file());
+    let exported = fs::read_to_string(text).unwrap();
+    assert!(exported.contains("Source:        applications/workloads/api.yaml"));
+    assert!(!exported.contains('\x1b'));
+    assert!(!report.to_string().contains("\\u001b"));
+}
+
+#[test]
+fn validation_exports_reject_source_output_and_stdout_collisions() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "string");
+    let output = TempDir::new().unwrap();
+    let source = fixture.path().join("applications/workloads/api.yaml");
+    let original = fs::read(&source).unwrap();
+    let schema = fixture.path().join("schemas/v1/configmap_v1.json");
+    let original_schema = fs::read(&schema).unwrap();
+    for destination in [source.clone(), schema.clone(), output.path().join("validation.json")] {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--output-dir"])
+            .arg(output.path())
+            .arg("--validation-output")
+            .arg(format!("json:{}", destination.display()))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("overwrite source or managed output"));
+    }
+    assert_eq!(fs::read(source).unwrap(), original);
+    assert_eq!(fs::read(schema).unwrap(), original_schema);
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "render",
+            "applications/workloads/api.yaml",
+            "--offline",
+            "--target",
+            "production",
+            "--validation-output",
+            "json:-",
+        ])
+        .assert()
+        .failure()
+        .stdout("");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render-tree", "--output-dir"])
+        .arg(output.path())
+        .args(["--validation-output", "json:-", "--validation-output", "text:-"])
+        .assert()
+        .failure()
+        .stdout("");
 }

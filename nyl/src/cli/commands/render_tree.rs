@@ -53,6 +53,8 @@ pub struct RenderTreeArgs {
 }
 
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
+    args.validation
+        .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
@@ -86,6 +88,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     } else {
         initial
     };
+    args.validation.enabled(&inventory.project_config.config.validation)?;
 
     if !args.check {
         validate_rendered_tree_owner(&output_root, &render_index_owner(&target_name, &target))?;
@@ -104,13 +107,14 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         },
     )
     .await?;
-    crate::validation::validate_tree(&args.validation, &inventory, &compiled).await?;
+    let validation = crate::validation::validate_tree(&args.validation, &inventory, &compiled).await;
     if args.check {
-        let target = target_name.as_str().cyan().bold();
-        println!(
-            "✓ deployment target {target} is valid ({}, {})",
-            format_file_count(compiled.files.len()),
-            format_elapsed(started.elapsed())
+        validation?;
+        report_checked_target(
+            &target_name,
+            compiled.files.len(),
+            started.elapsed(),
+            args.validation.report_stdout(),
         );
         return Ok(());
     }
@@ -141,17 +145,58 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
             force_owned: args.force,
         },
     )?;
-    let target = target_name.as_str().cyan().bold();
-    let output = crate::util::path_for_display(&output_root)
+    report_render_result(
+        &target_name,
+        &output_root,
+        compiled.files.len(),
+        started.elapsed(),
+        validation,
+        args.validation.report_stdout(),
+    )
+}
+
+fn report_checked_target(target: &str, count: usize, elapsed: Duration, report_stdout: bool) {
+    let target = target.cyan().bold();
+    let message = format!(
+        "✓ deployment target {target} is valid ({}, {})",
+        format_file_count(count),
+        format_elapsed(elapsed)
+    );
+    if report_stdout {
+        eprintln!("{message}");
+    } else {
+        println!("{message}");
+    }
+}
+
+fn report_render_result(
+    target_name: &str,
+    output_root: &Path,
+    file_count: usize,
+    elapsed: Duration,
+    validation: Result<()>,
+    report_stdout: bool,
+) -> Result<()> {
+    let target = target_name.cyan().bold();
+    let output = crate::util::path_for_display(output_root)
         .display()
         .to_string()
         .replace(std::path::MAIN_SEPARATOR, "/")
         .green();
-    println!(
+    if let Err(error) = validation {
+        eprintln!("Deployment target {target} rendered at {output}; validation failed. Inspect the rendered files.");
+        return Err(error);
+    }
+    let message = format!(
         "✓ deployment target {target} ready at {output} ({}, {})",
-        format_file_count(compiled.files.len()),
-        format_elapsed(started.elapsed())
+        format_file_count(file_count),
+        format_elapsed(elapsed)
     );
+    if report_stdout {
+        eprintln!("{message}");
+    } else {
+        println!("{message}");
+    }
     Ok(())
 }
 

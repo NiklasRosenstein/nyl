@@ -55,6 +55,11 @@ nyl render-tree --target production --output-dir deploy-worktree
 the target's `pathPrefix`. Use `nyl render-tree --check` to render and validate
 without writing.
 
+Validation failures return a nonzero exit status and leave the current rendered
+files at the output path for inspection. Normal rendering reconciles these files
+even when validation fails; ownership and local-edit protections still apply.
+`--check` leaves existing output untouched.
+
 Tree commands display an updating Release progress bar on an attended stderr.
 In CI they instead print one line before processing each Release, keeping stdout
 available for rendered diffs. Select the behavior explicitly with

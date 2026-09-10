@@ -147,6 +147,7 @@ struct SilentTreeRenderObserver;
 impl TreeRenderObserver for SilentTreeRenderObserver {}
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
+    args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;

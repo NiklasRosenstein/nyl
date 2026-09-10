@@ -133,7 +133,7 @@ users:
     let requests = worker.join().unwrap();
     assert_cmd::assert::Assert::new(output)
         .failure()
-        .stderr(predicate::str::contains("1 resource(s) failed kubeconform validation"));
+        .stderr(predicate::str::contains("1 invalid"));
     assert!(!requests.is_empty(), "test must reach API discovery");
     assert!(
         requests.iter().all(|request| request.starts_with("GET ")),

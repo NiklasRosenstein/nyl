@@ -65,8 +65,16 @@ pub struct ClusterCaptureSettings {
 }
 
 /// Shared switches for all manifest-producing commands.
+// Clap exposes independent invocation switches rather than one combined state.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Args)]
 pub struct ValidationArgs {
+    /// Export a validation report (repeatable). Formats: text, json. PATH=- requires render-tree.
+    #[arg(long, value_name = "FORMAT:PATH", conflicts_with = "no_validate")]
+    pub validation_output: Vec<super::report::ValidationOutput>,
+    /// Suppress human findings and the validation summary on stderr; progress remains visible.
+    #[arg(long)]
+    pub no_validation_stderr: bool,
     /// Run every validator configured in nyl.toml.
     #[arg(long, conflicts_with = "no_validate")]
     pub validate: bool,
@@ -80,9 +88,27 @@ pub struct ValidationArgs {
 }
 
 impl ValidationArgs {
+    /// Whether a report owns stdout for this invocation.
+    pub fn report_stdout(&self) -> bool {
+        self.validation_output
+            .iter()
+            .any(|output| output.path == std::path::Path::new("-"))
+    }
+
+    /// Validate report destinations before rendering or changing external state.
+    pub fn validate_outputs(
+        &self,
+        stdout_allowed: bool,
+        protected: &[std::path::PathBuf],
+        trees: &[std::path::PathBuf],
+    ) -> Result<()> {
+        super::report::validate_outputs(&self.validation_output, stdout_allowed, protected, trees)
+    }
+
     /// Resolve invocation overrides and reject an empty validator selection.
     pub fn enabled(&self, settings: &ValidationSettings) -> Result<bool> {
-        let enabled = !self.no_validate && (self.validate || self.use_desired_crds || settings.enabled);
+        let enabled = !self.no_validate
+            && (self.validate || self.use_desired_crds || !self.validation_output.is_empty() || settings.enabled);
         if enabled && settings.kubeconform.is_none() {
             return Err(NylError::config(
                 "Validation requested but no validators configured; add [validation.kubeconform] to nyl.toml",

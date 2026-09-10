@@ -97,7 +97,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     // is applied (and consistent with `release rollback`, which also stores sorted).
     ResourceOrdering::sort_by_priority(&mut desired_manifests)?;
 
-    crate::validation::validate_manifests(
+    crate::validation::validate_manifest_input(
         &args.common.validation,
         &preflight.project_config,
         &preflight.project_root,
@@ -106,8 +106,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
         None,
-        &desired_manifests,
-        &args.common.path,
+        crate::validation::ManifestValidationInput {
+            manifests: &desired_manifests,
+            source: &args.common.path,
+            provenance: &preflight.provenance,
+        },
     )
     .await?;
 

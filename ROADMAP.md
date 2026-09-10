@@ -132,9 +132,15 @@ Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
 contract from another declared Cluster. Effective capabilities drive both
 rendering and validation; destinations, values, and live connection settings
 remain local. `nyl capture cluster` refreshes committed capabilities and optional
-CRD schema snapshots. Project-configured validators check final artifacts before
-render output, diff calculation, application, or publication. These operations
-remain independently usable without orchestration state.
+CRD schema snapshots. Project-configured validators check final artifacts.
+Rendering emits inspectable artifacts even when validation fails and returns a
+failing exit status; `render-tree --check` writes no output. Validation gates diff
+calculation, application, and publication. These operations remain independently
+usable without orchestration state. Validation findings and text/JSON exports
+share structured resource results, schema origins, and authoring provenance.
+Reports retain completed results on operational failure and distinguish invalid
+resources from unchecked inputs; rendering caches retain the provenance needed
+for identical reports on cache hits.
 
 Separate authoring membership, unit identity, and native resource ownership.
 Stable identities and incarnation fences protect against stale operations after

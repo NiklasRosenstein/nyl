@@ -98,3 +98,5 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 Use `--validate` to run project-configured validators. See
 [Manifest validation](../manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.
+Validation failures return a nonzero exit status while still emitting manifests
+to stdout for inspection. Diagnostics go to stderr.
