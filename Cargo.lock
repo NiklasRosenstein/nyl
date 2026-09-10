@@ -1943,6 +1943,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls",
+ "same-file",
  "schemars",
  "serde",
  "serde-saphyr 1.2.0",

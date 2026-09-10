@@ -1,6 +1,6 @@
 //! Stable validation results and destination-specific presentation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -412,8 +412,7 @@ pub(crate) fn validate_outputs(
     trees: &[PathBuf],
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
-    #[cfg(unix)]
-    let mut identities = BTreeSet::new();
+    let mut identities = HashSet::new();
     for output in outputs {
         if output.path == Path::new("-") {
             if !stdout_allowed || !seen.insert(PathBuf::from("-")) {
@@ -438,38 +437,25 @@ pub(crate) fn validate_outputs(
                 "Validation report destinations must be distinct files",
             ));
         }
-        if protected
+        if protected.iter().any(|p| {
+            output_identity(p)
+                .is_ok_and(|p| p == identity || same_file::is_same_file(p.as_path(), &output.path).unwrap_or(false))
+        }) || trees
             .iter()
-            .any(|p| output_identity(p).is_ok_and(|p| p == identity || same_file(p.as_path(), &output.path)))
-            || trees
-                .iter()
-                .any(|p| output_identity(p).is_ok_and(|p| identity.starts_with(p)))
+            .any(|p| output_identity(p).is_ok_and(|p| identity.starts_with(p)))
         {
             return Err(NylError::config(format!(
                 "Validation report would overwrite source or managed output: {}",
                 output.path.display()
             )));
         }
-        #[cfg(unix)]
-        if let Ok(meta) = std::fs::metadata(&output.path) {
-            use std::os::unix::fs::MetadataExt as _;
-            if !identities.insert((meta.dev(), meta.ino())) {
+        if let Ok(handle) = same_file::Handle::from_path(&output.path) {
+            if !identities.insert(handle) {
                 return Err(NylError::config("Validation reports refer to the same file"));
             }
         }
     }
     Ok(())
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            return a.dev() == b.dev() && a.ino() == b.ino();
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -553,7 +539,19 @@ mod tests {
             format: ReportFormat::Json,
             path: alias,
         };
-        assert!(validate_outputs(std::slice::from_ref(&output), false, &[source], &[]).is_err());
+        assert!(validate_outputs(std::slice::from_ref(&output), false, std::slice::from_ref(&source), &[]).is_err());
+        let source_output = ValidationOutput {
+            format: ReportFormat::Text,
+            path: source,
+        };
+        assert!(validate_outputs(&[source_output.clone(), output], false, &[], &[]).is_err());
+        let separate = directory.path().join("separate.json");
+        std::fs::write(&separate, "{}").unwrap();
+        let output = ValidationOutput {
+            format: ReportFormat::Json,
+            path: separate,
+        };
+        assert!(validate_outputs(&[source_output, output], false, &[], &[]).is_ok());
         let tree = directory.path().join("rendered");
         std::fs::create_dir_all(tree.join("_nyl")).unwrap();
         std::fs::write(tree.join("_nyl/index.json"), "{}").unwrap();
