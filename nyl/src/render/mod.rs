@@ -13,6 +13,7 @@ pub(crate) use bundle::load_release_bundle;
 pub(crate) use bundle::{load_release_bundle_with_root, static_release_envelope};
 pub(crate) use expand::*;
 pub(crate) use postprocess::*;
+pub use provenance::{Provenance, ProvenanceFrame};
 pub(crate) use provenance::{RenderProvenance, RenderResource};
 pub use session::{RenderPathMode, RenderRequest, RenderSession, RenderedBundle};
 

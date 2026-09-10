@@ -173,6 +173,11 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
 }
 
 pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {
+    let protected = std::iter::once(args.output.clone())
+        .chain(args.stats_output.iter().map(|o| o.path.clone()))
+        .filter(|p| p != Path::new("-"))
+        .collect::<Vec<_>>();
+    args.validation.validate_outputs(false, &protected, &[])?;
     report::validate_outputs(&args.output, &args.stats_output)?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
@@ -940,6 +945,7 @@ mod tests {
         }))
         .unwrap();
         let baseline = crate::gitops::CompiledTargetTree {
+            provenance: BTreeMap::new(),
             target: target.clone(),
             cluster,
             repository_name: None,

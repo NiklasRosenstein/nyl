@@ -78,7 +78,7 @@ pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, V
 
 pub(crate) fn render_manifest_layout_with_provenance(
     resources: &[Value],
-    provenance: &HashMap<crate::kubernetes::ResourceKey, String>,
+    provenance: &HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut output = BTreeMap::new();
     let mut ordinary_resources = Vec::new();
@@ -248,7 +248,7 @@ fn validate_safe_path_segment(field: &str, segment: &str) -> Result<()> {
 
 fn serialize_documents(
     resources: &[&Value],
-    provenance: &HashMap<crate::kubernetes::ResourceKey, String>,
+    provenance: &HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
 ) -> Result<Vec<u8>> {
     let mut yaml = String::new();
     for (index, resource) in resources.iter().enumerate() {
@@ -263,7 +263,7 @@ fn serialize_documents(
         }
         let key = crate::kubernetes::ResourceKey::from_json_value(&resource)?;
         if let Some(provenance) = provenance.get(&key) {
-            for line in provenance.lines() {
+            for line in provenance.to_string().lines() {
                 yaml.push_str("# Nyl-Provenance: ");
                 yaml.push_str(line);
                 yaml.push('\n');
@@ -426,10 +426,15 @@ mod tests {
             .map(|resource| {
                 (
                     crate::kubernetes::ResourceKey::from_json_value(resource).unwrap(),
-                    format!(
-                        "Source: applications/api.yaml (document 2)\nResource: {}",
-                        resource["kind"].as_str().unwrap()
-                    ),
+                    crate::render::Provenance(vec![
+                        crate::render::ProvenanceFrame::Source {
+                            path: "applications/api.yaml".into(),
+                            document: 2,
+                        },
+                        crate::render::ProvenanceFrame::Resource {
+                            identity: resource["kind"].as_str().unwrap().to_owned(),
+                        },
+                    ]),
                 )
             })
             .collect::<HashMap<_, _>>();

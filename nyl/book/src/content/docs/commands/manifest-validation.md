@@ -2,8 +2,11 @@
 title: Manifest validation
 ---
 
-Nyl runs configured validators against final Kubernetes manifests before writing
-render output, calculating diffs, applying resources, or publishing a target.
+Nyl runs configured validators against final Kubernetes manifests. `render` and
+`render-tree` emit their output even when validation fails so it can be inspected;
+they return a failing exit status. `render-tree --check` writes no output.
+Validation must succeed before calculating diffs, applying resources, or publishing
+a target.
 The CI image includes the pinned kubeconform executable. For local development,
 install the tools in the project mise configuration.
 
@@ -57,6 +60,11 @@ In append mode, `diff` validates its composed desired set, while `apply`
 validates the resources submitted in that invocation.
 
 Diagnostics and summaries go to stderr, preserving manifest and diff stdout.
+Each destination reports schema preparation, the number of resources submitted
+to kubeconform, and its elapsed validation time. A final summary counts resource
+outcomes across destinations. Borrowed CRD snapshots
+identify their source Cluster. Failures are reported when that destination's
+validation completes.
 Invalid resources, missing schemas, tool failures, and timeouts fail the command.
 Explicit `skip` entries use `apiVersion/kind`, such as `example.com/v1/Widget`;
 the summary reports skipped resources. Lists are expanded for schema discovery
@@ -235,3 +243,94 @@ aborts schema pruning if an inventory is malformed.
 Publication loads validation policy, inheritance references, and schemas from
 the source snapshot selected for the published artifact. Commit these inputs
 before publishing; invocation flags apply to that selected snapshot.
+
+## Findings and report exports
+
+Human findings group field errors beneath each resource and include its rendered
+location and recorded Nyl authoring provenance. The expansion trace identifies
+source documents, Components, HelmCharts, remote repository revisions, and Nyl
+operations when available. It is a resource-level trace, not a field-to-template
+source map. Schema instance paths come from kubeconform; source line numbers
+are not inferred from them.
+
+Each failure leads with the validated resource and its field errors. `Rendered:`
+locates the output document, `Source:` locates the authoring document, and
+successive `Expanded from:` rows identify the resources in its expansion trace.
+Document suffixes and provenance API versions share a dimmed, aligned column
+within each resource's details.
+Terminal and CI findings use a bold cyan header and red failure labels, following
+Nyl's `--color` policy and `NO_COLOR`. Text and JSON exports remain unstyled.
+
+Export the same results independently of manifest output:
+
+```bash
+nyl render-tree --output-dir tmp \
+  --validation-output json:validation.json \
+  --validation-output text:validation.txt
+
+nyl render-tree --check --output-dir tmp \
+  --validation-output json:- --no-validation-stderr
+```
+
+`--validation-output FORMAT:PATH` is repeatable and supports `json` and `text`.
+An export request enables configured validation and conflicts with
+`--no-validate`. `render`, `render-tree`, `diff`, `diff-tree`, `apply`, and
+`publish-tree` support file exports. Only `render-tree` supports `PATH=-`; its
+informational messages then go to stderr so stdout contains exactly one report.
+Plain `render` reserves stdout for manifests.
+
+`--no-validation-stderr` suppresses human findings and the final validation
+summary. Progress and unexpected operational errors remain visible. Exported
+reports retain their findings regardless of this switch.
+
+Reports are written atomically on successful or failing validation. Keep them
+outside managed render trees, vendor directories, and source files. Duplicate or
+conflicting output destinations are rejected. A report write failure fails the
+command and blocks diff, apply, and publication. Rendering still attempts to
+produce inspectable manifests.
+
+### JSON version 1
+
+The envelope contains `version`, `status`, `complete`, `summary`, `destinations`,
+`resources`, and `operationErrors`. JSON contains every resource result,
+including valid and skipped resources. Ordering is deterministic by destination,
+rendered path, document number, List item indexes, resource identity, and finding
+path/message. Reports contain no ANSI formatting or elapsed-time fields.
+
+Each resource result contains:
+
+- `validator` and `destination`.
+- `resource`: `apiVersion`, `kind`, nullable `namespace`, and nullable `name`.
+- `renderedLocation`: target-relative `path`, one-based `document`, and `items`
+  containing zero-based indexes for nested Lists. File-based operations identify
+  the validated stream as `<rendered>`; authoring paths are in provenance.
+- `status`: `valid`, `invalid`, `error`, `skipped`, or `notChecked`.
+- `findings`: a list of nullable validator instance `path` and human-readable
+  `message` pairs. An empty path identifies the resource root; null means the
+  validator supplied no field location.
+- `provenance`: ordered frames tagged by `type`. `source` has `path` and
+  `document`; `resource` has `identity`; `generated` has `operation`; `remote`
+  has `repository` and resolved `revision`. An empty list means unavailable.
+- `schemaOrigin`: null when unresolved, or a tagged origin. `captured` contains
+  `cluster` and `digest`; `desired` contains `crd` and `digest`; `local` contains
+  `path` and `digest`; `builtin` contains `url` and nullable `digest`. Digests
+  identify canonical schema JSON; built-in URLs retain the registry commit and
+  selected Kubernetes version.
+
+`summary` counts resources as `valid`, `invalid`, `errors`, `skipped`, and
+`notChecked`. Multiple findings on one resource count as one invalid resource.
+Operation errors have an optional `destination` and a `message`; they are separate
+from resource error counts.
+
+The overall `status` is `valid`, `invalid`, or `error`. A resource error or
+incomplete operation produces `error`; otherwise any invalid resource produces
+`invalid`. `complete` means every input resource has a trustworthy outcome and
+there are no operation errors. Schema preparation failures, malformed tool
+responses, and timeouts stop validation, preserve completed destinations, and
+leave unchecked resources as `notChecked`. Ordinary invalid resources do not
+stop later destinations. Skipped Lists appear as one skipped resource with their
+contents excluded.
+
+Failures before a validation input inventory can be constructed remain ordinary
+command errors and do not produce a validation report. Exporting findings does
+not change the validation exit status or authorize deployment.

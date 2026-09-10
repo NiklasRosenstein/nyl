@@ -83,9 +83,9 @@ pub struct RenderedBundle {
     /// Whether empty `metadata.labels` objects were normalized out.
     pub strip_empty_metadata_labels: bool,
     /// Per-resource Nyl expansion provenance, keyed by final Kubernetes identity.
-    pub manifest_provenance: HashMap<ResourceKey, String>,
+    pub manifest_provenance: HashMap<ResourceKey, crate::render::Provenance>,
     /// Provenance of the Release declaration, used for Nyl-synthesized resources.
-    pub release_provenance: Option<String>,
+    pub release_provenance: Option<crate::render::Provenance>,
     /// Entry and included files that contributed to this release.
     pub inputs: Vec<PathBuf>,
     /// Whether every external renderer input can be validated without repeating the render.
@@ -466,12 +466,10 @@ impl RenderSession {
         for manifest in &manifests {
             let key = ResourceKey::from_json_value(manifest)?;
             manifest_provenance.entry(key).or_insert_with(|| {
-                let mut provenance = release_provenance.clone().unwrap_or_default();
-                if !provenance.is_empty() {
-                    provenance.push('\n');
-                }
-                provenance.push_str("Generated or transformed during Nyl rendering");
-                provenance
+                release_provenance
+                    .clone()
+                    .unwrap_or_default()
+                    .generated("Resource generated or transformed during Nyl rendering")
             });
         }
 
@@ -550,6 +548,7 @@ impl RenderSession {
             &serde_json::json!({
                 "onlySourceKind": request.only_source_kind,
                 "pathMode": format!("{:?}", request.path_mode),
+                "provenanceRoot": request.provenance_root,
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
                 "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,
@@ -562,7 +561,7 @@ impl RenderSession {
         if let Some(previous) = &previous {
             recorder.replay_filesystem_dependencies(previous)?;
         }
-        let current = recorder.clone().finish("release", String::new());
+        let current = recorder.clone().finish("release-provenance-v2", String::new());
         let cached = if cache.bypasses_render_artifacts() {
             cache.observe(CacheLayer::Release, CacheOutcome::Refreshed, &[]);
             None
@@ -630,7 +629,7 @@ impl RenderSession {
         let Some(digest) = cache.store_artifact("release", &cached)? else {
             return Ok(());
         };
-        let record = probe.recorder.finish("release", digest);
+        let record = probe.recorder.finish("release-provenance-v2", digest);
         cache.store_record("release", &probe.key, &record)?;
         cache.observe(CacheLayer::Release, CacheOutcome::Stored, &[]);
         Ok(())
@@ -658,8 +657,8 @@ struct CachedRenderedBundle {
     manifests: Vec<Value>,
     duplicates: Vec<(ResourceKey, usize)>,
     strip_empty_metadata_labels: bool,
-    manifest_provenance: Vec<(ResourceKey, String)>,
-    release_provenance: Option<String>,
+    manifest_provenance: Vec<(ResourceKey, crate::render::Provenance)>,
+    release_provenance: Option<crate::render::Provenance>,
     inputs: Vec<PathBuf>,
     helm_render_count: usize,
 }
@@ -783,11 +782,11 @@ fn resources_render_cache_bypass_reasons(resources: &[RenderResource], config: &
 
 fn push_rendered_manifest(
     manifests: &mut Vec<Value>,
-    provenance: &mut HashMap<ResourceKey, String>,
+    provenance: &mut HashMap<ResourceKey, crate::render::Provenance>,
     manifest: RenderResource,
 ) -> Result<()> {
     let key = ResourceKey::from_json_value(&manifest.value)?;
-    provenance.insert(key, manifest.gitops_provenance_display()?);
+    provenance.insert(key, manifest.gitops_provenance()?);
     manifests.push(manifest.value);
     Ok(())
 }
@@ -943,6 +942,32 @@ data:
         fs::write(temp.path().join("nyl.toml"), "not valid TOML = [").unwrap();
 
         RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_cache_respects_the_requested_provenance_root() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        let source = temp.path().join("releases");
+        fs::create_dir(&source).unwrap();
+        let path = source.join("app.yaml");
+        fs::write(&path, "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: app}\n").unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
+        ));
+        for (root, expected) in [(temp.path(), "releases/app.yaml"), (source.as_path(), "app.yaml")] {
+            let rendered = session
+                .render_release_file_with_provenance_root(&path, root)
+                .await
+                .unwrap();
+            let provenance = rendered.manifest_provenance.values().next().unwrap();
+            assert!(matches!(
+                &provenance.0[0],
+                crate::render::ProvenanceFrame::Source { path, document: 1 } if path == Path::new(expected)
+            ));
+        }
     }
 
     #[test]

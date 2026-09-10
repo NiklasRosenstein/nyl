@@ -26,7 +26,7 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-semantic-v2";
+const TARGET_CACHE_ACTION: &str = "target-provenance-v3";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -44,6 +44,8 @@ pub struct CompiledTargetTree {
     pub repository_name: Option<String>,
     pub repository: InlineGitRepository,
     pub files: BTreeMap<PathBuf, Vec<u8>>,
+    /// Per-document provenance, keyed by target-relative output path.
+    pub provenance: BTreeMap<PathBuf, Vec<crate::render::Provenance>>,
     pub inputs: BTreeSet<PathBuf>,
 }
 
@@ -84,7 +86,7 @@ struct CachedTargetTreeRef<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct ManagedNamespaceOwner {
     manifest: Value,
-    provenance: String,
+    provenance: crate::render::Provenance,
     application_namespace: String,
     project: String,
     destination: ClusterDestination,
@@ -99,8 +101,8 @@ struct PendingWorkload {
     group: ApplicationGroup,
     release: crate::resources::Release,
     manifests: Vec<Value>,
-    manifest_provenance: HashMap<crate::kubernetes::ResourceKey, String>,
-    release_provenance: Option<String>,
+    manifest_provenance: HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+    release_provenance: Option<crate::render::Provenance>,
     destination_namespace: String,
     argocd_project_name: String,
     release_directory: PathBuf,
@@ -437,6 +439,7 @@ async fn compile_target_tree_inner(
     if let Some(repository_path) = repository_path {
         inputs.insert(repository_path);
     }
+    let mut provenance_by_key = HashMap::new();
     let mut emitted_projects = BTreeSet::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
@@ -497,14 +500,21 @@ async fn compile_target_tree_inner(
                 },
             );
             inputs.insert(input_path);
-            let provenance_root = if source.remote {
-                &source.root
-            } else {
-                &inventory.project_root
-            };
+            let provenance_root = &source.provenance_root;
             let mut rendered = session
                 .render_release_file_with_provenance_root(&source_file.path, provenance_root)
                 .await?;
+            if let (Some(repository), Some(revision)) = (
+                &source.repository,
+                group.spec.source.as_ref().and_then(|source| source.commit.as_deref()),
+            ) {
+                for provenance in rendered.manifest_provenance.values_mut() {
+                    provenance.remote(&repository.repo_url, revision);
+                }
+                if let Some(provenance) = &mut rendered.release_provenance {
+                    provenance.remote(&repository.repo_url, revision);
+                }
+            }
             progress_completed += 1;
             observer.release_finished(progress_completed);
             helm_render_count += rendered.helm_render_count;
@@ -595,7 +605,9 @@ async fn compile_target_tree_inner(
         for (relative, bytes) in
             render_manifest_layout_with_provenance(&workload.manifests, &workload.manifest_provenance)?
         {
-            insert_file(&mut files, workload.release_directory.join(relative), bytes)?;
+            let path = workload.release_directory.join(relative);
+            provenance_by_key.insert(path.clone(), workload.manifest_provenance.clone());
+            insert_file(&mut files, path, bytes)?;
         }
 
         let rendered_path = join_posix(target.publication_path_prefix(), &workload.release_directory)?;
@@ -631,7 +643,9 @@ async fn compile_target_tree_inner(
         let key = crate::kubernetes::ResourceKey::from_json_value(&owner.manifest)?;
         let provenance = HashMap::from([(key, owner.provenance.clone())]);
         for (relative, bytes) in render_manifest_layout_with_provenance(&[owner.manifest], &provenance)? {
-            insert_file(&mut files, namespace_directory.join(relative), bytes)?;
+            let path = namespace_directory.join(relative);
+            provenance_by_key.insert(path.clone(), provenance.clone());
+            insert_file(&mut files, path, bytes)?;
         }
         let rendered_path = join_posix(target.publication_path_prefix(), &namespace_directory)?;
         let application = build_directory_application(&DirectoryApplicationInput {
@@ -668,12 +682,37 @@ async fn compile_target_tree_inner(
         )?;
     }
 
+    let provenance = files
+        .iter()
+        .map(|(path, bytes)| {
+            let documents = serde_saphyr::from_multiple::<Value>(std::str::from_utf8(bytes).unwrap_or_default())
+                .map_err(NylError::Yaml)?;
+            let frames = documents
+                .iter()
+                .map(|manifest| {
+                    let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
+                    Ok(provenance_by_key
+                        .get(path)
+                        .and_then(|entries| entries.get(&key))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            crate::render::Provenance::default().generated(format!(
+                                "Argo CD catalog resource for DeploymentTarget {:?}: {key}",
+                                target.metadata.name
+                            ))
+                        }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((path.clone(), frames))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let compiled = CompiledTargetTree {
         target,
         cluster,
         repository_name,
         repository,
         files,
+        provenance,
         inputs,
     };
     store_cached_target(
@@ -1160,17 +1199,15 @@ fn manage_namespace_in_release(workload: &mut PendingWorkload, namespace: &str) 
     Ok(())
 }
 
-fn generated_namespace_provenance(workload: &PendingWorkload, namespace: &str) -> String {
-    let mut provenance = workload.release_provenance.clone().unwrap_or_default();
-    if !provenance.is_empty() {
-        provenance.push('\n');
-    }
-    let _ = write!(
-        provenance,
-        "Generated: Namespace {namespace:?} for Release {:?}",
-        workload.release.metadata.name
-    );
-    provenance
+fn generated_namespace_provenance(workload: &PendingWorkload, namespace: &str) -> crate::render::Provenance {
+    workload
+        .release_provenance
+        .clone()
+        .unwrap_or_default()
+        .generated(format!(
+            "Namespace {namespace:?} for Release {:?}",
+            workload.release.metadata.name
+        ))
 }
 
 fn reject_namespace_manifests_from_non_owner(
@@ -1352,7 +1389,7 @@ fn register_namespace_owner(
     argocd_project_name: &str,
     namespace: &str,
     manifest: Value,
-    provenance: String,
+    provenance: crate::render::Provenance,
 ) -> Result<()> {
     let key = (cluster.metadata.name.clone(), namespace.to_owned());
     let owner = ManagedNamespaceOwner {
@@ -1955,6 +1992,7 @@ fn render_effective_control(
 
 struct ResolvedGroupSource {
     root: PathBuf,
+    provenance_root: PathBuf,
     candidate_files: Vec<PathBuf>,
     files: Vec<StaticReleaseFile>,
     renderer_mode: RendererConfigMode,
@@ -2102,6 +2140,7 @@ fn resolve_group_source(
 
     Ok(ResolvedGroupSource {
         root,
+        provenance_root: remote_root.clone().unwrap_or_else(|| inventory.project_root.clone()),
         candidate_files,
         files,
         renderer_mode: source.renderer_config.mode,
@@ -2540,6 +2579,7 @@ mod tests {
             std::fs::write(path, "---\n").unwrap();
         }
         let source = ResolvedGroupSource {
+            provenance_root: PathBuf::new(),
             root: temporary.path().to_path_buf(),
             candidate_files: vec![entry.clone(), included.clone(), ignored.clone()],
             files: vec![StaticReleaseFile {

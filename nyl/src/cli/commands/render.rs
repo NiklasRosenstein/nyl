@@ -113,6 +113,7 @@ pub struct RenderPreflightResult {
     pub project_config: ProjectConfig,
     pub project_root: PathBuf,
     pub manifests: Vec<serde_json::Value>,
+    pub provenance: HashMap<ResourceKey, crate::render::Provenance>,
     pub release: Option<Release>,
     pub strip_empty_metadata_labels: bool,
     pub resolved_target: Option<ResolvedTargetCluster>,
@@ -128,6 +129,10 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             || !options.common.only_kind.is_empty()
             || !options.common.exclude_kind.is_empty(),
     )?;
+    options
+        .common
+        .validation
+        .validate_outputs(false, &[PathBuf::from(&options.common.path)], &[])?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
     let (project_config, project_root, resolved_target) = if options.common.target.is_some() || target_required {
@@ -195,8 +200,19 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
     let rendered = session.render(request).await?;
+    let mut protected = rendered.inputs.clone();
+    protected.extend(project_config.file.iter().cloned());
+    options.common.validation.validate_outputs(
+        false,
+        &protected,
+        &[
+            project_root.join(".nyl"),
+            crate::validation::store::vendor_root(&project_root, &project_config)?,
+        ],
+    )?;
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
     let mut manifests = rendered.manifests;
+    let mut provenance = rendered.manifest_provenance;
     let release = rendered.release;
     let mut duplicates = rendered.duplicates;
 
@@ -233,7 +249,22 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         let client = kube_client
             .as_ref()
             .expect("kube client must exist when namespace resolution is enabled");
+        let origins = manifests
+            .iter()
+            .map(|manifest| {
+                ResourceKey::from_json_value(manifest)
+                    .ok()
+                    .and_then(|key| provenance.get(&key))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
         resolve_manifest_namespaces(client, &mut manifests, release_namespace_hint).await?;
+        provenance.clear();
+        for (manifest, origin) in manifests.iter().zip(origins) {
+            if let Some(origin) = origin {
+                provenance.insert(ResourceKey::from_json_value(manifest)?, origin);
+            }
+        }
     }
 
     if options.adjust_duplicate_keys {
@@ -247,6 +278,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         project_config,
         project_root,
         manifests,
+        provenance,
         release,
         strip_empty_metadata_labels,
         resolved_target,
@@ -287,7 +319,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     }
 
     let output = prepare_manifests_for_output(&preflight.manifests, preflight.strip_empty_metadata_labels);
-    crate::validation::validate_manifests(
+    let validation = crate::validation::validate_manifest_input(
         &args.common.validation,
         &preflight.project_config,
         &preflight.project_root,
@@ -296,12 +328,15 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
         args.kube_version.as_deref(),
-        &output,
-        &args.common.path,
+        crate::validation::ManifestValidationInput {
+            manifests: &output,
+            source: &args.common.path,
+            provenance: &preflight.provenance,
+        },
     )
-    .await?;
+    .await;
     output_manifests(&output, OutputFormat::Yaml, preflight.strip_empty_metadata_labels)?;
-    Ok(())
+    validation
 }
 
 pub(crate) fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> bool {

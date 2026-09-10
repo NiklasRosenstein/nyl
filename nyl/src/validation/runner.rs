@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use super::report::{self, Finding, ResourceIdentity, ResourceLocation, ResourceResult, ResourceStatus, SchemaOrigin};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -19,6 +20,8 @@ use crate::{NylError, Result};
 pub struct ValidationDocument {
     pub manifest: Value,
     pub source: String,
+    pub location: ResourceLocation,
+    pub provenance: crate::render::Provenance,
 }
 
 /// Documents installed into one destination, with independently resolved schema provenance.
@@ -30,21 +33,9 @@ pub struct ValidationPartition {
     pub documents: Vec<ValidationDocument>,
 }
 
-/// Structured diagnostics are independent of the concrete validator process.
-#[derive(Debug)]
-pub struct ValidationDiagnostic {
-    pub validator: String,
-    pub destination: String,
-    pub source: String,
-    pub resource: String,
-    pub message: String,
-}
-
 #[derive(Debug, Default)]
-struct ValidationReport {
-    valid: usize,
-    skipped: usize,
-    diagnostics: Vec<ValidationDiagnostic>,
+struct ToolValidationReport {
+    results: Vec<(PathBuf, ResourceStatus, Vec<Finding>)>,
 }
 
 trait ManifestValidator {
@@ -53,7 +44,7 @@ trait ManifestValidator {
         stage: &Path,
         files: &BTreeMap<PathBuf, (String, String)>,
         partition: &ValidationPartition,
-    ) -> Result<ValidationReport>;
+    ) -> Result<ToolValidationReport>;
 }
 
 struct KubeconformValidator<'a> {
@@ -67,11 +58,19 @@ struct ToolReport {
 }
 
 #[derive(Deserialize)]
+struct ToolFinding {
+    path: String,
+    msg: String,
+}
+
+#[derive(Deserialize)]
 struct ToolResource {
     filename: String,
     status: String,
     #[serde(default)]
     msg: String,
+    #[serde(default, rename = "validationErrors")]
+    findings: Vec<ToolFinding>,
 }
 
 impl ManifestValidator for KubeconformValidator<'_> {
@@ -80,9 +79,9 @@ impl ManifestValidator for KubeconformValidator<'_> {
         stage: &Path,
         files: &BTreeMap<PathBuf, (String, String)>,
         partition: &ValidationPartition,
-    ) -> Result<ValidationReport> {
+    ) -> Result<ToolValidationReport> {
         if files.is_empty() {
-            return Ok(ValidationReport::default());
+            return Ok(ToolValidationReport::default());
         }
         let mut command = tokio::process::Command::new(self.executable);
         command
@@ -107,41 +106,74 @@ impl ManifestValidator for KubeconformValidator<'_> {
                 "Cannot run kubeconform: {error}; install the version pinned in mise.toml or use the Nyl CI image"
             ))
         })?;
-        let tool: ToolReport = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let tool: ToolReport = serde_json::from_slice(&output.stdout).map_err(|error| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\nkubeconform stderr:\n{}", stderr.trim())
+            };
             NylError::process(format!(
-                "kubeconform returned malformed JSON (status {})",
-                output.status
+                "kubeconform returned invalid JSON (status {}; {} stdout bytes): {error}{detail}",
+                output.status,
+                output.stdout.len()
             ))
         })?;
-        let mut report = ValidationReport::default();
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Err(NylError::process(format!(
+                "kubeconform exited unexpectedly: {}",
+                output.status
+            )));
+        }
+        let mut report = ToolValidationReport::default();
         let mut observed = BTreeSet::new();
         for resource in tool.resources {
             let path = PathBuf::from(&resource.filename);
-            let (source, identity) = files
+            let _ = files
                 .get(&path)
                 .ok_or_else(|| NylError::process("kubeconform returned an unknown manifest path"))?;
-            if !observed.insert(path) {
+            if !observed.insert(path.clone()) {
                 return Err(NylError::process("kubeconform returned duplicate manifest results"));
             }
-            match resource.status.as_str() {
-                "statusValid" | "VALID" => report.valid += 1,
-                "statusInvalid" | "statusError" | "INVALID" | "ERROR" => {
-                    report.diagnostics.push(ValidationDiagnostic {
-                        validator: "kubeconform".to_owned(),
-                        destination: partition.destination.clone(),
-                        source: source.clone(),
-                        resource: identity.clone(),
-                        message: resource.msg,
-                    });
-                }
+            let status = match resource.status.as_str() {
+                "statusValid" | "VALID" => ResourceStatus::Valid,
+                "statusInvalid" | "INVALID" => ResourceStatus::Invalid,
+                "statusError" | "ERROR" => ResourceStatus::Error,
                 _ => {
                     return Err(NylError::process(
                         "kubeconform returned an unexpected validation status",
                     ))
                 }
-            }
+            };
+            let findings = if resource.findings.is_empty() {
+                if status == ResourceStatus::Valid {
+                    Vec::new()
+                } else {
+                    vec![Finding {
+                        path: None,
+                        message: clean_tool_message(&resource.msg, stage),
+                    }]
+                }
+            } else {
+                resource
+                    .findings
+                    .iter()
+                    .map(|finding| Finding {
+                        path: Some(finding.path.clone()),
+                        message: clean_tool_message(&finding.msg, stage),
+                    })
+                    .collect()
+            };
+            report.results.push((path, status, findings));
         }
-        if observed.len() != files.len() || (!output.status.success() && report.diagnostics.is_empty()) {
+
+        if observed.len() != files.len()
+            || (!output.status.success()
+                && report
+                    .results
+                    .iter()
+                    .all(|(_, status, _)| *status == ResourceStatus::Valid))
+        {
             return Err(NylError::process(
                 "kubeconform did not validate every submitted resource",
             ));
@@ -215,6 +247,17 @@ pub fn tree_partitions(inventory: &GitOpsInventory, compiled: &CompiledTargetTre
             partition.documents.push(ValidationDocument {
                 manifest: manifest?,
                 source: format!("{} (document {})", path.display(), index + 1),
+                location: ResourceLocation {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    document: index + 1,
+                    items: Vec::new(),
+                },
+                provenance: compiled
+                    .provenance
+                    .get(path)
+                    .and_then(|frames| frames.get(index))
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -230,11 +273,33 @@ pub async fn validate_tree(
     if !args.enabled(&inventory.project_config.config.validation)? {
         return Ok(());
     }
+    let mut protected = inventory
+        .yaml_files
+        .iter()
+        .chain(compiled.inputs.iter())
+        .map(|path| inventory.project_root.join(path))
+        .collect::<Vec<_>>();
+    protected.extend(inventory.project_config.file.iter().cloned());
+    args.validate_outputs(
+        true,
+        &protected,
+        &[
+            inventory.project_root.join(".nyl"),
+            store::vendor_root(&inventory.project_root, &inventory.project_config)?,
+        ],
+    )?;
     let partitions = tree_partitions(inventory, compiled)?;
     validate_partitions(args, &inventory.project_config, &inventory.project_root, &partitions).await
 }
 
-/// Validate exactly the documents a file-based command emits, diffs, or applies.
+/// Final manifests and their authoring origins for file-based validation.
+pub struct ManifestValidationInput<'a> {
+    pub manifests: &'a [Value],
+    pub source: &'a str,
+    pub provenance: &'a std::collections::HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+}
+
+/// Validate final documents when no expansion provenance is available.
 pub async fn validate_manifests(
     args: &ValidationArgs,
     config: &ProjectConfig,
@@ -244,6 +309,35 @@ pub async fn validate_manifests(
     manifests: &[Value],
     source: &str,
 ) -> Result<()> {
+    validate_manifest_input(
+        args,
+        config,
+        project,
+        cluster,
+        explicit_version,
+        ManifestValidationInput {
+            manifests,
+            source,
+            provenance: &std::collections::HashMap::new(),
+        },
+    )
+    .await
+}
+
+/// Validate exactly the documents a file-based command emits, diffs, or applies.
+pub async fn validate_manifest_input(
+    args: &ValidationArgs,
+    config: &ProjectConfig,
+    project: &Path,
+    cluster: Option<&str>,
+    explicit_version: Option<&str>,
+    input: ManifestValidationInput<'_>,
+) -> Result<()> {
+    let ManifestValidationInput {
+        manifests,
+        source,
+        provenance,
+    } = input;
     if !args.enabled(&config.config.validation)? {
         return Ok(());
     }
@@ -268,6 +362,16 @@ pub async fn validate_manifests(
         .map(|(index, manifest)| ValidationDocument {
             manifest: manifest.clone(),
             source: format!("{source} (document {})", index + 1),
+            location: ResourceLocation {
+                path: "<rendered>".to_owned(),
+                document: index + 1,
+                items: Vec::new(),
+            },
+            provenance: crate::kubernetes::ResourceKey::from_json_value(manifest)
+                .ok()
+                .and_then(|key| provenance.get(&key))
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect();
     validate_partitions(args, config, project, &[partition]).await
@@ -279,6 +383,16 @@ async fn validate_partitions(
     project: &Path,
     partitions: &[ValidationPartition],
 ) -> Result<()> {
+    validate_partitions_with_tool(args, config, project, partitions, Path::new("kubeconform")).await
+}
+
+async fn validate_partitions_with_tool(
+    args: &ValidationArgs,
+    config: &ProjectConfig,
+    project: &Path,
+    partitions: &[ValidationPartition],
+    executable: &Path,
+) -> Result<()> {
     let settings = config
         .config
         .validation
@@ -287,64 +401,170 @@ async fn validate_partitions(
         .expect("enabled validates selection");
     let root = store::vendor_root(project, config)?;
     let mut resolver = SchemaResolver::new(project, root, settings, false, false)?;
+    let mut report = inventory_report(partitions, &settings.skip)?;
+    let mut active_destination = None;
     let operation = async {
-        let mut combined = ValidationReport::default();
+        let mut offset = 0;
         for partition in partitions {
-            if let Some(source) = &partition.schema_source {
-                eprintln!(
-                    "Validating {} with CRD snapshot from {} (Kubernetes {})",
-                    partition.destination, source, partition.version
-                );
+            active_destination = Some(partition.destination.clone());
+            resolver.observed_origins.clear();
+            let count = expand_documents(&partition.documents, &settings.skip)?.len();
+            let resources = &mut report.resources[offset..offset + count];
+            offset += count;
+            validate_partition(args, partition, &mut resolver, resources, executable).await?;
+            if !args.no_validation_stderr {
+                if let Some(destination) = report.destinations.iter().find(|d| d.name == partition.destination) {
+                    let text =
+                        report.destination_text(destination, colored::control::SHOULD_COLORIZE.should_colorize());
+                    if !text.is_empty() {
+                        eprint!("\n{text}");
+                    }
+                }
             }
-            let stage = tempfile::TempDir::new()?;
-            let (files, skipped) = prepare_partition(args, partition, &mut resolver, stage.path(), false).await?;
-            let validator = KubeconformValidator {
-                executable: Path::new("kubeconform"),
-                strict: settings.strict,
-            };
-            let report = validator.validate(stage.path(), &files, partition).await?;
-            combined.valid += report.valid;
-            combined.skipped += skipped;
-            combined.diagnostics.extend(report.diagnostics);
         }
-        for diagnostic in &combined.diagnostics {
-            eprintln!(
-                "{}: {}: {}: {}: {}",
-                diagnostic.validator,
-                diagnostic.destination,
-                diagnostic.source,
-                diagnostic.resource,
-                diagnostic.message
-            );
-        }
-        eprintln!(
-            "Validation: {} valid, {} failed, {} skipped",
-            combined.valid,
-            combined.diagnostics.len(),
-            combined.skipped
-        );
-        if combined.diagnostics.is_empty() {
-            Ok(())
-        } else {
-            Err(NylError::validation(format!(
-                "{} resource(s) failed kubeconform validation",
-                combined.diagnostics.len()
-            )))
-        }
+        Ok::<_, NylError>(())
     };
-    tokio::time::timeout(std::time::Duration::from_secs(settings.timeout_seconds), operation)
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(settings.timeout_seconds), operation)
         .await
-        .map_err(|_| {
-            NylError::validation(format!(
+        .unwrap_or_else(|_| {
+            Err(NylError::validation(format!(
                 "kubeconform validation timed out after {} seconds",
                 settings.timeout_seconds
-            ))
-        })?
+            )))
+        });
+    if let Err(error) = &outcome {
+        report.operation_errors.push(report::OperationError {
+            destination: active_destination,
+            message: error.to_string(),
+        });
+    }
+    report.finish();
+    if !args.no_validation_stderr {
+        eprint!("{}", report.summary_text());
+    }
+    args.validate_outputs(true, &resolver.observed_sources.into_iter().collect::<Vec<_>>(), &[])?;
+    report.export(&args.validation_output)?;
+    outcome?;
+    if report.status != "valid" {
+        return Err(NylError::ValidationReported(format!(
+            "{} resource(s) failed kubeconform validation",
+            report.summary.invalid + report.summary.errors
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_partition(
+    args: &ValidationArgs,
+    partition: &ValidationPartition,
+    resolver: &mut SchemaResolver<'_>,
+    resources: &mut [ResourceResult],
+    executable: &Path,
+) -> Result<()> {
+    eprintln!(
+        "{}: Preparing validation schemas (Kubernetes {})",
+        partition.destination, partition.version
+    );
+    let stage = tempfile::TempDir::new()?;
+    let prepared = prepare_partition(args, partition, resolver, stage.path(), false).await;
+    for resource in resources.iter_mut() {
+        let gvk = format!("{}/{}", resource.resource.api_version, resource.resource.kind);
+        resource.schema_origin = resolver.observed_origins.get(&gvk).cloned();
+        if let Some(SchemaOrigin::Builtin { url, digest }) = &mut resource.schema_origin {
+            if let Some(hash) = resolver.schema_digests.get(url.split('#').next().unwrap_or(url)) {
+                *digest = Some(hash.clone());
+            }
+        }
+    }
+    let (files, _) = prepared.map_err(|error| sanitize_stage_error(error, stage.path()))?;
+    eprintln!(
+        "{}: kubeconform validating {} resources",
+        partition.destination,
+        files.len()
+    );
+    let started = std::time::Instant::now();
+    let validator = KubeconformValidator {
+        executable,
+        strict: resolver.settings.strict,
+    };
+    let tool = validator
+        .validate(stage.path(), &files, partition)
+        .await
+        .map_err(|error| sanitize_stage_error(error, stage.path()))?;
+    let locations = (0..resources.len())
+        .map(|index| (stage.path().join("manifests").join(format!("{index}.yaml")), index))
+        .collect::<BTreeMap<_, _>>();
+    for (path, status, mut findings) in tool.results {
+        findings.sort_by(|a, b| (&a.path, &a.message).cmp(&(&b.path, &b.message)));
+        let index = *locations
+            .get(&path)
+            .ok_or_else(|| NylError::process("Unknown resource in validation report"))?;
+        resources[index].status = status;
+        resources[index].findings = findings;
+    }
+    eprintln!(
+        "{}: kubeconform finished ({:.1}s)",
+        partition.destination,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn inventory_report(partitions: &[ValidationPartition], skip: &[String]) -> Result<report::ValidationReport> {
+    let mut report = report::ValidationReport::default();
+    for partition in partitions {
+        report.destinations.push(report::Destination {
+            name: partition.destination.clone(),
+            kubernetes_version: partition.version.clone(),
+            schema_source: partition.schema_source.clone(),
+        });
+        for document in expand_documents(&partition.documents, skip)? {
+            let resource = ResourceIdentity::from_manifest(&document.manifest);
+            let skipped = skip.contains(&format!("{}/{}", resource.api_version, resource.kind));
+            report.resources.push(ResourceResult {
+                validator: "kubeconform".into(),
+                destination: partition.destination.clone(),
+                resource,
+                rendered_location: document.location,
+                provenance: document.provenance,
+                status: if skipped {
+                    ResourceStatus::Skipped
+                } else {
+                    ResourceStatus::NotChecked
+                },
+                findings: Vec::new(),
+                schema_origin: None,
+            });
+        }
+    }
+    Ok(report)
+}
+
+fn sanitize_stage_error(error: NylError, stage: &Path) -> NylError {
+    match error {
+        NylError::Validation(message) => NylError::Validation(clean_tool_message(&message, stage)),
+        NylError::Process(message) => NylError::Process(clean_tool_message(&message, stage)),
+        other => other,
+    }
+}
+
+fn clean_tool_message(message: &str, stage: &Path) -> String {
+    let path = stage.to_string_lossy();
+    let file_url = reqwest::Url::from_file_path(stage).ok().map(|url| url.to_string());
+    let message = file_url.map_or_else(|| message.to_owned(), |url| message.replace(&url, "<validation>"));
+    message.replace(path.as_ref(), "<validation>")
 }
 
 /// Flatten validation inputs while keeping item paths for diagnostics and desired CRD discovery.
 fn expand_documents(documents: &[ValidationDocument], skip: &[String]) -> Result<Vec<ValidationDocument>> {
-    fn expand(manifest: &Value, source: String, skip: &[String], output: &mut Vec<ValidationDocument>) -> Result<()> {
+    fn expand(
+        manifest: &Value,
+        source: String,
+        location: ResourceLocation,
+        provenance: &crate::render::Provenance,
+        skip: &[String],
+        output: &mut Vec<ValidationDocument>,
+    ) -> Result<()> {
         let kind = manifest.get("kind").and_then(Value::as_str).unwrap_or("");
         let api = manifest.get("apiVersion").and_then(Value::as_str).unwrap_or("");
         if kind.eq_ignore_ascii_case("list") && !skip.contains(&format!("{api}/{kind}")) {
@@ -353,19 +573,37 @@ fn expand_documents(documents: &[ValidationDocument], skip: &[String]) -> Result
                 .and_then(Value::as_array)
                 .ok_or_else(|| NylError::validation(format!("{source}: List requires an items array")))?;
             for (index, item) in items.iter().enumerate() {
-                expand(item, format!("{source}.items[{index}]"), skip, output)?;
+                let mut location = location.clone();
+                location.items.push(index);
+                expand(
+                    item,
+                    format!("{source}.items[{index}]"),
+                    location,
+                    provenance,
+                    skip,
+                    output,
+                )?;
             }
         } else {
             output.push(ValidationDocument {
                 manifest: manifest.clone(),
                 source,
+                location,
+                provenance: provenance.clone(),
             });
         }
         Ok(())
     }
     let mut output = Vec::new();
     for document in documents {
-        expand(&document.manifest, document.source.clone(), skip, &mut output)?;
+        expand(
+            &document.manifest,
+            document.source.clone(),
+            document.location.clone(),
+            &document.provenance,
+            skip,
+            &mut output,
+        )?;
     }
     Ok(output)
 }
@@ -539,7 +777,65 @@ impl PartitionSchemas {
                 }
             }
         };
+        let origin = self.schema_origin(&schema, gvk, partition, resolver)?;
+        resolver.observed_origins.insert(gvk.to_owned(), origin);
         Ok(Some(schema))
+    }
+    fn schema_origin(
+        &self,
+        schema: &SchemaDocument,
+        gvk: &str,
+        partition: &ValidationPartition,
+        resolver: &SchemaResolver<'_>,
+    ) -> Result<SchemaOrigin> {
+        let (api, kind) = resolve::resource_parts(gvk)?;
+        let (group, _) = api.split_once('/').unwrap_or(("", api));
+        Ok(match &schema.origin {
+            Origin::Local(path) => SchemaOrigin::Local {
+                path: path
+                    .strip_prefix(resolver.project)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned(),
+                digest: store::digest(&store::json_bytes(&schema.value)?),
+            },
+            Origin::Builtin(url) => {
+                let source = if let Some(reference) = schema.value.get("$ref").and_then(Value::as_str) {
+                    reqwest::Url::parse(url)
+                        .ok()
+                        .and_then(|url| url.join(reference).ok())
+                        .map_or_else(|| url.clone(), |url| url.to_string())
+                } else {
+                    url.clone()
+                };
+                SchemaOrigin::Builtin {
+                    digest: resolver
+                        .schema_digests
+                        .get(source.split('#').next().unwrap_or(&source))
+                        .cloned(),
+                    url: source,
+                }
+            }
+            Origin::Captured => {
+                let digest = store::digest(&store::json_bytes(&schema.value)?);
+                if self.desired.values().any(|crd| crd.group == group && crd.kind == kind) {
+                    SchemaOrigin::Desired {
+                        crd: self
+                            .desired
+                            .iter()
+                            .find(|(_, c)| c.group == group && c.kind == kind)
+                            .map(|(name, _)| name.clone())
+                            .unwrap_or_default(),
+                        digest,
+                    }
+                } else {
+                    SchemaOrigin::Captured {
+                        cluster: partition.schema_source.clone().unwrap_or_default(),
+                        digest,
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -609,6 +905,12 @@ mod tests {
         ValidationDocument {
             manifest,
             source: "workload.yaml (document 1)".into(),
+            location: ResourceLocation {
+                path: "workload.yaml".into(),
+                document: 1,
+                items: Vec::new(),
+            },
+            provenance: crate::render::Provenance::default(),
         }
     }
 
@@ -1286,6 +1588,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("every submitted resource"));
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s' 'fatal: schema compiler failed' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let error = validator.validate(stage.path(), &files, &partition).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("fatal: schema compiler failed"));
+        assert!(message.contains("0 stdout bytes"));
+        assert!(message.contains("EOF while parsing a value"));
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s' '{\"resources\":[]}'\nexit 2\n").unwrap();
+        assert!(validator
+            .validate(stage.path(), &files, &partition)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("exited unexpectedly"));
         std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
         assert!(tokio::time::timeout(
             std::time::Duration::from_millis(100),
@@ -1293,5 +1612,119 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_partial_report_preserves_completed_destinations_on_schema_failure() {
+        let (directory, config, first) = fixture();
+        let second = ValidationPartition {
+            destination: "second".into(),
+            version: first.version.clone(),
+            schema_source: None,
+            schema_capabilities_fingerprint: None,
+            documents: vec![document(
+                json!({"apiVersion":"unavailable.example/v1","kind":"Missing","metadata":{"name":"missing"}}),
+            )],
+        };
+        let third = ValidationPartition {
+            destination: "third".into(),
+            version: first.version.clone(),
+            schema_source: None,
+            schema_capabilities_fingerprint: None,
+            documents: vec![document(first.documents[0].manifest.clone())],
+        };
+        let path = directory.path().join("report.json");
+        let args = ValidationArgs {
+            validation_output: vec![format!("json:{}", path.display()).parse().unwrap()],
+            ..ValidationArgs::default()
+        };
+        assert!(
+            validate_partitions(&args, &config, directory.path(), &[first, second, third])
+                .await
+                .is_err()
+        );
+        let report: report::ValidationReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!report.complete);
+        assert_eq!(report.status, "error");
+        assert_eq!(report.summary.valid, 1);
+        assert_eq!(report.summary.not_checked, 2);
+        assert_eq!(report.operation_errors[0].destination.as_deref(), Some("second"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_partial_reports_for_invalid_tool_output_and_timeout() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for timeout in [false, true] {
+            let (directory, mut config, first) = fixture();
+            config.config.validation.kubeconform.as_mut().unwrap().timeout_seconds = 1;
+            let second = ValidationPartition {
+                destination: "second".into(),
+                version: first.version.clone(),
+                schema_source: None,
+                schema_capabilities_fingerprint: None,
+                documents: vec![document(first.documents[0].manifest.clone())],
+            };
+            let executable = directory.path().join("validator");
+            // State lives beside this invocation's executable, independently of other tests.
+            let ending = if timeout {
+                "exec /bin/sleep 30"
+            } else {
+                "printf '%s' 'compiler failed' >&2\nexit 1"
+            };
+            let script = format!(
+                r#"#!/bin/sh
+for last; do :; done
+marker="$0.called"
+if [ -f "$marker" ]; then
+{ending}
+fi
+: > "$marker"
+printf '{{"resources":[{{"filename":"%s/0.yaml","status":"statusValid"}}]}}' "$last"
+"#
+            );
+            std::fs::write(&executable, script).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.path().join("report.json");
+            let args = ValidationArgs {
+                validation_output: vec![format!("json:{}", path.display()).parse().unwrap()],
+                ..ValidationArgs::default()
+            };
+            assert!(
+                validate_partitions_with_tool(&args, &config, directory.path(), &[first, second], &executable)
+                    .await
+                    .is_err()
+            );
+            let report: report::ValidationReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert!(!report.complete);
+            assert_eq!(report.summary.valid, 1);
+            assert_eq!(report.summary.not_checked, 1);
+            assert!(report.operation_errors[0]
+                .message
+                .contains(if timeout { "timed out" } else { "compiler failed" }));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_json_counts_resources_independently_of_findings_and_retains_list_locations() {
+        let (directory, config, mut partition) = fixture();
+        partition.documents = vec![document(json!({"apiVersion":"v1","kind":"List","items":[
+            {"apiVersion":"example.com/v1","kind":"Widget","metadata":{"name":"one"},"spec":{"count":"bad","unknown":true}},
+            {"apiVersion":"example.com/v1","kind":"Widget","metadata":{"name":"two"},"spec":{"count":1}}
+        ]}))];
+        let path = directory.path().join("report.json");
+        let args = ValidationArgs {
+            validation_output: vec![format!("json:{}", path.display()).parse().unwrap()],
+            ..ValidationArgs::default()
+        };
+        assert!(validate_partitions(&args, &config, directory.path(), &[partition])
+            .await
+            .is_err());
+        let report: report::ValidationReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report.summary.invalid, 1);
+        assert_eq!(report.summary.valid, 1);
+        assert_eq!(report.resources[0].findings.len(), 2);
+        assert_eq!(report.resources[0].rendered_location.items, vec![0]);
+        assert_eq!(report.resources[1].rendered_location.items, vec![1]);
     }
 }

@@ -36,6 +36,9 @@ pub struct SchemaResolver<'a> {
     pub populate: bool,
     pub check: bool,
     refresh: bool,
+    pub schema_digests: BTreeMap<String, String>,
+    pub observed_sources: BTreeSet<PathBuf>,
+    pub observed_origins: BTreeMap<String, super::report::SchemaOrigin>,
     pub observed_builtins: BTreeMap<String, String>,
     cache: PathBuf,
     client: reqwest::Client,
@@ -71,6 +74,9 @@ impl<'a> SchemaResolver<'a> {
             check,
             refresh: false,
             observed_builtins: BTreeMap::new(),
+            observed_origins: BTreeMap::new(),
+            observed_sources: BTreeSet::new(),
+            schema_digests: BTreeMap::new(),
             cache: project.join(".nyl/cache/validation-schemas"),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(settings.timeout_seconds))
@@ -115,6 +121,15 @@ impl<'a> SchemaResolver<'a> {
     }
 
     pub async fn builtin(&mut self, url: &str) -> Result<Option<SchemaDocument>> {
+        let document = self.load_builtin(url).await?;
+        if let Some(document) = &document {
+            self.schema_digests
+                .insert(url.to_owned(), store::digest(&store::json_bytes(&document.value)?));
+        }
+        Ok(document)
+    }
+
+    async fn load_builtin(&mut self, url: &str) -> Result<Option<SchemaDocument>> {
         if let Some(hash) = self.observed_builtins.get(url) {
             return Ok(Some(SchemaDocument {
                 value: serde_json::from_slice(&store::read_blob(&self.vendor, hash)?)?,
@@ -192,7 +207,7 @@ impl<'a> SchemaResolver<'a> {
         }))
     }
 
-    pub fn local(&self, gvk: &str, version: &str) -> Result<Option<SchemaDocument>> {
+    pub fn local(&mut self, gvk: &str, version: &str) -> Result<Option<SchemaDocument>> {
         let (api_version, kind) = resource_parts(gvk)?;
         let (group, api, suffix) = lookup_parts(api_version);
         let fields = BTreeMap::from([
@@ -229,6 +244,7 @@ impl<'a> SchemaResolver<'a> {
                 )));
             }
             let path = store::safe_path(self.project, Path::new(path.as_ref()))?;
+            self.observed_sources.insert(path.clone());
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     return Ok(Some(SchemaDocument {
@@ -273,6 +289,7 @@ impl<'a> SchemaResolver<'a> {
                         }
                         let parent = source.parent().expect("local schema has parent");
                         let path = normalize_local(self.project, &parent.join(file))?;
+                        self.observed_sources.insert(path.clone());
                         let value = serde_json::from_slice(&std::fs::read(&path)?)?;
                         SchemaDocument {
                             value,
