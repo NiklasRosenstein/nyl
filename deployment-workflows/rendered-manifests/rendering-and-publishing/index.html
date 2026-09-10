@@ -100,6 +100,10 @@ files that were made outside Nyl.</p>
 <p><code dir="auto">--output-dir</code> names the checked-out destination repository root; Nyl appends
 the target’s <code dir="auto">pathPrefix</code>. Use <code dir="auto">nyl render-tree --check</code> to render and validate
 without writing.</p>
+<p>Validation failures return a nonzero exit status and leave the current rendered
+files at the output path for inspection. Normal rendering reconciles these files
+even when validation fails; ownership and local-edit protections still apply.
+<code dir="auto">--check</code> leaves existing output untouched.</p>
 <p>Tree commands display an updating Release progress bar on an attended stderr.
 In CI they instead print one line before processing each Release, keeping stdout
 available for rendered diffs. Select the behavior explicitly with
@@ -201,6 +205,10 @@ after writing the complete diff. Comparison coordinates and human status are
 written to stderr, including the desired source commit and the resolved
 published or source baseline commit. Stdout and <code dir="auto">--output</code> contain only unified
 diff bytes; no differences produce zero bytes.</p>
+<p>YAML comparisons normalize mapping order and presentation, so formatting and
+comment changes do not affect the patch, statistics, or <code dir="auto">--fail-on-diff</code>.
+Use <code dir="auto">--raw</code> for byte comparisons and text patches applicable to stored files.
+See the <a href="/nyl/commands/gitops/#nyl-diff-tree">comparison rules</a> for details.</p>
 <p>Use <code dir="auto">--catalog</code> for generated Applications and AppProjects, <code dir="auto">--applications</code>
 for every workload Application and payload, or repeat
 <code dir="auto">--application &#x3C;namespace>/&#x3C;name></code> for a focused review. Application views are

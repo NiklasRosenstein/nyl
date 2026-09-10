@@ -123,6 +123,19 @@ atomically to a file instead:</p>
 Rendering or comparison errors leave existing output files untouched.
 <code dir="auto">--fail-on-diff</code> writes the complete diff and all requested reports before
 returning a non-zero status when changes exist.</p>
+<p>YAML files (<code dir="auto">.yaml</code> and <code dir="auto">.yml</code>) are parsed and serialized on both sides before
+comparison. Mapping keys are sorted recursively; comments (including provenance),
+quoting, indentation, and empty or null documents do not produce differences.
+Document order, list order, scalar types, and string contents remain significant.
+Embedded configuration strings are compared as text, with multiline values shown
+as literal blocks when they can preserve the contents safely.</p>
+<p>The patch, statistics, and <code dir="auto">--fail-on-diff</code> all use this normalized comparison.
+Other files are compared as raw bytes. If either side of a YAML file cannot be
+normalized, both sides of that file are compared as raw bytes as well.</p>
+<p>Use <code dir="auto">--raw</code> to include formatting and comment changes and produce a text patch
+applicable to the original files. Normalized patches describe normalized content;
+their line numbers and blob hashes refer to that content, not the stored files.</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--raw</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--output</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">rendered.diff</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl diff-tree --target production --raw --output rendered.diff"><div></div></button></div></figure></div>
 <div class="sl-heading-wrapper level-h3"><h3 id="statistics-and-report-exports">Statistics and report exports</h3><a class="sl-anchor-link" href="#statistics-and-report-exports"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Statistics and report exports”</span></a></div>
 <p>The complete report includes comparison context, file and line counts, and
 render/cache/source statistics. Totals distinguish added, modified, and deleted
@@ -130,8 +143,8 @@ files. <code dir="auto">--stats-files</code> includes a path-sorted table with e
 added/removed line counts in human-readable reports:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--stats-files</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl diff-tree --target production --stats-files"><div></div></button></div></figure></div>
 <p>Line counts use the same line comparisons as the patch, excluding patch headers
-and context. Replacements count as deletions plus insertions; provenance comments
-count as ordinary lines. Counts respect the selected catalog or Application
+and context. Replacements count as deletions plus insertions. Comments count as
+ordinary lines in raw comparisons. Counts respect the selected catalog or Application
 view. Empty-file additions and deletions count as file changes with zero changed
 lines. Invalid UTF-8 or NUL-containing files are binary: their changes produce
 patch notices, and their line counts are unavailable. Aggregate line counts
