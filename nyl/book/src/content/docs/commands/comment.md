@@ -133,13 +133,17 @@ absence when writes remain invisible during the recheck.
 
 ## CI examples
 
-Generate and post a rendered GitOps report as separate steps:
+`diff-tree --stats-output markdown:PATH` produces a combined diff and validation
+report suitable for `--body-file`. It includes validation failures and available
+comparison results even when the command exits unsuccessfully. Capture that
+status, post the report, then return the captured failure. See the
+[combined-report CI example](/nyl/commands/gitops/#markdown-prmr-comments) for the
+complete shell flow and artifact handling.
 
-```bash
-nyl diff-tree --target production --output artifacts/rendered.diff \
-  --stats-files --stats-output markdown:artifacts/comment.md --no-stats-stderr
-nyl comment upsert --key gitops/production --body-file artifacts/comment.md
-```
+Reports have a 60,000-byte Markdown budget, with explicit truncation notices for
+large findings, file tables, and optional `--stats-patch` previews. Supply
+`--stats-artifacts-url` to link to complete CI artifacts. This budget leaves room
+for the sticky marker; `comment upsert` still validates the final body size.
 
 For a GitHub Actions job with Nyl installed and `report.md` available:
 

@@ -270,6 +270,31 @@ pub async fn validate_tree(
     inventory: &GitOpsInventory,
     compiled: &CompiledTargetTree,
 ) -> Result<()> {
+    collect_tree_validation(args, inventory, compiled).await.result
+}
+
+/// Validation evidence survives both validation and report-delivery failures.
+pub(crate) struct TreeValidationOutcome {
+    pub report: Option<report::ValidationReport>,
+    pub result: Result<()>,
+}
+
+pub(crate) async fn collect_tree_validation(
+    args: &ValidationArgs,
+    inventory: &GitOpsInventory,
+    compiled: &CompiledTargetTree,
+) -> TreeValidationOutcome {
+    let mut report = None;
+    let result = validate_tree_inner(args, inventory, compiled, &mut report).await;
+    TreeValidationOutcome { report, result }
+}
+
+async fn validate_tree_inner(
+    args: &ValidationArgs,
+    inventory: &GitOpsInventory,
+    compiled: &CompiledTargetTree,
+    collected: &mut Option<report::ValidationReport>,
+) -> Result<()> {
     if !args.enabled(&inventory.project_config.config.validation)? {
         return Ok(());
     }
@@ -289,7 +314,15 @@ pub async fn validate_tree(
         ],
     )?;
     let partitions = tree_partitions(inventory, compiled)?;
-    validate_partitions(args, &inventory.project_config, &inventory.project_root, &partitions).await
+    collect_partitions_with_tool(
+        args,
+        &inventory.project_config,
+        &inventory.project_root,
+        &partitions,
+        Path::new("kubeconform"),
+        collected,
+    )
+    .await
 }
 
 /// Final manifests and their authoring origins for file-based validation.
@@ -393,17 +426,30 @@ async fn validate_partitions_with_tool(
     partitions: &[ValidationPartition],
     executable: &Path,
 ) -> Result<()> {
+    collect_partitions_with_tool(args, config, project, partitions, executable, &mut None).await
+}
+
+async fn collect_partitions_with_tool(
+    args: &ValidationArgs,
+    config: &ProjectConfig,
+    project: &Path,
+    partitions: &[ValidationPartition],
+    executable: &Path,
+    collected: &mut Option<report::ValidationReport>,
+) -> Result<()> {
     let settings = config
         .config
         .validation
         .kubeconform
         .as_ref()
         .expect("enabled validates selection");
-    let root = store::vendor_root(project, config)?;
-    let mut resolver = SchemaResolver::new(project, root, settings, false, false)?;
     let mut report = inventory_report(partitions, &settings.skip)?;
+    let mut resolver = None;
     let mut active_destination = None;
     let operation = async {
+        let root = store::vendor_root(project, config)?;
+        resolver = Some(SchemaResolver::new(project, root, settings, false, false)?);
+        let resolver = resolver.as_mut().expect("schema resolver initialized");
         let mut offset = 0;
         for partition in partitions {
             active_destination = Some(partition.destination.clone());
@@ -411,7 +457,7 @@ async fn validate_partitions_with_tool(
             let count = expand_documents(&partition.documents, &settings.skip)?.len();
             let resources = &mut report.resources[offset..offset + count];
             offset += count;
-            validate_partition(args, partition, &mut resolver, resources, executable).await?;
+            validate_partition(args, partition, resolver, resources, executable).await?;
             if !args.no_validation_stderr {
                 if let Some(destination) = report.destinations.iter().find(|d| d.name == partition.destination) {
                     let text =
@@ -442,7 +488,13 @@ async fn validate_partitions_with_tool(
     if !args.no_validation_stderr {
         eprint!("{}", report.summary_text());
     }
-    args.validate_outputs(true, &resolver.observed_sources.into_iter().collect::<Vec<_>>(), &[])?;
+    *collected = Some(report);
+    let report = collected.as_ref().expect("validation evidence collected");
+    let observed_sources = resolver
+        .into_iter()
+        .flat_map(|resolver| resolver.observed_sources)
+        .collect::<Vec<_>>();
+    args.validate_outputs(true, &observed_sources, &[])?;
     report.export(&args.validation_output)?;
     outcome?;
     if report.status != "valid" {
@@ -1690,12 +1742,20 @@ printf '{{"resources":[{{"filename":"%s/0.yaml","status":"statusValid"}}]}}' "$l
                 validation_output: vec![format!("json:{}", path.display()).parse().unwrap()],
                 ..ValidationArgs::default()
             };
-            assert!(
-                validate_partitions_with_tool(&args, &config, directory.path(), &[first, second], &executable)
-                    .await
-                    .is_err()
-            );
-            let report: report::ValidationReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let mut collected = None;
+            assert!(collect_partitions_with_tool(
+                &args,
+                &config,
+                directory.path(),
+                &[first, second],
+                &executable,
+                &mut collected
+            )
+            .await
+            .is_err());
+            let report = collected.unwrap();
+            let exported: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&report).unwrap(), exported);
             assert!(!report.complete);
             assert_eq!(report.summary.valid, 1);
             assert_eq!(report.summary.not_checked, 1);

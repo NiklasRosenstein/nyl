@@ -115,9 +115,12 @@ nyl diff-tree --target production --raw --output rendered.diff
 
 ### Statistics and report exports
 
-The complete report includes comparison context, file and line counts, and
-render/cache/source statistics. Totals distinguish added, modified, and deleted
-files. `--stats-files` includes a path-sorted table with each file's status and
+The combined report includes validation results, comparison context, file and
+line counts, and render/cache/source statistics. Validation checks the complete
+desired target; diff counts respect the selected catalog or Application view.
+The report does not attribute validation failures to the PR's changes.
+
+`--stats-files` includes a path-sorted table with each file's status and
 added/removed line counts in human-readable reports:
 
 ```bash
@@ -156,8 +159,86 @@ with [`nyl comment upsert`](/nyl/commands/comment/):
 nyl comment upsert --key gitops/production --body-file artifacts/comment.md
 ```
 
-Add `--fail-on-diff` if the job should fail when changes exist; the
-artifacts are still written before that failure.
+Validation failures do not prevent comparison or report exports. Nyl attempts
+validation and comparison independently after desired rendering succeeds, writes
+available artifacts, and then returns a failing status. Apply and publication
+remain blocked by unsuccessful validation.
+
+Discovery, rendering, schema/validator, and baseline/comparison errors appear in
+reports with explicit unavailable or not-run results. Invalid resources do not
+make a completed validation run incomplete. Disabled validation is reported as
+not run; skipped and unchecked resource counts remain visible. All-skipped or
+empty validation says “No resources validated.”
+
+Add `--fail-on-diff` if the job should also fail when changes exist; artifacts are
+written before returning that failure. Separate `--validation-output text:PATH`
+and `json:PATH` exports remain available. `--no-validation-stderr` suppresses the
+standalone validation stream; `--no-stats-stderr` suppresses the combined report
+copy. Neither option changes exported reports.
+
+### Markdown PR/MR comments
+
+Markdown starts with the target, source and baseline, validation outcome, and
+diff totals. Dirty source state and the comparison scope are visible. Validation
+findings identify the resource, destination, failing field, validator message,
+and source/rendered document locations. The first two failing resources appear
+inline; further failures are collapsed. Each resource can include a collapsed
+expansion trace and schema origin.
+
+Changed-file tables are collapsed when they contain more than two entries.
+`--stats-patch` adds an optional collapsed unified-patch preview independently of
+`--stats-files`. Full comparison metadata and render statistics are collapsed
+beneath the findings and diff sections. The complete patch is written to
+`--output`; the Markdown preview is not a substitute for that artifact.
+
+Markdown is limited to **60,000 UTF-8 bytes**, including markup and omission
+notices, leaving room for the sticky-comment marker. Outcomes and totals have
+priority, followed by operational errors and validation findings. File tables
+use at most 10,000 bytes and patch previews at most 20,000 bytes; validation can
+consume their available space. Extended provenance, context, and render
+statistics use remaining space. These limits apply to Markdown only.
+
+Tables truncate at complete rows. Patch previews retain complete hunks with
+file headers, or complete binary/metadata-only entries. Oversized hunks are
+omitted. Notices count displayed versus total entries and identify omitted
+findings. Displayed metadata and diagnostic values are bounded to 2,048 UTF-8
+bytes, including escaping, with explicit truncation markers. Text, JSON, and standalone patches
+retain complete evidence.
+
+`--stats-artifacts-url URL` links the report to a CI artifacts page. Supply an
+absolute HTTP(S) URL without credentials, at most 2,048 bytes. Nyl does not fetch
+it or infer the CI provider. Without this option, the report names requested
+output files; local paths are not artifact download links.
+
+Use a fresh artifact directory for each invocation. This example preserves the
+diff command's status, posts its report when available, and also fails if posting
+fails:
+
+```bash
+artifacts=$(mktemp -d)
+status=0
+nyl diff-tree --target production \
+  --output "$artifacts/rendered.diff" \
+  --stats-files --stats-patch \
+  --stats-output "markdown:$artifacts/comment.md" \
+  --stats-output "json:$artifacts/report.json" \
+  --no-stats-stderr --no-validation-stderr || status=$?
+
+comment_status=0
+if [ -f "$artifacts/comment.md" ]; then
+  nyl comment upsert --key gitops/production \
+    --body-file "$artifacts/comment.md" || comment_status=$?
+fi
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+exit "$comment_status"
+```
+
+Configure the CI runner to upload the complete report and patch artifacts.
+Reports are attempted after CLI parsing and output-path preflight. Invalid CLI
+arguments, unsafe/conflicting output paths, process termination, and unwritable
+destinations cannot guarantee a report. A failed comparison does not write a
+patch; use its explicit report state rather than treating an absent or stale
+patch as an empty diff.
 
 Paths resolve against the invocation directory. `PATH=-` selects stdout, so
 redirect the diff to a file when exporting a report to stdout:
@@ -176,9 +257,11 @@ nyl diff-tree --stats-output markdown:- --output /dev/null --no-stats-stderr
 Multiple outputs may use `/dev/null`, but cannot share stdout or the same regular
 file. Nyl creates missing parent directories and atomically replaces each output
 file. A write failure
-returns an error; multiple output files are not a single transaction, so files
-already written remain available. A successful zero-change comparison writes an
-empty patch and a complete report with zero counts and an empty file list.
+returns an error, and Nyl continues attempting independent exports. Multiple
+output files are not a single transaction, so files already written remain
+available. Delivery failures appear on stderr and in the exit status; report
+contents describe evaluation and cannot certify their own successful delivery.
+A successful zero-change comparison writes an empty patch and a complete report with zero counts and an empty file list.
 
 Text reports on stderr follow `--color auto|always|never`: automatic color on a
 TTY or in CI, respecting `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM`.
@@ -189,26 +272,55 @@ formatter ANSI sequences.
 ### JSON report contract
 
 JSON always includes every changed file, independently of `--stats-files`. The
-report has `schema_version: 1` and these top-level objects:
+report has `schema_version: 2` and these top-level fields:
 
-- `comparison`: `target`, `selection`, `desired_source`, `baseline`,
-  `desired_publication`, and `diff_output` (`-` means stdout).
+- `request`: invocation `path`, nullable explicit `target`, `against` (`published`
+  or `source`), nullable `source_ref`, and nullable sanitized `source_repository`.
+- `stages`: `discovery`, `render` (desired rendering), and `comparison`, each
+  `completed`, `failed`, or `not_run`.
+- `comparison`: `mode` (`normalized` or `raw`), `target`, `selection`,
+  `desired_source`, `baseline`, `desired_publication`, and `diff_output` (`-` means stdout).
 - `diff`: `has_changes`, `files_changed`, `files_added`, `files_modified`,
   `files_deleted`, `binary_files`, `lines_added`, `lines_removed`, and `files`.
-  Each file has `path`, `status` (`added`, `modified`, or `deleted`), `binary`,
-  `lines_added`, and `lines_removed`. Binary line counts are `null`.
+  It is `null` when comparison is unavailable. Each file has `path`, `status`
+  (`added`, `modified`, or `deleted`), `binary`, `lines_added`, and `lines_removed`. Binary line counts are `null`.
 - `render`: `layers`, `target_reuse`, `release_helm_renders_avoided`, and `sources`.
   Statistics aggregate the complete invocation, including both renders for a
-  source comparison.
+  source comparison. It is `null` if collection never initialized and may contain
+  partial statistics after a failure.
+- `validation`: `status` (`valid`, `invalid`, `error`, `disabled`, or `not_run`),
+  nullable explanatory `reason`, `scope: "desired_target"`, and nullable `report`.
+  `report` embeds the complete version-one validation JSON: `version`,
+  `status`, `complete`, `summary`, `destinations`, `resources`, and
+  `operationErrors`. This nested contract uses camelCase. Each resource retains
+  its validator, destination, identity, status, findings, rendered location,
+  provenance, and schema origin, including valid/skipped resources. `invalid`
+  means resource violations; `error` means validation errors or incomplete
+  evidence. `disabled` means project/invocation policy did not enable validation;
+  `not_run` means desired rendering did not complete. A setup error can produce
+  `status: "error"` with `report: null`.
+- `errors`: operational failures with `stage` (`discovery`, `render`,
+  `validation`, or `comparison`) and descriptive `message`. Resource findings
+  belong in the nested validation report.
+- `fail_on_diff`: whether differences are configured to fail the invocation.
+- `diff_policy_failed`: true only when a completed comparison found differences
+  and `fail_on_diff` is true.
 
 `selection.mode` is `tree`, `catalog`, or `applications`; the last includes an
 `applications` array of explicit selectors, empty for all workload Applications.
+`comparison.target`, `desired_source`, `baseline`, and `desired_publication` are
+nullable until resolved. Unavailable results never use zero counts or fabricated
+commits. A completed zero-change comparison has a non-null `diff` with zero
+counts and an empty file list.
+
 `desired_source` contains nullable `repository` and `commit`, plus `dirty`.
 `baseline.mode` is `published` or `source`; both include the resolved `commit`
 and a `publication`. A source baseline also includes `repository` and `revision`.
 Publication objects contain `cluster`, sanitized `repository`, nullable
 `publish_url`, `revision`, and `path_prefix` (empty means repository root).
-Reports contain comparison metadata and counts, not manifest contents.
+JSON contains comparison metadata, counts, and complete validation evidence; it
+does not embed the unified patch. Markdown preview flags and truncation do not
+change JSON data. Validation messages can contain resource values.
 
 Render `layers` keys are `target`, `release`, and `helm`; each entry has `outcomes`
 and `bypass_reasons` count maps. Outcomes are `hit`, `miss`, `invalidated`,

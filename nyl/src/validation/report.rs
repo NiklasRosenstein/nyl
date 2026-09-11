@@ -292,20 +292,31 @@ impl ValidationReport {
     }
 
     pub(crate) fn export(&self, destinations: &[ValidationOutput]) -> Result<()> {
+        let mut errors = Vec::new();
         for output in destinations {
-            let bytes = match output.format {
-                ReportFormat::Json => super::store::json_bytes(self)?,
-                ReportFormat::Text => self.text().into_bytes(),
-            };
-            if output.path == Path::new("-") {
-                let mut stdout = std::io::stdout().lock();
-                stdout.write_all(&bytes)?;
-                stdout.flush()?;
-            } else {
-                super::store::atomic_write(&output.path, &bytes)?;
+            let result = (|| {
+                let bytes = match output.format {
+                    ReportFormat::Json => super::store::json_bytes(self)?,
+                    ReportFormat::Text => self.text().into_bytes(),
+                };
+                if output.path == Path::new("-") {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(&bytes)?;
+                    stdout.flush()?;
+                } else {
+                    super::store::atomic_write(&output.path, &bytes)?;
+                }
+                Ok::<_, NylError>(())
+            })();
+            if let Err(error) = result {
+                errors.push(format!("validation output {}: {error}", output.path.display()));
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(NylError::Other(errors.join("\n")))
+        }
     }
 }
 
