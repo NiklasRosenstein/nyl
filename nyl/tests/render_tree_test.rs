@@ -2478,17 +2478,16 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Deployment target   production"))
         .stderr(predicate::str::contains(
-            "Rendered tree comparison\n  Deployment target   production\n  View                entire rendered tree\n  Desired source",
+            "Repository        https://example.invalid/source.git",
         ))
-        .stderr(predicate::str::contains(format!(
-            "    Repository        https://example.invalid/source.git\n    Commit            {source_commit}\n    Working tree      clean"
-        )))
-        .stderr(predicate::str::contains("  Published baseline"))
-        .stderr(predicate::str::contains("    Revision          deploy/production"))
-        .stderr(predicate::str::contains(format!("    Commit            {}", commit.id())))
-        .stderr(predicate::str::contains("    Path              production"))
-        .stderr(predicate::str::contains("  Diff output         stdout\n\n"))
+        .stderr(predicate::str::contains(format!("Commit            {source_commit}")))
+        .stderr(predicate::str::contains("Working tree      clean"))
+        .stderr(predicate::str::contains("Published baseline"))
+        .stderr(predicate::str::contains("Revision          deploy/production"))
+        .stderr(predicate::str::contains(format!("Commit            {}", commit.id())))
+        .stderr(predicate::str::contains("Path              production"))
         .stderr(predicate::str::contains("has no rendered differences"));
 
     let empty_diff = fixture.path().join("artifacts/no-differences.diff");
@@ -2898,7 +2897,7 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
         .stderr(predicate::str::contains("Render statistics"));
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.path().join("artifacts/report.json")).unwrap()).unwrap();
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["schema_version"], 2);
     assert_eq!(json["comparison"]["target"], "production");
     assert_eq!(
         json["comparison"]["desired_source"]["commit"],
@@ -2936,7 +2935,7 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("## Rendered tree comparison\n"))
+        .stdout(predicate::str::starts_with("## Nyl · production\n"))
         .stdout(predicate::str::contains(
             "1 changed · 0 added · 1 modified · 0 deleted; **+1 −1 lines**.",
         ))
@@ -3099,7 +3098,7 @@ fn diff_tree_rejects_output_conflicts_before_rendering() {
 }
 
 #[test]
-fn diff_tree_failed_comparisons_preserve_reports_and_report_write_failures() {
+fn diff_tree_failed_comparisons_export_current_failure_and_protect_output_aliases() {
     let (fixture, _destination, _seed, source_commit) = publication_fixture();
     fs::write(fixture.path().join("report.json"), "preserve me").unwrap();
     Command::cargo_bin("nyl")
@@ -3121,10 +3120,10 @@ fn diff_tree_failed_comparisons_preserve_reports_and_report_write_failures() {
         ])
         .assert()
         .failure();
-    assert_eq!(
-        fs::read_to_string(fixture.path().join("report.json")).unwrap(),
-        "preserve me"
-    );
+    let contents = fs::read_to_string(fixture.path().join("report.json")).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&contents).unwrap();
+    assert_eq!(report["stages"]["comparison"], "failed");
+    assert_eq!(report["diff"], serde_json::Value::Null);
 
     Command::cargo_bin("nyl")
         .unwrap()
@@ -3151,7 +3150,7 @@ fn diff_tree_failed_comparisons_preserve_reports_and_report_write_failures() {
         .stdout(predicate::str::is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path().join("report.json")).unwrap(),
-        "preserve me"
+        contents
     );
 }
 
@@ -3352,4 +3351,220 @@ fn validation_exports_reject_source_output_and_stdout_collisions() {
         .assert()
         .failure()
         .stdout("");
+}
+
+#[test]
+fn diff_tree_exports_validation_failures_and_independent_comparison_results() {
+    let (fixture, _destination, _seed, _) = publication_fixture();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["publish-tree"])
+        .assert()
+        .success();
+    configure_validation(fixture.path(), "string");
+    let schemas = fixture.path().join("schemas/postgresql.cnpg.io");
+    fs::create_dir_all(&schemas).unwrap();
+    fs::write(
+        schemas.join("cluster_v1.json"),
+        r#"{"type":"object","properties":{"spec":{"type":"object","properties":{"affinity":{"type":"object"}}}}}"#,
+    )
+    .unwrap();
+    for (namespace, name) in [("rise", "rise-db"), ("rise-dash", "dash-db")] {
+        fs::write(fixture.path().join(format!("applications/workloads/{namespace}.yaml")), format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata: {{name: {namespace}, namespace: {namespace}}}\n---\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata: {{name: {name}, namespace: {namespace}}}\nspec:\n  affinity: null\n"
+        )).unwrap();
+    }
+    let source = Repository::open(fixture.path()).unwrap();
+    commit_all(&source, "Resources requiring affinity objects");
+    let artifacts = TempDir::new().unwrap();
+    for (case, extra) in [
+        ("published", Vec::<&str>::new()),
+        (
+            "unchanged",
+            vec![
+                "--against",
+                "source",
+                "--source-ref",
+                "HEAD",
+                "--source-repository",
+                fixture.path().to_str().unwrap(),
+            ],
+        ),
+        ("catalog", vec!["--catalog"]),
+        (
+            "missing-baseline",
+            vec![
+                "--against",
+                "source",
+                "--source-ref",
+                "missing-ref",
+                "--source-repository",
+                fixture.path().to_str().unwrap(),
+            ],
+        ),
+    ] {
+        let patch = artifacts.path().join(format!("{case}.diff"));
+        let json = artifacts.path().join(format!("{case}.json"));
+        let markdown = artifacts.path().join(format!("{case}.md"));
+        let separate = artifacts.path().join(format!("{case}-validation.json"));
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args([
+                "diff-tree",
+                "--progress",
+                "off",
+                "--stats-files",
+                "--stats-patch",
+                "--no-validation-stderr",
+                "--no-stats-stderr",
+            ])
+            .args(extra)
+            .arg("--output")
+            .arg(&patch)
+            .args(["--stats-output", &format!("markdown:{}", markdown.display())])
+            .args(["--stats-output", &format!("json:{}", json.display())])
+            .args(["--validation-output", &format!("json:{}", separate.display())])
+            .assert()
+            .failure();
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+        let validation: serde_json::Value = serde_json::from_slice(&fs::read(separate).unwrap()).unwrap();
+        assert_eq!(report["validation"]["report"], validation);
+        assert_eq!(report["validation"]["status"], "invalid", "{report}");
+        assert_eq!(validation["complete"], true);
+        assert_eq!(validation["summary"]["invalid"], 2);
+        let body = fs::read_to_string(markdown).unwrap();
+        for resource in [
+            "Cluster rise/rise\\-db",
+            "Cluster rise\\-dash/dash\\-db",
+            "/spec/affinity",
+            "got null, want object",
+            "Source: applications/workloads/",
+            "Rendered: workloads/",
+        ] {
+            assert!(body.contains(resource), "{case}: missing {resource}\n{body}");
+        }
+        if case == "missing-baseline" {
+            assert_eq!(report["stages"]["comparison"], "failed");
+            assert_eq!(report["diff"], serde_json::Value::Null);
+            assert!(!patch.exists());
+            assert!(body.contains("Diff unavailable"));
+        } else {
+            assert_eq!(report["stages"]["comparison"], "completed");
+            assert_eq!(report["diff"]["has_changes"], case != "unchanged");
+            assert_eq!(fs::read(patch).unwrap().is_empty(), case == "unchanged");
+        }
+        if case == "catalog" {
+            assert!(body.contains("Diff scope: Argo CD catalog"));
+            assert!(body.contains("Validation scope: complete desired target"));
+        }
+    }
+}
+
+#[test]
+fn diff_tree_reports_discovery_render_and_validation_operation_failures() {
+    for stage in ["discovery", "render", "validation"] {
+        let (fixture, _destination, _seed, _) = publication_fixture();
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["publish-tree"])
+            .assert()
+            .success();
+        match stage {
+            "discovery" => fs::write(fixture.path().join("nyl.toml"), "invalid = [").unwrap(),
+            "render" => {
+                let path = fixture.path().join("applications/workloads/api.yaml");
+                let template = fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("{{ values.environment }}", "{{ values.environment | missing_filter }}");
+                fs::write(path, template).unwrap();
+            }
+            "validation" => {
+                configure_validation(fixture.path(), "string");
+                fs::remove_file(fixture.path().join("schemas/v1/configmap_v1.json")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let artifacts = TempDir::new().unwrap();
+        let patch = artifacts.path().join("rendered.diff");
+        let json = artifacts.path().join("report.json");
+        let markdown = artifacts.path().join("comment.md");
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(["diff-tree", "--progress", "off", "--output"])
+            .arg(&patch)
+            .args(["--stats-output", &format!("json:{}", json.display())])
+            .args(["--stats-output", &format!("markdown:{}", markdown.display())])
+            .assert()
+            .failure();
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+        let body = fs::read_to_string(markdown).unwrap();
+        if stage == "validation" {
+            assert_eq!(report["validation"]["status"], "error");
+            assert_eq!(report["validation"]["report"]["complete"], false);
+            assert!(
+                report["validation"]["report"]["summary"]["notChecked"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            assert_eq!(report["stages"]["comparison"], "completed");
+            assert!(patch.exists());
+        } else {
+            assert_eq!(report["stages"][stage], "failed");
+            assert_eq!(report["validation"]["status"], "not_run");
+            assert_eq!(report["stages"]["comparison"], "not_run");
+            assert_eq!(report["diff"], serde_json::Value::Null);
+            assert!(!patch.exists());
+            assert!(body.contains("Diff unavailable"));
+        }
+    }
+}
+
+#[test]
+fn diff_tree_keeps_exporting_after_a_report_write_fails() {
+    let (fixture, _destination, _seed, _) = publication_fixture();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["publish-tree"])
+        .assert()
+        .success();
+    configure_validation(fixture.path(), "string");
+    let artifacts = TempDir::new().unwrap();
+    for separate in [false, true] {
+        let directory = artifacts.path().join(if separate { "validation" } else { "combined" });
+        fs::create_dir(&directory).unwrap();
+        let blocking_file = directory.join("parent");
+        let blocked_output = blocking_file.join("child.json");
+        let json = directory.join("complete.json");
+        let option = if separate {
+            "--validation-output"
+        } else {
+            "--stats-output"
+        };
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["diff-tree", "--output"])
+            .arg(directory.join("rendered.diff"))
+            .args([option, &format!("text:{}", blocking_file.display())])
+            .args([option, &format!("json:{}", blocked_output.display())])
+            .args(["--stats-output", &format!("json:{}", json.display())])
+            .assert()
+            .failure();
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+        assert_eq!(report["stages"]["comparison"], "completed");
+        assert_eq!(report["validation"]["report"]["status"], "valid", "{report}");
+        assert!(blocking_file.is_file());
+    }
 }

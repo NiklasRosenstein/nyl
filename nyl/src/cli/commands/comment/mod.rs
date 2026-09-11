@@ -120,6 +120,18 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_report_fits_every_provider_with_maximum_comment_key() {
+        let marker = marker(&"k".repeat(256)).unwrap();
+        let body = "界".repeat(20_000);
+        for provider in [Provider::Github, Provider::Gitlab, Provider::Forgejo] {
+            assert_eq!(
+                read_body(body.as_bytes(), &marker, provider.body_limit()).unwrap(),
+                format!("{marker}\n\n{body}")
+            );
+        }
+    }
+
+    #[test]
     fn test_read_body_preserves_markdown_and_checks_complete_payload_size() {
         let marker = marker("key").unwrap();
         let input = "# Report\r\n\né\n";

@@ -15,7 +15,7 @@ use crate::gitops::{
 };
 use crate::{NylError, Result};
 
-use report::{DiffMode, Report, ReportFormat, ReportOutput, TreeDiff};
+use report::{DiffMode, Report, ReportFormat, ReportOutput, StageState, TreeDiff};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
@@ -62,6 +62,12 @@ pub struct DiffTreeArgs {
     /// Include per-file line counts in text and Markdown reports.
     #[arg(long)]
     stats_files: bool,
+    /// Include a bounded, collapsed unified-patch preview in Markdown reports.
+    #[arg(long)]
+    stats_patch: bool,
+    /// Link Markdown reports to a CI artifacts page (absolute HTTP(S) URL).
+    #[arg(long, value_name = "URL", value_parser = report::parse_artifacts_url)]
+    stats_artifacts_url: Option<String>,
     /// Export a complete report (repeatable). Formats: text, markdown, json. PATH=- selects stdout.
     #[arg(long, value_name = "FORMAT:PATH")]
     stats_output: Vec<ReportOutput>,
@@ -155,18 +161,6 @@ struct ComparisonFiles {
     desired: BTreeMap<PathBuf, Vec<u8>>,
 }
 
-struct ComparisonSummary<'a> {
-    mode: DiffMode,
-    target: &'a str,
-    desired_source_repository: Option<&'a str>,
-    desired_source_commit: Option<&'a str>,
-    desired_dirty: bool,
-    desired: &'a crate::gitops::CompiledTargetTree,
-    baseline: &'a ResolvedBaseline,
-    selection: &'a DiffSelection,
-    output: &'a Path,
-}
-
 /// Compare rendered trees with the automatic report color policy.
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
     execute_with_color(args, crate::cli::ColorChoice::Auto).await
@@ -179,83 +173,119 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
         .collect::<Vec<_>>();
     args.validation.validate_outputs(false, &protected, &[])?;
     report::validate_outputs(&args.output, &args.stats_output)?;
-    let inventory = discover_gitops_inventory(&args.path, None)?;
-    let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-    let (desired_source_commit, desired_dirty) = super::render_tree::source_state(&inventory.project_root)?;
-    let desired_source_repository = source_repository_url(&inventory.project_root)?;
-    let cache = GitOpsCache::new(&inventory.project_root, args.cache.mode())?;
+    let mut report = Report::new(&args);
+    evaluate(&args, &mut report).await;
+    // Each artifact is independently useful, including after another write fails.
+    let mut delivery_errors = Vec::new();
+    if let Some(patch) = &report.patch {
+        if let Err(error) = write_diff_output(&args.output, patch.as_bytes()) {
+            delivery_errors.push(format!("diff output {}: {error}", args.output.display()));
+        }
+    }
+    for destination in &args.stats_output {
+        let ansi = match color {
+            crate::cli::ColorChoice::Always => true,
+            crate::cli::ColorChoice::Never => false,
+            crate::cli::ColorChoice::Auto => destination.path == Path::new("-") && color.should_use_ansi(),
+        };
+        let result = report
+            .format(destination.format, args.stats_files, ansi)
+            .and_then(|contents| write_diff_output(&destination.path, contents.as_bytes()));
+        if let Err(error) = result {
+            delivery_errors.push(format!("report output {}: {error}", destination.path.display()));
+        }
+    }
+    if !args.no_stats_stderr {
+        let result = report
+            .format(ReportFormat::Text, args.stats_files, color.should_use_ansi())
+            .and_then(|contents| {
+                let mut stderr = io::stderr().lock();
+                stderr.write_all(b"\n")?;
+                stderr.write_all(contents.as_bytes())?;
+                stderr.flush()?;
+                Ok(())
+            });
+        if let Err(error) = result {
+            delivery_errors.push(format!("stderr report: {error}"));
+        }
+    }
+    let outcome = report.result();
+    if delivery_errors.is_empty() {
+        outcome
+    } else {
+        if let Err(error) = outcome {
+            delivery_errors.push(error.to_string());
+        }
+        Err(NylError::Other(delivery_errors.join("\n")))
+    }
+}
+
+async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
+    let discovered = (|| {
+        let inventory = discover_gitops_inventory(&args.path, None)?;
+        let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
+        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
+        let repository = source_repository_url(&inventory.project_root)?;
+        Ok::<_, NylError>((inventory, target, commit, dirty, repository))
+    })();
+    let (inventory, target_name, commit, dirty, repository) = match discovered {
+        Ok(value) => value,
+        Err(error) => {
+            report.error("discovery", &error);
+            return;
+        }
+    };
+    report.source(&target_name, repository.as_deref(), commit.as_deref(), dirty);
+    report.stages.discovery = StageState::Completed;
+    let cache = match GitOpsCache::new(&inventory.project_root, args.cache.mode()) {
+        Ok(cache) => cache,
+        Err(error) => {
+            report.error("render", &error);
+            return;
+        }
+    };
     let desired_phase = matches!(args.against, DiffTreeBase::Source).then(|| "Desired".to_string());
-    let mut desired_progress = TreeProgressReporter::new(args.progress, desired_phase);
+    let mut progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
     };
-    let desired = compile_target_tree_cached_with_observer_and_options(
-        &inventory,
-        &target_name,
-        &cache,
-        &mut desired_progress,
-        options,
-    )
-    .await?;
-    crate::validation::validate_tree(&args.validation, &inventory, &desired).await?;
-    let baseline = resolve_baseline(&args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
-    let selection = DiffSelection::from_args(&args);
-    let comparison = comparison_files(&selection, &baseline, &desired)?;
-    let mode = if args.raw { DiffMode::Raw } else { DiffMode::Normalized };
-    let diff = TreeDiff::between(&comparison.base, &comparison.desired, mode)?;
-    let report = Report::new(
-        &ComparisonSummary {
-            mode,
-            target: &target_name,
-            desired_source_repository: desired_source_repository.as_deref(),
-            desired_source_commit: desired_source_commit.as_deref(),
-            desired_dirty,
-            desired: &desired,
-            baseline: &baseline,
-            selection: &selection,
-            output: &args.output,
-        },
-        diff.stats,
-        cache.stats(),
-    );
-    let exports = args
-        .stats_output
-        .iter()
-        .map(|destination| {
-            let ansi = match color {
-                crate::cli::ColorChoice::Always => true,
-                crate::cli::ColorChoice::Never => false,
-                crate::cli::ColorChoice::Auto => destination.path == Path::new("-") && color.should_use_ansi(),
-            };
-            report.format(destination.format, args.stats_files, ansi)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let terminal_report = if args.no_stats_stderr {
-        None
-    } else {
-        Some(report.format(ReportFormat::Text, args.stats_files, color.should_use_ansi())?)
-    };
-    write_diff_output(&args.output, diff.patch.as_bytes())?;
-    for (destination, contents) in args.stats_output.iter().zip(exports) {
-        write_diff_output(&destination.path, contents.as_bytes())?;
-    }
-    if let Some(contents) = terminal_report {
-        let mut stderr = io::stderr().lock();
-        if (args.output == Path::new("-") && !diff.patch.is_empty())
-            || args.stats_output.iter().any(|output| output.path == Path::new("-"))
-        {
-            stderr.write_all(b"\n")?;
+    let rendered =
+        compile_target_tree_cached_with_observer_and_options(&inventory, &target_name, &cache, &mut progress, options)
+            .await;
+    report.render = Some(cache.stats());
+    let desired = match rendered {
+        Ok(desired) => desired,
+        Err(error) => {
+            report.error("render", &error);
+            return;
         }
-        stderr.write_all(contents.as_bytes())?;
-        stderr.flush()?;
+    };
+    report.desired(&desired);
+    let validation = crate::validation::collect_tree_validation(&args.validation, &inventory, &desired).await;
+    report.validation(
+        validation,
+        if args.validation.no_validate {
+            "Disabled by --no-validate"
+        } else {
+            "Validation is not enabled in project configuration"
+        },
+    );
+    let compared = async {
+        let baseline = resolve_baseline(args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
+        report.baseline(&baseline, &desired);
+        let selection = DiffSelection::from_args(args);
+        let comparison = comparison_files(&selection, &baseline, &desired)?;
+        TreeDiff::between(
+            &comparison.base,
+            &comparison.desired,
+            if args.raw { DiffMode::Raw } else { DiffMode::Normalized },
+        )
     }
-    if args.fail_on_diff && report.diff.has_changes {
-        Err(NylError::validation(format!(
-            "deployment target {:?} has rendered differences",
-            target_name
-        )))
-    } else {
-        Ok(())
+    .await;
+    report.render = Some(cache.stats());
+    match compared {
+        Ok(diff) => report.compared(diff),
+        Err(error) => report.error("comparison", &error),
     }
 }
 

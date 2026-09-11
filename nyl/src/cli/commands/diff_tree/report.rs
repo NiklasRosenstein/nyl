@@ -12,7 +12,9 @@ use crate::render::cache::CacheStats;
 use crate::util::{ansi_style, sanitize_url};
 use crate::{NylError, Result};
 
-use super::{is_null_output, ComparisonSummary, DiffSelection, ResolvedBaseline};
+use super::{is_null_output, DiffSelection, DiffTreeArgs, DiffTreeBase, ResolvedBaseline};
+
+mod markdown;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ReportFormat {
@@ -46,6 +48,19 @@ impl FromStr for ReportOutput {
             path: path.into(),
         })
     }
+}
+
+pub(super) fn parse_artifacts_url(value: &str) -> std::result::Result<String, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "Artifact URL must be an absolute HTTP(S) URL")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.as_str().len() > 2_048
+    {
+        return Err("Artifact URL must be HTTP(S), without credentials, and at most 2,048 bytes".into());
+    }
+    Ok(url.to_string())
 }
 
 /// Validate every destination before rendering or opening output files.
@@ -323,20 +338,73 @@ fn patch_path(path: &str) -> String {
 #[derive(Serialize)]
 pub(super) struct Report {
     schema_version: u32,
+    request: Request,
     comparison: Comparison,
-    pub diff: DiffStats,
-    render: CacheStats,
+    pub diff: Option<DiffStats>,
+    pub render: Option<CacheStats>,
+    pub stages: Stages,
+    validation: Validation,
+    errors: Vec<OperationError>,
+    fail_on_diff: bool,
+    diff_policy_failed: bool,
+    #[serde(skip)]
+    pub patch: Option<String>,
+    #[serde(skip)]
+    stats_patch: bool,
+    #[serde(skip)]
+    artifacts_url: Option<String>,
+    #[serde(skip)]
+    outputs: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+struct Request {
+    path: PathBuf,
+    target: Option<String>,
+    against: &'static str,
+    source_ref: Option<String>,
+    source_repository: Option<String>,
 }
 
 #[derive(Serialize)]
 struct Comparison {
     mode: DiffMode,
-    target: String,
+    target: Option<String>,
     selection: Selection,
-    desired_source: Source,
-    baseline: Baseline,
-    desired_publication: Publication,
+    desired_source: Option<Source>,
+    baseline: Option<Baseline>,
+    desired_publication: Option<Publication>,
     diff_output: String,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum StageState {
+    Completed,
+    Failed,
+    #[default]
+    NotRun,
+}
+
+#[derive(Default, Serialize)]
+pub(super) struct Stages {
+    pub discovery: StageState,
+    pub render: StageState,
+    pub comparison: StageState,
+}
+
+#[derive(Serialize)]
+struct Validation {
+    status: &'static str,
+    reason: Option<String>,
+    scope: &'static str,
+    report: Option<crate::validation::ValidationReport>,
+}
+
+#[derive(Serialize)]
+struct OperationError {
+    stage: &'static str,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -418,88 +486,212 @@ impl Publication {
 }
 
 impl Report {
-    pub fn new(summary: &ComparisonSummary<'_>, diff: DiffStats, render: CacheStats) -> Self {
-        let selection = match summary.selection {
+    pub fn new(args: &DiffTreeArgs) -> Self {
+        let selection = match DiffSelection::from_args(args) {
             DiffSelection::Tree => Selection::Tree,
             DiffSelection::Catalog => Selection::Catalog,
             DiffSelection::Applications(applications) => Selection::Applications {
-                applications: applications.iter().cloned().collect(),
-            },
-        };
-        let baseline = match summary.baseline {
-            ResolvedBaseline::Published(baseline) => Baseline::Published {
-                commit: baseline.commit.to_string(),
-                publication: Publication::from_tree(summary.desired),
-            },
-            ResolvedBaseline::Source(baseline) => Baseline::Source {
-                repository: sanitize_url(&baseline.repository),
-                revision: baseline.revision.clone(),
-                commit: baseline.commit.to_string(),
-                publication: Publication::from_tree(&baseline.compiled),
+                applications: applications.into_iter().collect(),
             },
         };
         Self {
-            schema_version: 1,
-            comparison: Comparison {
-                mode: summary.mode,
-                target: summary.target.to_owned(),
-                selection,
-                desired_source: Source {
-                    repository: summary.desired_source_repository.map(sanitize_url),
-                    commit: summary.desired_source_commit.map(str::to_owned),
-                    dirty: summary.desired_dirty,
+            schema_version: 2,
+            request: Request {
+                path: args.path.clone(),
+                target: args.target.clone(),
+                against: match args.against {
+                    DiffTreeBase::Published => "published",
+                    DiffTreeBase::Source => "source",
                 },
-                baseline,
-                desired_publication: Publication::from_tree(summary.desired),
-                diff_output: summary.output.to_string_lossy().into_owned(),
+                source_ref: args.source_ref.clone(),
+                source_repository: args.source_repository.as_deref().map(sanitize_url),
             },
-            diff,
-            render,
+            comparison: Comparison {
+                mode: if args.raw { DiffMode::Raw } else { DiffMode::Normalized },
+                target: None,
+                selection,
+                desired_source: None,
+                baseline: None,
+                desired_publication: None,
+                diff_output: args.output.to_string_lossy().into_owned(),
+            },
+            diff: None,
+            render: None,
+            stages: Stages::default(),
+            validation: Validation {
+                status: "not_run",
+                reason: Some("Desired rendering did not complete".into()),
+                scope: "desired_target",
+                report: None,
+            },
+            errors: Vec::new(),
+            fail_on_diff: args.fail_on_diff,
+            diff_policy_failed: false,
+            patch: None,
+            stats_patch: args.stats_patch,
+            artifacts_url: args.stats_artifacts_url.clone(),
+            outputs: args
+                .stats_output
+                .iter()
+                .filter(|o| o.path != Path::new("-") && !is_null_output(&o.path))
+                .map(|o| {
+                    (
+                        match o.format {
+                            ReportFormat::Text => "Text report",
+                            ReportFormat::Json => "JSON report",
+                            ReportFormat::Markdown => "Markdown report",
+                        }
+                        .into(),
+                        o.path.display().to_string(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub fn source(&mut self, target: &str, repository: Option<&str>, commit: Option<&str>, dirty: bool) {
+        self.comparison.target = Some(target.into());
+        self.comparison.desired_source = Some(Source {
+            repository: repository.map(sanitize_url),
+            commit: commit.map(str::to_owned),
+            dirty,
+        });
+    }
+
+    pub fn desired(&mut self, desired: &crate::gitops::CompiledTargetTree) {
+        self.comparison.desired_publication = Some(Publication::from_tree(desired));
+        self.stages.render = StageState::Completed;
+    }
+
+    pub fn baseline(&mut self, baseline: &ResolvedBaseline, desired: &crate::gitops::CompiledTargetTree) {
+        self.comparison.baseline = Some(match baseline {
+            ResolvedBaseline::Published(b) => Baseline::Published {
+                commit: b.commit.to_string(),
+                publication: Publication::from_tree(desired),
+            },
+            ResolvedBaseline::Source(b) => Baseline::Source {
+                repository: sanitize_url(&b.repository),
+                revision: b.revision.clone(),
+                commit: b.commit.to_string(),
+                publication: Publication::from_tree(&b.compiled),
+            },
+        });
+    }
+
+    pub fn compared(&mut self, diff: TreeDiff) {
+        self.diff_policy_failed = self.fail_on_diff && diff.stats.has_changes;
+        self.diff = Some(diff.stats);
+        self.patch = Some(diff.patch);
+        self.stages.comparison = StageState::Completed;
+    }
+
+    pub fn validation(&mut self, outcome: crate::validation::TreeValidationOutcome, disabled_reason: &str) {
+        self.validation.report = outcome.report;
+        self.validation.reason = outcome.result.as_ref().err().map(ToString::to_string);
+        self.validation.status = if let Some(report) = &self.validation.report {
+            match report.status.as_str() {
+                "valid" => "valid",
+                "invalid" => "invalid",
+                _ => "error",
+            }
+        } else if outcome.result.is_err() {
+            "error"
+        } else {
+            "disabled"
+        };
+        if self.validation.status == "disabled" {
+            self.validation.reason = Some(disabled_reason.into());
+        }
+        if let Err(error) = outcome.result {
+            if !matches!(error, NylError::ValidationReported(_)) {
+                self.error("validation", &error);
+            }
+        }
+    }
+
+    pub fn error(&mut self, stage: &'static str, error: &NylError) {
+        match stage {
+            "discovery" => self.stages.discovery = StageState::Failed,
+            "render" => self.stages.render = StageState::Failed,
+            "comparison" => self.stages.comparison = StageState::Failed,
+            _ => {}
+        }
+        self.errors.push(OperationError {
+            stage,
+            message: error.to_string(),
+        });
+    }
+
+    pub fn result(&self) -> Result<()> {
+        let mut reasons = self
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.stage, e.message))
+            .collect::<Vec<_>>();
+        if matches!(self.validation.status, "invalid" | "error") {
+            reasons.push(self.validation_summary());
+        }
+        if self.diff_policy_failed {
+            reasons.push(format!(
+                "deployment target {:?} has rendered differences",
+                self.comparison.target.as_deref().unwrap_or("<unresolved>")
+            ));
+        }
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(NylError::Other(reasons.join("\n")))
         }
     }
 
     fn context_sections(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
-        let source = &self.comparison.desired_source;
-        let mut sections = vec![(
-            "Desired source",
-            vec![
-                (
-                    "Repository",
-                    source
-                        .repository
-                        .clone()
-                        .unwrap_or_else(|| "<local Git repository>".into()),
-                ),
-                (
-                    "Commit",
-                    source.commit.clone().unwrap_or_else(|| "<uncommitted>".into()),
-                ),
-                ("Working tree", if source.dirty { "dirty" } else { "clean" }.into()),
-            ],
-        )];
-        match &self.comparison.baseline {
-            Baseline::Published { commit, publication } => {
-                let mut fields = publication.fields();
-                fields.insert(3, ("Commit", commit.clone()));
-                sections.push(("Published baseline", fields));
+        let mut sections = Vec::new();
+        if let Some(source) = &self.comparison.desired_source {
+            sections.push((
+                "Desired source",
+                vec![
+                    (
+                        "Repository",
+                        source
+                            .repository
+                            .clone()
+                            .unwrap_or_else(|| "<local Git repository>".into()),
+                    ),
+                    (
+                        "Commit",
+                        source.commit.clone().unwrap_or_else(|| "<uncommitted>".into()),
+                    ),
+                    ("Working tree", if source.dirty { "dirty" } else { "clean" }.into()),
+                ],
+            ));
+        }
+        if let Some(baseline) = &self.comparison.baseline {
+            match baseline {
+                Baseline::Published { commit, publication } => {
+                    let mut fields = publication.fields();
+                    fields.insert(3, ("Commit", commit.clone()));
+                    sections.push(("Published baseline", fields));
+                }
+                Baseline::Source {
+                    repository,
+                    revision,
+                    commit,
+                    publication,
+                } => {
+                    sections.push((
+                        "Source baseline",
+                        vec![
+                            ("Repository", repository.clone()),
+                            ("Revision", revision.clone()),
+                            ("Commit", commit.clone()),
+                        ],
+                    ));
+                    sections.push(("Baseline publication", publication.fields()));
+                }
             }
-            Baseline::Source {
-                repository,
-                revision,
-                commit,
-                publication,
-            } => {
-                sections.push((
-                    "Source baseline",
-                    vec![
-                        ("Repository", repository.clone()),
-                        ("Revision", revision.clone()),
-                        ("Commit", commit.clone()),
-                    ],
-                ));
-                sections.push(("Desired publication", self.comparison.desired_publication.fields()));
-                sections.push(("Baseline publication", publication.fields()));
-            }
+        }
+        if let Some(publication) = &self.comparison.desired_publication {
+            sections.push(("Desired publication", publication.fields()));
         }
         sections
     }
@@ -513,155 +705,134 @@ impl Report {
     }
 
     fn file_totals(&self) -> String {
-        let d = &self.diff;
-        format!(
-            "{} changed · {} added · {} modified · {} deleted",
-            d.files_changed, d.files_added, d.files_modified, d.files_deleted
+        self.diff.as_ref().map_or_else(
+            || "Diff unavailable".into(),
+            |d| {
+                format!(
+                    "{} changed · {} added · {} modified · {} deleted",
+                    d.files_changed, d.files_added, d.files_modified, d.files_deleted
+                )
+            },
         )
+    }
+
+    fn validation_summary(&self) -> String {
+        let label = match self.validation.status {
+            "valid" => "Validation passed",
+            "invalid" => "Validation failed",
+            "error" => "Validation could not complete",
+            _ => "Validation not run",
+        };
+        if let Some(report) = &self.validation.report {
+            let s = &report.summary;
+            let label = if self.validation.status == "valid" && s.valid == 0 {
+                "No resources validated"
+            } else {
+                label
+            };
+            format!(
+                "{label}: {} valid · {} invalid · {} errors · {} skipped · {} not checked{}",
+                s.valid,
+                s.invalid,
+                s.errors,
+                s.skipped,
+                s.not_checked,
+                if report.complete { "" } else { " (incomplete)" }
+            )
+        } else {
+            format!(
+                "{label}: {}",
+                self.validation.reason.as_deref().unwrap_or("unavailable")
+            )
+        }
     }
 
     fn text(&self, files: bool, color: bool) -> String {
         let mut output = format!(
-            "{}\n  {:<20}{}\n  {:<20}{}\n",
+            "{}\n  Deployment target   {}\n  View                {}\n\n{}\nValidation scope: complete desired target\n",
             ansi_style("Rendered tree comparison", "1", color),
-            "Deployment target",
-            ansi_style(display_value(&self.comparison.target), "1;36", color),
-            "View",
-            display_value(&self.comparison.selection.description())
+            display_value(
+                self.comparison
+                    .target
+                    .as_deref()
+                    .or(self.request.target.as_deref())
+                    .unwrap_or("<unresolved>")
+            ),
+            display_value(&self.comparison.selection.description()),
+            self.validation_summary()
         );
-        for (heading, fields) in self.context_sections() {
-            writeln!(output, "  {}", ansi_style(heading, "1;36", color)).unwrap();
-            for (label, value) in fields {
-                let code = if label == "Working tree" {
-                    if value == "dirty" {
-                        "1;33"
-                    } else {
-                        "32"
-                    }
-                } else {
-                    "36"
-                };
+        for error in &self.errors {
+            writeln!(output, "ERROR ({}): {}", error.stage, display_value(&error.message)).unwrap();
+        }
+        if let Some(validation) = &self.validation.report {
+            for destination in &validation.destinations {
+                output.push_str(&validation.destination_text(destination, color));
+            }
+        }
+        if let Some(d) = &self.diff {
+            writeln!(
+                output,
+                "\n{}\n  Files       {}\n  Lines       {} {}",
+                ansi_style("Rendered differences", "1", color),
+                self.file_totals(),
+                ansi_style(format!("+{}", d.lines_added), "32", color),
+                ansi_style(format!("−{}", d.lines_removed), "31", color)
+            )
+            .unwrap();
+            if !d.has_changes {
                 writeln!(
                     output,
-                    "    {label:<18}{}",
-                    ansi_style(display_value(&value), code, color)
+                    "Deployment target {} has no rendered differences",
+                    self.comparison.target.as_deref().unwrap_or("<unresolved>")
                 )
                 .unwrap();
             }
+            if d.binary_files > 0 {
+                writeln!(output, "  Binary      {} (excluded from line totals)", d.binary_files).unwrap();
+            }
+            if files && d.has_changes {
+                writeln!(output, "\n  {:<8} {:>8} {:>8}  File", "Status", "Added", "Removed").unwrap();
+                for file in &d.files {
+                    let (added, removed) = line_labels(file);
+                    writeln!(
+                        output,
+                        "  {:<8} {:>8} {:>8}  {}",
+                        file.status.label(),
+                        ansi_style(format!("{added:>8}"), "32", color),
+                        ansi_style(format!("{removed:>8}"), "31", color),
+                        display_value(&file.path)
+                    )
+                    .unwrap();
+                }
+            }
+        } else {
+            output.push_str("\nDiff unavailable.\n");
         }
-        let destination = &self.comparison.diff_output;
-        writeln!(output, "  {:<20}{}", "Comparison", self.comparison.mode.label()).unwrap();
+        if self.diff_policy_failed {
+            output.push_str("Difference policy failed (--fail-on-diff).\n");
+        }
+        for (heading, fields) in self.context_sections() {
+            writeln!(output, "\n  {heading}").unwrap();
+            for (label, value) in fields {
+                writeln!(output, "    {label:<18}{}", display_value(&value)).unwrap();
+            }
+        }
         writeln!(
             output,
-            "  {:<20}{}\n",
+            "  {:<20}{}\n  {:<20}{}",
+            "Comparison",
+            self.comparison.mode.label(),
             "Diff output",
-            ansi_style(
-                if destination == "-" {
-                    "stdout".into()
-                } else {
-                    display_value(destination)
-                },
-                "36",
-                color
-            )
+            display_value(if self.comparison.diff_output == "-" {
+                "stdout"
+            } else {
+                &self.comparison.diff_output
+            })
         )
         .unwrap();
-        if !self.diff.has_changes {
-            writeln!(
-                output,
-                "Deployment target {} has no rendered differences",
-                display_value(&self.comparison.target)
-            )
-            .unwrap();
-        }
-        writeln!(
-            output,
-            "{}\n  {:<12}{}\n  {:<12}{} {}",
-            ansi_style("Rendered differences", "1", color),
-            "Files",
-            self.file_totals(),
-            "Lines",
-            ansi_style(format!("+{}", self.diff.lines_added), "32", color),
-            ansi_style(format!("−{}", self.diff.lines_removed), "31", color)
-        )
-        .unwrap();
-        if self.diff.binary_files > 0 {
-            writeln!(
-                output,
-                "  Binary      {} (excluded from line totals)",
-                self.diff.binary_files
-            )
-            .unwrap();
-        }
-        if files && self.diff.has_changes {
-            writeln!(output, "\n  {:<8} {:>8} {:>8}  File", "Status", "Added", "Removed").unwrap();
-            for file in &self.diff.files {
-                let (added, removed) = line_labels(file);
-                writeln!(
-                    output,
-                    "  {:<8} {:>8} {:>8}  {}",
-                    file.status.label(),
-                    ansi_style(format!("{added:>8}"), "32", color),
-                    ansi_style(format!("{removed:>8}"), "31", color),
-                    display_value(&file.path)
-                )
-                .unwrap();
-            }
-        }
-        if self.render.has_reportable_work() {
-            writeln!(output, "\n{}", self.render.format_with_color(color)).unwrap();
-        }
-        output
-    }
-
-    fn markdown(&self, files: bool) -> String {
-        let mut output = format!("## Rendered tree comparison\n\n| Field | Value |\n| --- | --- |\n| Deployment target | {} |\n| View | {} |\n| Diff output | {} |\n",
-            markdown_value(&self.comparison.target), markdown_value(&self.comparison.selection.description()),
-            markdown_value(if self.comparison.diff_output == "-" { "stdout" } else { &self.comparison.diff_output }));
-        writeln!(output, "| Comparison | {} |", self.comparison.mode.label()).unwrap();
-        for (heading, fields) in self.context_sections() {
-            writeln!(output, "\n### {heading}\n\n| Field | Value |\n| --- | --- |").unwrap();
-            for (label, value) in fields {
-                writeln!(output, "| {label} | {} |", markdown_value(&value)).unwrap();
-            }
-        }
-        writeln!(
-            output,
-            "\n### Rendered differences\n\n{}; **+{} −{} lines**.\n",
-            self.file_totals(),
-            self.diff.lines_added,
-            self.diff.lines_removed
-        )
-        .unwrap();
-        if !self.diff.has_changes {
-            output.push_str("No rendered differences.\n");
-        }
-        if self.diff.binary_files > 0 {
-            writeln!(
-                output,
-                "\n{} binary files excluded from line totals.",
-                self.diff.binary_files
-            )
-            .unwrap();
-        }
-        if files && self.diff.has_changes {
-            output.push_str("\n| File | Status | Added | Removed |\n| --- | --- | ---: | ---: |\n");
-            for file in &self.diff.files {
-                let (added, removed) = line_labels(file);
-                writeln!(
-                    output,
-                    "| {} | {} | {added} | {removed} |",
-                    markdown_value(&file.path),
-                    file.status.label()
-                )
-                .unwrap();
-            }
-        }
-        if self.render.has_reportable_work() {
-            // Indented code keeps arbitrary bypass reasons literal in Markdown.
-            output.push_str("\n### Render statistics\n\n");
-            for line in self.render.format_with_color(false).lines().skip(1) {
-                writeln!(output, "    {}", display_value(line)).unwrap();
+        if let Some(render) = &self.render {
+            if render.has_reportable_work() {
+                writeln!(output, "\n{}", render.format_with_color(color)).unwrap();
             }
         }
         output
@@ -717,27 +888,23 @@ mod tests {
     }
 
     fn report(diff: DiffStats) -> Report {
-        Report {
-            schema_version: 1,
-            comparison: Comparison {
-                mode: DiffMode::Normalized,
-                target: "production".into(),
-                selection: Selection::Tree,
-                desired_source: Source {
-                    repository: None,
-                    commit: None,
-                    dirty: true,
-                },
-                baseline: Baseline::Published {
-                    commit: "0123456".into(),
-                    publication: publication(),
-                },
-                desired_publication: publication(),
-                diff_output: "-".into(),
-            },
-            diff,
-            render: CacheStats::default(),
-        }
+        use clap::Parser as _;
+        let cli = crate::cli::Cli::try_parse_from(["nyl", "diff-tree", "--target", "production"]).unwrap();
+        let crate::cli::Commands::DiffTree(args) = cli.command else {
+            panic!("diff-tree command")
+        };
+        let mut report = Report::new(&args);
+        report.source("production", None, None, true);
+        report.comparison.baseline = Some(Baseline::Published {
+            commit: "0123456".into(),
+            publication: publication(),
+        });
+        report.comparison.desired_publication = Some(publication());
+        report.compared(TreeDiff {
+            patch: String::new(),
+            stats: diff,
+        });
+        report
     }
 
     fn publication() -> Publication {
@@ -975,7 +1142,7 @@ mod tests {
         let report = report(diff.stats);
         let json: serde_json::Value =
             serde_json::from_str(&report.format(ReportFormat::Json, false, true).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["diff"]["files"], serde_json::json!([]));
         assert_eq!(json["diff"]["lines_added"], 0);
         assert!(report.text(true, false).contains("has no rendered differences"));
@@ -1045,6 +1212,23 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn test_artifact_links_require_bounded_http_urls_without_credentials() {
+        assert_eq!(
+            parse_artifacts_url("https://example.invalid/artifacts?q=a(b)").unwrap(),
+            "https://example.invalid/artifacts?q=a(b)"
+        );
+        for invalid in [
+            "javascript:alert(1)",
+            "/relative",
+            "https://user:password@example.invalid/artifacts",
+            "https://user@example.invalid/artifacts",
+        ] {
+            assert!(parse_artifacts_url(invalid).is_err());
+        }
+        assert!(parse_artifacts_url(&format!("https://example.invalid/{}", "x".repeat(2_048))).is_err());
     }
 
     #[test]
