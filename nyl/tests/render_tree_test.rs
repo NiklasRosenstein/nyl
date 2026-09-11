@@ -2916,7 +2916,7 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
     }
     let markdown = fs::read_to_string(fixture.path().join("artifacts/comment.md")).unwrap();
     assert!(markdown.contains("| workloads/api/resources\\.yaml | modified | +1 | −1 |"));
-    assert!(markdown.contains("### Render statistics"));
+    assert!(markdown.contains("<summary>Render statistics</summary>\n\n```text\n"));
     #[cfg(unix)]
     Command::cargo_bin("nyl")
         .unwrap()
@@ -2935,10 +2935,10 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("## Nyl · production\n"))
-        .stdout(predicate::str::contains(
-            "1 changed · 0 added · 1 modified · 0 deleted; **+1 −1 lines**.",
+        .stdout(predicate::str::starts_with(
+            "## Nyl deployment check · production — 1 file changed\n",
         ))
+        .stdout(predicate::str::contains("**1 file changed · +1 −1 lines**"))
         .stderr(predicate::str::contains("Rendered tree comparison"));
     assert!(fs::read_to_string(fixture.path().join("artifacts/rendered.diff"))
         .unwrap()
@@ -3438,12 +3438,12 @@ fn diff_tree_exports_validation_failures_and_independent_comparison_results() {
         assert_eq!(validation["summary"]["invalid"], 2);
         let body = fs::read_to_string(markdown).unwrap();
         for resource in [
-            "Cluster rise/rise\\-db",
-            "Cluster rise\\-dash/dash\\-db",
+            "Cluster <code>rise/rise-db</code>",
+            "Cluster <code>rise-dash/dash-db</code>",
             "/spec/affinity",
             "got null, want object",
-            "Source: applications/workloads/",
-            "Rendered: workloads/",
+            "Source: <code>applications/workloads/",
+            "Rendered    workloads/",
         ] {
             assert!(body.contains(resource), "{case}: missing {resource}\n{body}");
         }
