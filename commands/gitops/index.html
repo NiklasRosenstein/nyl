@@ -176,16 +176,24 @@ and <code dir="auto">json:PATH</code> exports remain available. <code dir="auto"
 standalone validation stream; <code dir="auto">--no-stats-stderr</code> suppresses the combined report
 copy. Neither option changes exported reports.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="markdown-prmr-comments">Markdown PR/MR comments</h3><a class="sl-anchor-link" href="#markdown-prmr-comments"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Markdown PR/MR comments”</span></a></div>
-<p>Markdown starts with the target, source and baseline, validation outcome, and
-diff totals. Dirty source state and the comparison scope are visible. Validation
-findings identify the resource, destination, failing field, validator message,
-and source/rendered document locations. The first two failing resources appear
-inline; further failures are collapsed. Each resource can include a collapsed
-expansion trace and schema origin.</p>
+<p>The title identifies the deployment check, target, and outcome, for example
+“Nyl deployment check · kasoku — validation failed.” The summary leads with
+invalid and valid counts; zero counts are omitted. Disabled or incomplete
+validation remains explicit. Source and baseline revisions and dirty state are
+visible. Scope information appears beside the summary when validation and diff
+scopes differ, and is always available in the comparison context.</p>
+<p>Validation findings use one bullet per failing resource: kind and monospace
+namespace/name, failing field and message, then the source file and document.
+Multiple findings use nested bullets with one shared source location. The first
+two resources are visible; additional resources share a single collapsed list.
+A separate “Validation details” disclosure groups rendered locations, API
+versions, destinations, validators, expansion traces, and readable schema
+origins by resource. Full schema digests remain in JSON.</p>
 <p>Changed-file tables are collapsed when they contain more than two entries.
 <code dir="auto">--stats-patch</code> adds an optional collapsed unified-patch preview independently of
 <code dir="auto">--stats-files</code>. Full comparison metadata and render statistics are collapsed
-beneath the findings and diff sections. The complete patch is written to
+beneath the findings and diff sections. Render statistics use an aligned text
+code block inside their disclosure. The complete patch is written to
 <code dir="auto">--output</code>; the Markdown preview is not a substitute for that artifact.</p>
 <p>Markdown is limited to <strong>60,000 UTF-8 bytes</strong>, including markup and omission
 notices, leaving room for the sticky-comment marker. Outcomes and totals have
