@@ -2939,7 +2939,7 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
             "## Nyl deployment check · production — 1 file changed\n",
         ))
         .stdout(predicate::str::contains("**1 file changed · +1 −1 lines**"))
-        .stderr(predicate::str::contains("Rendered tree comparison"));
+        .stderr(predicate::str::contains("Rendered tree comparison").not());
     assert!(fs::read_to_string(fixture.path().join("artifacts/rendered.diff"))
         .unwrap()
         .contains("+  environment: changed"));
@@ -3460,6 +3460,57 @@ fn diff_tree_exports_validation_failures_and_independent_comparison_results() {
         if case == "catalog" {
             assert!(body.contains("Diff scope: Argo CD catalog"));
             assert!(body.contains("Validation scope: complete desired target"));
+        }
+    }
+
+    for (format, suppress_stderr) in [
+        (None, false),
+        (None, true),
+        (Some("text"), false),
+        (Some("markdown"), false),
+        (Some("json"), false),
+    ] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(["diff-tree", "--color", "never", "--progress", "off", "--output"])
+            .arg(artifacts.path().join("terminal.diff"));
+        if let Some(format) = format {
+            command.args(["--stats-output", &format!("{format}:-")]);
+        }
+        if suppress_stderr {
+            command.arg("--no-stats-stderr");
+        }
+        let result = command.assert().failure();
+        let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+        let terminal_reports = usize::from(format.is_none() && !suppress_stderr);
+        assert_eq!(stderr.matches("Rendered tree comparison").count(), terminal_reports);
+        for identity in ["Cluster rise/rise-db", "Cluster rise-dash/dash-db"] {
+            assert_eq!(
+                stderr.matches(&format!("FAIL  {identity}")).count(),
+                terminal_reports,
+                "{stderr}"
+            );
+        }
+        assert!(stderr.contains("kubeconform validating"), "{stderr}");
+        assert!(stderr.contains("Validation failed"), "{stderr}");
+        let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+        match format {
+            Some("json") => {
+                let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(report["validation"]["report"]["summary"]["invalid"], 2);
+            }
+            Some("markdown") => {
+                assert!(stdout.starts_with("## Nyl deployment check"));
+                assert!(stdout.contains("Cluster <code>rise/rise-db</code>"));
+            }
+            Some("text") => {
+                assert!(stdout.starts_with("Rendered tree comparison"));
+                assert_eq!(stdout.matches("FAIL  Cluster rise/rise-db").count(), 1);
+            }
+            None => assert!(stdout.is_empty()),
+            _ => unreachable!(),
         }
     }
 }

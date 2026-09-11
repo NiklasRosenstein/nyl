@@ -68,7 +68,8 @@ pub struct DiffTreeArgs {
     /// Link Markdown reports to a CI artifacts page (absolute HTTP(S) URL).
     #[arg(long, value_name = "URL", value_parser = report::parse_artifacts_url)]
     stats_artifacts_url: Option<String>,
-    /// Export a complete report (repeatable). Formats: text, markdown, json. PATH=- selects stdout.
+    /// Export a complete report (repeatable). Formats: text, markdown, json.
+    /// PATH=- selects stdout and suppresses the automatic stderr report.
     #[arg(long, value_name = "FORMAT:PATH")]
     stats_output: Vec<ReportOutput>,
     /// Suppress the default stderr report; progress and errors remain on stderr.
@@ -195,7 +196,8 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
             delivery_errors.push(format!("report output {}: {error}", destination.path.display()));
         }
     }
-    if !args.no_stats_stderr {
+    let report_stdout = args.stats_output.iter().any(|output| output.path == Path::new("-"));
+    if !args.no_stats_stderr && !report_stdout {
         let result = report
             .format(ReportFormat::Text, args.stats_files, color.should_use_ansi())
             .and_then(|contents| {
@@ -261,7 +263,12 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         }
     };
     report.desired(&desired);
-    let validation = crate::validation::collect_tree_validation(&args.validation, &inventory, &desired).await;
+    // The combined report owns findings; the validator still emits progress and exports.
+    let validation_args = crate::validation::ValidationArgs {
+        no_validation_stderr: true,
+        ..args.validation.clone()
+    };
+    let validation = crate::validation::collect_tree_validation(&validation_args, &inventory, &desired).await;
     report.validation(
         validation,
         if args.validation.no_validate {

@@ -136,10 +136,11 @@ patch notices, and their line counts are unavailable. Aggregate line counts
 cover text changes only. File moves count as additions and deletions.
 
 Use repeatable `--stats-output FORMAT:PATH` options to export `text`, `markdown`,
-and/or `json` reports independently of the patch. Exports copy the report; add
-`--no-stats-stderr` to suppress the stderr copy. Progress and errors remain on
-stderr; `--progress off` disables render progress. Formatter preferences are
-command-line options only.
+and/or `json` reports independently of the patch. A report sent to stdout
+(`PATH=-`) suppresses the automatic stderr report. File exports retain the
+stderr report unless `--no-stats-stderr` is set. Validation findings appear once
+in the combined report. Progress and errors remain on stderr; `--progress off`
+disables render progress. Formatter preferences are command-line options only.
 
 For example, prepare a Markdown PR comment and JSON for subsequent processing:
 
@@ -172,9 +173,10 @@ empty validation says “No resources validated.”
 
 Add `--fail-on-diff` if the job should also fail when changes exist; artifacts are
 written before returning that failure. Separate `--validation-output text:PATH`
-and `json:PATH` exports remain available. `--no-validation-stderr` suppresses the
-standalone validation stream; `--no-stats-stderr` suppresses the combined report
-copy. Neither option changes exported reports.
+and `json:PATH` exports remain available. `diff-tree` suppresses the standalone
+validation stream automatically, so `--no-validation-stderr` is unnecessary.
+`--no-stats-stderr` suppresses the combined terminal report, including validation
+findings, without changing exported reports or validation's exit status.
 
 ### Markdown PR/MR comments
 
@@ -231,7 +233,7 @@ nyl diff-tree --target production \
   --stats-files --stats-patch \
   --stats-output "markdown:$artifacts/comment.md" \
   --stats-output "json:$artifacts/report.json" \
-  --no-stats-stderr --no-validation-stderr || status=$?
+  --no-stats-stderr || status=$?
 
 comment_status=0
 if [ -f "$artifacts/comment.md" ]; then
@@ -253,14 +255,14 @@ Paths resolve against the invocation directory. `PATH=-` selects stdout, so
 redirect the diff to a file when exporting a report to stdout:
 
 ```bash
-nyl diff-tree --output rendered.diff --stats-output json:- --no-stats-stderr
+nyl diff-tree --output rendered.diff --stats-output json:-
 ```
 
-On Unix, `/dev/null` discards an output. For example, display just the Markdown
-report on stdout while discarding the patch:
+On Unix, `/dev/null` discards an output. For example, pipe the Markdown report
+into VS Code while discarding the patch:
 
 ```bash
-nyl diff-tree --stats-output markdown:- --output /dev/null --no-stats-stderr
+nyl diff-tree --stats-output markdown:- --output /dev/null | code -
 ```
 
 Multiple outputs may use `/dev/null`, but cannot share stdout or the same regular
