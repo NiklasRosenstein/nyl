@@ -178,17 +178,26 @@ copy. Neither option changes exported reports.
 
 ### Markdown PR/MR comments
 
-Markdown starts with the target, source and baseline, validation outcome, and
-diff totals. Dirty source state and the comparison scope are visible. Validation
-findings identify the resource, destination, failing field, validator message,
-and source/rendered document locations. The first two failing resources appear
-inline; further failures are collapsed. Each resource can include a collapsed
-expansion trace and schema origin.
+The title identifies the deployment check, target, and outcome, for example
+“Nyl deployment check · kasoku — validation failed.” The summary leads with
+invalid and valid counts; zero counts are omitted. Disabled or incomplete
+validation remains explicit. Source and baseline revisions and dirty state are
+visible. Scope information appears beside the summary when validation and diff
+scopes differ, and is always available in the comparison context.
+
+Validation findings use one bullet per failing resource: kind and monospace
+namespace/name, failing field and message, then the source file and document.
+Multiple findings use nested bullets with one shared source location. The first
+two resources are visible; additional resources share a single collapsed list.
+A separate “Validation details” disclosure groups rendered locations, API
+versions, destinations, validators, expansion traces, and readable schema
+origins by resource. Full schema digests remain in JSON.
 
 Changed-file tables are collapsed when they contain more than two entries.
 `--stats-patch` adds an optional collapsed unified-patch preview independently of
 `--stats-files`. Full comparison metadata and render statistics are collapsed
-beneath the findings and diff sections. The complete patch is written to
+beneath the findings and diff sections. Render statistics use an aligned text
+code block inside their disclosure. The complete patch is written to
 `--output`; the Markdown preview is not a substitute for that artifact.
 
 Markdown is limited to **60,000 UTF-8 bytes**, including markup and omission

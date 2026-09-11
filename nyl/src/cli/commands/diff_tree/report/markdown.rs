@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::render::ProvenanceFrame;
-use crate::validation::{ResourceResult, ResourceStatus};
+use crate::validation::{ResourceResult, ResourceStatus, SchemaOrigin};
 
 pub(super) const MARKDOWN_LIMIT: usize = 60_000;
 const FILES_LIMIT: usize = 10_000;
@@ -11,9 +11,13 @@ const NOTICE_RESERVE: usize = 1_024;
 
 /// Bound complete escaped characters, so clipping cannot expose Markdown syntax.
 fn value(input: &str) -> String {
+    bounded(input, |c| markdown_value(&c.to_string()))
+}
+
+fn bounded(input: &str, escape: impl Fn(char) -> String) -> String {
     let mut output = String::new();
     for c in input.chars() {
-        let escaped = markdown_value(&c.to_string());
+        let escaped = escape(c);
         if output.len() + escaped.len() > 2_048 - "… [truncated]".len() {
             output.push_str("… [truncated]");
             break;
@@ -23,8 +27,24 @@ fn value(input: &str) -> String {
     output
 }
 
+fn code(input: &str) -> String {
+    let escaped = bounded(input, |c| match c {
+        '&' => "&amp;".into(),
+        '<' => "&lt;".into(),
+        '>' => "&gt;".into(),
+        '\\' | '`' | '*' | '_' | '[' | ']' | '~' => format!("&#{};", u32::from(c)),
+        _ => display_value(&c.to_string()),
+    });
+    format!("<code>{escaped}</code>")
+}
+
+fn code_block(input: &str) -> String {
+    let fence = "`".repeat(fence_size(input));
+    format!("{fence}text\n{input}\n{fence}\n")
+}
+
 fn details(summary: &str, contents: &str) -> String {
-    format!("\n<details>\n<summary>{summary}</summary>\n\n{contents}\n</details>\n")
+    format!("\n<details>\n<summary>{summary}</summary>\n\n{contents}\n</details>\n\n")
 }
 
 fn push_if_fits(output: &mut String, block: &str, limit: usize) -> bool {
@@ -53,6 +73,7 @@ impl Report {
         }
 
         let traces = self.markdown_findings(&mut output, limit);
+        let details_position = output.len();
 
         if let Some(diff) = &self.diff {
             if files && diff.has_changes {
@@ -81,7 +102,19 @@ impl Report {
                 }
             }
         }
-        self.markdown_context(&mut output, traces, limit);
+        let validation_details = self.validation_details(&traces, limit.saturating_sub(output.len()));
+        if validation_details.is_empty() && !traces.is_empty() {
+            output.insert_str(
+                details_position,
+                &format!(
+                    "Validation details omitted for size. Full evidence: {}.\n\n",
+                    self.evidence_reference()
+                ),
+            );
+        } else {
+            output.insert_str(details_position, &validation_details);
+        }
+        self.markdown_context(&mut output, limit);
         output.push_str(&footer);
         debug_assert!(output.len() <= MARKDOWN_LIMIT);
         output
@@ -94,7 +127,7 @@ impl Report {
             .as_deref()
             .or(self.request.target.as_deref())
             .unwrap_or("target unresolved");
-        let mut output = format!("## Nyl · {}\n\n", value(target));
+        let mut output = format!("## Nyl deployment check · {} — {}\n\n", value(target), self.headline());
         let source = self.comparison.desired_source.as_ref();
         let commit = source.and_then(|s| s.commit.as_deref()).unwrap_or(if source.is_some() {
             "uncommitted"
@@ -108,26 +141,29 @@ impl Report {
         writeln!(
             output,
             "Source {} · {} baseline {}\n",
-            value(commit),
+            code(commit),
             self.request.against,
-            value(baseline)
+            code(baseline)
         )
         .unwrap();
         if source.is_some_and(|s| s.dirty) {
             output.push_str("**Working tree: dirty.**\n\n");
         }
-        writeln!(output, "**{}**\n", value(&self.validation_summary())).unwrap();
-        writeln!(
-            output,
-            "Validation scope: complete desired target. Diff scope: {}.\n",
-            value(&self.comparison.selection.description())
-        )
-        .unwrap();
+        writeln!(output, "**{}**\n", self.markdown_validation_summary()).unwrap();
+        if !matches!(self.comparison.selection, Selection::Tree) {
+            writeln!(
+                output,
+                "Validation scope: complete desired target. Diff scope: {}.\n",
+                value(&self.comparison.selection.description())
+            )
+            .unwrap();
+        }
         if let Some(diff) = &self.diff {
             writeln!(
                 output,
-                "**Rendered differences:** {}; **+{} −{} lines**.\n",
-                self.file_totals(),
+                "**{} file{} changed · +{} −{} lines**\n",
+                diff.files_changed,
+                if diff.files_changed == 1 { "" } else { "s" },
                 diff.lines_added,
                 diff.lines_removed
             )
@@ -149,120 +185,206 @@ impl Report {
         if self.diff_policy_failed {
             output.push_str("**Difference policy failed** (`--fail-on-diff`).\n\n");
         }
-        for (name, state) in [
-            ("Discovery", &self.stages.discovery),
-            ("Rendering", &self.stages.render),
-            ("Comparison", &self.stages.comparison),
-        ] {
-            if matches!(state, StageState::Failed) {
-                writeln!(output, "**{name} failed.**\n").unwrap();
-            }
-        }
 
         output
     }
 
-    fn markdown_findings(&self, output: &mut String, limit: usize) -> Vec<(&ResourceResult, usize)> {
-        let mut traces = Vec::new();
-        if let Some(validation) = &self.validation.report {
-            let failures = validation
-                .resources
-                .iter()
-                .filter(|r| matches!(r.status, ResourceStatus::Invalid | ResourceStatus::Error))
-                .collect::<Vec<_>>();
-            if !failures.is_empty() {
-                output.push_str("### Validation findings\n\n");
-                let mut shown_resources = 0;
-                let mut shown_findings = 0;
-                let total_findings: usize = failures.iter().map(|r| r.findings.len()).sum();
-                let mut additional = String::new();
-                for (index, resource) in failures.iter().copied().enumerate() {
-                    let prefix = resource_prefix(resource);
-                    let mut block = prefix;
-                    let mut findings = 0;
-                    for finding in &resource.findings {
-                        let entry = format!(
-                            "- **{}:** {}\n",
-                            value(match finding.path.as_deref() {
-                                Some("") => "Resource root",
-                                Some(path) => path,
-                                None => "Field unavailable",
-                            }),
-                            value(&finding.message)
-                        );
-                        if output.len() + additional.len() + block.len() + entry.len() + 512 > limit {
-                            break;
-                        }
-                        block.push_str(&entry);
-                        findings += 1;
-                    }
-                    if findings == 0 && !resource.findings.is_empty() {
-                        continue;
-                    }
-                    if resource.findings.is_empty() {
-                        block.push_str("Validator returned no finding message.\n");
-                    }
-                    if findings < resource.findings.len() {
-                        writeln!(
-                            block,
-                            "\n{} further findings omitted for this resource.",
-                            resource.findings.len() - findings
-                        )
-                        .unwrap();
-                    }
-                    writeln!(block, "\n<nyl-provenance-{index}>").unwrap();
-                    if output.len() + additional.len() + block.len() + 512 > limit {
-                        continue;
-                    }
-                    shown_resources += 1;
-                    shown_findings += findings;
-                    // Expansion traces have lower priority than findings and diff previews.
-                    traces.push((resource, index));
-                    if index < 2 {
-                        output.push_str(&block);
-                    } else {
-                        additional.push_str(&block);
-                    }
-                }
-                if !additional.is_empty() {
-                    output.push_str(&details(
-                        &format!(
-                            "More validation failures ({} resource{})",
-                            failures.len().saturating_sub(2),
-                            if failures.len() == 3 { "" } else { "s" }
-                        ),
-                        &additional,
-                    ));
-                }
-                if shown_resources < failures.len() || shown_findings < total_findings {
-                    writeln!(output, "Showing {shown_resources} of {} failing resources and {shown_findings} of {total_findings} findings. Full evidence: {}.\n", failures.len(), self.evidence_reference()).unwrap();
-                }
+    fn headline(&self) -> String {
+        for (state, outcome) in [
+            (&self.stages.discovery, "discovery failed"),
+            (&self.stages.render, "rendering failed"),
+            (&self.stages.comparison, "comparison unavailable"),
+        ] {
+            if matches!(state, StageState::Failed) {
+                return outcome.into();
             }
         }
-        traces
+        match self.validation.status {
+            "invalid" => return "validation failed".into(),
+            "error" => return "validation incomplete".into(),
+            _ => {}
+        }
+        if !self.errors.is_empty() {
+            return "reporting failed".into();
+        }
+        if self.diff_policy_failed {
+            return "difference policy failed".into();
+        }
+        self.diff.as_ref().map_or_else(
+            || "comparison unavailable".into(),
+            |diff| {
+                if diff.has_changes {
+                    format!(
+                        "{} file{} changed",
+                        diff.files_changed,
+                        if diff.files_changed == 1 { "" } else { "s" }
+                    )
+                } else {
+                    "no rendered changes".into()
+                }
+            },
+        )
     }
 
-    fn markdown_context(&self, output: &mut String, traces: Vec<(&ResourceResult, usize)>, limit: usize) {
-        let mut omitted_context = false;
-        for (resource, index) in traces {
-            let trace = resource_trace(resource);
-            if trace.is_empty() {
-                *output = output.replacen(&format!("<nyl-provenance-{index}>"), "", 1);
-            } else {
-                let block = details("Expansion trace and schema", &trace);
-                let marker = format!("<nyl-provenance-{index}>");
-                if output.len() - marker.len() + block.len() <= limit {
-                    *output = output.replacen(&marker, &block, 1);
+    fn markdown_validation_summary(&self) -> String {
+        let Some(report) = &self.validation.report else {
+            return value(&self.validation_summary());
+        };
+        let summary = &report.summary;
+        let mut parts = Vec::new();
+        if self.validation.status == "error" {
+            parts.push("Validation could not complete".into());
+        }
+        if self.validation.status == "valid" {
+            parts.push(
+                if summary.valid == 0 {
+                    "No resources validated"
                 } else {
-                    *output = output.replacen(&marker, "", 1);
-                    omitted_context = true;
+                    "Validation passed"
                 }
+                .into(),
+            );
+        }
+        for (count, label) in [
+            (summary.invalid, "invalid"),
+            (summary.valid, "valid"),
+            (summary.errors, "errors"),
+            (summary.skipped, "skipped"),
+            (summary.not_checked, "not checked"),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {label}"));
             }
         }
+        parts.join(" · ")
+    }
+
+    fn markdown_findings(&self, output: &mut String, limit: usize) -> Vec<&ResourceResult> {
+        let mut shown = Vec::new();
+        let Some(validation) = &self.validation.report else {
+            return shown;
+        };
+        let failures = validation
+            .resources
+            .iter()
+            .filter(|r| matches!(r.status, ResourceStatus::Invalid | ResourceStatus::Error))
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return shown;
+        }
+        output.push_str("### Validation findings\n\n");
+        let mut shown_findings = 0;
+        let total_findings: usize = failures.iter().map(|r| r.findings.len()).sum();
+        let mut additional = String::new();
+        for (index, resource) in failures.iter().copied().enumerate() {
+            let source = source_location(resource);
+            let mut block = format!("- **{}**  \n", resource_identity(resource));
+            let mut findings = 0;
+            for finding in &resource.findings {
+                let path = match finding.path.as_deref() {
+                    Some("") => "Resource root".into(),
+                    Some(path) => code(path),
+                    None => "Field unavailable".into(),
+                };
+                let entry = format!(
+                    "  {}{path}: {}  \n",
+                    if resource.findings.len() > 1 { "- " } else { "" },
+                    value(&finding.message)
+                );
+                if output.len() + additional.len() + block.len() + entry.len() + source.len() + 512 > limit {
+                    break;
+                }
+                block.push_str(&entry);
+                findings += 1;
+            }
+            if findings == 0 && !resource.findings.is_empty() {
+                continue;
+            }
+            if resource.findings.is_empty() {
+                block.push_str("  Validator returned no finding message.  \n");
+            }
+            if findings < resource.findings.len() {
+                writeln!(
+                    block,
+                    "\n  {} further findings omitted for this resource.\n",
+                    resource.findings.len() - findings
+                )
+                .unwrap();
+            }
+            // A blank line ends nested finding bullets before the shared source location.
+            if resource.findings.len() > 1 {
+                block.push('\n');
+            }
+            writeln!(block, "  {source}\n").unwrap();
+            if output.len() + additional.len() + block.len() + 512 > limit {
+                continue;
+            }
+            shown.push(resource);
+            shown_findings += findings;
+            if index < 2 {
+                output.push_str(&block);
+            } else {
+                additional.push_str(&block);
+            }
+        }
+        if !additional.is_empty() {
+            output.push_str(&details(
+                &format!(
+                    "More validation failures ({} resource{})",
+                    failures.len().saturating_sub(2),
+                    if failures.len() == 3 { "" } else { "s" }
+                ),
+                &additional,
+            ));
+        }
+        if shown.len() < failures.len() || shown_findings < total_findings {
+            writeln!(output, "Showing {} of {} failing resources and {shown_findings} of {total_findings} findings. Full evidence: {}.\n", shown.len(), failures.len(), self.evidence_reference()).unwrap();
+        }
+        shown
+    }
+
+    fn validation_details(&self, resources: &[&ResourceResult], allowance: usize) -> String {
+        if resources.is_empty() {
+            return String::new();
+        }
+        let mut body = String::new();
+        let mut shown = 0;
+        for resource in resources {
+            let block = format!(
+                "**{}**\n\n{}\n",
+                resource_identity(resource),
+                code_block(&resource_trace(resource))
+            );
+            if body.len() + block.len() + 256 > allowance {
+                break;
+            }
+            body.push_str(&block);
+            shown += 1;
+        }
+        if shown < resources.len() {
+            writeln!(
+                body,
+                "Details for {} additional resources omitted for size. Full evidence: {}.",
+                resources.len() - shown,
+                self.evidence_reference()
+            )
+            .unwrap();
+        }
+        let section = details("Validation details", &body);
+        if section.len() <= allowance {
+            section
+        } else {
+            String::new()
+        }
+    }
+
+    fn markdown_context(&self, output: &mut String, limit: usize) {
+        let mut omitted_context = false;
         let mut context = format!(
-            "Comparison: {}. Diff output: {}.\n",
+            "Comparison: {}. Diff output: {}.\n\nValidation scope: complete desired target. Diff scope: {}.\n",
             self.comparison.mode.label(),
-            value(&self.comparison.diff_output)
+            code(&self.comparison.diff_output),
+            value(&self.comparison.selection.description())
         );
         for (heading, fields) in self.context_sections() {
             writeln!(context, "\n### {heading}\n\n| Field | Value |\n| --- | --- |").unwrap();
@@ -275,11 +397,14 @@ impl Report {
         }
         if let Some(render) = &self.render {
             if render.has_reportable_work() {
-                let mut statistics = String::from("### Render statistics\n\n");
-                for line in render.format_with_color(false).lines().skip(1) {
-                    writeln!(statistics, "{}  ", value(line)).unwrap();
-                }
-                if !push_if_fits(output, &details("Render statistics", &statistics), limit) {
+                let statistics = render
+                    .format_with_color(false)
+                    .lines()
+                    .skip(1)
+                    .map(|line| bounded(line, |c| display_value(&c.to_string())))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !push_if_fits(output, &details("Render statistics", &code_block(&statistics)), limit) {
                     omitted_context = true;
                 }
             }
@@ -421,59 +546,59 @@ impl Report {
     }
 }
 
-fn resource_prefix(result: &ResourceResult) -> String {
+fn resource_identity(result: &ResourceResult) -> String {
     let r = &result.resource;
     let name = r.namespace.as_deref().map_or_else(
         || r.name.as_deref().unwrap_or("unnamed").to_owned(),
         |ns| format!("{ns}/{}", r.name.as_deref().unwrap_or("unnamed")),
     );
-    let mut output = format!(
-        "**{} {}** · {} · destination {} · {}\n\n",
-        value(&r.kind),
-        value(&name),
-        value(&r.api_version),
-        value(&result.destination),
-        value(&result.validator)
-    );
+    format!("{} {}", value(&r.kind), code(&name))
+}
+
+fn source_location(result: &ResourceResult) -> String {
     if let Some(ProvenanceFrame::Source { path, document }) = result
         .provenance
         .0
         .iter()
         .find(|f| matches!(f, ProvenanceFrame::Source { .. }))
     {
-        writeln!(
-            output,
-            "Source: {} · document {document}  ",
-            value(&path.to_string_lossy())
-        )
-        .unwrap();
+        format!("Source: {} · document {document}", code(&path.to_string_lossy()))
     } else {
-        output.push_str("Source provenance unavailable.  \n");
+        "Source provenance unavailable.".into()
     }
-    writeln!(output, "Rendered: {}\n", value(&result.rendered_location.to_string())).unwrap();
-    output
 }
 
 fn resource_trace(result: &ResourceResult) -> String {
-    let mut output = String::new();
+    let mut rows = vec![
+        ("API version", result.resource.api_version.clone()),
+        ("Destination", result.destination.clone()),
+        ("Validator", result.validator.clone()),
+        ("Rendered", result.rendered_location.to_string()),
+    ];
     for frame in &result.provenance.0 {
-        let line = match frame {
-            ProvenanceFrame::Source { path, document } => format!("Source: {} · document {document}", path.display()),
-            ProvenanceFrame::Resource { identity } => format!("Expanded from: {identity}"),
-            ProvenanceFrame::Generated { operation } => format!("Generated: {operation}"),
-            ProvenanceFrame::Remote { repository, revision } => format!("Repository: {repository} @ {revision}"),
-        };
-        writeln!(output, "- {}", value(&line)).unwrap();
+        rows.push(match frame {
+            ProvenanceFrame::Source { path, document } => {
+                ("Source", format!("{} · document {document}", path.display()))
+            }
+            ProvenanceFrame::Resource { identity } => ("Expanded", identity.clone()),
+            ProvenanceFrame::Generated { operation } => ("Generated", operation.clone()),
+            ProvenanceFrame::Remote { repository, revision } => ("Repository", format!("{repository} @ {revision}")),
+        });
     }
-    if let Some(origin) = &result.schema_origin {
-        writeln!(
-            output,
-            "- Schema: {}",
-            value(&serde_json::to_string(origin).expect("schema origin serializes"))
-        )
-        .unwrap();
-    }
-    output
+    rows.push((
+        "Schema",
+        match &result.schema_origin {
+            Some(SchemaOrigin::Captured { cluster, .. }) => format!("Captured from cluster {cluster}"),
+            Some(SchemaOrigin::Desired { crd, .. }) => format!("Desired CRD {crd}"),
+            Some(SchemaOrigin::Local { path, .. }) => format!("Local schema {path}"),
+            Some(SchemaOrigin::Builtin { url, .. }) => format!("Built-in schema {url}"),
+            None => "Origin unavailable".into(),
+        },
+    ));
+    rows.into_iter()
+        .map(|(label, text)| format!("{label:<12}{}", bounded(&text, |c| display_value(&c.to_string()))))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn link_url(url: &str) -> String {
@@ -611,12 +736,16 @@ mod tests {
     }
 
     #[test]
-    fn test_findings_have_identity_locations_and_nested_provenance() {
+    fn test_findings_lead_with_problems_and_share_collapsed_details() {
         let mut report = sample_report(3);
         let mut validation = ValidationReport {
             resources: (0..3).map(|i| invalid_resource(i, 2)).collect(),
             ..Default::default()
         };
+        validation.resources[0].schema_origin = Some(SchemaOrigin::Captured {
+            cluster: "kasoku".into(),
+            digest: "abc123".into(),
+        });
         validation.resources[1].findings[0].path = Some(String::new());
         validation.resources[2].findings[0].path = None;
         validation.finish();
@@ -628,14 +757,23 @@ mod tests {
             "",
         );
         let markdown = report.markdown(true);
-        assert!(markdown.contains("Validation failed: 0 valid · 3 invalid"));
-        assert!(markdown.contains("Cluster rise/rise\\-db\\-0"));
+        assert!(markdown.starts_with("## Nyl deployment check · production — validation failed\n"));
+        assert!(markdown.contains("**3 invalid**"));
+        assert!(markdown.contains("- **Cluster <code>rise/rise-db-0</code>**"));
         assert!(markdown.contains("/spec/affinity"));
         assert!(markdown.contains("got null, want object"));
-        assert!(markdown.contains("Source: applications/rise\\.yaml · document 4"));
-        assert!(markdown.contains("document 1\\) · items\\[0\\]"));
+        assert!(markdown.contains("Source: <code>applications/rise.yaml</code> · document 4"));
+        assert!(markdown.contains("document 1) · items[0]"));
         assert!(markdown.contains("More validation failures (1 resource)"));
-        assert!(markdown.find("Expansion trace and schema").unwrap() < markdown.find("Changed files").unwrap());
+        assert!(markdown.find("Validation details").unwrap() < markdown.find("Changed files").unwrap());
+        assert!(markdown.contains("Schema      Captured from cluster kasoku"));
+        assert!(markdown.contains("- <code>/spec/affinity</code>: got null, want object"));
+        let json: serde_json::Value =
+            serde_json::from_str(&report.format(ReportFormat::Json, false, false).unwrap()).unwrap();
+        assert_eq!(
+            json["validation"]["report"]["resources"][0]["schemaOrigin"]["digest"],
+            "abc123"
+        );
         assert!(markdown.contains("Resource root"));
         assert!(markdown.contains("Field unavailable"));
         assert!(report.result().is_err());
@@ -730,6 +868,16 @@ mod tests {
                 "",
             );
             assert!(report.markdown(false).contains(expected));
+            assert_eq!(
+                report.headline(),
+                if matches!(status, ResourceStatus::Error | ResourceStatus::NotChecked) {
+                    "validation incomplete"
+                } else {
+                    "no rendered changes"
+                }
+            );
+            report.stages.comparison = StageState::Failed;
+            assert_eq!(report.headline(), "comparison unavailable");
         }
         let report = sample_report(0);
         assert!(report.markdown(false).contains("Validation not run"));
