@@ -8,12 +8,17 @@ pub fn parse_yaml_documents_k8s_compatible(
     input: &str,
 ) -> Result<Vec<serde_json::Value>, serde_saphyr::DeserializeError> {
     // Each document keeps its own complexity budget, including in stored release streams.
-    serde_saphyr::read(&mut input.as_bytes()).collect()
+    serde_saphyr::read_with_options(&mut input.as_bytes(), k8s_parse_options()).collect()
 }
 
 /// Parse one YAML document into JSON using the library's scalar resolution.
 pub fn parse_yaml_value_k8s_compatible(input: &str) -> Result<serde_json::Value, serde_saphyr::DeserializeError> {
-    serde_saphyr::from_str(input)
+    serde_saphyr::from_str_with_options(input, k8s_parse_options())
+}
+
+fn k8s_parse_options() -> serde_saphyr::Options {
+    // Kubernetes accepts leading-zero integers as YAML 1.1 octal permission modes.
+    serde_saphyr::options! { legacy_octal_numbers: true }
 }
 
 /// Serialize data to YAML while preserving string contents through a parse roundtrip.
@@ -115,6 +120,30 @@ items:
         assert_eq!(items[0], 16);
         assert_eq!(items[1], 8);
         assert_eq!(items[2], 1.5);
+    }
+
+    #[test]
+    fn test_roundtrip_projected_volume_octal_permissions() {
+        let input = "projected:\n  defaultMode: 0444\n  sources:\n  - secret:\n      items:\n      - key: token\n        path: token\n        mode: 0644\n";
+        let expected = serde_json::json!({
+            "projected": {
+                "defaultMode": 0o444,
+                "sources": [{"secret": {"items": [{"key": "token", "path": "token", "mode": 0o644}]}}]
+            }
+        });
+
+        for parsed in [
+            parse_yaml_value_k8s_compatible(input).unwrap(),
+            parse_yaml_documents_k8s_compatible(input).unwrap().remove(0),
+        ] {
+            for yaml in [
+                serialize_yaml_document(&parsed).unwrap(),
+                serialize_yaml_value(&parsed).unwrap(),
+            ] {
+                let roundtripped = parse_yaml_value_k8s_compatible(&yaml).unwrap();
+                assert_eq!(roundtripped, expected, "serialized YAML:\n{yaml}");
+            }
+        }
     }
 
     #[test]
