@@ -10,7 +10,7 @@ rust = "1.98.1"
 
 # Kubernetes tools
 kubeconform = "0.8.0"
-kyverno = "1.19.0"
+kyverno = "1.19.1"
 sops = "3.13.3"
 helm = "4.3.0"
 kubectl = "1.37.0"
