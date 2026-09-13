@@ -1,0 +1,179 @@
+{
+  "$defs": {
+    "ObjectMetadata": {
+      "additionalProperties": false,
+      "description": "Kubernetes object metadata",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations",
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace (optional)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "RemoteManifestSpec": {
+      "additionalProperties": false,
+      "description": "RemoteManifest specification",
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "urls": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "urls"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "url": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "url"
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "url": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "url"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "urls": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "urls"
+          ]
+        }
+      ],
+      "properties": {
+        "overrideNamespace": {
+          "description": "Overwrite fetched manifest metadata.namespace with RemoteManifest metadata.namespace",
+          "type": "boolean"
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Parameters for `{key}` substitution in `urls` URL templates",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Single HTTPS URL to fetch (mutually exclusive with `urls`)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "urls": {
+          "description": "List of HTTPS URL templates to fetch (mutually exclusive with `url`)",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Fetches HTTPS YAML or JSON documents and expands them into Kubernetes manifests.\n\nFetched documents enter the recursive render pipeline. Namespace overriding applies when explicitly requested.\n\n## When needed\n\nUse this optional resource to fetch HTTPS YAML or JSON documents into the render pipeline.\n\n## If omitted\n\nNyl does not fetch remote manifests automatically. Other authored resources render normally without a RemoteManifest.",
+  "examples": [
+    {
+      "apiVersion": "k8s.nyl/v1",
+      "kind": "RemoteManifest",
+      "metadata": {
+        "name": "workloads",
+        "namespace": "workloads"
+      },
+      "spec": {
+        "url": "https://example.com/manifests/app.yaml"
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "k8s.nyl/v1",
+      "description": "API version (must be core Nyl API version)",
+      "type": "string"
+    },
+    "kind": {
+      "const": "RemoteManifest",
+      "description": "Resource kind (always \"RemoteManifest\")",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ObjectMetadata",
+      "description": "Kubernetes metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/RemoteManifestSpec",
+      "description": "Remote manifest source configuration"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "RemoteManifest",
+  "type": "object"
+}
