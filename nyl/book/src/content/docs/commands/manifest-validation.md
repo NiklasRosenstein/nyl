@@ -20,7 +20,7 @@ enabled = false
 
 [validation.kubeconform]
 strict = true
-vendor_builtin_schemas = false
+builtin_schemas = "cached"
 schema_locations = []
 skip = []
 timeout_seconds = 60
@@ -75,8 +75,8 @@ ordering or compatibility with resources outside the validated input.
 
 ## Capture cluster CRD schemas
 
-CRD capture is an explicit live read. Pass `--crds` on each capture, or enable it
-by default in `nyl.toml`:
+Cluster capture explicitly reads live capabilities and CRDs. Its default policy
+is equivalent to:
 
 ```toml
 [capture.cluster]
@@ -94,7 +94,11 @@ The command refreshes committed Kubernetes capabilities and, when enabled,
 schemas for every served CRD version. `--check` compares the enabled capture
 outputs with the live cluster without writing. `--no-crds` refreshes capabilities
 while preserving schema files; it does not certify those schemas as current.
-Capturing schemas requires permission to list CRDs.
+Capturing schemas is enabled by default, including when `nyl init` invokes
+capture, and requires permission to list CRDs. Set `[capture.cluster] crds = false`
+to default to capabilities-only capture; `--crds` overrides that setting.
+A CRD read failure aborts capture before writing. `nyl vendor` consumes committed
+captures and does not contact clusters.
 
 A capture with CRDs replaces that Cluster's schema inventory with the served
 CRD versions currently in the cluster, removing entries for deleted CRDs and
@@ -157,28 +161,33 @@ contract, independently of the workload destination.
 
 ## Validate an operator installation or upgrade
 
-`--use-desired-crds` enables validation and asserts that the input includes each
-desired CRD and **all custom resources affected by it**:
+Complete target-tree validation uses desired CRDs automatically. This applies to
+`render-tree`, `diff-tree`, and `publish-tree` whenever validation is enabled:
 
 ```bash
-nyl publish-tree --target production --use-desired-crds
+nyl publish-tree --target production --validate
 ```
 
-This assertion is per invocation. It cannot be combined with source/output kind
-filters or `--append-release`. A complete file-based render can also make the
-assertion. Nyl does not infer completeness from the presence of a CRD.
+Use `--no-use-desired-crds` to validate against local or captured CRD schemas.
+This switch does not enable validation. File-based `render`, `diff`, and `apply`
+require `--use-desired-crds` to enable validation using desired CRDs; it cannot
+be combined with source/output kind filters or `--append-release`.
 
 Schemas are resolved in this order, independently for each destination:
 
-1. Desired CRDs, when explicitly admitted with `--use-desired-crds`.
+1. Desired CRDs, when enabled for the invocation.
 2. Configured local schema locations.
 3. The effective Cluster's captured CRD schemas.
 4. The pinned registry for built-in Kubernetes APIs.
 
 A desired CRD supersedes its entire group/kind definition. Removed and unserved
 versions cannot fall back to captured schemas. Conflicting desired definitions
-fail. Without the assertion, CRD objects themselves are validated but their
-schemas are not used to validate custom resources.
+fail. A group/kind absent from desired CRDs retains ordinary schema resolution.
+
+Validation checks compatibility of resources included in the render. It does
+not check resources in other targets or existing cluster resources omitted from
+the input, establish upgrade ordering, or perform stored-version migration.
+Tree diff selection filters do not narrow the complete desired validation input.
 
 For APIs managed elsewhere, commit schemas locally and configure a lookup:
 
@@ -217,7 +226,7 @@ committed schemas during validation:
 mode = "required"
 
 [validation.kubeconform]
-vendor_builtin_schemas = true
+builtin_schemas = "vendor-used"
 ```
 
 ```bash
@@ -227,8 +236,21 @@ nyl diff-tree --target production --validate
 nyl publish-tree --target production --validate
 ```
 
-Vendoring materializes built-ins required by the selected target renders,
-including catalog destinations and schema dependencies. In this mode validation
+`builtin_schemas` selects one of three modes:
+
+| Mode | Vendoring | Validation |
+| --- | --- | --- |
+| `cached` (default) | No builtin schema population | Download into a disposable cache as needed |
+| `vendor-used` | Schemas required by selected target renders | Require vendored schemas |
+| `vendor-all` | Every JSON schema in each selected Kubernetes version directory | Require vendored schemas |
+
+Both vendor modes include catalog destinations and schema dependencies.
+`vendor-all` uses the configured strictness and immutable registry revision,
+regardless of local schema overrides or resource exclusions. It records complete
+directory inventories so `nyl vendor --check` can verify coverage offline.
+Adding a builtin resource kind for those versions requires no new vendor run.
+Changing Kubernetes version, strictness, or registry revision requires vendoring
+its matching schemas. In both vendor modes validation
 fails on missing vendored schemas and never downloads a fallback. A targetless
 render must also have all of its required built-ins available locally.
 

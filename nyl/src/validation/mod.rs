@@ -1,5 +1,6 @@
 //! Final-artifact validation with explicit destination and schema provenance.
 
+mod collections;
 mod config;
 mod report;
 mod resolve;
@@ -11,5 +12,5 @@ pub use report::{
 pub(crate) mod schemas;
 pub(crate) mod store;
 
-pub use config::{CaptureSettings, KubeconformSettings, ValidationArgs, ValidationSettings};
+pub use config::{BuiltinSchemas, CaptureSettings, KubeconformSettings, ValidationArgs, ValidationSettings};
 pub use runner::*;

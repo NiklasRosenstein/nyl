@@ -131,8 +131,13 @@ Kubernetes contracts.
 Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
 contract from another declared Cluster. Effective capabilities drive both
 rendering and validation; destinations, values, and live connection settings
-remain local. `nyl capture cluster` refreshes committed capabilities and optional
-CRD schema snapshots. Project-configured validators check final artifacts.
+remain local. `nyl capture cluster` refreshes committed capabilities and
+CRD schema snapshots by default, with capabilities-only overrides. Project-configured
+validators check final artifacts. Complete tree validation uses desired CRDs for
+rendered resources by default, with an invocation opt-out; compatibility outside
+the rendered input and upgrade ordering require separate handling. Builtin schema
+policy selects disposable caching, vendoring of used schemas, or complete pinned
+Kubernetes version directories with offline inventory verification.
 Rendering emits inspectable artifacts even when validation fails and returns a
 failing exit status; `render-tree --check` writes no output. Validation gates diff
 calculation, application, and publication. These operations remain independently

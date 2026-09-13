@@ -17,14 +17,27 @@ pub struct ValidationSettings {
     pub kubeconform: Option<KubeconformSettings>,
 }
 
+/// Built-in schema download and vendoring policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuiltinSchemas {
+    /// Download schemas into a disposable cache as needed.
+    #[default]
+    Cached,
+    /// Vendor schemas needed by selected target renders; validate offline.
+    VendorUsed,
+    /// Vendor complete Kubernetes version directories; validate offline.
+    VendorAll,
+}
+
 /// Kubeconform's schema inputs and bounded execution policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct KubeconformSettings {
     /// Reject unknown properties and duplicate YAML keys.
     pub strict: bool,
-    /// Require built-in schemas materialized by nyl vendor; never download during validation.
-    pub vendor_builtin_schemas: bool,
+    /// Built-in schema download and vendoring policy.
+    pub builtin_schemas: BuiltinSchemas,
     /// Ordered local schema lookup templates, relative to nyl.toml.
     pub schema_locations: Vec<String>,
     /// Explicit apiVersion/kind exclusions. Skipped resources appear in the summary.
@@ -39,7 +52,7 @@ impl Default for KubeconformSettings {
     fn default() -> Self {
         Self {
             strict: true,
-            vendor_builtin_schemas: false,
+            builtin_schemas: BuiltinSchemas::Cached,
             schema_locations: Vec::new(),
             skip: Vec::new(),
             timeout_seconds: 60,
@@ -57,11 +70,17 @@ pub struct CaptureSettings {
 }
 
 /// Optional cluster API schema capture.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClusterCaptureSettings {
     /// Capture schemas for all served CRD versions.
     pub crds: bool,
+}
+
+impl Default for ClusterCaptureSettings {
+    fn default() -> Self {
+        Self { crds: true }
+    }
 }
 
 /// Shared switches for all manifest-producing commands.
@@ -81,10 +100,13 @@ pub struct ValidationArgs {
     /// Suppress project-default manifest validation.
     #[arg(long, conflicts_with = "use_desired_crds")]
     pub no_validate: bool,
-    /// Validate using desired CRDs; asserts that every affected CR is included.
-    /// Cannot be used with resource filters or append-release.
-    #[arg(long)]
+    /// Validate rendered custom resources using desired CRDs.
+    /// Default for complete tree validation; cannot be used with file resource filters or append-release.
+    #[arg(long, conflicts_with = "no_use_desired_crds")]
     pub use_desired_crds: bool,
+    /// Use local or captured CRD schemas instead of desired CRDs during validation.
+    #[arg(long)]
+    pub no_use_desired_crds: bool,
 }
 
 impl ValidationArgs {
@@ -117,7 +139,7 @@ impl ValidationArgs {
         Ok(enabled)
     }
 
-    /// A filtered or incremental input cannot assert complete CRD coverage.
+    /// Desired CRD validation requires an unfiltered, non-incremental input.
     pub fn check_complete(&self, partial: bool) -> Result<()> {
         if self.use_desired_crds && partial {
             return Err(NylError::config(
@@ -125,5 +147,39 @@ impl ValidationArgs {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_modes_and_capture_defaults() {
+        assert_eq!(
+            toml::from_str::<KubeconformSettings>("").unwrap().builtin_schemas,
+            BuiltinSchemas::Cached
+        );
+        for (name, mode) in [
+            ("cached", BuiltinSchemas::Cached),
+            ("vendor-used", BuiltinSchemas::VendorUsed),
+            ("vendor-all", BuiltinSchemas::VendorAll),
+        ] {
+            assert_eq!(
+                toml::from_str::<KubeconformSettings>(&format!("builtin_schemas = '{name}'"))
+                    .unwrap()
+                    .builtin_schemas,
+                mode
+            );
+        }
+        assert!(toml::from_str::<KubeconformSettings>("vendor_builtin_schemas = true").is_err());
+        assert!(toml::from_str::<KubeconformSettings>("builtin_schemas = 'invalid'").is_err());
+        assert!(toml::from_str::<CaptureSettings>("").unwrap().cluster.crds);
+        assert!(
+            !toml::from_str::<CaptureSettings>("[cluster]\ncrds = false")
+                .unwrap()
+                .cluster
+                .crds
+        );
     }
 }

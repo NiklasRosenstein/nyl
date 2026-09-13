@@ -35,13 +35,15 @@ pub struct SchemaResolver<'a> {
     pub settings: &'a KubeconformSettings,
     pub populate: bool,
     pub check: bool,
-    refresh: bool,
+    pub(super) refresh: bool,
     pub schema_digests: BTreeMap<String, String>,
     pub observed_sources: BTreeSet<PathBuf>,
     pub observed_origins: BTreeMap<String, super::report::SchemaOrigin>,
     pub observed_builtins: BTreeMap<String, String>,
+    pub observed_collections: BTreeMap<String, String>,
     cache: PathBuf,
-    client: reqwest::Client,
+    pub(super) client: reqwest::Client,
+    pub(super) registry_api: String,
 }
 
 impl<'a> SchemaResolver<'a> {
@@ -74,10 +76,12 @@ impl<'a> SchemaResolver<'a> {
             check,
             refresh: false,
             observed_builtins: BTreeMap::new(),
+            observed_collections: BTreeMap::new(),
             observed_origins: BTreeMap::new(),
             observed_sources: BTreeSet::new(),
             schema_digests: BTreeMap::new(),
             cache: project.join(".nyl/cache/validation-schemas"),
+            registry_api: "https://api.github.com/repos/yannh/kubernetes-json-schema/git/trees".into(),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(settings.timeout_seconds))
                 .build()
@@ -152,7 +156,7 @@ impl<'a> SchemaResolver<'a> {
                 }
             }
         }
-        if self.check || (self.settings.vendor_builtin_schemas && !self.populate) {
+        if self.check || (self.settings.builtin_schemas != super::BuiltinSchemas::Cached && !self.populate) {
             return Err(NylError::validation(format!(
                 "Missing vendored built-in schema {url}; run nyl vendor"
             )));
@@ -650,6 +654,7 @@ mod tests {
         let bytes = store::json_bytes(value).unwrap();
         let hash = store::write_blob(&resolver.vendor, &bytes).unwrap();
         let index = store::BuiltinIndex {
+            collections: BTreeMap::new(),
             version: 1,
             schemas: BTreeMap::from([(url.to_owned(), hash.clone())]),
         };
@@ -675,7 +680,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let vendor = directory.path().join("vendor");
         let settings = KubeconformSettings {
-            vendor_builtin_schemas: true,
+            builtin_schemas: crate::validation::BuiltinSchemas::VendorUsed,
             ..KubeconformSettings::default()
         };
         for corrupt in [false, true] {
