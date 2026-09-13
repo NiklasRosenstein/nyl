@@ -18,7 +18,7 @@ pub struct ClusterCaptureArgs {
     /// Check whether stored capabilities are current without modifying the file
     #[arg(long)]
     pub check: bool,
-    /// Capture schemas for all served CRD versions.
+    /// Capture schemas for all served CRD versions (enabled by default).
     #[arg(long, conflicts_with = "no_crds")]
     pub crds: bool,
     /// Capture capabilities only, preserving existing schema files.
@@ -240,7 +240,9 @@ async fn fetch_cluster_info(
             "CustomResourceDefinition",
         ));
         let api: kube::Api<kube::api::DynamicObject> = kube::Api::all_with(raw, &resource);
-        let listed = api.list(&kube::api::ListParams::default()).await?;
+        let listed = api.list(&kube::api::ListParams::default()).await.map_err(|error| {
+            NylError::Kubernetes(format!("Cannot capture CRDs: {error}; grant permission to list customresourcedefinitions or use --no-crds for capabilities-only capture"))
+        })?;
         Some(crd_list_documents(listed)?)
     } else {
         None
@@ -422,6 +424,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::resources::GitOpsResourceIdentity;
+    use crate::validation::store;
 
     struct StubCapture {
         version: String,
@@ -453,7 +456,7 @@ mod tests {
     fn capture_fixture() -> tempfile::TempDir {
         let directory = tempfile::TempDir::new().unwrap();
         git2::Repository::init(directory.path()).unwrap();
-        fs::write(directory.path().join("nyl.toml"), "[capture.cluster]\ncrds = true\n").unwrap();
+        fs::write(directory.path().join("nyl.toml"), "").unwrap();
         fs::write(directory.path().join("cluster.yaml"),
             "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: staging\nspec:\n  destination:\n    name: staging\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, example.com/v1]\n").unwrap();
         directory
@@ -479,6 +482,35 @@ mod tests {
                     "schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":kind}}}}}}}]}
             })],
         }
+    }
+
+    #[tokio::test]
+    async fn test_capture_config_and_cli_overrides_preserve_capabilities_only_snapshots() {
+        let directory = capture_fixture();
+        let root = directory.path().join("vendor");
+        capture_with_client(capture_args(false), directory.path(), &capture_stub("integer"))
+            .await
+            .unwrap();
+        let before = store::read_cluster_index(&root, "staging").unwrap().unwrap();
+        fs::write(directory.path().join("nyl.toml"), "[capture.cluster]\ncrds = false\n").unwrap();
+        capture_with_client(capture_args(false), directory.path(), &capture_stub("string"))
+            .await
+            .unwrap();
+        assert_eq!(store::read_cluster_index(&root, "staging").unwrap().unwrap(), before);
+        let mut args = capture_args(false);
+        args.crds = true;
+        capture_with_client(args, directory.path(), &capture_stub("string"))
+            .await
+            .unwrap();
+        let updated = store::read_cluster_index(&root, "staging").unwrap().unwrap();
+        assert_ne!(updated, before);
+        fs::write(directory.path().join("nyl.toml"), "").unwrap();
+        let mut args = capture_args(false);
+        args.no_crds = true;
+        capture_with_client(args, directory.path(), &capture_stub("integer"))
+            .await
+            .unwrap();
+        assert_eq!(store::read_cluster_index(&root, "staging").unwrap().unwrap(), updated);
     }
 
     #[tokio::test]

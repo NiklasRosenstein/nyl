@@ -313,6 +313,10 @@ async fn validate_tree_inner(
             store::vendor_root(&inventory.project_root, &inventory.project_config)?,
         ],
     )?;
+    let args = &ValidationArgs {
+        use_desired_crds: !args.no_use_desired_crds,
+        ..args.clone()
+    };
     let partitions = tree_partitions(inventory, compiled)?;
     collect_partitions_with_tool(
         args,
@@ -901,39 +905,48 @@ pub async fn vendor_schemas(
 ) -> Result<()> {
     let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
     let settings = inventory.project_config.config.validation.kubeconform.as_ref();
-    if let Some(settings) = settings.filter(|settings| settings.vendor_builtin_schemas) {
-        let _lock = if check { None } else { Some(store::lock(&root)?) };
+    let _lock = if check { None } else { Some(store::lock(&root)?) };
+    let mut index = if preserve {
+        store::read_builtins(&root)?
+    } else {
+        store::BuiltinIndex {
+            version: 1,
+            ..store::BuiltinIndex::default()
+        }
+    };
+    if let Some(settings) = settings.filter(|settings| settings.builtin_schemas != super::BuiltinSchemas::Cached) {
         let mut resolver =
             SchemaResolver::new(&inventory.project_root, root.clone(), settings, !check, check)?.with_refresh(refresh);
+        let mut versions = BTreeSet::new();
         for tree in compiled {
             for partition in tree_partitions(inventory, tree)? {
-                let stage = tempfile::TempDir::new()?;
-                // Schema discovery does not assert a complete desired CRD delivery scope.
-                prepare_partition(
-                    &ValidationArgs::default(),
-                    &partition,
-                    &mut resolver,
-                    stage.path(),
-                    true,
-                )
-                .await?;
+                versions.insert(partition.version.clone());
+                if settings.builtin_schemas == super::BuiltinSchemas::VendorUsed {
+                    let stage = tempfile::TempDir::new()?;
+                    prepare_partition(
+                        &ValidationArgs::default(),
+                        &partition,
+                        &mut resolver,
+                        stage.path(),
+                        true,
+                    )
+                    .await?;
+                }
             }
         }
-        if !check {
-            let mut index = if preserve {
-                store::read_builtins(&root)?
-            } else {
-                store::BuiltinIndex {
-                    version: 1,
-                    ..store::BuiltinIndex::default()
-                }
-            };
-            index.schemas.extend(resolver.observed_builtins);
-            store::atomic_write(
-                &store::safe_path(&root, Path::new("schemas/builtins.json"))?,
-                &store::json_bytes(&index)?,
-            )?;
+        if settings.builtin_schemas == super::BuiltinSchemas::VendorAll {
+            for version in versions {
+                resolver.vendor_version(&version).await?;
+            }
         }
+        index.schemas.extend(resolver.observed_builtins);
+        index.collections.extend(resolver.observed_collections);
+    }
+    if !check {
+        store::atomic_write(
+            &store::safe_path(&root, Path::new("schemas/builtins.json"))?,
+            &store::json_bytes(&index)?,
+        )?;
     }
     store::check_and_prune(&root, false)?;
     Ok(())
@@ -969,7 +982,7 @@ mod tests {
     fn fixture() -> (TempDir, ProjectConfig, ValidationPartition) {
         let directory = TempDir::new().unwrap();
         std::fs::write(directory.path().join("nyl.toml"),
-            "[validation]\nenabled=true\n[validation.kubeconform]\nvendor_builtin_schemas=true\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
+            "[validation]\nenabled=true\n[validation.kubeconform]\nbuiltin_schemas=\"vendor-used\"\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
         let config = ProjectConfig::load_from_dir(None, Some(directory.path())).unwrap();
         let definitions = schemas::extract_crds(&[crd("integer")]).unwrap();
         let schema = &definitions["widgets.example.com"].versions["v1"].strict;
@@ -1287,7 +1300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_desired_crds_require_explicit_scope_and_mask_removed_versions() {
+    async fn test_desired_crds_fall_back_for_absent_kinds_and_mask_removed_versions() {
         let (directory, config, mut partition) = fixture();
         std::fs::remove_file(directory.path().join("schemas/example.com/widget_v1.json")).unwrap();
         let root = directory.path().join("vendor");
@@ -1311,6 +1324,13 @@ mod tests {
         .unwrap();
         partition.schema_source = Some("staging".into());
         partition.schema_capabilities_fingerprint = Some(index.capabilities_fingerprint);
+        let desired = ValidationArgs {
+            use_desired_crds: true,
+            ..ValidationArgs::default()
+        };
+        validate_partitions(&desired, &config, directory.path(), std::slice::from_ref(&partition))
+            .await
+            .unwrap();
         partition.documents[0].manifest["spec"]["count"] = json!("new");
         partition.documents.push(document(crd("string")));
         assert!(validate_partitions(
@@ -1321,10 +1341,6 @@ mod tests {
         )
         .await
         .is_err());
-        let desired = ValidationArgs {
-            use_desired_crds: true,
-            ..ValidationArgs::default()
-        };
         validate_partitions(&desired, &config, directory.path(), std::slice::from_ref(&partition))
             .await
             .unwrap();
@@ -1368,6 +1384,7 @@ mod tests {
         )
         .unwrap();
         let index = store::BuiltinIndex {
+            collections: BTreeMap::new(),
             version: 1,
             schemas: BTreeMap::from([(url, hash), (dependency_url, dependency_hash.clone())]),
         };
@@ -1425,6 +1442,7 @@ mod tests {
             }});
             let hash = store::write_blob(&root, &store::json_bytes(&definitions).unwrap()).unwrap();
             let index = store::BuiltinIndex {
+                collections: BTreeMap::new(),
                 version: 1,
                 schemas: BTreeMap::from([(url.to_string(), hash.clone())]),
             };

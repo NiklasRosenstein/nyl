@@ -236,7 +236,7 @@ fn publication_fixture() -> (TempDir, TempDir, TempDir, git2::Oid) {
 
 fn configure_validation(root: &std::path::Path, data_type: &str) {
     fs::write(root.join("nyl.toml"),
-        "[validation]\nenabled=true\n[validation.kubeconform]\nvendor_builtin_schemas=true\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
+        "[validation]\nenabled=true\n[validation.kubeconform]\nbuiltin_schemas=\"vendor-used\"\nschema_locations=['schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json']\n").unwrap();
     for (group, kind, version) in [
         ("v1", "configmap", "v1"),
         ("v1", "namespace", "v1"),
@@ -3618,4 +3618,145 @@ fn diff_tree_keeps_exporting_after_a_report_write_fails() {
         assert_eq!(report["validation"]["report"]["status"], "valid", "{report}");
         assert!(blocking_file.is_file());
     }
+}
+
+#[test]
+fn desired_crds_default_to_tree_validation_and_support_opt_out() {
+    let fixture = fixture();
+    configure_validation(fixture.path(), "string");
+    for (group, file, schema) in [
+        (
+            "apiextensions.k8s.io",
+            "customresourcedefinition_v1.json",
+            serde_json::json!({"type":"object"}),
+        ),
+        ("example.com", "widget_v1.json", serde_json::json!({"type":"object"})),
+    ] {
+        fs::create_dir_all(fixture.path().join("schemas").join(group)).unwrap();
+        fs::write(
+            fixture.path().join("schemas").join(group).join(file),
+            schema.to_string(),
+        )
+        .unwrap();
+    }
+    let path = fixture.path().join("applications/workloads/api.yaml");
+    let manifests = format!(
+        "{}\n---\n{}\n---\n{}\n",
+        fs::read_to_string(&path).unwrap(),
+        serde_json::json!({"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"widgets.example.com"},"spec":{"group":"example.com","scope":"Namespaced","names":{"kind":"Widget","plural":"widgets"},"versions":[{"name":"v1","served":true,"storage":true,"schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":"integer"}}}}}}}]}}),
+        serde_json::json!({"apiVersion":"example.com/v1","kind":"Widget","metadata":{"name":"example","namespace":"api"},"spec":{"count":"invalid"}})
+    );
+    fs::write(&path, manifests).unwrap();
+    let output = TempDir::new().unwrap();
+    for flags in [vec![], vec!["--no-use-desired-crds"], vec!["--no-validate"]] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--target", "production", "--output-dir"])
+            .arg(output.path())
+            .args(&flags);
+        if flags.is_empty() {
+            command.assert().failure().stderr(predicate::str::contains("1 invalid"));
+        } else {
+            command.assert().success();
+        }
+    }
+    for explicit in [false, true] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args([
+                "render",
+                "applications/workloads/api.yaml",
+                "--offline",
+                "--target",
+                "production",
+            ]);
+        if explicit {
+            command
+                .arg("--use-desired-crds")
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("1 invalid"));
+        } else {
+            command.assert().success();
+        }
+    }
+}
+
+#[test]
+fn vendor_all_preserves_targeted_collections_and_prunes_unselected_versions() {
+    use sha2::Digest as _;
+    let fixture = fixture();
+    configure_validation(fixture.path(), "string");
+    let config_path = fixture.path().join("nyl.toml");
+    let config = format!(
+        "{}\n[vendor]\nmode='required'\n",
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("vendor-used", "vendor-all")
+    );
+    fs::write(&config_path, &config).unwrap();
+    let root = fixture.path().join("vendor/schemas");
+    fs::create_dir_all(root.join("blobs")).unwrap();
+    let write_blob = |value: &serde_json::Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        fs::write(root.join("blobs").join(format!("{hash}.json")), bytes).unwrap();
+        hash
+    };
+    let mut schemas = BTreeMap::new();
+    let mut collections = BTreeMap::new();
+    let revision = "07b64c5376535fbbd6fb9910621e1a41f7613c14";
+    for version in ["1.30.0", "1.31.4"] {
+        let directory = format!(
+            "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{revision}/v{version}-standalone-strict/"
+        );
+        for file in ["configmap-v1.json", "secret-v1.json"] {
+            schemas.insert(
+                format!("{directory}{file}"),
+                write_blob(&serde_json::json!({"type":"object","description":format!("{version}/{file}")})),
+            );
+        }
+        collections.insert(
+            directory.clone(),
+            write_blob(&serde_json::json!({"directory":directory,"files":["configmap-v1.json","secret-v1.json"]})),
+        );
+    }
+    let index_path = root.join("builtins.json");
+    fs::write(
+        &index_path,
+        serde_json::to_vec(&serde_json::json!({"version":1,"schemas":schemas,"collections":collections})).unwrap(),
+    )
+    .unwrap();
+    let vendor = |arguments: &[&str]| {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .arg("vendor")
+            .args(arguments);
+        command
+    };
+    vendor(&["--target", "production"]).assert().success();
+    let index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    assert_eq!(index["collections"].as_object().unwrap().len(), 2);
+    vendor(&["--check"]).assert().success();
+    vendor(&["--prune"]).assert().success();
+    let index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    assert_eq!(index["collections"].as_object().unwrap().len(), 1);
+    assert_eq!(index["schemas"].as_object().unwrap().len(), 2);
+    let secret = format!("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{revision}/v1.31.4-standalone-strict/secret-v1.json");
+    let hash = index["schemas"][&secret].as_str().unwrap();
+    fs::remove_file(root.join("blobs").join(format!("{hash}.json"))).unwrap();
+    vendor(&["--check"]).assert().failure();
+    let mut index = index;
+    let invalid = write_blob(&serde_json::json!({"$ref":"https://example.invalid/schema.json"}));
+    index["schemas"][&secret] = serde_json::json!(invalid);
+    let before = serde_json::to_vec(&index).unwrap();
+    fs::write(&index_path, &before).unwrap();
+    vendor(&["--target", "production"]).assert().failure();
+    assert_eq!(fs::read(&index_path).unwrap(), before);
 }

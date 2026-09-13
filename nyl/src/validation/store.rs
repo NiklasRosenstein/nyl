@@ -45,6 +45,9 @@ pub struct BuiltinIndex {
     pub version: u32,
     /// Immutable schema URL to verified content digest.
     pub schemas: BTreeMap<String, String>,
+    /// Pinned version-directory URL to the digest of its complete file inventory.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub collections: BTreeMap<String, String>,
 }
 
 pub fn digest(bytes: &[u8]) -> String {
@@ -315,7 +318,9 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
             }
         }
     }
-    referenced.extend(read_builtins(root)?.schemas.into_values());
+    let builtins = read_builtins(root)?;
+    referenced.extend(builtins.schemas.into_values());
+    referenced.extend(builtins.collections.into_values());
     for hash in &referenced {
         read_blob(root, hash)?;
     }

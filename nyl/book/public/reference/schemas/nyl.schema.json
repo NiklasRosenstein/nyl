@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "BuiltinSchemas": {
+      "description": "Built-in schema download and vendoring policy.",
+      "oneOf": [
+        {
+          "const": "cached",
+          "description": "Download schemas into a disposable cache as needed.",
+          "type": "string"
+        },
+        {
+          "const": "vendor-used",
+          "description": "Vendor schemas needed by selected target renders; validate offline.",
+          "type": "string"
+        },
+        {
+          "const": "vendor-all",
+          "description": "Vendor complete Kubernetes version directories; validate offline.",
+          "type": "string"
+        }
+      ]
+    },
     "CaptureSettings": {
       "additionalProperties": false,
       "description": "Defaults for explicit live capture commands.",
@@ -7,7 +27,7 @@
         "cluster": {
           "$ref": "#/$defs/ClusterCaptureSettings",
           "default": {
-            "crds": false
+            "crds": true
           },
           "description": "Cluster capture defaults."
         }
@@ -19,7 +39,7 @@
       "description": "Optional cluster API schema capture.",
       "properties": {
         "crds": {
-          "default": false,
+          "default": true,
           "description": "Capture schemas for all served CRD versions.",
           "type": "boolean"
         }
@@ -37,6 +57,11 @@
             "string",
             "null"
           ]
+        },
+        "builtin_schemas": {
+          "$ref": "#/$defs/BuiltinSchemas",
+          "default": "cached",
+          "description": "Built-in schema download and vendoring policy."
         },
         "schema_locations": {
           "default": [],
@@ -65,11 +90,6 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
-        },
-        "vendor_builtin_schemas": {
-          "default": false,
-          "description": "Require built-in schemas materialized by nyl vendor; never download during validation.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -206,7 +226,7 @@
       "$ref": "#/$defs/CaptureSettings",
       "default": {
         "cluster": {
-          "crds": false
+          "crds": true
         }
       },
       "description": "Defaults for explicit cluster capture."

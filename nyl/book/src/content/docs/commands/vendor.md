@@ -61,7 +61,14 @@ for resolution and Git LFS behavior.
 
 ## Validation schemas
 
-With `validation.kubeconform.vendor_builtin_schemas = true`, vendoring also
-materializes required built-in schemas. Cluster captures are read-only inputs
+Set `validation.kubeconform.builtin_schemas` to `"vendor-used"` to materialize
+required builtin schemas, or `"vendor-all"` to materialize complete schema
+directories for every selected workload and catalog Kubernetes version. Both
+modes require vendored builtin schemas during validation. The default `"cached"`
+mode permits validation to download builtin schemas into a disposable cache.
+
+Complete directory inventories and schema digests let `--check` verify
+`"vendor-all"` coverage without network access. `--refresh` retrieves inventories
+and schemas again. Cluster captures are read-only inputs
 whose referenced blobs survive pruning. See
 [Manifest validation](../manifest-validation/) for the offline workflow.
