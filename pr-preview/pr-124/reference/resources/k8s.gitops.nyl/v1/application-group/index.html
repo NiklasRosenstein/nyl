@@ -154,7 +154,12 @@
 <span class="line"><span style="color:#85E89D">        not</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">          type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"null"</span></span>
 <span class="line"><span style="color:#85E89D">    required</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#9ECBFF">projectTemplate</span></span></code></pre>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#9ECBFF">projectTemplate</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">properties</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">      projectRef</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"null"</span></span>
+<span class="line"><span style="color:#85E89D">      projectTemplate</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"null"</span></span></code></pre>
 </details>
 <p><a id="field-spec.annotations"></a></p>
 <h3 id="specannotations">spec.annotations</h3>
@@ -289,11 +294,11 @@
 <p><a id="field-spec.projectRef"></a></p>
 <h3 id="specprojectref">spec.projectRef</h3>
 <p><strong>Optional</strong> · string or null</p>
-<p>Project-local <a href="/nyl/pr-preview/pr-124/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Exactly one of <code>projectRef</code> and <code>projectTemplate</code> is required.</p>
+<p>Project-local <a href="/nyl/pr-preview/pr-124/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Mutually exclusive with <code>projectTemplate</code>; omitting both implies a permissive AppProject named after this group.</p>
 <p><a id="field-spec.projectTemplate"></a></p>
 <h3 id="specprojecttemplate">spec.projectTemplate</h3>
 <p><strong>Optional</strong> · object or null</p>
-<p>Constrained generated AppProject. Exactly one of <code>projectRef</code> and <code>projectTemplate</code> is required.</p>
+<p>Constrained generated AppProject. Mutually exclusive with <code>projectRef</code>; declaring it requires explicit destination namespaces.</p>
 <p>Unknown fields are rejected.</p>
 <p><a id="field-spec.projectTemplate.clusterResourceWhitelist"></a></p>
 <h3 id="specprojecttemplateclusterresourcewhitelist">spec.projectTemplate.clusterResourceWhitelist</h3>

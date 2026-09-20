@@ -83,9 +83,10 @@ under the configured <code dir="auto">project.gitops_scaffold_path</code>, which
 resource identities are never overwritten.</p>
 <p><code dir="auto">nyl create cluster</code> records its local context but does not connect to it. Use
 <code dir="auto">nyl capture cluster NAME</code> to refresh stored Kubernetes capabilities.</p>
-<p>A generated ApplicationGroup references the project’s only AppProjectDefinition
-when exactly one exists, and otherwise a project of its own name. It sets no
-<code dir="auto">destinationNamespace</code>, so each Release keeps the namespace in its own metadata.</p>
+<p>A generated ApplicationGroup declares no project and no <code dir="auto">destinationNamespace</code>,
+so it owns its implied permissive AppProject and each Release keeps the
+namespace in its own metadata. Add <code dir="auto">spec.projectTemplate</code> to narrow the project,
+or <code dir="auto">spec.projectRef</code> to share an AppProjectDefinition.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="create-releases">Create releases</h2><a class="sl-anchor-link" href="#create-releases"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Create releases”</span></a></div>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">create</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">api</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">create</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">api</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--group</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">platform</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">create</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">api</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--namespace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">api-system</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--additional-namespaces</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">observability,ingress</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl create release apinyl create release api --group platformnyl create release api --namespace api-system --additional-namespaces observability,ingress"><div></div></button></div></figure></div>
 <p>The Release file is written to the source directory of a matching
@@ -97,10 +98,9 @@ one. A group whose spec is rendered with a target still works as long as its
 <code dir="auto">spec.source</code> can be read without one; a remote or templated source needs an
 explicit <code dir="auto">--output</code>, which is accepted together with <code dir="auto">--group</code>.</p>
 <p>Nyl warns, without refusing the file, when the group’s <code dir="auto">spec.source</code> selection
-does not include it, and when the AppProjectDefinition behind the group’s
-<code dir="auto">projectRef</code> lists no destination for one of the Release namespaces. The
-AppProject that <a href="/nyl/pr-preview/pr-124/commands/init/"><code dir="auto">nyl init</code></a> generates admits only the
-namespaces given by its <code dir="auto">--allow-namespace</code> options.</p>
+does not include it, and when the group’s project lists no destination for one
+of the Release namespaces. A group that declares no project admits every
+namespace, so it never produces that warning.</p>
 <p>When <code dir="auto">--group NAME</code> names a group that does not exist, Nyl offers to declare it
 and, with <code dir="auto">--create-group</code>, does so without asking. The new group is appended to
 a root <code dir="auto">gitops.yaml</code> or written under <code dir="auto">project.gitops_scaffold_path</code>, and its
