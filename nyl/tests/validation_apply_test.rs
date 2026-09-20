@@ -112,7 +112,12 @@ users:
         "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: invalid, namespace: default}\ndata: {count: 123}\n",
     )
     .unwrap();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+    // The stub cluster is local; an ambient proxy must not intercept it.
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        command.env_remove(variable);
+    }
+    let output = command
         .current_dir(temp.path())
         .env("KUBECONFIG", temp.path().join("kubeconfig"))
         .args([

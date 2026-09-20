@@ -8,6 +8,7 @@ pub mod schema;
 
 use crate::util::fs::{find_config_file, resolve_path, resolve_paths};
 use crate::{NylError, Result};
+use clap::ValueEnum;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -64,12 +65,23 @@ impl StripEmptyMetadataLabelsMode {
 }
 
 /// Controls whether remote renderer inputs may use an in-tree vendor snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum VendorMode {
     Disabled,
     Preferred,
     Required,
+}
+
+impl VendorMode {
+    /// The value written to and read from `vendor.mode` in `nyl.toml`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Preferred => "preferred",
+            Self::Required => "required",
+        }
+    }
 }
 
 /// Project-global remote artifact vendoring settings.

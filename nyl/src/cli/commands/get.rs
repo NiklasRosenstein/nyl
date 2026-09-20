@@ -174,9 +174,19 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
             vec![name.clone(), format!("{:?}", project.spec.management), file]
         }
         Some(GitOpsResource::ApplicationGroup(group)) => {
-            let project = group.spec.project_ref.as_deref().unwrap_or("<inline>");
+            // A group without a projectRef generates its project, from its own
+            // template or from the implied permissive one.
+            let project = group.spec.project_ref.clone().unwrap_or_else(|| {
+                let generated = group
+                    .spec
+                    .project_template
+                    .as_ref()
+                    .and_then(|template| template.name.clone())
+                    .unwrap_or_else(|| name.clone());
+                format!("{generated} (generated)")
+            });
             let source = group.spec.source.as_ref().map_or("-", |source| source.path.as_str());
-            vec![name.clone(), project.to_owned(), source.to_owned(), file]
+            vec![name.clone(), project, source.to_owned(), file]
         }
         None => templated_resource_row(kind, name, file),
     }

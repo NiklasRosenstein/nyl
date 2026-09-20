@@ -3,7 +3,8 @@ title: 'vendor'
 ---
 
 Manage the project-wide snapshot of remote inputs consumed by Nyl rendering.
-The commands require a `[vendor]` section in `nyl.toml`.
+The commands require a `[vendor]` section in `nyl.toml`. `nyl init --vendor
+<MODE>` writes that section for a new project.
 
 ## `nyl vendor`
 

@@ -42,6 +42,13 @@ adds Namespace permissions when namespace creation is enabled. Other
 cluster-scoped permissions remain explicit. The generated policy complements,
 but does not replace, Argo CD admission.
 
+A group that declares no project at all keeps the implied AppProject, which is
+permissive: it still confines the group to one destination cluster and to the
+target publication repository, but it admits every namespace and every
+cluster-scoped resource, and no Release namespace check applies. Declare
+`projectTemplate` for any group whose namespace or cluster-resource scope
+should be an enforced boundary.
+
 The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
 to catalog resources, applies only out-of-sync resources, and pruning the parent

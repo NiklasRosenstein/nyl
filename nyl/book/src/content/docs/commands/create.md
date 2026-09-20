@@ -28,6 +28,46 @@ resource identities are never overwritten.
 `nyl create cluster` records its local context but does not connect to it. Use
 `nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 
+A generated ApplicationGroup declares no project and no `destinationNamespace`,
+so it owns its implied permissive AppProject and each Release keeps the
+namespace in its own metadata. Add `spec.projectTemplate` to narrow the project,
+or `spec.projectRef` to share an AppProjectDefinition.
+
+## Create releases
+
+```bash
+nyl create release api
+nyl create release api --group platform
+nyl create release api --namespace api-system --additional-namespaces observability,ingress
+```
+
+The Release file is written to the source directory of a matching
+ApplicationGroup: `spec.source.path` when the group declares one, the directory
+containing a colocated `_application-group.yaml`, and otherwise
+`applications/<group-name>`. The directory is created when it does not exist.
+`--group` selects the group; it can be omitted when the project declares exactly
+one. A group whose spec is rendered with a target still works as long as its
+`spec.source` can be read without one; a remote or templated source needs an
+explicit `--output`, which is accepted together with `--group`.
+
+Nyl warns, without refusing the file, when the group's `spec.source` selection
+does not include it, and when the group's project lists no destination for one
+of the Release namespaces. A group that declares no project admits every
+namespace, so it never produces that warning.
+
+When `--group NAME` names a group that does not exist, Nyl offers to declare it
+and, with `--create-group`, does so without asking. The new group is appended to
+a root `gitops.yaml` or written under `project.gitops_scaffold_path`, and its
+Releases live in `applications/NAME`.
+
+`--namespace` sets `metadata.namespace`. It defaults to the group's
+`destinationNamespace`, then to the Release name. `--additional-namespaces`
+fills `spec.additionalNamespaces` and accepts repeated and comma-separated
+values. Namespaces are validated, and an existing file is detected, before
+anything is created, so a rejected command declares no group and writes no
+Release. The generated file contains only the Release document; add the
+workload manifests as further YAML documents below it.
+
 ## Create components
 
 ```bash

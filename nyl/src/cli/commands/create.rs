@@ -1,12 +1,22 @@
 use clap::{Args, Subcommand};
+use dialoguer::Confirm;
+use serde_json::json;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::cli::resource_file::{append_document, atomic_replace};
 use crate::config::ProjectConfig;
-use crate::gitops::{discover_gitops_inventory, GitOpsInventoryKey};
-use crate::resources::GitOpsResourceKind;
+use crate::constants::API_VERSION_K8S_GITOPS;
+use crate::gitops::{
+    central_group_source_root, derived_group_source_root, discover_gitops_inventory, DiscoveredGitOpsResource,
+    GitOpsInventory, GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
+};
+use crate::resources::{
+    ApplicationGroup, ApplicationGroupSource, GitOpsResource, GitOpsResourceKind, Release, KIND_RELEASE,
+    RELEASE_SCHEMA_FILENAME,
+};
 use crate::util::path_for_display;
 use crate::{NylError, Result};
 
@@ -48,6 +58,8 @@ enum CreateCommand {
     AppProject(AliasScaffoldArgs),
     /// Create an application group declaration.
     ApplicationGroup(AliasScaffoldArgs),
+    /// Create a Release manifest in a matching application group directory.
+    Release(ReleaseScaffoldArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -77,6 +89,27 @@ struct AliasScaffoldArgs {
     source: Option<PathBuf>,
     #[arg(long, requires = "source", conflicts_with = "output")]
     colocate: bool,
+}
+
+#[derive(Args, Debug)]
+struct ReleaseScaffoldArgs {
+    /// Release name. It also names the created file.
+    name: String,
+    /// ApplicationGroup whose source directory receives the Release. Defaults to the only group.
+    #[arg(long)]
+    group: Option<String>,
+    /// Create a missing ApplicationGroup without asking.
+    #[arg(long, requires = "group")]
+    create_group: bool,
+    /// Release namespace. Defaults to the group destination namespace, then the Release name.
+    #[arg(long)]
+    namespace: Option<String>,
+    /// Additional namespace the Release may target. Repeatable and comma-separated.
+    #[arg(long = "additional-namespaces", value_name = "NAMESPACE", value_delimiter = ',')]
+    additional_namespaces: Vec<String>,
+    /// Exact output file path.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -111,6 +144,7 @@ pub fn execute(args: CreateArgs) -> Result<()> {
         CreateCommand::Target(args) => scaffold_alias_resource(GitOpsResourceKind::DeploymentTarget, args),
         CreateCommand::AppProject(args) => scaffold_alias_resource(GitOpsResourceKind::AppProjectDefinition, args),
         CreateCommand::ApplicationGroup(args) => scaffold_alias_resource(GitOpsResourceKind::ApplicationGroup, args),
+        CreateCommand::Release(args) => scaffold_release(args),
     }
 }
 
@@ -169,6 +203,335 @@ fn scaffold_cluster(args: ClusterScaffoldArgs) -> Result<()> {
     .map(|_| ())
 }
 
+/// Source directory and defaults of the ApplicationGroup that owns a Release.
+#[derive(Debug)]
+struct ResolvedApplicationGroup {
+    name: String,
+    /// Absent when only the group's defaults are needed, such as with an explicit `--output`.
+    root: Option<PathBuf>,
+    destination_namespace: Option<String>,
+    /// Statically known file selection of the group source, when the group parses without a target.
+    source: Option<ApplicationGroupSource>,
+    /// The Argo CD project name and the namespaces it admits, when the group
+    /// narrows them. An implied permissive project states nothing.
+    project: Option<(String, Vec<String>)>,
+    /// The group must still be declared in project source.
+    declare: bool,
+}
+
+fn scaffold_release(args: ReleaseScaffoldArgs) -> Result<()> {
+    scaffold_release_in_dir(args, None).map(|_| ())
+}
+
+fn scaffold_release_in_dir(args: ReleaseScaffoldArgs, project_dir: Option<&Path>) -> Result<PathBuf> {
+    validate_resource_name(&args.name)?;
+    let start_dir = project_dir.unwrap_or_else(|| Path::new("."));
+    let inventory = discover_gitops_inventory(start_dir, None)?;
+
+    // An exact output path needs no source directory; the group still supplies the namespace default.
+    let group = if args.output.is_some() {
+        args.group
+            .as_deref()
+            .map(|name| resolve_application_group(&inventory, Some(name), args.create_group, false))
+            .transpose()?
+    } else {
+        Some(resolve_application_group(
+            &inventory,
+            args.group.as_deref(),
+            args.create_group,
+            true,
+        )?)
+    };
+
+    let namespace = args
+        .namespace
+        .or_else(|| group.as_ref().and_then(|group| group.destination_namespace.clone()))
+        .unwrap_or_else(|| args.name.clone());
+    // Validate the whole document before anything is created.
+    let yaml = render_release_scaffold(&args.name, &namespace, &args.additional_namespaces)?;
+
+    let output = match (args.output, group.as_ref().and_then(|group| group.root.as_ref())) {
+        (Some(output), _) => output,
+        (None, Some(root)) => root.join(format!("{}.yaml", args.name)),
+        (None, None) => return Err(NylError::config("A Release needs an ApplicationGroup or --output")),
+    };
+    if output.exists() {
+        return Err(NylError::config(format!(
+            "Refusing to overwrite existing file: {}",
+            display_path(&output)
+        )));
+    }
+
+    if let Some(group) = &group {
+        if group.declare {
+            declare_application_group(&group.name, project_dir)?;
+        }
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&output, yaml)?;
+    match &group {
+        Some(group) => {
+            warn_for_unselected_release(group, &output);
+            warn_for_namespace_outside_project(group, &namespace, &args.additional_namespaces);
+            println!(
+                "✓ Created Release in ApplicationGroup {:?}: {}",
+                group.name,
+                display_path(&output)
+            );
+        }
+        None => println!("✓ Created Release: {}", display_path(&output)),
+    }
+    Ok(output)
+}
+
+/// Select the ApplicationGroup that owns the new Release and locate its source directory.
+///
+/// `require_root` reports a group whose source directory cannot be determined
+/// without a target context; a caller that supplies its own output path does
+/// not need one.
+fn resolve_application_group(
+    inventory: &GitOpsInventory,
+    requested: Option<&str>,
+    create: bool,
+    require_root: bool,
+) -> Result<ResolvedApplicationGroup> {
+    let name = if let Some(name) = requested {
+        name.to_owned()
+    } else {
+        let names = inventory
+            .resources
+            .values()
+            .filter(|resource| resource.identity.kind == GitOpsResourceKind::ApplicationGroup)
+            .map(|resource| resource.identity.name.as_str())
+            .collect::<Vec<_>>();
+        match names.as_slice() {
+            [] => {
+                return Err(NylError::config(
+                    "This project declares no ApplicationGroup; pass --group NAME to create one",
+                ))
+            }
+            [name] => (*name).to_owned(),
+            _ => {
+                return Err(NylError::config(format!(
+                    "--group is required because multiple ApplicationGroups are configured: {}",
+                    names.join(", ")
+                )))
+            }
+        }
+    };
+
+    let Some(discovered) = inventory.get(GitOpsResourceKind::ApplicationGroup, &name) else {
+        return plan_application_group(inventory, name, create);
+    };
+    let group = match &discovered.resource {
+        Some(GitOpsResource::ApplicationGroup(group)) => Some(group.as_ref()),
+        // A templated spec is only parsed once a DeploymentTarget is selected.
+        _ => None,
+    };
+    let root = match group_source_root(inventory, discovered, group, &name) {
+        Ok(root) => Some(root),
+        Err(_) if !require_root => None,
+        Err(error) => return Err(error),
+    };
+    Ok(ResolvedApplicationGroup {
+        name,
+        root,
+        destination_namespace: group.and_then(|group| group.spec.destination_namespace.clone()),
+        source: group.and_then(|group| group.spec.source.clone()),
+        project: resolved_project_scope(inventory, group),
+        declare: false,
+    })
+}
+
+/// Locate the project directory an ApplicationGroup reads Releases from.
+fn group_source_root(
+    inventory: &GitOpsInventory,
+    discovered: &DiscoveredGitOpsResource,
+    group: Option<&ApplicationGroup>,
+    name: &str,
+) -> Result<PathBuf> {
+    let source = match group {
+        Some(group) => group.spec.source.clone(),
+        // The static envelope is known even when the spec needs a target; read
+        // the source from the document itself, and refuse when it stays unknown.
+        None => match crate::yaml::parse_yaml_value_k8s_compatible(&discovered.raw_document) {
+            Ok(document) => match document.pointer("/spec/source") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(source) => Some(
+                    serde_json::from_value::<ApplicationGroupSource>(source.clone())
+                        .map_err(|_| templated_source(name))?,
+                ),
+            },
+            Err(_) if document_mentions_source(&discovered.raw_document) => return Err(templated_source(name)),
+            Err(_) => None,
+        },
+    };
+    match source {
+        Some(source) if source.is_remote() => Err(NylError::config(format!(
+            "ApplicationGroup {name:?} reads a remote source; create the Release in that repository"
+        ))),
+        Some(source) if contains_template(&source.path) => Err(templated_source(name)),
+        Some(source) => Ok(inventory.project_root.join(&source.path)),
+        None => Ok(derived_group_source_root(
+            &inventory.project_root,
+            &discovered.source_path,
+            name,
+        )),
+    }
+}
+
+fn templated_source(name: &str) -> NylError {
+    NylError::config(format!(
+        "ApplicationGroup {name:?} has a templated spec.source; pass --output to select the Release file"
+    ))
+}
+
+fn contains_template(value: &str) -> bool {
+    value.contains("{{") || value.contains("{%")
+}
+
+/// Whether a document that no YAML parser accepts may still declare `spec.source`.
+fn document_mentions_source(document: &str) -> bool {
+    document.contains("source")
+}
+
+/// Plan the declaration of a missing ApplicationGroup so the Release has a discoverable home.
+fn plan_application_group(inventory: &GitOpsInventory, name: String, create: bool) -> Result<ResolvedApplicationGroup> {
+    validate_resource_name(&name)?;
+    if !create && !confirm_application_group(&name)? {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {name:?} does not exist; pass --create-group to declare it"
+        )));
+    }
+    Ok(ResolvedApplicationGroup {
+        // A new group is declared centrally and reads `applications/<name>`.
+        root: Some(central_group_source_root(&inventory.project_root, &name)),
+        destination_namespace: None,
+        source: None,
+        // A new group is scaffolded with the implied permissive project.
+        project: None,
+        declare: true,
+        name,
+    })
+}
+
+fn declare_application_group(name: &str, project_dir: Option<&Path>) -> Result<()> {
+    scaffold_resource(
+        ResourceScaffoldArgs {
+            kind: GitOpsResourceKind::ApplicationGroup,
+            name: name.to_owned(),
+            output: None,
+            source: None,
+            colocate: false,
+        },
+        project_dir,
+        None,
+        None,
+    )
+    .map(|_| ())
+}
+
+fn confirm_application_group(name: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(false);
+    }
+    Confirm::new()
+        .with_prompt(format!("ApplicationGroup {name:?} does not exist. Create it now?"))
+        .default(true)
+        .interact()
+        .map_err(|error| NylError::Other(format!("Confirmation prompt failed: {error}")))
+}
+
+/// Warn when the group's own file selection skips the new Release.
+fn warn_for_unselected_release(group: &ResolvedApplicationGroup, output: &Path) {
+    let (Some(root), Some(source)) = (&group.root, &group.source) else {
+        return;
+    };
+    if !crate::gitops::source_matches(root, output, source) {
+        eprintln!(
+            "⚠ ApplicationGroup {:?} does not select {}; adjust spec.source or use --output",
+            group.name,
+            display_path(output)
+        );
+    }
+}
+
+/// Warn when the group's Argo CD project does not admit the Release namespaces.
+fn warn_for_namespace_outside_project(group: &ResolvedApplicationGroup, namespace: &str, additional: &[String]) {
+    let Some((project, patterns)) = &group.project else {
+        return;
+    };
+    for namespace in std::iter::once(namespace).chain(additional.iter().map(String::as_str)) {
+        if !crate::gitops::namespace_matches_any(namespace, patterns) {
+            eprintln!(
+                "⚠ AppProject {project:?} does not allow namespace {namespace:?}; add it to the project destinations"
+            );
+        }
+    }
+}
+
+/// The Argo CD project of a group and the namespaces it admits, when it narrows them.
+fn resolved_project_scope(
+    inventory: &GitOpsInventory,
+    group: Option<&ApplicationGroup>,
+) -> Option<(String, Vec<String>)> {
+    let group = group?;
+    if let Some(reference) = &group.spec.project_ref {
+        return Some((reference.clone(), project_destination_namespaces(inventory, reference)?));
+    }
+    let template = group.spec.project_template.as_ref()?;
+    let mut namespaces = template.destination_namespaces.clone();
+    if let Some(namespace) = &group.spec.destination_namespace {
+        namespaces.push(namespace.clone());
+    }
+    // An empty template list leaves the generated project's namespaces unrestricted.
+    (!namespaces.is_empty()).then(|| {
+        let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
+        (name, namespaces)
+    })
+}
+
+/// Literal destination namespaces of a statically declared AppProjectDefinition.
+fn project_destination_namespaces(inventory: &GitOpsInventory, project: &str) -> Option<Vec<String>> {
+    let discovered = inventory.get(GitOpsResourceKind::AppProjectDefinition, project)?;
+    let Some(GitOpsResource::AppProjectDefinition(definition)) = &discovered.resource else {
+        return None;
+    };
+    let namespaces = definition
+        .spec
+        .manifest
+        .pointer("/spec/destinations")?
+        .as_array()?
+        .iter()
+        .filter_map(|destination| destination.get("namespace")?.as_str())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    // An empty or unreadable destination list carries no statement about namespaces.
+    (!namespaces.is_empty()).then_some(namespaces)
+}
+
+fn render_release_scaffold(name: &str, namespace: &str, additional_namespaces: &[String]) -> Result<String> {
+    let mut document = json!({
+        "apiVersion": API_VERSION_K8S_GITOPS,
+        "kind": KIND_RELEASE,
+        "metadata": {"name": name, "namespace": namespace},
+    });
+    if !additional_namespaces.is_empty() {
+        document["spec"] = json!({"additionalNamespaces": additional_namespaces});
+    }
+    // Reject invalid namespaces before the file is written.
+    Release::from_value(&document)?;
+    let schema = format!(
+        "https://niklasrosenstein.github.io/nyl/reference/schemas/{API_VERSION_K8S_GITOPS}/{RELEASE_SCHEMA_FILENAME}"
+    );
+    let body = crate::yaml::serialize_yaml_value(&document)?;
+    Ok(format!(
+        "# yaml-language-server: $schema={schema}\n{body}\n# Add this Release's workload manifests as further YAML documents below.\n"
+    ))
+}
+
 fn scaffold_resource(
     args: ResourceScaffoldArgs,
     project_dir: Option<&Path>,
@@ -202,7 +565,7 @@ fn scaffold_resource(
         args.source
             .as_ref()
             .expect("clap requires --source with --colocate")
-            .join("_application-group.yaml")
+            .join(APPLICATION_GROUP_FILE_NAME)
     } else if use_primary {
         primary
     } else {
@@ -310,8 +673,10 @@ fn render_resource_scaffold(
         ),
         GitOpsResourceKind::ApplicationGroup => {
             let source = source.map_or_else(String::new, |source| format!("  source:\n    path: {source}\n"));
+            // No project: the group owns its implied permissive AppProject.
+            // No destinationNamespace: each Release keeps its own metadata.namespace.
             format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {name}\n  applicationNamespace: argocd\n{source}  destinationNamespace: default\n"
+                "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  applicationNamespace: argocd\n{source}"
             )
         }
     };
@@ -685,6 +1050,206 @@ mod tests {
         )
         .unwrap();
         assert!(source.join("_application-group.yaml").is_file());
+    }
+
+    const APPLICATION_GROUP: &str = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: platform\nspec:\n  projectRef: platform\n  applicationNamespace: argocd\n";
+
+    fn release_args(name: &str) -> ReleaseScaffoldArgs {
+        ReleaseScaffoldArgs {
+            name: name.to_owned(),
+            group: None,
+            create_group: false,
+            namespace: None,
+            additional_namespaces: Vec::new(),
+            output: None,
+        }
+    }
+
+    /// Discovery canonicalizes the project root, which differs from the raw
+    /// temporary directory on macOS and Windows; compare the tail instead.
+    fn assert_written_at(path: &Path, expected: &str) {
+        assert!(
+            path.ends_with(expected),
+            "{} does not end with {expected}",
+            path.display()
+        );
+        assert!(path.is_file(), "{} was not written", path.display());
+    }
+
+    fn project(gitops: Option<&str>) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        if let Some(gitops) = gitops {
+            fs::write(temp.path().join("gitops.yaml"), gitops).unwrap();
+        }
+        temp
+    }
+
+    #[test]
+    fn test_scaffold_release_derives_directory_and_namespace_from_the_only_group() {
+        let temp = project(Some(APPLICATION_GROUP));
+        let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
+
+        assert_written_at(&path, "applications/platform/api.yaml");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("release.schema.json"));
+        assert!(content.contains("kind: Release"));
+        assert!(content.contains("name: api"));
+        // Without a group destination namespace the Release owns its own namespace.
+        assert!(content.contains("namespace: api"));
+        assert!(scaffold_release_in_dir(release_args("api"), Some(temp.path())).is_err());
+    }
+
+    #[test]
+    fn test_scaffold_release_follows_explicit_and_colocated_group_sources() {
+        let temp = project(Some(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: platform\nspec:\n  projectRef: platform\n  applicationNamespace: argocd\n  destinationNamespace: platform-system\n  source:\n    path: workloads/platform\n",
+        ));
+        let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
+        assert_written_at(&path, "workloads/platform/api.yaml");
+        // A group destination namespace is the Release default.
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("namespace: platform-system"));
+
+        let colocated = temp.path().join("teams/search/_application-group.yaml");
+        fs::create_dir_all(colocated.parent().unwrap()).unwrap();
+        fs::write(
+            &colocated,
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: search\nspec:\n  projectRef: search\n  applicationNamespace: argocd\n",
+        )
+        .unwrap();
+        let mut args = release_args("index");
+        args.group = Some("search".to_owned());
+        let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
+        assert_written_at(&path, "teams/search/index.yaml");
+    }
+
+    #[test]
+    fn test_scaffold_release_creates_requested_group_on_demand() {
+        let temp = project(None);
+        let mut args = release_args("api");
+        args.group = Some("platform".to_owned());
+        args.create_group = true;
+        let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
+
+        assert_written_at(&path, "applications/platform/api.yaml");
+        let group = fs::read_to_string(temp.path().join("config/application-groups/platform.yaml")).unwrap();
+        assert!(group.contains("kind: ApplicationGroup"));
+        // The group must not pin a destination namespace over its Releases.
+        assert!(!group.contains("destinationNamespace:"));
+    }
+
+    #[test]
+    fn test_scaffold_release_requires_an_unambiguous_group() {
+        let temp = project(None);
+        let error = scaffold_release_in_dir(release_args("api"), Some(temp.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no ApplicationGroup"));
+
+        let mut args = release_args("api");
+        args.group = Some("platform".to_owned());
+        let error = scaffold_release_in_dir(args, Some(temp.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--create-group"));
+
+        fs::write(
+            temp.path().join("gitops.yaml"),
+            format!("{APPLICATION_GROUP}---\napiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: search\nspec:\n  projectRef: search\n  applicationNamespace: argocd\n"),
+        )
+        .unwrap();
+        let error = scaffold_release_in_dir(release_args("api"), Some(temp.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("platform, search"));
+    }
+
+    #[test]
+    fn test_scaffold_release_validates_namespaces_before_writing() {
+        let temp = project(Some(APPLICATION_GROUP));
+        let mut args = release_args("api");
+        args.namespace = Some("Invalid".to_owned());
+        assert!(scaffold_release_in_dir(args, Some(temp.path())).is_err());
+
+        let mut args = release_args("api");
+        args.additional_namespaces = vec!["observability".to_owned(), "observability".to_owned()];
+        assert!(scaffold_release_in_dir(args, Some(temp.path())).is_err());
+        assert!(!temp.path().join("applications/platform/api.yaml").exists());
+
+        let mut args = release_args("api");
+        args.additional_namespaces = vec!["observability".to_owned(), "ingress".to_owned()];
+        let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("additionalNamespaces:"));
+        assert!(content.contains("- observability"));
+        assert!(content.contains("- ingress"));
+    }
+
+    /// A group whose spec only parses with a target context, keeping a static source.
+    const TEMPLATED_GROUP: &str = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: platform\nspec:\n  enabled: '{{ target.metadata.name == \"production\" }}'\n  projectRef: platform\n  applicationNamespace: argocd\n  source:\n    path: workloads/platform\n";
+
+    #[test]
+    fn test_scaffold_release_reads_a_static_source_from_a_templated_group() {
+        let temp = project(Some(TEMPLATED_GROUP));
+        let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
+        assert_written_at(&path, "workloads/platform/api.yaml");
+    }
+
+    #[test]
+    fn test_scaffold_release_refuses_an_unreadable_source_and_accepts_an_explicit_output() {
+        // A structural template hides whether the group declares a source.
+        let temp = project(Some(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: platform\nspec:\n  projectRef: platform\n  applicationNamespace: argocd\n{% if target.metadata.name == 'production' %}\n  source:\n    path: workloads/platform\n{% endif %}\n",
+        ));
+        let error = scaffold_release_in_dir(release_args("api"), Some(temp.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--output"));
+
+        // The escape hatch the error recommends must work with the same group.
+        let mut args = release_args("api");
+        args.group = Some("platform".to_owned());
+        args.output = Some(temp.path().join("workloads/platform/api.yaml"));
+        let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn test_scaffold_release_leaves_no_group_behind_when_the_release_is_invalid() {
+        let temp = project(None);
+        let mut args = release_args("api");
+        args.group = Some("platform".to_owned());
+        args.create_group = true;
+        args.namespace = Some("Invalid".to_owned());
+        assert!(scaffold_release_in_dir(args, Some(temp.path())).is_err());
+        assert!(!temp.path().join("config/application-groups/platform.yaml").exists());
+        assert!(!temp.path().join("applications/platform").exists());
+    }
+
+    #[test]
+    fn test_application_group_scaffold_declares_no_project() {
+        let temp = project(None);
+        scaffold_resource(
+            ResourceScaffoldArgs {
+                kind: GitOpsResourceKind::ApplicationGroup,
+                name: "platform".to_string(),
+                output: None,
+                source: None,
+                colocate: false,
+            },
+            Some(temp.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        // The implied permissive AppProject needs no declaration; narrowing is opt-in.
+        let group = fs::read_to_string(temp.path().join("config/application-groups/platform.yaml")).unwrap();
+        assert!(!group.contains("projectRef:"));
+        assert!(!group.contains("projectTemplate:"));
+        assert!(!group.contains("destinationNamespace:"));
     }
 
     #[test]

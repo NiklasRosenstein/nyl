@@ -9,7 +9,7 @@ use git2::Repository;
 use serde_json::{json, Value};
 
 use crate::cli::commands::cluster::{self, ClusterCaptureArgs};
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, VendorMode};
 use crate::resources::{parse_gitops_resource, validate_repository_coordinates};
 use crate::util::path_for_display;
 use crate::{NylError, Result};
@@ -29,6 +29,10 @@ pub struct InitArgs {
         "allowed_cluster_resources", "applications_path", "applications_name", "skip_applications", "yes"
     ])]
     minimal: bool,
+
+    /// Record a project-global remote artifact vendoring policy in `nyl.toml`.
+    #[arg(long, value_enum, value_name = "MODE")]
+    vendor: Option<VendorMode>,
 
     #[command(flatten)]
     gitops: GitOpsInitArgs,
@@ -86,9 +90,9 @@ pub struct GitOpsInitArgs {
     /// Namespace containing Argo CD Applications and AppProjects.
     argocd_namespace: Option<String>,
     #[arg(long)]
-    /// Name of the least-privilege AppProject and its local definition.
+    /// Name of the generated AppProject. Defaults to the ApplicationGroup name.
     project_name: Option<String>,
-    /// Namespace allowed by the generated AppProject. May be repeated.
+    /// Namespace pattern allowed by the generated AppProject. May be repeated.
     #[arg(long = "allow-namespace")]
     allowed_namespaces: Vec<String>,
     /// Cluster resource allowed by the AppProject as GROUP/KIND. May be repeated.
@@ -125,20 +129,29 @@ struct GitOpsInitConfig {
     revision: String,
     path_prefix: Option<String>,
     argocd_namespace: String,
-    project_name: String,
-    allowed_namespaces: Vec<String>,
-    allowed_cluster_resources: Vec<(String, String)>,
+    /// Narrowing overrides for the group's AppProject. Absent leaves the
+    /// implied permissive project in place.
+    project: Option<ProjectScope>,
     applications_path: Option<PathBuf>,
     applications_name: Option<String>,
     capture_cluster: bool,
+    vendor: Option<VendorMode>,
+}
+
+/// Explicit `projectTemplate` narrowing requested on the command line.
+#[derive(Debug)]
+struct ProjectScope {
+    name: Option<String>,
+    namespaces: Vec<String>,
+    cluster_resources: Vec<(String, String)>,
 }
 
 pub async fn execute(args: InitArgs) -> Result<()> {
     if args.minimal {
-        return init_minimal(&args.gitops.dir);
+        return init_minimal(&args.gitops.dir, args.vendor);
     }
     prepare_gitops_directory(&args.gitops.dir)?;
-    init_gitops(args.gitops).await
+    init_gitops(args.gitops, args.vendor).await
 }
 
 fn prepare_gitops_directory(path: &Path) -> Result<()> {
@@ -173,7 +186,7 @@ fn prepare_gitops_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn init_minimal(path: &Path) -> Result<()> {
+fn init_minimal(path: &Path, vendor: Option<VendorMode>) -> Result<()> {
     if path.exists() && !path.is_dir() {
         return Err(NylError::config(format!(
             "Initialization path is not a directory: {}",
@@ -200,16 +213,17 @@ fn init_minimal(path: &Path) -> Result<()> {
     ] {
         fs::create_dir_all(path.join(relative))?;
     }
-    fs::write(
-        &config_path,
-        "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json\n\n[project]\ncomponents_search_paths = [\"components\"]\nhelm_chart_search_paths = [\".\"]\ngitops_scaffold_path = \"config\"\n",
-    )?;
+    let config = format!(
+        "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json\n\n[project]\ncomponents_search_paths = [\"components\"]\nhelm_chart_search_paths = [\".\"]\ngitops_scaffold_path = \"config\"\n{}",
+        vendor_section(vendor)
+    );
+    fs::write(&config_path, config)?;
     println!("✓ Initialized Nyl project at {}", path_for_display(path).display());
     Ok(())
 }
 
-async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
-    let config = resolve_config(args)?;
+async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result<()> {
+    let config = resolve_config(args, vendor)?;
     let documents = build_documents(&config)?;
     let yaml = documents
         .iter()
@@ -223,7 +237,8 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
     }
 
     if config.create_project_config {
-        fs::write(config.project_root.join("nyl.toml"), MINIMAL_PROJECT_CONFIG)?;
+        let project_config = format!("{MINIMAL_PROJECT_CONFIG}{}", vendor_section(config.vendor));
+        fs::write(config.project_root.join("nyl.toml"), project_config)?;
     }
     if let Some(parent) = config.output.parent() {
         fs::create_dir_all(parent)?;
@@ -243,6 +258,12 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
             path_for_display(&config.project_root.join("nyl.toml")).display()
         );
     }
+    if config.project.is_none() && config.applications_name.is_some() {
+        println!(
+            "Hint: the ApplicationGroup uses an implied AppProject that admits every namespace and cluster-scoped \
+             resource on this cluster; narrow it with --allow-namespace, --allow-cluster-resource, or spec.projectTemplate"
+        );
+    }
     if config.capture_cluster {
         cluster::capture_from_dir(
             ClusterCaptureArgs {
@@ -260,7 +281,7 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)] // This keeps the interactive questions in their user-visible order.
-fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
+fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result<GitOpsInitConfig> {
     if !args.dir.is_dir() {
         return Err(NylError::config(format!(
             "Initialization directory does not exist or is not a directory: {}",
@@ -295,6 +316,9 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
     if stdout && args.capture_cluster {
         return Err(NylError::config("--capture-cluster cannot be used with --output -"));
     }
+    if stdout && vendor.is_some() {
+        return Err(NylError::config("--vendor cannot be used with --output -"));
+    }
     let output = if stdout {
         args.output.clone()
     } else {
@@ -314,6 +338,18 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
             "Refusing to overwrite existing configuration: {}",
             path_for_display(&project_config_path).display()
         )));
+    }
+    if let (Some(mode), Some(existing)) = (vendor, &found_config) {
+        let declared = ProjectConfig::load(Some(existing.clone()))?
+            .vendor()
+            .map(|settings| settings.mode);
+        if declared != Some(mode) {
+            return Err(NylError::config(format!(
+                "--vendor cannot modify the existing project configuration; set [vendor] mode = {:?} in {}",
+                mode.as_str(),
+                path_for_display(existing).display()
+            )));
+        }
     }
 
     let interactive = !args.yes && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -396,14 +432,6 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         interactive,
         true,
     )?;
-    let project_name = prompt_string(
-        args.project_name.take(),
-        "Argo CD project name",
-        Some("default".to_owned()),
-        interactive,
-        true,
-    )?;
-
     let applications_path = if args.skip_applications {
         None
     } else {
@@ -437,22 +465,21 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         None
     };
 
-    let allowed_namespaces = deduplicate(if args.allowed_namespaces.is_empty() {
-        vec!["default".to_owned()]
-    } else {
-        args.allowed_namespaces
+    // Without a narrowing option the ApplicationGroup keeps the implied
+    // permissive AppProject, so nothing about projects is written at all.
+    let namespaces = deduplicate(args.allowed_namespaces);
+    let cluster_resources = args
+        .allowed_cluster_resources
+        .iter()
+        .map(|value| parse_resource_pattern(value))
+        .collect::<Result<Vec<_>>>()?;
+    let project = (args.project_name.is_some() || !namespaces.is_empty() || !cluster_resources.is_empty()).then(|| {
+        ProjectScope {
+            name: args.project_name.take(),
+            namespaces,
+            cluster_resources,
+        }
     });
-    if allowed_namespaces.iter().any(|namespace| namespace == "*") {
-        eprintln!("⚠ The generated AppProject allows deployments to every namespace");
-    }
-    let allowed_cluster_resources = if args.allowed_cluster_resources.is_empty() {
-        vec![(String::new(), "Namespace".to_owned())]
-    } else {
-        args.allowed_cluster_resources
-            .iter()
-            .map(|value| parse_resource_pattern(value))
-            .collect::<Result<Vec<_>>>()?
-    };
 
     let capture_cluster = if args.no_capture_cluster || context.is_none() || stdout {
         false
@@ -488,12 +515,18 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         revision,
         path_prefix: args.path_prefix,
         argocd_namespace,
-        project_name,
-        allowed_namespaces,
-        allowed_cluster_resources,
+        project,
         applications_path,
         applications_name,
         capture_cluster,
+        vendor,
+    })
+}
+
+/// The `[vendor]` section recorded in a generated `nyl.toml`.
+fn vendor_section(vendor: Option<VendorMode>) -> String {
+    vendor.map_or_else(String::new, |mode| {
+        format!("\n[vendor]\nmode = \"{}\"\n", mode.as_str())
     })
 }
 
@@ -534,61 +567,47 @@ fn build_documents(config: &GitOpsInitConfig) -> Result<Vec<Value>> {
     }
     let target = resource("DeploymentTarget", &config.target_name, target_spec);
 
-    let project_destinations = config
-        .allowed_namespaces
-        .iter()
-        .map(|namespace| {
-            if let Some(server) = &config.destination_server {
-                json!({"server": server, "namespace": namespace})
-            } else {
-                json!({"name": config.destination_name, "namespace": namespace})
-            }
-        })
-        .collect::<Vec<_>>();
-    let cluster_resource_whitelist = config
-        .allowed_cluster_resources
-        .iter()
-        .map(|(group, kind)| json!({"group": group, "kind": kind}))
-        .collect::<Vec<_>>();
-    let project = resource(
-        "AppProjectDefinition",
-        &config.project_name,
-        json!({
-            "management": "Rendered",
-            "sourceRepositoryRefs": [{"name": config.repository_name}],
-            "manifest": {
-                "apiVersion": "argoproj.io/v1alpha1",
-                "kind": "AppProject",
-                "metadata": {
-                    "name": config.project_name,
-                    "namespace": config.argocd_namespace
-                },
-                "spec": {
-                    "sourceRepos": [],
-                    "destinations": project_destinations,
-                    "clusterResourceWhitelist": cluster_resource_whitelist
-                }
-            }
-        }),
-    );
-
-    let mut documents = vec![repository, cluster, target, project];
+    let mut documents = vec![repository, cluster, target];
     if let (Some(path), Some(name)) = (&config.applications_path, &config.applications_name) {
-        documents.push(resource(
-            "ApplicationGroup",
-            name,
-            json!({
-                "projectRef": config.project_name,
-                "applicationNamespace": config.argocd_namespace,
-                "source": {"path": path.to_string_lossy()}
-            }),
-        ));
+        let mut group_spec = json!({
+            "applicationNamespace": config.argocd_namespace,
+            "source": {"path": path.to_string_lossy()}
+        });
+        // Without narrowing options the group keeps its implied permissive AppProject.
+        if let Some(project) = &config.project {
+            group_spec["projectTemplate"] = project_template(project);
+        }
+        documents.push(resource("ApplicationGroup", name, group_spec));
     }
     for document in &documents {
         parse_gitops_resource(document)?
             .ok_or_else(|| NylError::config("Generated document is not a GitOps resource"))?;
     }
     Ok(documents)
+}
+
+/// The `projectTemplate` for the narrowing the command line asked for. Every
+/// dimension the caller left open stays permissive.
+fn project_template(project: &ProjectScope) -> Value {
+    let mut template = json!({});
+    if let Some(name) = &project.name {
+        template["name"] = json!(name);
+    }
+    template["destinationNamespaces"] = if project.namespaces.is_empty() {
+        json!(["*"])
+    } else {
+        json!(project.namespaces)
+    };
+    template["clusterResourceWhitelist"] = if project.cluster_resources.is_empty() {
+        json!([{"group": "*", "kind": "*"}])
+    } else {
+        json!(project
+            .cluster_resources
+            .iter()
+            .map(|(group, kind)| json!({"group": group, "kind": kind}))
+            .collect::<Vec<_>>())
+    };
+    template
 }
 
 fn resource(kind: &str, name: &str, spec: Value) -> Value {
@@ -708,12 +727,11 @@ mod tests {
             revision: "deploy/main".to_owned(),
             path_prefix: None,
             argocd_namespace: "argocd".to_owned(),
-            project_name: "default".to_owned(),
-            allowed_namespaces: vec!["default".to_owned()],
-            allowed_cluster_resources: vec![(String::new(), "Namespace".to_owned())],
+            project: None,
             applications_path: Some(PathBuf::from("applications")),
             applications_name: Some("applications".to_owned()),
             capture_cluster: false,
+            vendor: None,
         }
     }
 
@@ -721,31 +739,47 @@ mod tests {
     fn generated_simple_project_is_valid_and_uses_derived_target_defaults() {
         let temporary = tempfile::TempDir::new().unwrap();
         let documents = build_documents(&config(temporary.path())).unwrap();
-        assert_eq!(documents.len(), 5);
+        // GitRepository, Cluster, DeploymentTarget, ApplicationGroup: no project resource.
+        assert_eq!(documents.len(), 4);
+        assert!(!documents.iter().any(|value| value["kind"] == "AppProjectDefinition"));
         let target = documents
             .iter()
             .find(|value| value["kind"] == "DeploymentTarget")
             .unwrap();
         assert!(target["spec"].get("clusterRef").is_none());
         assert!(target["spec"]["publication"].get("pathPrefix").is_none());
-        let project = documents
-            .iter()
-            .find(|value| value["kind"] == "AppProjectDefinition")
-            .unwrap();
-        assert_eq!(project["spec"]["sourceRepositoryRefs"][0]["name"], "deploy");
-        assert_eq!(
-            project["spec"]["manifest"]["spec"]["destinations"][0]["namespace"],
-            "default"
-        );
-        assert_eq!(
-            project["spec"]["manifest"]["spec"]["clusterResourceWhitelist"][0],
-            json!({"group": "", "kind": "Namespace"})
-        );
         let group = documents
             .iter()
             .find(|value| value["kind"] == "ApplicationGroup")
             .unwrap();
+        // The group keeps the implied permissive project and each Release's namespace.
+        assert!(group["spec"].get("projectRef").is_none());
+        assert!(group["spec"].get("projectTemplate").is_none());
         assert!(group["spec"].get("destinationNamespace").is_none());
+    }
+
+    #[test]
+    fn requested_project_scope_narrows_only_the_named_dimensions() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let mut config = config(temporary.path());
+        config.project = Some(ProjectScope {
+            name: Some("workloads".to_owned()),
+            namespaces: vec!["apps".to_owned(), "apps-preview".to_owned()],
+            cluster_resources: Vec::new(),
+        });
+        let documents = build_documents(&config).unwrap();
+        let group = documents
+            .iter()
+            .find(|value| value["kind"] == "ApplicationGroup")
+            .unwrap();
+        let template = &group["spec"]["projectTemplate"];
+        assert_eq!(template["name"], "workloads");
+        assert_eq!(template["destinationNamespaces"], json!(["apps", "apps-preview"]));
+        // An unrequested dimension stays permissive rather than becoming empty.
+        assert_eq!(
+            template["clusterResourceWhitelist"],
+            json!([{"group": "*", "kind": "*"}])
+        );
     }
 
     #[test]

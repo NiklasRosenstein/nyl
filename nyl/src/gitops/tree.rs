@@ -13,9 +13,10 @@ use crate::git::GitManager;
 use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
-    ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster,
-    ClusterDestination, DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, InlineGitRepository,
-    LocalReference, ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    AppProjectTemplate, ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec,
+    CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget, GitOpsResource, GitOpsResourceKind,
+    GitPublication, InlineGitRepository, LocalReference, ManagedResourceDeletionPolicy, RendererConfig,
+    RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::TemplateEngine;
 use crate::util::SourceContext;
@@ -1639,17 +1640,14 @@ fn validate_same_instance_catalog_collisions(
                     true,
                 )
             } else {
-                let template = group
+                // An implied project carries the group name, like an unnamed template.
+                let name = group
                     .spec
                     .project_template
                     .as_ref()
-                    .expect("validated project template");
-                (
-                    group.metadata.name.clone(),
-                    template.name.clone().unwrap_or_else(|| group.metadata.name.clone()),
-                    true,
-                    false,
-                )
+                    .and_then(|template| template.name.clone())
+                    .unwrap_or_else(|| group.metadata.name.clone());
+                (group.metadata.name.clone(), name, true, false)
             };
             if rendered {
                 let key = (
@@ -1782,11 +1780,23 @@ fn resolve_effective_group_project(
         });
     }
 
-    let template = group
-        .spec
-        .project_template
-        .as_ref()
-        .expect("ApplicationGroup validation requires a projectRef or projectTemplate");
+    build_generated_project(group, publication_repository, target_cluster, argocd)
+}
+
+/// Build the AppProject a group generates for itself, from `spec.projectTemplate`
+/// or, when it declares none, from the implied permissive project.
+fn build_generated_project(
+    group: &ApplicationGroup,
+    publication_repository: &InlineGitRepository,
+    target_cluster: &Cluster,
+    argocd: &ArgoCDInstance,
+) -> Result<EffectiveProject> {
+    // A group that declares no project owns an implied permissive AppProject:
+    // the target cluster, any namespace, any cluster-scoped resource. Narrowing
+    // it means declaring spec.projectTemplate.
+    let implied = group.spec.project_template.is_none();
+    let default_template = AppProjectTemplate::default();
+    let template = group.spec.project_template.as_ref().unwrap_or(&default_template);
     let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
     let mut destination_namespaces = template.destination_namespaces.clone();
     if let Some(namespace) = &group.spec.destination_namespace {
@@ -1794,11 +1804,14 @@ fn resolve_effective_group_project(
             destination_namespaces.push(namespace.clone());
         }
     }
-    if group.spec.destination_namespace.is_none() && destination_namespaces.is_empty() {
-        return Err(NylError::config(format!(
-            "ApplicationGroup {:?} projectTemplate requires destinationNamespaces when spec.destinationNamespace is absent",
-            group.metadata.name
-        )));
+    if destination_namespaces.is_empty() {
+        if !implied {
+            return Err(NylError::config(format!(
+                "ApplicationGroup {:?} projectTemplate requires destinationNamespaces when spec.destinationNamespace is absent; remove spec.projectTemplate for the implied permissive project",
+                group.metadata.name
+            )));
+        }
+        destination_namespaces.push(PERMISSIVE_PATTERN.to_owned());
     }
     destination_namespaces.sort();
     destination_namespaces.dedup();
@@ -1817,7 +1830,11 @@ fn resolve_effective_group_project(
             Value::Object(value)
         })
         .collect::<Vec<_>>();
-    if group.spec.namespace.create {
+    if implied && cluster_resources.is_empty() {
+        cluster_resources.push(serde_json::json!({"group": PERMISSIVE_PATTERN, "kind": PERMISSIVE_PATTERN}));
+    }
+    let permits_every_resource = cluster_resources.iter().any(is_permissive_resource);
+    if group.spec.namespace.create && !permits_every_resource {
         for namespace in &destination_namespaces {
             let permission = serde_json::json!({"group": "", "kind": "Namespace", "name": namespace});
             if !cluster_resources.contains(&permission) {
@@ -1904,7 +1921,17 @@ fn resolve_project_source_repositories(
     Ok(source_paths)
 }
 
-fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
+/// The Argo CD glob that admits every namespace, group, or kind.
+const PERMISSIVE_PATTERN: &str = "*";
+
+/// Whether an AppProject resource permission already admits every cluster-scoped resource.
+fn is_permissive_resource(permission: &Value) -> bool {
+    permission.get("group").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
+        && permission.get("kind").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
+}
+
+/// Whether an Argo CD namespace glob list admits a namespace.
+pub(crate) fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
     patterns
         .iter()
         .any(|pattern| Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(namespace)))
@@ -2082,14 +2109,11 @@ fn resolve_group_source(
         }
         Some(source) => (inventory.project_root.join(&source.path), source.clone(), None, None),
         None => {
-            let root =
-                if group_resource_path.file_name().and_then(|name| name.to_str()) == Some("_application-group.yaml") {
-                    inventory
-                        .project_root
-                        .join(group_resource_path.parent().unwrap_or_else(|| Path::new("")))
-                } else {
-                    inventory.project_root.join("applications").join(&group.metadata.name)
-                };
+            let root = crate::gitops::derived_group_source_root(
+                &inventory.project_root,
+                group_resource_path,
+                &group.metadata.name,
+            );
             (
                 root,
                 ApplicationGroupSource {
@@ -2306,7 +2330,8 @@ fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource) -> bool {
+/// Whether an ApplicationGroup source selects a file below its root.
+pub(crate) fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };

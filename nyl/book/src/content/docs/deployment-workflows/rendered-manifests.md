@@ -23,7 +23,8 @@ Kubernetes-shaped configuration resources describe the deployment:
    parent-catalog defaults.
 5. An [`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
    declares source releases and generated Application and Namespace policy. It
-   references an AppProjectDefinition or uses `projectTemplate` to generate one.
+   owns an implied permissive AppProject unless it narrows one with
+   `projectTemplate` or shares one through an AppProjectDefinition.
 
 These resources are compiler inputs. They are not installed in Kubernetes.
 `nyl render-tree` produces workload manifests, managed Namespaces, Argo CD

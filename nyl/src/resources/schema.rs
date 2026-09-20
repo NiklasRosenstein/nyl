@@ -265,7 +265,8 @@ pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(schema, &["repositoryRef", "repository"], true);
 }
 pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(schema, &["projectRef", "projectTemplate"], true);
+    // Declaring neither implies this group's own permissive AppProject.
+    exclusive_fields(schema, &["projectRef", "projectTemplate"], false);
 }
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(schema, &["url", "urls"], true);

@@ -4,6 +4,9 @@ title: 'Using Release'
 
 See the [Release resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) for the API, example, and field definitions.
 
+[`nyl create release`](/nyl/commands/create/#create-releases) writes a new
+Release into the source directory of a matching ApplicationGroup.
+
 ## Multi-file releases
 
 Every `include` pattern is evaluated relative to the directory containing the

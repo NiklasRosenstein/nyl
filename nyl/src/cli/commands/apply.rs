@@ -114,7 +114,23 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     )
     .await?;
 
-    // 4. Apply manifests
+    // 4. Resolve the release identity before touching the cluster, so a missing
+    //    --name/--namespace fails before anything is applied.
+    let release_identity = if args.no_release {
+        None
+    } else {
+        Some(resolve_release_identity(release.as_ref(), args.name, args.namespace)?)
+    };
+
+    // 5. Create the release namespace before the resources that live in it.
+    //    Nyl creates this namespace either way to store release state; creating
+    //    it after the apply left the first run failing for every namespaced
+    //    resource and succeeding only on a retry.
+    if let Some((_, release_namespace)) = &release_identity {
+        ensure_namespace_exists(&kube_client, release_namespace).await?;
+    }
+
+    // 6. Apply manifests
     let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests).await?;
 
     if args.no_release {
@@ -128,24 +144,13 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 5. Determine release name and namespace
-    let (release_name, release_namespace) = if let Some(ref release) = release {
-        (release.metadata.name.clone(), release.metadata.namespace.clone())
-    } else {
-        // Require CLI flags if no Release
-        let name = args
-            .name
-            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
-        let namespace = args
-            .namespace
-            .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
-        (name, namespace)
-    };
+    let (release_name, release_namespace) =
+        release_identity.expect("a release identity is resolved unless --no-release is set");
 
-    // 6. Initialize release storage
+    // 7. Initialize release storage
     let storage = KubernetesReleaseStorage::new(client);
 
-    // 7-12. Record the new revision, mark the previous one superseded, and prune.
+    // 8-12. Record the new revision, mark the previous one superseded, and prune.
     let release = apply_and_record_release(
         &storage,
         &kube_client,
@@ -173,6 +178,22 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the release name and namespace from the rendered Release or the CLI flags.
+fn resolve_release_identity(
+    release: Option<&crate::resources::Release>,
+    name: Option<String>,
+    namespace: Option<String>,
+) -> Result<(String, String)> {
+    if let Some(release) = release {
+        return Ok((release.metadata.name.clone(), release.metadata.namespace.clone()));
+    }
+    let name =
+        name.ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
+    let namespace = namespace
+        .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
+    Ok((name, namespace))
 }
 
 pub(crate) struct ApplyExecutionResult {
@@ -709,10 +730,7 @@ async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str) -> Resu
         Ok(())
     } else {
         // Namespace doesn't exist, create it
-        tracing::warn!(
-            "Namespace '{}' does not exist. Creating it to store release state.",
-            namespace
-        );
+        tracing::warn!("Namespace '{}' does not exist. Creating it for the release.", namespace);
 
         // Create bare namespace resource
         let ns_resource: DynamicObject = serde_json::from_value(json!({

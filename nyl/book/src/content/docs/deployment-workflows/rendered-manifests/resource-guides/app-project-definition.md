@@ -4,6 +4,11 @@ title: 'Using AppProjectDefinition'
 
 See the [AppProjectDefinition resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/app-project-definition/) for the API, example, and field definitions.
 
+An ApplicationGroup generates its own AppProject, so this resource is for the
+cases that one cannot express: a project shared by several ApplicationGroups, a
+project Argo CD owns externally (`management: External`), or AppProject fields
+outside `spec.projectTemplate`, such as roles or sync windows.
+
 ## Target-dependent policy
 
 `spec` may use Nyl structural templating so destinations, source repositories,
