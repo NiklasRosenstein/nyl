@@ -86,6 +86,10 @@ nyl apply --target production --no-release manifest.yaml
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
+- The release namespace is created when it is missing, before the manifests are
+  applied. Nyl does not own that namespace and never prunes it. Other namespaces
+  a release writes to, including `spec.additionalNamespaces`, need their own
+  `Namespace` manifest.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
 

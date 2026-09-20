@@ -51,3 +51,9 @@ id = "a70aa56a-b730-4eca-bfb7-825bfb7ccbee"
 type = "improvement"
 description = "A scaffolded ApplicationGroup now references the project's only AppProjectDefinition when one exists and no longer pins `destinationNamespace`, so each Release keeps the namespace from its own metadata"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "fc47c749-91b8-461f-9f2a-d3ca5590054d"
+type = "fix"
+description = "`nyl apply` now creates a missing release namespace before applying manifests instead of afterwards for release state, so the first apply of a release into a new namespace no longer fails for every namespaced resource and succeeds only on a retry"
+author = "@NiklasRosenstein"
