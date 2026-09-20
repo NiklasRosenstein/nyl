@@ -108,6 +108,21 @@ pub fn resolve_deployment_target_name(inventory: &GitOpsInventory, requested: Op
     }
 }
 
+/// File name that colocates an ApplicationGroup with its Release source directory.
+pub const APPLICATION_GROUP_FILE_NAME: &str = "_application-group.yaml";
+
+/// Source root of an ApplicationGroup that declares no `spec.source`.
+///
+/// A colocated `_application-group.yaml` owns its containing directory; a
+/// centrally declared group owns `applications/<group-name>`.
+pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, group_name: &str) -> PathBuf {
+    if group_source_path.file_name().and_then(|name| name.to_str()) == Some(APPLICATION_GROUP_FILE_NAME) {
+        project_root.join(group_source_path.parent().unwrap_or_else(|| Path::new("")))
+    } else {
+        project_root.join("applications").join(group_name)
+    }
+}
+
 /// Locate the nearest `nyl.toml` and discover Git-visible GitOps resources.
 ///
 /// A relative `output_subtree` is resolved beneath the project root. The

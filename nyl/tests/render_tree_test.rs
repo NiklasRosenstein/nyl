@@ -3760,3 +3760,49 @@ fn vendor_all_preserves_targeted_collections_and_prunes_unselected_versions() {
     vendor(&["--target", "production"]).assert().failure();
     assert_eq!(fs::read(&index_path).unwrap(), before);
 }
+
+#[test]
+fn created_release_is_rendered_by_the_group_that_owns_its_directory() {
+    let fixture = fixture();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "create",
+            "release",
+            "web",
+            "--group",
+            "workloads",
+            "--additional-namespaces",
+            "web-jobs,web-cache",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("applications/workloads/web.yaml"));
+
+    let release = fs::read_to_string(fixture.path().join("applications/workloads/web.yaml")).unwrap();
+    assert!(release.contains("namespace: web"));
+    assert!(release.contains("- web-jobs"));
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            ".",
+            "--output-dir",
+            "deploy-worktree",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Release workloads/web (applications/workloads/web.yaml)",
+        ));
+
+    let root = fixture.path().join("deploy-worktree/production");
+    assert!(root
+        .join("_nyl/catalog/applications/argocd-production/web.yaml")
+        .is_file());
+}

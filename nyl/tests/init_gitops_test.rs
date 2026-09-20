@@ -2,6 +2,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use git2::Repository;
+use nyl::config::{ProjectConfig, VendorMode};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -115,4 +116,79 @@ fn minimal_mode_rejects_gitops_options() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn records_the_requested_vendor_policy_in_the_generated_project_config() {
+    let repository = repository();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
+        .args(["init", ".", "--yes", "--no-context", "--vendor", "required"])
+        .assert()
+        .success();
+
+    let config = ProjectConfig::load(Some(repository.path().join("nyl.toml"))).unwrap();
+    assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Required));
+
+    // The policy of an existing project configuration is never rewritten.
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .args([
+            "init",
+            ".",
+            "--yes",
+            "--no-context",
+            "--output",
+            "second.yaml",
+            "--vendor",
+            "preferred",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vendor cannot modify"));
+}
+
+#[test]
+fn minimal_mode_records_the_requested_vendor_policy() {
+    let repository = repository();
+    let project = repository.path().join("platform");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .args(["init", "platform", "--minimal", "--vendor", "preferred"])
+        .assert()
+        .success();
+
+    let config = ProjectConfig::load(Some(project.join("nyl.toml"))).unwrap();
+    assert_eq!(config.vendor().map(|vendor| vendor.mode), Some(VendorMode::Preferred));
+    assert_eq!(
+        config.vendor().map(|vendor| vendor.path.clone()),
+        Some(project.join("vendor"))
+    );
+}
+
+#[test]
+fn vendor_policy_requires_a_written_project_config() {
+    let repository = repository();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
+        .args([
+            "init",
+            ".",
+            "--yes",
+            "--no-context",
+            "--output",
+            "-",
+            "--vendor",
+            "required",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vendor cannot be used with --output -"));
+    assert!(!repository.path().join("nyl.toml").exists());
 }

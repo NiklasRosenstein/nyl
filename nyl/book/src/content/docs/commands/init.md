@@ -14,6 +14,15 @@ Use `nyl init DIR --minimal` to create only `nyl.toml` and the conventional
 project directories. Minimal initialization can create a project outside Git;
 GitOps-specific options cannot be combined with `--minimal`.
 
+`--vendor <disabled|preferred|required>` records a
+[remote artifact vendoring](/nyl/configuration/#remote-artifact-vendoring)
+policy in the generated `nyl.toml`. It applies to both forms of initialization
+and writes only the `[vendor] mode` setting; `path` and `lfs_threshold_bytes`
+keep their defaults. Because initialization never rewrites an existing
+`nyl.toml`, the option is rejected when the project already has one that
+declares a different policy, and when `--output -` writes no project
+configuration at all.
+
 When attached to a terminal, the command proposes values detected from the Git
 `origin` remote and the current kubeconfig context. It creates:
 
@@ -55,6 +64,7 @@ options include:
 --applications-path <PATH>
 --applications-name <NAME>
 --skip-applications
+--vendor <MODE>
 ```
 
 Repeat the two `--allow-*` options to build a larger least-privilege AppProject.

@@ -2082,14 +2082,11 @@ fn resolve_group_source(
         }
         Some(source) => (inventory.project_root.join(&source.path), source.clone(), None, None),
         None => {
-            let root =
-                if group_resource_path.file_name().and_then(|name| name.to_str()) == Some("_application-group.yaml") {
-                    inventory
-                        .project_root
-                        .join(group_resource_path.parent().unwrap_or_else(|| Path::new("")))
-                } else {
-                    inventory.project_root.join("applications").join(&group.metadata.name)
-                };
+            let root = crate::gitops::derived_group_source_root(
+                &inventory.project_root,
+                group_resource_path,
+                &group.metadata.name,
+            );
             (
                 root,
                 ApplicationGroupSource {

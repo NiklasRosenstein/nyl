@@ -9,7 +9,7 @@ use git2::Repository;
 use serde_json::{json, Value};
 
 use crate::cli::commands::cluster::{self, ClusterCaptureArgs};
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, VendorMode};
 use crate::resources::{parse_gitops_resource, validate_repository_coordinates};
 use crate::util::path_for_display;
 use crate::{NylError, Result};
@@ -29,6 +29,10 @@ pub struct InitArgs {
         "allowed_cluster_resources", "applications_path", "applications_name", "skip_applications", "yes"
     ])]
     minimal: bool,
+
+    /// Record a project-global remote artifact vendoring policy in `nyl.toml`.
+    #[arg(long, value_enum, value_name = "MODE")]
+    vendor: Option<VendorMode>,
 
     #[command(flatten)]
     gitops: GitOpsInitArgs,
@@ -131,14 +135,15 @@ struct GitOpsInitConfig {
     applications_path: Option<PathBuf>,
     applications_name: Option<String>,
     capture_cluster: bool,
+    vendor: Option<VendorMode>,
 }
 
 pub async fn execute(args: InitArgs) -> Result<()> {
     if args.minimal {
-        return init_minimal(&args.gitops.dir);
+        return init_minimal(&args.gitops.dir, args.vendor);
     }
     prepare_gitops_directory(&args.gitops.dir)?;
-    init_gitops(args.gitops).await
+    init_gitops(args.gitops, args.vendor).await
 }
 
 fn prepare_gitops_directory(path: &Path) -> Result<()> {
@@ -173,7 +178,7 @@ fn prepare_gitops_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn init_minimal(path: &Path) -> Result<()> {
+fn init_minimal(path: &Path, vendor: Option<VendorMode>) -> Result<()> {
     if path.exists() && !path.is_dir() {
         return Err(NylError::config(format!(
             "Initialization path is not a directory: {}",
@@ -200,16 +205,17 @@ fn init_minimal(path: &Path) -> Result<()> {
     ] {
         fs::create_dir_all(path.join(relative))?;
     }
-    fs::write(
-        &config_path,
-        "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json\n\n[project]\ncomponents_search_paths = [\"components\"]\nhelm_chart_search_paths = [\".\"]\ngitops_scaffold_path = \"config\"\n",
-    )?;
+    let config = format!(
+        "#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json\n\n[project]\ncomponents_search_paths = [\"components\"]\nhelm_chart_search_paths = [\".\"]\ngitops_scaffold_path = \"config\"\n{}",
+        vendor_section(vendor)
+    );
+    fs::write(&config_path, config)?;
     println!("✓ Initialized Nyl project at {}", path_for_display(path).display());
     Ok(())
 }
 
-async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
-    let config = resolve_config(args)?;
+async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result<()> {
+    let config = resolve_config(args, vendor)?;
     let documents = build_documents(&config)?;
     let yaml = documents
         .iter()
@@ -223,7 +229,8 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
     }
 
     if config.create_project_config {
-        fs::write(config.project_root.join("nyl.toml"), MINIMAL_PROJECT_CONFIG)?;
+        let project_config = format!("{MINIMAL_PROJECT_CONFIG}{}", vendor_section(config.vendor));
+        fs::write(config.project_root.join("nyl.toml"), project_config)?;
     }
     if let Some(parent) = config.output.parent() {
         fs::create_dir_all(parent)?;
@@ -260,7 +267,7 @@ async fn init_gitops(args: GitOpsInitArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)] // This keeps the interactive questions in their user-visible order.
-fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
+fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result<GitOpsInitConfig> {
     if !args.dir.is_dir() {
         return Err(NylError::config(format!(
             "Initialization directory does not exist or is not a directory: {}",
@@ -295,6 +302,9 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
     if stdout && args.capture_cluster {
         return Err(NylError::config("--capture-cluster cannot be used with --output -"));
     }
+    if stdout && vendor.is_some() {
+        return Err(NylError::config("--vendor cannot be used with --output -"));
+    }
     let output = if stdout {
         args.output.clone()
     } else {
@@ -314,6 +324,18 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
             "Refusing to overwrite existing configuration: {}",
             path_for_display(&project_config_path).display()
         )));
+    }
+    if let (Some(mode), Some(existing)) = (vendor, &found_config) {
+        let declared = ProjectConfig::load(Some(existing.clone()))?
+            .vendor()
+            .map(|settings| settings.mode);
+        if declared != Some(mode) {
+            return Err(NylError::config(format!(
+                "--vendor cannot modify the existing project configuration; set [vendor] mode = {:?} in {}",
+                mode.as_str(),
+                path_for_display(existing).display()
+            )));
+        }
     }
 
     let interactive = !args.yes && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -494,6 +516,14 @@ fn resolve_config(mut args: GitOpsInitArgs) -> Result<GitOpsInitConfig> {
         applications_path,
         applications_name,
         capture_cluster,
+        vendor,
+    })
+}
+
+/// The `[vendor]` section recorded in a generated `nyl.toml`.
+fn vendor_section(vendor: Option<VendorMode>) -> String {
+    vendor.map_or_else(String::new, |mode| {
+        format!("\n[vendor]\nmode = \"{}\"\n", mode.as_str())
     })
 }
 
@@ -714,6 +744,7 @@ mod tests {
             applications_path: Some(PathBuf::from("applications")),
             applications_name: Some("applications".to_owned()),
             capture_cluster: false,
+            vendor: None,
         }
     }
 

@@ -33,3 +33,21 @@ id = "cb8fdd17-a169-4a62-9655-3865d324849f"
 type = "feature"
 description = "Exclude project secrets and NYL_* environment inputs from tree rendering by default, with explicit per-command admission through `--allow-secret-inputs` for trusted central sources"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "ba31919b-e898-4c53-886f-3db675ed9ba8"
+type = "feature"
+description = "Add `nyl init --vendor <disabled|preferred|required>` to record the project-global remote artifact vendoring policy in the generated `nyl.toml`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "024a2ee6-2470-4c84-af9c-1381ff495931"
+type = "feature"
+description = "Add `nyl create release NAME` to scaffold a Release in the source directory of a matching ApplicationGroup, with `--group` (offering to declare a missing group), `--namespace`, and `--additional-namespaces`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a70aa56a-b730-4eca-bfb7-825bfb7ccbee"
+type = "improvement"
+description = "A scaffolded ApplicationGroup now references the project's only AppProjectDefinition when one exists and no longer pins `destinationNamespace`, so each Release keeps the namespace from its own metadata"
+author = "@NiklasRosenstein"

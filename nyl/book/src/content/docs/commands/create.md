@@ -28,6 +28,38 @@ resource identities are never overwritten.
 `nyl create cluster` records its local context but does not connect to it. Use
 `nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 
+A generated ApplicationGroup references the project's only AppProjectDefinition
+when exactly one exists, and otherwise a project of its own name. It sets no
+`destinationNamespace`, so each Release keeps the namespace in its own metadata.
+
+## Create releases
+
+```bash
+nyl create release api
+nyl create release api --group platform
+nyl create release api --namespace api-system --additional-namespaces observability,ingress
+```
+
+The Release file is written to the source directory of a matching
+ApplicationGroup: `spec.source.path` when the group declares one, the directory
+containing a colocated `_application-group.yaml`, and otherwise
+`applications/<group-name>`. The directory is created when it does not exist.
+`--group` selects the group; it can be omitted when the project declares exactly
+one. Groups with a remote or templated `spec.source` need an explicit
+`--output`.
+
+When `--group NAME` names a group that does not exist, Nyl offers to declare it
+and, with `--create-group`, does so without asking. The new group is appended to
+a root `gitops.yaml` or written under `project.gitops_scaffold_path`, and its
+Releases live in `applications/NAME`.
+
+`--namespace` sets `metadata.namespace`. It defaults to the group's
+`destinationNamespace`, then to the Release name. `--additional-namespaces`
+fills `spec.additionalNamespaces` and accepts repeated and comma-separated
+values. Namespaces are validated before the file is written, and existing files
+are never overwritten. The generated file contains only the Release document;
+add the workload manifests as further YAML documents below it.
+
 ## Create components
 
 ```bash

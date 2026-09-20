@@ -49,6 +49,9 @@ lfs_threshold_bytes = 1048576
 - `lfs_threshold_bytes` defaults to 1 MiB. Helm and Git archives always use Git
   LFS rules; RemoteManifest blobs use LFS at or above this threshold.
 
+`nyl init --vendor <MODE>` writes this section with the selected mode when it
+creates `nyl.toml`.
+
 The committed lock identifies artifacts by a deterministic fingerprint of the
 complete request coordinate. Multiple Releases requesting the same coordinate
 share one lock entry and one blob. See [`nyl vendor`](/nyl/commands/vendor/)
