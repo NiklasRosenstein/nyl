@@ -120,6 +120,10 @@ For shared rendering behavior and namespace resolution details, see
 <li>Nyl accepts one entry file. <code dir="auto">Release.spec.include</code> can attach additional relative manifest files and glob matches; directory arguments are not supported.</li>
 <li>A <code dir="auto">Release</code> resource in the manifest provides release metadata automatically.</li>
 <li>Release state is tracked in Kubernetes Secrets in the release namespace. Use <a href="/nyl/pr-preview/pr-124/commands/release/"><code dir="auto">nyl release</code></a> to inspect history or <a href="/nyl/pr-preview/pr-124/commands/release/#rollback">roll back</a> to a previous revision.</li>
+<li>The release namespace is created when it is missing, before the manifests are
+applied. Nyl does not own that namespace and never prunes it. Other namespaces
+a release writes to, including <code dir="auto">spec.additionalNamespaces</code>, need their own
+<code dir="auto">Namespace</code> manifest.</li>
 <li><code dir="auto">--no-release</code> disables release tracking entirely. In this mode, <code dir="auto">nyl</code> cannot compute or prune resources removed from subsequent applies.</li>
 <li>See <a href="/nyl/pr-preview/pr-124/commands/rendering-pipeline/">Rendering Pipeline</a> for namespace resolution and filter semantics.</li>
 </ul>
