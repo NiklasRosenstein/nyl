@@ -10,12 +10,20 @@ selection, `spec.enabled` may be structurally templated per target.
 
 ## Project assignment
 
+A group that declares neither `projectRef` nor `projectTemplate` owns an
+implied AppProject named after the group. It is permissive: the target workload
+Cluster as its only destination, every namespace, and every cluster-scoped
+resource. Nothing outside the group needs to exist for it to render, and Argo CD
+still confines the project to that one cluster and to the target publication
+repository.
+
 `projectRef` retains a reusable AppProjectDefinition contract. A `Rendered`
 definition is copied into the target catalog once; an `External` definition
 only supplies the project name.
 
-`projectTemplate` generates a least-privilege AppProject without the reusable
-definition boilerplate:
+`projectTemplate` replaces the implied project with a least-privilege one.
+Declaring it opts into explicit scope, so it requires `destinationNamespaces`
+unless `spec.destinationNamespace` fixes the namespace:
 
 ```yaml
 projectTemplate:
@@ -28,8 +36,9 @@ projectTemplate:
       kind: CustomResourceDefinition
 ```
 
-The name defaults to the ApplicationGroup name. Nyl fixes `sourceRepos` to the
-target publication repository, `sourceNamespaces` to `applicationNamespace`,
+The name defaults to the ApplicationGroup name. Remove the whole
+`projectTemplate` to go back to the implied permissive project. Nyl fixes
+`sourceRepos` to the target publication repository, `sourceNamespaces` to `applicationNamespace`,
 and destinations to the target workload Cluster. A fixed
 `destinationNamespace` is automatically added. Without one, at least one
 destination namespace pattern is required. Every effective Release destination

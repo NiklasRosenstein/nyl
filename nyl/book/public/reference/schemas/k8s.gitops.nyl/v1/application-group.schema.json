@@ -278,6 +278,16 @@
           "required": [
             "projectTemplate"
           ]
+        },
+        {
+          "properties": {
+            "projectRef": {
+              "type": "null"
+            },
+            "projectTemplate": {
+              "type": "null"
+            }
+          }
         }
       ],
       "properties": {
@@ -340,7 +350,7 @@
           ]
         },
         "projectRef": {
-          "description": "Project-local AppProjectDefinition identity. Exactly one of `projectRef` and `projectTemplate` is required.",
+          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.",
           "type": [
             "string",
             "null"
@@ -355,7 +365,7 @@
               "type": "null"
             }
           ],
-          "description": "Constrained generated AppProject. Exactly one of `projectRef` and `projectTemplate` is required."
+          "description": "Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces."
         },
         "releaseCustomization": {
           "$ref": "#/$defs/GitOpsReleaseCustomization",

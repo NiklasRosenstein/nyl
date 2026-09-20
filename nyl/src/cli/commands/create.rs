@@ -212,7 +212,9 @@ struct ResolvedApplicationGroup {
     destination_namespace: Option<String>,
     /// Statically known file selection of the group source, when the group parses without a target.
     source: Option<ApplicationGroupSource>,
-    project_ref: Option<String>,
+    /// The Argo CD project name and the namespaces it admits, when the group
+    /// narrows them. An implied permissive project states nothing.
+    project: Option<(String, Vec<String>)>,
     /// The group must still be declared in project source.
     declare: bool,
 }
@@ -272,7 +274,7 @@ fn scaffold_release_in_dir(args: ReleaseScaffoldArgs, project_dir: Option<&Path>
     match &group {
         Some(group) => {
             warn_for_unselected_release(group, &output);
-            warn_for_namespace_outside_project(&inventory, group, &namespace, &args.additional_namespaces);
+            warn_for_namespace_outside_project(group, &namespace, &args.additional_namespaces);
             println!(
                 "✓ Created Release in ApplicationGroup {:?}: {}",
                 group.name,
@@ -338,7 +340,7 @@ fn resolve_application_group(
         root,
         destination_namespace: group.and_then(|group| group.spec.destination_namespace.clone()),
         source: group.and_then(|group| group.spec.source.clone()),
-        project_ref: group.and_then(|group| group.spec.project_ref.clone()),
+        project: resolved_project_scope(inventory, group),
         declare: false,
     })
 }
@@ -408,7 +410,8 @@ fn plan_application_group(inventory: &GitOpsInventory, name: String, create: boo
         root: Some(central_group_source_root(&inventory.project_root, &name)),
         destination_namespace: None,
         source: None,
-        project_ref: sole_app_project_name(inventory),
+        // A new group is scaffolded with the implied permissive project.
+        project: None,
         declare: true,
         name,
     })
@@ -456,25 +459,38 @@ fn warn_for_unselected_release(group: &ResolvedApplicationGroup, output: &Path) 
 }
 
 /// Warn when the group's Argo CD project does not admit the Release namespaces.
-fn warn_for_namespace_outside_project(
-    inventory: &GitOpsInventory,
-    group: &ResolvedApplicationGroup,
-    namespace: &str,
-    additional_namespaces: &[String],
-) {
-    let Some(project) = &group.project_ref else {
+fn warn_for_namespace_outside_project(group: &ResolvedApplicationGroup, namespace: &str, additional: &[String]) {
+    let Some((project, patterns)) = &group.project else {
         return;
     };
-    let Some(patterns) = project_destination_namespaces(inventory, project) else {
-        return;
-    };
-    for namespace in std::iter::once(namespace).chain(additional_namespaces.iter().map(String::as_str)) {
-        if !crate::gitops::namespace_matches_any(namespace, &patterns) {
+    for namespace in std::iter::once(namespace).chain(additional.iter().map(String::as_str)) {
+        if !crate::gitops::namespace_matches_any(namespace, patterns) {
             eprintln!(
-                "⚠ AppProject {project:?} does not allow namespace {namespace:?}; add it to the AppProjectDefinition destinations"
+                "⚠ AppProject {project:?} does not allow namespace {namespace:?}; add it to the project destinations"
             );
         }
     }
+}
+
+/// The Argo CD project of a group and the namespaces it admits, when it narrows them.
+fn resolved_project_scope(
+    inventory: &GitOpsInventory,
+    group: Option<&ApplicationGroup>,
+) -> Option<(String, Vec<String>)> {
+    let group = group?;
+    if let Some(reference) = &group.spec.project_ref {
+        return Some((reference.clone(), project_destination_namespaces(inventory, reference)?));
+    }
+    let template = group.spec.project_template.as_ref()?;
+    let mut namespaces = template.destination_namespaces.clone();
+    if let Some(namespace) = &group.spec.destination_namespace {
+        namespaces.push(namespace.clone());
+    }
+    // An empty template list leaves the generated project's namespaces unrestricted.
+    (!namespaces.is_empty()).then(|| {
+        let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
+        (name, namespaces)
+    })
 }
 
 /// Literal destination namespaces of a statically declared AppProjectDefinition.
@@ -580,17 +596,12 @@ fn scaffold_resource(
     } else {
         args.source.as_deref().map(|path| path.to_string_lossy())
     };
-    // A group scaffold references an existing AppProjectDefinition when the project declares exactly one.
-    let project_ref = (args.kind == GitOpsResourceKind::ApplicationGroup)
-        .then(|| sole_app_project_name(&inventory))
-        .flatten();
     let yaml = render_resource_scaffold(
         args.kind,
         &args.name,
         source.as_deref(),
         cluster_context,
         repository_urls,
-        project_ref.as_deref(),
     );
     if use_primary {
         let relative = output.strip_prefix(&inventory.project_root).map_err(|_| {
@@ -616,24 +627,12 @@ fn scaffold_resource(
     Ok(output)
 }
 
-/// The only AppProjectDefinition in the project, when it is unambiguous.
-fn sole_app_project_name(inventory: &GitOpsInventory) -> Option<String> {
-    let mut names = inventory
-        .resources
-        .values()
-        .filter(|resource| resource.identity.kind == GitOpsResourceKind::AppProjectDefinition)
-        .map(|resource| resource.identity.name.clone());
-    let name = names.next()?;
-    names.next().is_none().then_some(name)
-}
-
 fn render_resource_scaffold(
     kind: GitOpsResourceKind,
     name: &str,
     source: Option<&str>,
     cluster_context: Option<&str>,
     repository_urls: Option<(&str, Option<&str>)>,
-    project_ref: Option<&str>,
 ) -> String {
     let schema = format!(
         "https://niklasrosenstein.github.io/nyl/reference/schemas/{}/{}",
@@ -674,10 +673,10 @@ fn render_resource_scaffold(
         ),
         GitOpsResourceKind::ApplicationGroup => {
             let source = source.map_or_else(String::new, |source| format!("  source:\n    path: {source}\n"));
-            let project = project_ref.unwrap_or(name);
+            // No project: the group owns its implied permissive AppProject.
             // No destinationNamespace: each Release keeps its own metadata.namespace.
             format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  projectRef: {project}\n  applicationNamespace: argocd\n{source}"
+                "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  applicationNamespace: argocd\n{source}"
             )
         }
     };
@@ -1220,10 +1219,8 @@ mod tests {
     }
 
     #[test]
-    fn test_application_group_scaffold_references_the_only_app_project() {
-        let temp = project(Some(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: AppProjectDefinition\nmetadata:\n  name: default\nspec:\n  management: Rendered\n  manifest:\n    apiVersion: argoproj.io/v1alpha1\n    kind: AppProject\n    metadata:\n      name: default\n      namespace: argocd\n    spec:\n      sourceRepos: []\n      destinations: []\n",
-        ));
+    fn test_application_group_scaffold_declares_no_project() {
+        let temp = project(None);
         scaffold_resource(
             ResourceScaffoldArgs {
                 kind: GitOpsResourceKind::ApplicationGroup,
@@ -1237,8 +1234,11 @@ mod tests {
             None,
         )
         .unwrap();
-        let gitops = fs::read_to_string(temp.path().join("gitops.yaml")).unwrap();
-        assert!(gitops.contains("projectRef: default"));
+        // The implied permissive AppProject needs no declaration; narrowing is opt-in.
+        let group = fs::read_to_string(temp.path().join("config/application-groups/platform.yaml")).unwrap();
+        assert!(!group.contains("projectRef:"));
+        assert!(!group.contains("projectTemplate:"));
+        assert!(!group.contains("destinationNamespace:"));
     }
 
     #[test]

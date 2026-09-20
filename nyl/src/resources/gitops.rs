@@ -377,11 +377,11 @@ pub struct InlineGitRepository {
 ///
 /// ## When needed
 ///
-/// Required when an ApplicationGroup uses `spec.projectRef`, including when the Argo CD AppProject is externally managed.
+/// Required when one project is shared by several ApplicationGroups, when the Argo CD AppProject is externally managed, or when the project needs AppProject fields beyond `spec.projectTemplate`.
 ///
 /// ## If omitted
 ///
-/// An ApplicationGroup can use `spec.projectTemplate` to generate its AppProject instead. Exactly one of `projectRef` and `projectTemplate` must be set; Nyl does not assume an existing Argo CD project supplies the required policy contract.
+/// An ApplicationGroup generates its own AppProject: `spec.projectTemplate` for a least-privilege project, or the implied permissive project when the group declares neither. Nyl does not assume an existing Argo CD project supplies the required policy contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::AppProjectDefinition))]
@@ -453,10 +453,10 @@ pub struct ApplicationGroupSpec {
     /// Release source selection. Omission derives `applications/<group-name>` for central groups or the containing directory for `_application-group.yaml`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<ApplicationGroupSource>,
-    /// Project-local AppProjectDefinition identity. Exactly one of `projectRef` and `projectTemplate` is required.
+    /// Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.
     #[serde(rename = "projectRef", skip_serializing_if = "Option::is_none")]
     pub project_ref: Option<String>,
-    /// Constrained generated AppProject. Exactly one of `projectRef` and `projectTemplate` is required.
+    /// Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces.
     #[serde(rename = "projectTemplate", skip_serializing_if = "Option::is_none")]
     pub project_template: Option<AppProjectTemplate>,
     /// Namespace containing generated Argo CD Applications.
@@ -503,7 +503,7 @@ pub struct LabelSelector {
 }
 
 /// A constrained AppProject generated for one ApplicationGroup and target.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AppProjectTemplate {
     /// Generated AppProject name; defaults to the ApplicationGroup name. Must be unambiguous across targets sharing an Argo CD namespace.
@@ -1172,11 +1172,8 @@ impl ApplicationGroup {
                     "spec.projectRef and spec.projectTemplate are mutually exclusive",
                 ))
             }
-            (None, None) => {
-                return Err(NylError::config(
-                    "Exactly one of spec.projectRef or spec.projectTemplate is required",
-                ))
-            }
+            // Neither declares the implied project: this group's own permissive AppProject.
+            (None, None) => {}
         }
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
         if let Some(namespace) = &self.spec.destination_namespace {
@@ -1682,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn application_group_requires_exactly_one_project_source() {
+    fn application_group_accepts_at_most_one_project_source() {
         let mut value = application_group();
         value["spec"]["projectTemplate"] = json!({"destinationNamespaces": ["cloud"]});
         assert!(parse_gitops_resource(&value)
@@ -1691,11 +1688,14 @@ mod tests {
             .contains("mutually exclusive"));
         value["spec"].as_object_mut().unwrap().remove("projectRef");
         assert!(parse_gitops_resource(&value).is_ok());
+        // Declaring neither is the implied permissive project, not an error.
         value["spec"].as_object_mut().unwrap().remove("projectTemplate");
-        assert!(parse_gitops_resource(&value)
-            .unwrap_err()
-            .to_string()
-            .contains("Exactly one"));
+        let parsed = parse_gitops_resource(&value).unwrap().unwrap();
+        let GitOpsResource::ApplicationGroup(parsed) = parsed else {
+            panic!("expected application group");
+        };
+        assert!(parsed.spec.project_ref.is_none());
+        assert!(parsed.spec.project_template.is_none());
     }
 
     #[test]

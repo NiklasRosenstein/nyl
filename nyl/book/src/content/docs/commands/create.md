@@ -28,9 +28,10 @@ resource identities are never overwritten.
 `nyl create cluster` records its local context but does not connect to it. Use
 `nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 
-A generated ApplicationGroup references the project's only AppProjectDefinition
-when exactly one exists, and otherwise a project of its own name. It sets no
-`destinationNamespace`, so each Release keeps the namespace in its own metadata.
+A generated ApplicationGroup declares no project and no `destinationNamespace`,
+so it owns its implied permissive AppProject and each Release keeps the
+namespace in its own metadata. Add `spec.projectTemplate` to narrow the project,
+or `spec.projectRef` to share an AppProjectDefinition.
 
 ## Create releases
 
@@ -50,10 +51,9 @@ one. A group whose spec is rendered with a target still works as long as its
 explicit `--output`, which is accepted together with `--group`.
 
 Nyl warns, without refusing the file, when the group's `spec.source` selection
-does not include it, and when the AppProjectDefinition behind the group's
-`projectRef` lists no destination for one of the Release namespaces. The
-AppProject that [`nyl init`](/nyl/commands/init/) generates admits only the
-namespaces given by its `--allow-namespace` options.
+does not include it, and when the group's project lists no destination for one
+of the Release namespaces. A group that declares no project admits every
+namespace, so it never produces that warning.
 
 When `--group NAME` names a group that does not exist, Nyl offers to declare it
 and, with `--create-group`, does so without asking. The new group is appended to

@@ -49,11 +49,23 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "a70aa56a-b730-4eca-bfb7-825bfb7ccbee"
 type = "improvement"
-description = "A scaffolded ApplicationGroup now references the project's only AppProjectDefinition when one exists and no longer pins `destinationNamespace`, so each Release keeps the namespace from its own metadata"
+description = "A scaffolded ApplicationGroup no longer declares a project or pins `destinationNamespace`, so it owns its implied AppProject and each Release keeps the namespace from its own metadata"
 author = "@NiklasRosenstein"
 
 [[entries]]
 id = "fc47c749-91b8-461f-9f2a-d3ca5590054d"
 type = "fix"
 description = "`nyl apply` now creates a missing release namespace before applying manifests instead of afterwards for release state, so the first apply of a release into a new namespace no longer fails for every namespaced resource and succeeds only on a retry"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "822cf5b4-40b4-4edf-95c6-07693947d902"
+type = "feature"
+description = "An ApplicationGroup may declare neither `projectRef` nor `projectTemplate`; it then owns an implied AppProject named after the group that permits every namespace and cluster-scoped resource on the target workload Cluster. Declaring `spec.projectTemplate` remains the least-privilege form and still requires explicit destination namespaces."
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "087dafe2-887b-47bc-af60-9eb39be22df7"
+type = "improvement"
+description = "`nyl init` no longer generates an AppProjectDefinition. The generated ApplicationGroup uses the implied AppProject, and `--project-name`, `--allow-namespace`, and `--allow-cluster-resource` narrow it through `spec.projectTemplate`, leaving every dimension they do not name permissive"
 author = "@NiklasRosenstein"

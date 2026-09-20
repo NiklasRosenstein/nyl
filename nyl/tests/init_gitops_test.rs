@@ -47,10 +47,13 @@ fn initializes_simple_gitops_project_from_detected_repository() {
     assert!(yaml.contains("kind: ApplicationGroup"));
     assert!(yaml.contains("repoURL: https://git.example.invalid/platform.git"));
     assert!(yaml.contains("publishURL: ssh://git@git.example.invalid/platform.git"));
-    assert!(yaml.contains("sourceRepositoryRefs:"));
     assert!(!yaml.contains("clusterRef:"));
     assert!(!yaml.contains("pathPrefix:"));
     assert!(!yaml.contains("destinationNamespace:"));
+    // The group keeps the implied permissive AppProject; nothing declares a project.
+    assert!(!yaml.contains("kind: AppProjectDefinition"));
+    assert!(!yaml.contains("projectRef:"));
+    assert!(!yaml.contains("projectTemplate:"));
 
     Command::cargo_bin("nyl")
         .unwrap()
@@ -191,4 +194,34 @@ fn vendor_policy_requires_a_written_project_config() {
         .failure()
         .stderr(predicate::str::contains("--vendor cannot be used with --output -"));
     assert!(!repository.path().join("nyl.toml").exists());
+}
+
+#[test]
+fn project_scope_options_narrow_the_generated_application_group() {
+    let repository = repository();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(repository.path())
+        .env("KUBECONFIG", repository.path().join("missing-kubeconfig"))
+        .args([
+            "init",
+            ".",
+            "--yes",
+            "--no-context",
+            "--project-name",
+            "workloads",
+            "--allow-namespace",
+            "apps",
+            "--allow-cluster-resource",
+            "core/Namespace",
+        ])
+        .assert()
+        .success();
+
+    let yaml = fs::read_to_string(repository.path().join("gitops.yaml")).unwrap();
+    assert!(yaml.contains("projectTemplate:"));
+    assert!(yaml.contains("name: workloads"));
+    assert!(yaml.contains("- apps"));
+    assert!(yaml.contains("kind: Namespace"));
+    assert!(!yaml.contains("kind: AppProjectDefinition"));
 }

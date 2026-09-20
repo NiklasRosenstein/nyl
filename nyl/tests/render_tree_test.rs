@@ -3806,3 +3806,61 @@ fn created_release_is_rendered_by_the_group_that_owns_its_directory() {
         .join("_nyl/catalog/applications/argocd-production/web.yaml")
         .is_file());
 }
+
+#[test]
+fn group_without_a_declared_project_generates_a_permissive_app_project() {
+    let fixture = fixture();
+    // The group declares neither projectRef nor projectTemplate.
+    fs::remove_file(fixture.path().join("config/projects/workloads.yaml")).unwrap();
+    fs::write(
+        fixture.path().join("config/application-groups/workloads.yaml"),
+        r"apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: workloads
+  labels:
+    environment: production
+spec:
+  applicationNamespace: argocd
+",
+    )
+    .unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            ".",
+            "--output-dir",
+            "deploy-worktree",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success();
+
+    let root = fixture.path().join("deploy-worktree/production");
+    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+        &fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["metadata"]["name"], "workloads");
+    assert_eq!(project["metadata"]["namespace"], "argocd");
+    assert_eq!(
+        project["spec"]["destinations"],
+        serde_json::json!([{"namespace": "*", "server": "https://kubernetes.default.svc"}])
+    );
+    assert_eq!(
+        project["spec"]["clusterResourceWhitelist"],
+        serde_json::json!([{"group": "*", "kind": "*"}])
+    );
+    // The in-cluster destination and the publication repository stay fixed.
+    assert_eq!(
+        project["spec"]["sourceRepos"],
+        serde_json::json!(["https://example.invalid/deploy.git"])
+    );
+
+    let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/api.yaml")).unwrap();
+    assert!(application.contains("project: workloads"));
+}
