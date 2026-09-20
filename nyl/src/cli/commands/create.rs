@@ -1065,6 +1065,17 @@ mod tests {
         }
     }
 
+    /// Discovery canonicalizes the project root, which differs from the raw
+    /// temporary directory on macOS and Windows; compare the tail instead.
+    fn assert_written_at(path: &Path, expected: &str) {
+        assert!(
+            path.ends_with(expected),
+            "{} does not end with {expected}",
+            path.display()
+        );
+        assert!(path.is_file(), "{} was not written", path.display());
+    }
+
     fn project(gitops: Option<&str>) -> TempDir {
         let temp = TempDir::new().unwrap();
         git2::Repository::init(temp.path()).unwrap();
@@ -1080,7 +1091,7 @@ mod tests {
         let temp = project(Some(APPLICATION_GROUP));
         let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
 
-        assert_eq!(path, temp.path().join("applications/platform/api.yaml"));
+        assert_written_at(&path, "applications/platform/api.yaml");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("release.schema.json"));
         assert!(content.contains("kind: Release"));
@@ -1096,7 +1107,7 @@ mod tests {
             "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: platform\nspec:\n  projectRef: platform\n  applicationNamespace: argocd\n  destinationNamespace: platform-system\n  source:\n    path: workloads/platform\n",
         ));
         let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
-        assert_eq!(path, temp.path().join("workloads/platform/api.yaml"));
+        assert_written_at(&path, "workloads/platform/api.yaml");
         // A group destination namespace is the Release default.
         assert!(fs::read_to_string(&path)
             .unwrap()
@@ -1112,7 +1123,7 @@ mod tests {
         let mut args = release_args("index");
         args.group = Some("search".to_owned());
         let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
-        assert_eq!(path, temp.path().join("teams/search/index.yaml"));
+        assert_written_at(&path, "teams/search/index.yaml");
     }
 
     #[test]
@@ -1123,7 +1134,7 @@ mod tests {
         args.create_group = true;
         let path = scaffold_release_in_dir(args, Some(temp.path())).unwrap();
 
-        assert_eq!(path, temp.path().join("applications/platform/api.yaml"));
+        assert_written_at(&path, "applications/platform/api.yaml");
         let group = fs::read_to_string(temp.path().join("config/application-groups/platform.yaml")).unwrap();
         assert!(group.contains("kind: ApplicationGroup"));
         // The group must not pin a destination namespace over its Releases.
@@ -1184,7 +1195,7 @@ mod tests {
     fn test_scaffold_release_reads_a_static_source_from_a_templated_group() {
         let temp = project(Some(TEMPLATED_GROUP));
         let path = scaffold_release_in_dir(release_args("api"), Some(temp.path())).unwrap();
-        assert_eq!(path, temp.path().join("workloads/platform/api.yaml"));
+        assert_written_at(&path, "workloads/platform/api.yaml");
     }
 
     #[test]
