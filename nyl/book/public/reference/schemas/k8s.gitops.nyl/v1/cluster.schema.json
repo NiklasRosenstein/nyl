@@ -32,6 +32,7 @@
       "description": "Argo CD's identity for a concrete cluster.",
       "oneOf": [
         {
+          "description": "Sets `name` and leaves `server` unset.",
           "not": {
             "anyOf": [
               {
@@ -57,9 +58,11 @@
           },
           "required": [
             "name"
-          ]
+          ],
+          "title": "name"
         },
         {
+          "description": "Sets `server` and leaves `name` unset.",
           "not": {
             "anyOf": [
               {
@@ -85,7 +88,8 @@
           },
           "required": [
             "server"
-          ]
+          ],
+          "title": "server"
         }
       ],
       "properties": {

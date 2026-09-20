@@ -82,9 +82,21 @@ export function schemaReference(schema) {
       }
     }
     if (value.additionalProperties === false) output.push('Unknown fields are rejected.');
-    const documentedAlternatives = (keyword) => value[keyword]?.length && value[keyword].every((option) => option.const !== undefined || option.type || option.$ref);
+    // A labelled constraint branch documents itself, so it needs neither the raw
+    // constraint dump nor a walk into the fields it merely restricts.
+    const structuredVariant = (option) => option.$ref || option.type || option.const !== undefined;
+    const constraintAlternatives = (keyword) => value[keyword]?.length && value[keyword].every((option) => !structuredVariant(option) && option.title);
+    const documentedAlternatives = (keyword) => value[keyword]?.length && value[keyword].every((option) => structuredVariant(option) || option.title);
+    const alternativeHeading = (keyword) => keyword === 'oneOf' ? 'Choose exactly one variant:' : keyword === 'anyOf' ? 'Match one or more variants:' : 'All of the following apply:';
     const constraints = Object.fromEntries(structural.filter((key) => key in value && !(['oneOf', 'anyOf', 'allOf'].includes(key) && documentedAlternatives(key))).map((key) => [key, value[key]]));
     if (Object.keys(constraints).length) output.push('<details><summary>Validation constraints</summary>\n', '```yaml\n' + stringify(constraints).trimEnd() + '\n```', '</details>');
+    // Which fields may appear is a statement about this object, so it belongs
+    // here rather than after the fields it constrains.
+    for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
+      if (enumeration?.keyword === keyword || !constraintAlternatives(keyword)) continue;
+      output.push(alternativeHeading(keyword));
+      output.push(value[keyword].map((alternative) => `- **${html(alternative.title)}**${alternative.description ? ` — ${alternative.description}` : ''}`).join('\n'));
+    }
     for (const [field, child] of Object.entries(value.properties ?? {})) {
       walk(child, path ? `${path}.${field}` : field, value.required?.includes(field) ?? false, new Set(seen), anchorPath ? `${anchorPath}.${field}` : field);
     }
@@ -95,7 +107,8 @@ export function schemaReference(schema) {
     for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
       if (enumeration?.keyword === keyword) continue;
       const alternatives = value[keyword] ?? [];
-      if (documentedAlternatives(keyword)) output.push(keyword === 'oneOf' ? 'Choose exactly one variant:' : keyword === 'anyOf' ? 'Match one or more variants:' : 'All of the following apply:');
+      if (constraintAlternatives(keyword)) continue;
+      if (documentedAlternatives(keyword)) output.push(alternativeHeading(keyword));
       alternatives.forEach((alternative, index) => {
         // Constraint-only branches are shown above; typed alternatives need their field documentation too.
         if (alternative.$ref || alternative.type || alternative.description || alternative.const !== undefined) {

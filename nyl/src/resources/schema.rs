@@ -225,22 +225,48 @@ pub fn resource_example(kind: ResourceKind) -> Value {
 }
 
 /// Require exactly one non-null alternative, matching Option deserialization.
+/// Constrain a set of fields so at most one of them is set, and, when
+/// `required`, so exactly one is.
+///
+/// Each alternative carries a title and description. Without them the branches
+/// are anonymous constraints, and a reader of the generated reference or a
+/// validator message sees only `required: [<field>]` from one branch, which
+/// reads as if that field were required outright.
 pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[&str], required: bool) {
     let mut alternatives = Vec::new();
     for field in fields {
-        let others: Vec<_> = fields
+        let others: Vec<_> = fields.iter().filter(|other| *other != field).collect();
+        let excluded = others
             .iter()
-            .filter(|other| *other != field)
-            .map(|other| json!({"required": [other], "properties": {*other: {"not": {"type": "null"}}}}))
-            .collect();
-        alternatives.push(
-            json!({"required": [field], "properties": {*field: {"not": {"type": "null"}}}, "not": {"anyOf": others}}),
-        );
+            .map(|other| json!({"required": [other], "properties": {**other: {"not": {"type": "null"}}}}))
+            .collect::<Vec<_>>();
+        alternatives.push(json!({
+            "title": *field,
+            "description": format!("Sets `{field}` and leaves {} unset.", field_list(&others)),
+            "required": [field],
+            "properties": {*field: {"not": {"type": "null"}}},
+            "not": {"anyOf": excluded}
+        }));
     }
     if !required {
-        alternatives.push(json!({"properties": fields.iter().map(|field| ((*field).to_owned(), json!({"type": "null"}))).collect::<serde_json::Map<_,_>>()}));
+        let all = fields.iter().collect::<Vec<_>>();
+        alternatives.push(json!({
+            "title": "Neither",
+            "description": format!("Leaves {} unset.", field_list(&all)),
+            "properties": fields.iter().map(|field| ((*field).to_owned(), json!({"type": "null"}))).collect::<serde_json::Map<_,_>>()
+        }));
     }
     schema.insert("oneOf".into(), json!(alternatives));
+}
+
+/// Render field names as a readable list: `a`, `a` and `b`, `a`, `b` and `c`.
+fn field_list(fields: &[&&str]) -> String {
+    let quoted = fields.iter().map(|field| format!("`{field}`")).collect::<Vec<_>>();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
@@ -304,6 +330,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_exclusive_field_branches_are_labelled_for_readers_and_validators() {
+        // The generated reference and validator messages quote these branches;
+        // an anonymous branch only shows `required: [<field>]`, which reads as
+        // if that field were required outright.
+        let mut checked = 0;
+        for kind in ResourceKind::ALL {
+            let mut stack = vec![kind.schema()];
+            while let Some(node) = stack.pop() {
+                match node {
+                    Value::Object(map) => {
+                        if let Some(Value::Array(branches)) = map.get("oneOf") {
+                            let constraint_only = branches
+                                .iter()
+                                .all(|branch| !["type", "$ref", "const"].iter().any(|key| branch.get(key).is_some()));
+                            if constraint_only {
+                                for branch in branches {
+                                    assert!(
+                                        branch
+                                            .get("title")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|title| !title.is_empty()),
+                                        "{}: exclusive branch needs a title: {branch}",
+                                        kind.name()
+                                    );
+                                    assert!(
+                                        branch
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|text| text.contains('`')),
+                                        "{}: exclusive branch needs a description naming its fields: {branch}",
+                                        kind.name()
+                                    );
+                                    checked += 1;
+                                }
+                            }
+                        }
+                        stack.extend(map.into_values());
+                    }
+                    Value::Array(items) => stack.extend(items),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            checked >= 9,
+            "expected every exclusive-field branch to be checked, saw {checked}"
+        );
+    }
+
+    #[test]
+    fn test_exclusive_fields_names_the_fields_each_branch_excludes() {
+        let mut schema = schemars::Schema::default();
+        exclusive_fields(&mut schema, &["first", "second", "third"], false);
+        let branches = schema.get("oneOf").and_then(Value::as_array).unwrap().clone();
+        assert_eq!(branches.len(), 4);
+        assert_eq!(branches[0]["title"], "first");
+        assert_eq!(
+            branches[0]["description"],
+            "Sets `first` and leaves `second` and `third` unset."
+        );
+        assert_eq!(branches[3]["title"], "Neither");
+        assert_eq!(
+            branches[3]["description"],
+            "Leaves `first`, `second` and `third` unset."
+        );
     }
 
     #[test]

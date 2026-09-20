@@ -40,6 +40,7 @@
       "description": "RemoteManifest specification",
       "oneOf": [
         {
+          "description": "Sets `url` and leaves `urls` unset.",
           "not": {
             "anyOf": [
               {
@@ -65,9 +66,11 @@
           },
           "required": [
             "url"
-          ]
+          ],
+          "title": "url"
         },
         {
+          "description": "Sets `urls` and leaves `url` unset.",
           "not": {
             "anyOf": [
               {
@@ -93,7 +96,8 @@
           },
           "required": [
             "urls"
-          ]
+          ],
+          "title": "urls"
         }
       ],
       "properties": {

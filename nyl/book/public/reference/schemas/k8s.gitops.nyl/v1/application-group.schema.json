@@ -77,6 +77,7 @@
       "description": "A local source when no repository is given, otherwise an immutable remote source.",
       "oneOf": [
         {
+          "description": "Sets `repositoryRef` and leaves `repository` unset.",
           "not": {
             "anyOf": [
               {
@@ -102,9 +103,11 @@
           },
           "required": [
             "repositoryRef"
-          ]
+          ],
+          "title": "repositoryRef"
         },
         {
+          "description": "Sets `repository` and leaves `repositoryRef` unset.",
           "not": {
             "anyOf": [
               {
@@ -130,9 +133,11 @@
           },
           "required": [
             "repository"
-          ]
+          ],
+          "title": "repository"
         },
         {
+          "description": "Leaves `repositoryRef` and `repository` unset.",
           "properties": {
             "repository": {
               "type": "null"
@@ -140,7 +145,8 @@
             "repositoryRef": {
               "type": "null"
             }
-          }
+          },
+          "title": "Neither"
         }
       ],
       "properties": {
@@ -224,6 +230,7 @@
       "additionalProperties": false,
       "oneOf": [
         {
+          "description": "Sets `projectRef` and leaves `projectTemplate` unset.",
           "not": {
             "anyOf": [
               {
@@ -249,9 +256,11 @@
           },
           "required": [
             "projectRef"
-          ]
+          ],
+          "title": "projectRef"
         },
         {
+          "description": "Sets `projectTemplate` and leaves `projectRef` unset.",
           "not": {
             "anyOf": [
               {
@@ -277,9 +286,11 @@
           },
           "required": [
             "projectTemplate"
-          ]
+          ],
+          "title": "projectTemplate"
         },
         {
+          "description": "Leaves `projectRef` and `projectTemplate` unset.",
           "properties": {
             "projectRef": {
               "type": "null"
@@ -287,7 +298,8 @@
             "projectTemplate": {
               "type": "null"
             }
-          }
+          },
+          "title": "Neither"
         }
       ],
       "properties": {
