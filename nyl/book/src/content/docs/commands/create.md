@@ -45,8 +45,15 @@ ApplicationGroup: `spec.source.path` when the group declares one, the directory
 containing a colocated `_application-group.yaml`, and otherwise
 `applications/<group-name>`. The directory is created when it does not exist.
 `--group` selects the group; it can be omitted when the project declares exactly
-one. Groups with a remote or templated `spec.source` need an explicit
-`--output`.
+one. A group whose spec is rendered with a target still works as long as its
+`spec.source` can be read without one; a remote or templated source needs an
+explicit `--output`, which is accepted together with `--group`.
+
+Nyl warns, without refusing the file, when the group's `spec.source` selection
+does not include it, and when the AppProjectDefinition behind the group's
+`projectRef` lists no destination for one of the Release namespaces. The
+AppProject that [`nyl init`](/nyl/commands/init/) generates admits only the
+namespaces given by its `--allow-namespace` options.
 
 When `--group NAME` names a group that does not exist, Nyl offers to declare it
 and, with `--create-group`, does so without asking. The new group is appended to
@@ -56,9 +63,10 @@ Releases live in `applications/NAME`.
 `--namespace` sets `metadata.namespace`. It defaults to the group's
 `destinationNamespace`, then to the Release name. `--additional-namespaces`
 fills `spec.additionalNamespaces` and accepts repeated and comma-separated
-values. Namespaces are validated before the file is written, and existing files
-are never overwritten. The generated file contains only the Release document;
-add the workload manifests as further YAML documents below it.
+values. Namespaces are validated, and an existing file is detected, before
+anything is created, so a rejected command declares no group and writes no
+Release. The generated file contains only the Release document; add the
+workload manifests as further YAML documents below it.
 
 ## Create components
 

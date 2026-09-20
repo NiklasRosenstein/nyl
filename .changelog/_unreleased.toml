@@ -43,7 +43,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "024a2ee6-2470-4c84-af9c-1381ff495931"
 type = "feature"
-description = "Add `nyl create release NAME` to scaffold a Release in the source directory of a matching ApplicationGroup, with `--group` (offering to declare a missing group), `--namespace`, and `--additional-namespaces`"
+description = "Add `nyl create release NAME` to scaffold a Release in the source directory of a matching ApplicationGroup, with `--group` (offering to declare a missing group), `--namespace`, and `--additional-namespaces`; it warns when the group source does not select the new file or when its Argo CD project does not admit the Release namespaces"
 author = "@NiklasRosenstein"
 
 [[entries]]

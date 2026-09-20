@@ -111,6 +111,11 @@ pub fn resolve_deployment_target_name(inventory: &GitOpsInventory, requested: Op
 /// File name that colocates an ApplicationGroup with its Release source directory.
 pub const APPLICATION_GROUP_FILE_NAME: &str = "_application-group.yaml";
 
+/// Source root of a centrally declared ApplicationGroup without `spec.source`.
+pub fn central_group_source_root(project_root: &Path, group_name: &str) -> PathBuf {
+    project_root.join("applications").join(group_name)
+}
+
 /// Source root of an ApplicationGroup that declares no `spec.source`.
 ///
 /// A colocated `_application-group.yaml` owns its containing directory; a
@@ -119,7 +124,7 @@ pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, 
     if group_source_path.file_name().and_then(|name| name.to_str()) == Some(APPLICATION_GROUP_FILE_NAME) {
         project_root.join(group_source_path.parent().unwrap_or_else(|| Path::new("")))
     } else {
-        project_root.join("applications").join(group_name)
+        central_group_source_root(project_root, group_name)
     }
 }
 

@@ -1904,7 +1904,8 @@ fn resolve_project_source_repositories(
     Ok(source_paths)
 }
 
-fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
+/// Whether an Argo CD namespace glob list admits a namespace.
+pub(crate) fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
     patterns
         .iter()
         .any(|pattern| Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(namespace)))
@@ -2303,7 +2304,8 @@ fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource) -> bool {
+/// Whether an ApplicationGroup source selects a file below its root.
+pub(crate) fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
