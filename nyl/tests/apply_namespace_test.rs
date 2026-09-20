@@ -238,7 +238,16 @@ fn creates_the_release_namespace_before_the_resources_that_live_in_it() {
     let output = command
         .current_dir(temp.path())
         .env("KUBECONFIG", temp.path().join("kubeconfig"))
-        .args(["apply", "manifest.yaml", "--no-cache", "--target", "test"])
+        // CI sets colored output on; the assertions below read plain text.
+        .args([
+            "apply",
+            "manifest.yaml",
+            "--no-cache",
+            "--target",
+            "test",
+            "--color",
+            "never",
+        ])
         .timeout(Duration::from_secs(30))
         .output()
         .unwrap();
