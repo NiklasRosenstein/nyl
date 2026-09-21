@@ -77,6 +77,7 @@
       "description": "A local source when no repository is given, otherwise an immutable remote source.",
       "oneOf": [
         {
+          "description": "Reads Releases from a checkout of the named GitRepository.",
           "not": {
             "anyOf": [
               {
@@ -102,9 +103,11 @@
           },
           "required": [
             "repositoryRef"
-          ]
+          ],
+          "title": "repositoryRef"
         },
         {
+          "description": "Reads Releases from a checkout of the inline coordinates declared here.",
           "not": {
             "anyOf": [
               {
@@ -130,9 +133,11 @@
           },
           "required": [
             "repository"
-          ]
+          ],
+          "title": "repository"
         },
         {
+          "description": "Reads Releases from this project, at the declared `path`.",
           "properties": {
             "repository": {
               "type": "null"
@@ -140,7 +145,8 @@
             "repositoryRef": {
               "type": "null"
             }
-          }
+          },
+          "title": "Neither"
         }
       ],
       "properties": {
@@ -224,6 +230,7 @@
       "additionalProperties": false,
       "oneOf": [
         {
+          "description": "Uses the named AppProjectDefinition, so the project can be shared between groups or managed outside Nyl.",
           "not": {
             "anyOf": [
               {
@@ -249,9 +256,11 @@
           },
           "required": [
             "projectRef"
-          ]
+          ],
+          "title": "projectRef"
         },
         {
+          "description": "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
           "not": {
             "anyOf": [
               {
@@ -277,7 +286,20 @@
           },
           "required": [
             "projectTemplate"
-          ]
+          ],
+          "title": "projectTemplate"
+        },
+        {
+          "description": "Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource.",
+          "properties": {
+            "projectRef": {
+              "type": "null"
+            },
+            "projectTemplate": {
+              "type": "null"
+            }
+          },
+          "title": "Neither"
         }
       ],
       "properties": {
@@ -340,7 +362,7 @@
           ]
         },
         "projectRef": {
-          "description": "Project-local AppProjectDefinition identity. Exactly one of `projectRef` and `projectTemplate` is required.",
+          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.",
           "type": [
             "string",
             "null"
@@ -355,7 +377,7 @@
               "type": "null"
             }
           ],
-          "description": "Constrained generated AppProject. Exactly one of `projectRef` and `projectTemplate` is required."
+          "description": "Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces."
         },
         "releaseCustomization": {
           "$ref": "#/$defs/GitOpsReleaseCustomization",

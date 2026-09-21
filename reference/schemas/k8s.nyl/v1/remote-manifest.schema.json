@@ -40,6 +40,7 @@
       "description": "RemoteManifest specification",
       "oneOf": [
         {
+          "description": "Fetches the manifests at this single URL.",
           "not": {
             "anyOf": [
               {
@@ -65,9 +66,11 @@
           },
           "required": [
             "url"
-          ]
+          ],
+          "title": "url"
         },
         {
+          "description": "Fetches the manifests at each URL, in order.",
           "not": {
             "anyOf": [
               {
@@ -93,7 +96,8 @@
           },
           "required": [
             "urls"
-          ]
+          ],
+          "title": "urls"
         }
       ],
       "properties": {
