@@ -95,7 +95,12 @@ export function schemaReference(schema) {
     for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
       if (enumeration?.keyword === keyword || !constraintAlternatives(keyword)) continue;
       output.push(alternativeHeading(keyword));
-      output.push(value[keyword].map((alternative) => `- **${html(alternative.title)}**${alternative.description ? ` — ${alternative.description}` : ''}`).join('\n'));
+      output.push(value[keyword].map((alternative) => {
+        // A branch named after a field links to that field's documentation.
+        const field = alternative.title in (value.properties ?? {}) ? `#${fieldAnchor(`${anchorPath}.${alternative.title}`)}` : undefined;
+        const label = `**${html(alternative.title)}**`;
+        return `- ${field ? `[${label}](${field})` : label}${alternative.description ? ` — ${alternative.description}` : ''}`;
+      }).join('\n'));
     }
     for (const [field, child] of Object.entries(value.properties ?? {})) {
       walk(child, path ? `${path}.${field}` : field, value.required?.includes(field) ?? false, new Set(seen), anchorPath ? `${anchorPath}.${field}` : field);

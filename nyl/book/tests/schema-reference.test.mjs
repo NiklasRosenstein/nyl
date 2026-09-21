@@ -64,7 +64,10 @@ test('mutually exclusive fields read as labelled variants rather than a blanket 
   );
   const { code } = await (await createMarkdownProcessor()).render(markdown);
   assert.match(code, /<h3 [^>]*>spec\.projectRef<\/h3>\s*<p><strong>Optional<\/strong>/);
-  assert.match(code, /<strong>Neither<\/strong> — Leaves <code>projectRef<\/code> and <code>projectTemplate<\/code> unset\./);
+  // A variant says what choosing it does, and reaches the field it names.
+  assert.match(code, /<a href="#field-spec\.projectRef"><strong>projectRef<\/strong><\/a> — Uses the named AppProjectDefinition/);
+  assert.match(code, /<strong>Neither<\/strong> — Generates a permissive AppProject named after the group/);
+  assert.ok(!/<a href="#field-spec\.Neither"/.test(code), 'a variant that names no field must not link to one');
 });
 
 test('catalog and sidebar cover the same version-qualified identities', () => {

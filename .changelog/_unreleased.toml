@@ -73,5 +73,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "4d5cb2e1-7ba9-4935-8afe-69403f409a20"
 type = "improvement"
-description = "Label the generated schema branches for mutually exclusive fields, so the resource reference lists them as named variants (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
+description = "Label the generated schema branches for mutually exclusive fields with what choosing each one does, so the resource reference lists them as named variants linking to their fields (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
 author = "@NiklasRosenstein"
