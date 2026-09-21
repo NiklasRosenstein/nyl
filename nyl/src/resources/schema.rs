@@ -225,26 +225,52 @@ pub fn resource_example(kind: ResourceKind) -> Value {
 }
 
 /// Require exactly one non-null alternative, matching Option deserialization.
-pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[&str], required: bool) {
+/// Constrain a set of fields so at most one of them is set, and, when `neither`
+/// is absent, so exactly one is.
+///
+/// Each field is given with the description of what choosing it does, and
+/// `neither` describes omitting them all. The generated reference and validator
+/// messages quote these branches; without them a reader sees only
+/// `required: [<field>]` from one branch, which reads as if that field were
+/// required outright, and the branch has no name to report.
+pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], neither: Option<&str>) {
     let mut alternatives = Vec::new();
-    for field in fields {
-        let others: Vec<_> = fields
+    for (field, description) in fields {
+        let excluded = fields
             .iter()
-            .filter(|other| *other != field)
-            .map(|other| json!({"required": [other], "properties": {*other: {"not": {"type": "null"}}}}))
-            .collect();
-        alternatives.push(
-            json!({"required": [field], "properties": {*field: {"not": {"type": "null"}}}, "not": {"anyOf": others}}),
-        );
+            .filter(|(other, _)| other != field)
+            .map(|(other, _)| json!({"required": [other], "properties": {*other: {"not": {"type": "null"}}}}))
+            .collect::<Vec<_>>();
+        alternatives.push(json!({
+            "title": *field,
+            "description": *description,
+            "required": [field],
+            "properties": {*field: {"not": {"type": "null"}}},
+            "not": {"anyOf": excluded}
+        }));
     }
-    if !required {
-        alternatives.push(json!({"properties": fields.iter().map(|field| ((*field).to_owned(), json!({"type": "null"}))).collect::<serde_json::Map<_,_>>()}));
+    if let Some(description) = neither {
+        alternatives.push(json!({
+            "title": "Neither",
+            "description": description,
+            "properties": fields.iter().map(|(field, _)| ((*field).to_owned(), json!({"type": "null"}))).collect::<serde_json::Map<_,_>>()
+        }));
     }
     schema.insert("oneOf".into(), json!(alternatives));
 }
 
 pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(schema, &["name", "server"], true);
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "name",
+                "Addresses the destination by its registered Argo CD cluster name.",
+            ),
+            ("server", "Addresses the destination by its Kubernetes API server URL."),
+        ],
+        None,
+    );
 }
 
 pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
@@ -262,17 +288,59 @@ pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
     );
 }
 pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(schema, &["repositoryRef", "repository"], true);
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "repositoryRef",
+                "Publishes to the coordinates of the named GitRepository.",
+            ),
+            ("repository", "Publishes to the inline coordinates declared here."),
+        ],
+        None,
+    );
 }
 pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
-    // Declaring neither implies this group's own permissive AppProject.
-    exclusive_fields(schema, &["projectRef", "projectTemplate"], false);
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "projectRef",
+                "Uses the named AppProjectDefinition, so the project can be shared between groups or managed outside Nyl.",
+            ),
+            (
+                "projectTemplate",
+                "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
+            ),
+        ],
+        Some("Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource."),
+    );
 }
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(schema, &["url", "urls"], true);
+    exclusive_fields(
+        schema,
+        &[
+            ("url", "Fetches the manifests at this single URL."),
+            ("urls", "Fetches the manifests at each URL, in order."),
+        ],
+        None,
+    );
 }
 pub(crate) fn source_constraints(schema: &mut schemars::Schema) {
-    exclusive_fields(schema, &["repositoryRef", "repository"], false);
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "repositoryRef",
+                "Reads Releases from a checkout of the named GitRepository.",
+            ),
+            (
+                "repository",
+                "Reads Releases from a checkout of the inline coordinates declared here.",
+            ),
+        ],
+        Some("Reads Releases from this project, at the declared `path`."),
+    );
 }
 
 #[cfg(test)]
@@ -304,6 +372,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_exclusive_field_branches_are_labelled_for_readers_and_validators() {
+        // The generated reference and validator messages quote these branches;
+        // an anonymous branch only shows `required: [<field>]`, which reads as
+        // if that field were required outright.
+        let mut checked = 0;
+        for kind in ResourceKind::ALL {
+            let mut stack = vec![kind.schema()];
+            while let Some(node) = stack.pop() {
+                match node {
+                    Value::Object(map) => {
+                        if let Some(Value::Array(branches)) = map.get("oneOf") {
+                            let constraint_only = branches
+                                .iter()
+                                .all(|branch| !["type", "$ref", "const"].iter().any(|key| branch.get(key).is_some()));
+                            if constraint_only {
+                                for branch in branches {
+                                    assert!(
+                                        branch
+                                            .get("title")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|title| !title.is_empty()),
+                                        "{}: exclusive branch needs a title: {branch}",
+                                        kind.name()
+                                    );
+                                    assert!(
+                                        // Say what choosing the branch does, rather than restating its title.
+                                        branch
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(
+                                                |text| text.ends_with('.') && text.split_whitespace().count() > 3
+                                            ),
+                                        "{}: exclusive branch needs a description of what it does: {branch}",
+                                        kind.name()
+                                    );
+                                    checked += 1;
+                                }
+                            }
+                        }
+                        stack.extend(map.into_values());
+                    }
+                    Value::Array(items) => stack.extend(items),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            checked >= 9,
+            "expected every exclusive-field branch to be checked, saw {checked}"
+        );
+    }
+
+    #[test]
+    fn test_exclusive_fields_publishes_the_call_site_meaning_of_each_branch() {
+        let mut schema = schemars::Schema::default();
+        exclusive_fields(
+            &mut schema,
+            &[("first", "Does the first thing."), ("second", "Does the second thing.")],
+            Some("Does neither thing."),
+        );
+        let branches = schema.get("oneOf").and_then(Value::as_array).unwrap().clone();
+        assert_eq!(branches.len(), 3);
+        assert_eq!(branches[0]["title"], "first");
+        assert_eq!(branches[0]["description"], "Does the first thing.");
+        assert_eq!(branches[0]["required"], json!(["first"]));
+        // The branch for one field excludes every other field.
+        assert_eq!(branches[0]["not"]["anyOf"][0]["required"], json!(["second"]));
+        assert_eq!(branches[2]["title"], "Neither");
+        assert_eq!(branches[2]["description"], "Does neither thing.");
+        assert_eq!(
+            branches[2]["properties"],
+            json!({"first": {"type": "null"}, "second": {"type": "null"}})
+        );
+
+        // Omitting every field is a branch only where the call site describes it.
+        let mut required = schemars::Schema::default();
+        exclusive_fields(&mut required, &[("first", "Does the first thing.")], None);
+        assert_eq!(required.get("oneOf").and_then(Value::as_array).unwrap().len(), 1);
     }
 
     #[test]

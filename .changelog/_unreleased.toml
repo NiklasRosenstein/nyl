@@ -69,3 +69,9 @@ id = "087dafe2-887b-47bc-af60-9eb39be22df7"
 type = "improvement"
 description = "`nyl init` no longer generates an AppProjectDefinition. The generated ApplicationGroup uses the implied AppProject, and `--project-name`, `--allow-namespace`, and `--allow-cluster-resource` narrow it through `spec.projectTemplate`, leaving every dimension they do not name permissive"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "4d5cb2e1-7ba9-4935-8afe-69403f409a20"
+type = "improvement"
+description = "Label the generated schema branches for mutually exclusive fields with what choosing each one does, so the resource reference lists them as named variants linking to their fields (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
+author = "@NiklasRosenstein"

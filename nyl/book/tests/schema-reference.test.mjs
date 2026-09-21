@@ -39,6 +39,37 @@ test('cluster destination schema enforces exactly one non-null destination', () 
   }
 });
 
+test('mutually exclusive fields read as labelled variants rather than a blanket requirement', async () => {
+  const schema = schemaFor(resources.find((resource) => resource.name === 'ApplicationGroup'));
+  const validate = new Ajv2020({ strict: false }).compile(schema);
+  for (const [project, expected] of [
+    [{}, true],
+    [{ projectRef: 'workloads' }, true],
+    [{ projectTemplate: { destinationNamespaces: ['apps'] } }, true],
+    [{ projectRef: 'workloads', projectTemplate: { destinationNamespaces: ['apps'] } }, false],
+  ]) {
+    const example = structuredClone(schema.examples[0]);
+    delete example.spec.projectRef;
+    delete example.spec.projectTemplate;
+    Object.assign(example.spec, project);
+    assert.equal(validate(example), expected, JSON.stringify(project));
+  }
+
+  const markdown = schemaReference(schema);
+  // The branch requirement must not surface as raw schema a reader mistakes for the field contract.
+  assert.ok(!/required:\n\s+- projectRef/.test(markdown), 'a branch requirement must not be dumped as YAML');
+  assert.ok(
+    markdown.indexOf('Choose exactly one variant:') < markdown.indexOf('### spec.projectRef'),
+    'the variants belong to the object, before the fields they constrain',
+  );
+  const { code } = await (await createMarkdownProcessor()).render(markdown);
+  assert.match(code, /<h3 [^>]*>spec\.projectRef<\/h3>\s*<p><strong>Optional<\/strong>/);
+  // A variant says what choosing it does, and reaches the field it names.
+  assert.match(code, /<a href="#field-spec\.projectRef"><strong>projectRef<\/strong><\/a> — Uses the named AppProjectDefinition/);
+  assert.match(code, /<strong>Neither<\/strong> — Generates a permissive AppProject named after the group/);
+  assert.ok(!/<a href="#field-spec\.Neither"/.test(code), 'a variant that names no field must not link to one');
+});
+
 test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.equal(resourceGroups().flatMap((group) => group.resources).length, resources.length);
   assert.equal(new Set(resources.map((resource) => resource.route)).size, resources.length);
