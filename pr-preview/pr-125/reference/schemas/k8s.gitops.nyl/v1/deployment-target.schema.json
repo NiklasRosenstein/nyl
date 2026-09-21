@@ -216,7 +216,7 @@
       "description": "Git coordinates used as a rendered output and Argo CD source.",
       "oneOf": [
         {
-          "description": "Sets `repositoryRef` and leaves `repository` unset.",
+          "description": "Publishes to the coordinates of the named GitRepository.",
           "not": {
             "anyOf": [
               {
@@ -246,7 +246,7 @@
           "title": "repositoryRef"
         },
         {
-          "description": "Sets `repository` and leaves `repositoryRef` unset.",
+          "description": "Publishes to the inline coordinates declared here.",
           "not": {
             "anyOf": [
               {

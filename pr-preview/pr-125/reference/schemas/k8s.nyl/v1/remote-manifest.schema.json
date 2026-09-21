@@ -40,7 +40,7 @@
       "description": "RemoteManifest specification",
       "oneOf": [
         {
-          "description": "Sets `url` and leaves `urls` unset.",
+          "description": "Fetches the manifests at this single URL.",
           "not": {
             "anyOf": [
               {
@@ -70,7 +70,7 @@
           "title": "url"
         },
         {
-          "description": "Sets `urls` and leaves `url` unset.",
+          "description": "Fetches the manifests at each URL, in order.",
           "not": {
             "anyOf": [
               {

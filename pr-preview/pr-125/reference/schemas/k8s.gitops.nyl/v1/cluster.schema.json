@@ -32,7 +32,7 @@
       "description": "Argo CD's identity for a concrete cluster.",
       "oneOf": [
         {
-          "description": "Sets `name` and leaves `server` unset.",
+          "description": "Addresses the destination by its registered Argo CD cluster name.",
           "not": {
             "anyOf": [
               {
@@ -62,7 +62,7 @@
           "title": "name"
         },
         {
-          "description": "Sets `server` and leaves `name` unset.",
+          "description": "Addresses the destination by its Kubernetes API server URL.",
           "not": {
             "anyOf": [
               {

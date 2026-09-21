@@ -77,7 +77,7 @@
       "description": "A local source when no repository is given, otherwise an immutable remote source.",
       "oneOf": [
         {
-          "description": "Sets `repositoryRef` and leaves `repository` unset.",
+          "description": "Reads Releases from a checkout of the named GitRepository.",
           "not": {
             "anyOf": [
               {
@@ -107,7 +107,7 @@
           "title": "repositoryRef"
         },
         {
-          "description": "Sets `repository` and leaves `repositoryRef` unset.",
+          "description": "Reads Releases from a checkout of the inline coordinates declared here.",
           "not": {
             "anyOf": [
               {
@@ -137,7 +137,7 @@
           "title": "repository"
         },
         {
-          "description": "Leaves `repositoryRef` and `repository` unset.",
+          "description": "Reads Releases from this project, at the declared `path`.",
           "properties": {
             "repository": {
               "type": "null"
@@ -230,7 +230,7 @@
       "additionalProperties": false,
       "oneOf": [
         {
-          "description": "Sets `projectRef` and leaves `projectTemplate` unset.",
+          "description": "Uses the named AppProjectDefinition, so the project can be shared between groups or managed outside Nyl.",
           "not": {
             "anyOf": [
               {
@@ -260,7 +260,7 @@
           "title": "projectRef"
         },
         {
-          "description": "Sets `projectTemplate` and leaves `projectRef` unset.",
+          "description": "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
           "not": {
             "anyOf": [
               {
@@ -290,7 +290,7 @@
           "title": "projectTemplate"
         },
         {
-          "description": "Leaves `projectRef` and `projectTemplate` unset.",
+          "description": "Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource.",
           "properties": {
             "projectRef": {
               "type": "null"

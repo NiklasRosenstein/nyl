@@ -127,9 +127,9 @@
 <p>Unknown fields are rejected.</p>
 <p>Choose exactly one variant:</p>
 <ul>
-<li><strong>projectRef</strong> — Sets <code>projectRef</code> and leaves <code>projectTemplate</code> unset.</li>
-<li><strong>projectTemplate</strong> — Sets <code>projectTemplate</code> and leaves <code>projectRef</code> unset.</li>
-<li><strong>Neither</strong> — Leaves <code>projectRef</code> and <code>projectTemplate</code> unset.</li>
+<li><a href="#field-spec.projectRef"><strong>projectRef</strong></a> — Uses the named <a href="/nyl/pr-preview/pr-125/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a>, so the project can be shared between groups or managed outside Nyl.</li>
+<li><a href="#field-spec.projectTemplate"><strong>projectTemplate</strong></a> — Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.</li>
+<li><strong>Neither</strong> — Generates a permissive AppProject named after the group: the target workload <a href="/nyl/pr-preview/pr-125/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>, every namespace, every cluster-scoped resource.</li>
 </ul>
 <p><a id="field-spec.annotations"></a></p>
 <h3 id="specannotations">spec.annotations</h3>
@@ -389,9 +389,9 @@ one generated workload Application.</p>
 <p>Unknown fields are rejected.</p>
 <p>Choose exactly one variant:</p>
 <ul>
-<li><strong>repositoryRef</strong> — Sets <code>repositoryRef</code> and leaves <code>repository</code> unset.</li>
-<li><strong>repository</strong> — Sets <code>repository</code> and leaves <code>repositoryRef</code> unset.</li>
-<li><strong>Neither</strong> — Leaves <code>repositoryRef</code> and <code>repository</code> unset.</li>
+<li><a href="#field-spec.source.repositoryRef"><strong>repositoryRef</strong></a> — Reads <a href="/nyl/pr-preview/pr-125/reference/resources/k8s.gitops.nyl/v1/release/">Releases</a> from a checkout of the named <a href="/nyl/pr-preview/pr-125/reference/resources/gitops.nyl/v1/git-repository/">GitRepository</a>.</li>
+<li><a href="#field-spec.source.repository"><strong>repository</strong></a> — Reads <a href="/nyl/pr-preview/pr-125/reference/resources/k8s.gitops.nyl/v1/release/">Releases</a> from a checkout of the inline coordinates declared here.</li>
+<li><strong>Neither</strong> — Reads <a href="/nyl/pr-preview/pr-125/reference/resources/k8s.gitops.nyl/v1/release/">Releases</a> from this project, at the declared <code>path</code>.</li>
 </ul>
 <p><a id="field-spec.source.commit"></a></p>
 <h3 id="specsourcecommit">spec.source.commit</h3>
