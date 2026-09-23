@@ -427,8 +427,9 @@ spec:
   locked `fromGit` blob, or the binding at the recorded source commit. It then
   verifies the value against the recorded `@input` digest. A publication made
   from a dirty source worktree is not a promotion source.
-- The only evidence level is `published`. Acceptance and health need
-  observation that a non-orchestrated target does not record.
+- Recorded evidence for a target source is `published`. `accepted` and
+  `healthy` are checked live when promoting, as described under health
+  evidence below; a non-orchestrated target records no observations of its own.
 - The PromotionRecord adds the source target, publication repository, branch,
   and commit, and the input digest to its lineage.
 - `to` is always an environment, because the PromotionRecord lives in that
@@ -444,8 +445,47 @@ review. The two routes coexist:
 | --- | --- | --- |
 | Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a path and value |
 | Promote with | `nyl update source-locks --target …`, then a pull request | `nyl orchestrate promote --path …` |
+| Health gate | `--require healthy` on the lock update | `evidence: healthy` on the path |
 | Record | The lock in source | A PromotionRecord in target desired state |
 | Adds | — | Evidence gates, atomic multi-value promotion, lineage |
+
+### Health evidence
+
+Promoting only what is healthy in the source requires observing Argo CD. Each
+workload Application already reports its synced revision, sync status, and
+health; Nyl knows the Applications it generates for a target, their
+ArgoCDInstance, and its Cluster.
+
+- **Observer.** Nyl reads the target's generated Applications from the Argo CD
+  control-plane Cluster through its local context. `accepted` means synced;
+  `healthy` means synced and `Healthy`. Health checks need credentials for that
+  Cluster, which publication does not.
+- **Revision matching.** Argo CD reports the branch commit it synced. When
+  targets share a publication branch, other targets' commits change that
+  commit ID without changing this target's files. Nyl therefore compares the
+  Git tree of each Application's source directory at the synced revision with
+  the tree at the candidate publication commit. A different tree means the
+  candidate is not what runs, so it is not proven healthy.
+- **Coverage.** By default, the Applications whose Releases produced the
+  promoted values must be healthy. A PromotionPath may list Applications
+  explicitly instead.
+- **Evidence at promotion.** Health is knowable only for what runs now.
+  `nyl orchestrate promote` with `evidence: healthy`, and
+  `nyl update source-locks --require healthy`, check the Applications live and
+  promote the publication commit that is currently synced and healthy, which
+  may be older than the newest publication. The observation (time,
+  Application, synced revision, sync status, health) is stored in the
+  PromotionRecord or reported alongside the lock update.
+- **Recorded observations.** Promoting an older healthy commit or requiring a
+  minimum healthy duration needs observations over time, because Argo CD does
+  not reliably report how long an Application has been healthy. The
+  publication unit's observe mode records them in an environment's observed
+  state; periodic observation is part of continuous operation.
+- **Meaning.** Argo CD health means Kubernetes considers the resources ready,
+  such as a completed Deployment rollout. It does not prove the application
+  works. Application-level checks, such as HTTP probes or smoke tests, can be
+  added later as command units whose recorded results a PromotionPath also
+  requires.
 
 ### State, evidence, and recovery
 
@@ -637,6 +677,9 @@ configuration; an image build records a digest; unchanged inputs plan no change.
 - [ ] Resolve `fromUnit` Release input bindings into an explicit pinned input
   snapshot for rendering.
 - [ ] Distinguish publication, acceptance, and health evidence for dependents.
+- [ ] Add the publication unit's observe mode: read generated Argo CD
+  Applications, match them to publication commits by source-directory tree, and
+  record acceptance and health observations.
 - [ ] Document an end-to-end local/CI example.
 
 **Exit criterion:** one reconcile builds an image, applies Terraform, and
@@ -651,6 +694,8 @@ with static inputs in a target that does not use orchestration.
   across differently named units and inputs, from one consistent snapshot.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
+- [ ] Gate promotion on live health for both PromotionPath sources and add
+  `nyl update source-locks --require healthy`, recording the observation.
 - [ ] Show promotion lineage in `status`.
 
 **Exit criterion:** staging runs exactly the image digest and Terraform source
@@ -662,6 +707,9 @@ promotion.
 - [ ] Evaluate a scheduled or long-running runner, observation cadence, and
   drift-repair policy using M3–M6 evidence.
 - [ ] Decide which command-unit uses warrant typed drivers.
+- [ ] Support minimum healthy durations and promotion of older healthy commits
+  from recorded observations.
+- [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 
 ## Open decisions
@@ -673,6 +721,7 @@ reasons to delay independent work.
 | --- | --- |
 | Environment declaration and state ref configuration | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
+| Argo CD control-plane credentials for health checks in CI | M5/M6 |
 | Desired, observed, and coordination ref names and authorization | M1 |
 | Command unit sandboxing, environment variables, and secret admission | M1/M3 |
 | Terraform versus OpenTofu executable support and plan approval semantics | M4 |
