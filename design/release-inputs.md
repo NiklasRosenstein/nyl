@@ -237,13 +237,12 @@ production environment spanning two clusters has two targets.
 | Environment → DeploymentTarget | One environment, zero or more targets |
 | DeploymentTarget → Environment | At most one, so its orchestrated bindings resolve unambiguously |
 
-How a target joins an environment is an open M1 decision. The candidates are:
-
-1. A Kubernetes publication unit in the environment references the target. The
-   unit also carries the execution mode (publish only, observe, or apply).
-   DeploymentTarget stays unchanged.
-2. A `DeploymentTarget.spec.environment` field.
-3. The Environment lists its targets.
+A target joins an environment when a Kubernetes publication unit in that
+environment references it. The unit also carries the execution mode (publish
+only, observe, or apply), and DeploymentTarget itself stays unchanged. A target
+referenced by no publication unit belongs to no environment and rejects
+`fromUnit` and `fromPromotion` bindings; a target referenced by publication
+units in two environments is an error.
 
 Environments that share a cluster add risks beyond the current per-target
 checks:
@@ -263,4 +262,3 @@ it belongs to the layer that sees all targets on that Cluster.
 | Lock update command: extend `source-locks` or a new `input-locks` | M2 |
 | Remote group admission field name and default | M2 |
 | Direct-command flag names and override precedence | M2 |
-| How a DeploymentTarget joins an Environment | M1, before M5 |

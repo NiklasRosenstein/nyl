@@ -267,10 +267,12 @@ spec:
     target: dev          # DeploymentTarget whose Release inputs use fromUnit
 ```
 
-The environment association of a DeploymentTarget is a proposal: a Kubernetes
-publication unit places its target into the unit's environment, and that
-target's `fromUnit` and `fromPromotion` bindings resolve there. A target that no
-publication unit references rejects those bindings.
+A Kubernetes publication unit places its target into the unit's environment,
+and that target's `fromUnit` and `fromPromotion` bindings resolve there.
+DeploymentTarget itself stays unchanged. A target that no publication unit
+references rejects those bindings; a target referenced from two environments is
+an error. Several targets, and therefore several environments, may share one
+Cluster.
 
 - A `fromUnit` reference is a dependency edge. It resolves against the
   producer's current receipt: the receipt must match the producer's current
@@ -616,7 +618,7 @@ reasons to delay independent work.
 | Lock update: extend `nyl update source-locks` or add a separate command | M2 |
 | Remote ApplicationGroup admission of centrally bound inputs | M2 |
 | Direct-command input flags and override precedence | M2 |
-| Environment declaration and how a DeploymentTarget joins one; several targets, and so several environments, may share one Cluster | M1 |
+| Environment declaration and state ref configuration | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
 | Desired, observed, and coordination ref names and authorization | M1 |
 | Command unit sandboxing, environment variables, and secret admission | M1/M3 |
