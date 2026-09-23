@@ -3,15 +3,16 @@
 ## Purpose and use
 
 This roadmap frames Nyl's expansion from Kubernetes manifest generation and
-rendered GitOps into general infrastructure rendering, state management,
-reconciliation, and execution through drivers. It guides work across milestones;
-it is not a complete specification, a release schedule, or a commitment to every
-proposed interface.
+rendered GitOps into GitOps orchestration across infrastructure tools: container
+image builds, Terraform/OpenTofu configurations, and Kubernetes manifests
+rendered from their outputs. It guides work across milestones; it is not a
+complete specification, a release schedule, or a commitment to every proposed
+interface.
 
-The working direction is to expose orchestration through Nyl, reuse
-[gitopsctr](https://github.com/NiklasRosenstein/gitopsctr)'s lifecycle semantics and
-implementation initially, and decide implementation consolidation after a useful
-workflow demonstrates the contracts and recovery behavior.
+Nyl implements the orchestration semantics natively, in Rust, as one tool with
+one state model. Every orchestration capability is additive: existing commands,
+resources, and rendered GitOps behavior keep their meaning, and a project that
+never declares an orchestration resource never needs to understand one.
 
 Key architectural departures require a focused second check against evidence and
 user goals, followed by an update to this document. Record the selected direction
@@ -21,112 +22,408 @@ working instructions.
 
 ## Progress and next step
 
-The feasibility assessment is complete. Orchestration integration and the
-interfaces below are planned capabilities, not claims about Nyl's current CLI.
+Orchestration and the interfaces below are planned capabilities, not claims
+about Nyl's current CLI.
 
 | ID | Milestone | Status | Depends on |
 | --- | --- | --- | --- |
-| M1 | Shared resource, lifecycle, and interface contract | Planned | — |
-| M2 | Nyl orchestration interface over one backend | Planned | M1 |
-| M3 | Host identity to Terraform trust registration | Planned | M2 |
-| M4 | NixOS deployment and lifecycle recovery | Planned | M3 |
-| M5 | Distribution and implementation consolidation decision | Planned | M4 |
+| M1 | Unit, input, state, and promotion contract | Planned | — |
+| M2 | Release inputs without orchestration | Planned | M1 |
+| M3 | Orchestration core with a constrained command unit | Planned | M1 |
+| M4 | Container image and Terraform units | Planned | M3 |
+| M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
+| M6 | Promotion paths | Planned | M5 |
+| M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** inventory the relevant Nyl and gitopsctr contracts and produce the
-M1 contract, resolving the first-workflow questions under Open decisions. Begin
-with the minimum coherent model needed for M3, including its recovery semantics.
+**Next step:** produce the M1 contract. Start with the resource schemas for
+Release inputs and input bindings, because M2 can ship independently of the
+orchestration core and constrains how orchestrated values later reach
+rendering.
 
 ## Product direction
 
-> Authoring produces desired resources and artifacts. Reconciliation coordinates
-> managed units. Drivers implement each unit's lifecycle.
+> Authoring declares units and how their inputs are bound. Reconciliation runs
+> ready units and records their evidence. Promotion copies selected, proven
+> values from one environment to another through an explicit path.
 
-Nyl provides one authoring and operational experience across native infrastructure
-tools. Kubernetes remains a straightforward use case with an independently usable
-rendering path. Cross-system orchestration explicitly introduces units,
-dependencies, references, and recorded evidence.
+An orchestration unit is a meaningful lifecycle boundary: an image build, a
+Terraform configuration, a command, or one Kubernetes publication. A unit takes
+declared inputs, performs its effect through a driver, and records declared
+public outputs and artifact descriptors. Native tools retain responsibility for
+the resources inside that boundary; Nyl does not reproduce Terraform's resource
+graph or Kubernetes controllers.
 
-An orchestration unit is a meaningful lifecycle boundary: a Terraform
-configuration, Kubernetes release, host identity, or NixOS deployment. Native
-tools retain responsibility for the resources inside that boundary. The core
-does not reproduce Terraform's individual resource graph or Kubernetes's
-controllers.
+The target workflow is: build an image, apply Terraform, and render Kubernetes
+manifests that consume the image digest and Terraform outputs, then promote the
+exact values proven in one environment to the next.
 
-A reusable component may compose host identity, trust registration, and NixOS
-deployment units without requiring a domain-specific controller such as
-`BaoBackup`. If the composition needs behavior that its primitives cannot
-express, that lifecycle behavior must be modeled explicitly; templating alone
-cannot provide it.
+### Principles
+
+- **Additive.** `render`, `diff`, `apply`, `render-tree`, `publish-tree`, and
+  their resources keep their current behavior. New fields are optional and have
+  no effect when omitted.
+- **Gradual.** Release inputs work with static values or pinned external state
+  and no orchestration. Orchestration is one more way to bind the same inputs.
+- **Explicit links.** Dependencies and promotions are declared edges between
+  named selectors. Nothing is inferred from matching names or shapes.
+- **Pinned evidence.** Every value that reaches an effect is traceable to an
+  exact source commit, state revision, or recorded unit result.
 
 ### Initial scope
 
-- Reusable authoring, explicit inputs, immutable desired units, and artifacts.
-- Dependency-aware execution and typed references to recorded public outputs.
-- Unit identity, ownership, execution coordination, evidence, and recovery.
-- Consistent local and CI commands for planning, publication, reconciliation,
-  inspection, verification, and deletion intent.
-- Host enrollment, Terraform trust registration, and NixOS deployment as the
-  first cross-system proof, with ordinary Kubernetes workflows remaining usable.
+- Declared, typed Release inputs bound to static values, project files, or
+  pinned external Git state.
+- Units with declared inputs, public outputs, and artifact descriptors; a
+  constrained command unit; container image and Terraform units; a Kubernetes
+  publication unit over the existing rendered GitOps path.
+- Dependency-aware execution with typed references to recorded outputs.
+- Unit identity, execution coordination, evidence freshness, and recovery.
+- Explicit promotion paths between environments with recorded lineage.
+- Consistent local and CI commands for planning, reconciliation, inspection,
+  verification, promotion, and deletion intent.
 
 ### Outside the initial scope
 
-- A general CI pipeline or arbitrary workflow language.
+- A general CI pipeline or workflow language: no conditionals, loops, matrix
+  expansion, or ordering beyond the dependency graph.
 - A universal resource database replacing native state backends.
 - Cross-system transactions or a guarantee of reversible external effects.
+- Promotion of native tool state; each environment keeps its own Terraform
+  backend and lock.
 - A web dashboard, hosted service, or highly available controller fleet.
-- An immediate rewrite of gitopsctr or generalization of every Nyl renderer API.
-- Broad driver coverage, promotion policy redesign, or a plugin marketplace.
+- Broad driver coverage or a plugin marketplace.
 
-A command invoked locally or in CI is the initial execution model. Continuous
-GitOps additionally needs automatic retrieval and repeated observation and
-reconciliation; a scheduled runner or service can provide that operating model.
+A command invoked locally or in CI is the initial execution model. Events such
+as "a new dev receipt was published" trigger CI jobs that call Nyl; the core
+stores no event triggers. Continuous observation is an M7 decision.
 
 ## Architectural frame
 
-### Responsibilities and integration
+### Layers
 
 | Layer | Responsibility |
 | --- | --- |
-| Authoring | Components, templates, composition parameters, native source files |
-| Compilation | Resolve explicit inputs into units and immutable artifacts, retaining unresolved composition intent |
-| Orchestration core | Identity, membership, dependencies, references, scheduling, lifecycle fences, and evidence relationships |
-| Drivers | Native planning, execution, readiness, verification, inventory, and supported teardown |
-| Storage | Desired snapshots, receipts, artifact descriptors, and execution coordination records |
-| Interfaces | One consistent CLI and machine interface over core operations and observations |
+| Authoring | Components, templates, Release inputs, units, promotion paths, native source files |
+| Resolution | Bind inputs to pinned values and produce immutable desired units |
+| Orchestration core | Identity, dependencies, references, scheduling, leases, evidence, promotion |
+| Drivers | Native planning, execution, output capture, verification, and supported teardown |
+| Storage | Desired snapshots, receipts, artifact descriptors, promotion records, coordination |
+| Interfaces | One CLI and machine interface over the same operations and observations |
 
-The first integration uses a narrow, versioned process contract around complete
-gitopsctr controller operations. One backend owns desired/observed state,
-projection, leases, receipt freshness, and lifecycle decisions. Nyl supplies the
-user interface and authoring integration; it does not independently reconstruct
-those decisions or call drivers under a second scheduler.
-
-gitopsctr's Python driver classes are not a language-neutral protocol. Protocol
-design, compatible version selection, packaging, and recovery testing are real
-integration work. A dual-runtime distribution is acceptable for the initial
-proof, subject to the M5 decision.
+Drivers are Rust implementations behind one internal trait with advertised
+capabilities (plan, reconcile, verify, teardown). The command unit is the
+extension point for tools without a dedicated driver. An out-of-process driver
+protocol is not part of the initial scope.
 
 ### Resource model and scope
 
 | Concept | Meaning |
 | --- | --- |
 | Project | Authoring and configuration boundary |
-| Environment | Orchestration namespace and policy boundary |
-| Composition | Reusable declaration and ownership of related units |
-| Unit | Independently identified lifecycle boundary |
-| DeploymentTarget | Kubernetes rendering/publication configuration referenced by relevant units |
-| Execution destination | Driver-specific cluster, backend/workspace, or host |
+| Environment | Orchestration namespace: its units, state refs, and promotion policy |
+| Unit | Independently identified lifecycle boundary within one environment |
+| DeploymentTarget | Kubernetes rendering and publication configuration, unchanged |
+| PromotionPath | Declared mapping of selected values from a source environment to a target environment |
+| Execution destination | Driver-specific registry, backend/workspace, or cluster |
 
-An environment may contain several Kubernetes targets, Terraform configurations,
-and hosts. It does not require a Kubernetes destination. Keep DeploymentTarget's
-Kubernetes meaning rather than making non-Kubernetes units supply cluster or
-Argo CD configuration.
+An environment may contain several image builds, Terraform configurations, and
+Kubernetes publication units. It does not require a Kubernetes destination.
+DeploymentTarget keeps its Kubernetes meaning; non-Kubernetes units never
+supply cluster or Argo CD configuration.
 
-Kubernetes compiler resources use `k8s.gitops.nyl/v1`; HelmChart and
-RemoteManifest use `k8s.nyl/v1`, and chart-backed component invocations use
-`components.k8s.nyl/v1`. Shared GitRepository resources use `gitops.nyl/v1`.
-Resource reference pages and catalog summaries derive from the Rust-generated
-JSON Schemas. M1 defines additional orchestration APIs independently of these
-Kubernetes contracts.
+Orchestration resources use a new API group, proposed as `orchestration.nyl/v1`,
+defined independently of the Kubernetes contracts. Kubernetes compiler resources
+keep `k8s.gitops.nyl/v1`; HelmChart and RemoteManifest keep `k8s.nyl/v1`;
+chart-backed component invocations keep `components.k8s.nyl/v1`; shared
+GitRepository resources keep `gitops.nyl/v1`. Resource reference pages derive
+from the Rust-generated JSON Schemas.
+
+Separate authoring membership, unit identity, and native resource ownership.
+Stable identities and incarnation fences protect against stale operations after
+deletion and recreation. Different unit names do not imply disjoint native
+ownership: validate backend/workspace, registry repository, and cluster/resource
+scopes where the driver can establish them.
+
+### Release inputs (M2)
+
+A Release may declare named, typed inputs. Templates read them as
+`inputs.<name>`, alongside the existing `values`. A Release without declared
+inputs renders exactly as today.
+
+```yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata: {name: web, namespace: web}
+spec:
+  inputs:
+    image: {type: string, description: Immutable image reference}
+    databaseHost: {type: string}
+    replicas: {type: integer, default: 2}
+```
+
+A Release that declares inputs must have a literal `metadata.name` and a literal
+`spec.inputs` block, like the existing static Release envelope. Declarations are
+then known at discovery time, before the file is rendered, so Nyl can build the
+`inputs` context from bindings and check required inputs and types without a
+second rendering pass.
+
+The proposed binding location is the DeploymentTarget, which is static and
+already carries per-target values. Bindings are keyed by the Release's rendered
+identity, `<applicationGroup>/<release>`, because one Release name can appear in
+several groups on one target. Unknown keys, unknown input names, and duplicate
+bindings are errors. Each binding selects exactly one source:
+
+| Binding | Resolves from | Needs orchestration |
+| --- | --- | --- |
+| `value` | Inline static value | No |
+| `fromFile` | Project file plus JSON Pointer | No |
+| `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
+| `fromUnit` | Recorded public output of a unit in the same environment | Yes (M5) |
+| `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
+
+```yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata: {name: dev}
+spec:
+  # existing fields unchanged
+  releaseInputs:
+    platform/web:
+      image:
+        value: registry.example.com/web@sha256:…
+      databaseHost:
+        fromGit:
+          repositoryRef: {name: platform-state}
+          revision: main
+          commit: 3f1c…            # refreshed by a lock-update command
+          path: database/outputs.json
+          pointer: /host
+```
+
+- `fromGit` follows the ApplicationGroup source-lock pattern: rendering reads
+  only the locked commit, and an update command refreshes locks. Unlike source
+  locks, one target can hold many `fromGit` locks, so the updater addresses each
+  binding by path rather than by one `commit` field per document.
+- Rendering validates bound values against declared types and fails on an
+  unbound input without a default. Inputs are opt-in by the Release author, so
+  this never affects an existing Release.
+- Direct `nyl render`, `diff`, and `apply` have no target. They use input
+  defaults and accept optional explicit input flags or files.
+- A remote ApplicationGroup source renders in a restricted session. Bound input
+  values are data supplied by the central project; admitting them into a remote
+  session is an explicit per-group policy, never implied.
+- Resolved inputs participate in the dependency recorder and render-cache key.
+  The rendered ownership index records a digest and provenance per input in its
+  existing `inputs` map, not raw values, and without a format version change;
+  published trees remain reconcilable across the upgrade.
+- `fromUnit` and `fromPromotion` bindings are rejected by ordinary
+  `render-tree`. Only orchestrated execution may resolve them, and it passes
+  them to rendering as an explicit, pinned input snapshot. Ordinary rendering
+  never reads receipts implicitly, and runtime dependencies never hide inside
+  opaque template lookups.
+
+### Units, references, and artifacts (M3–M5)
+
+Units are declared per environment:
+
+```yaml
+apiVersion: orchestration.nyl/v1
+kind: Unit
+metadata: {name: web-image}
+spec:
+  environment: dev
+  driver: OciImage
+  inputs:
+    context: {path: services/web}
+  outputs: [digestRef]
+---
+apiVersion: orchestration.nyl/v1
+kind: Unit
+metadata: {name: database}
+spec:
+  environment: dev
+  driver: Terraform
+  inputs:
+    source: {path: infra/database}
+    variables:
+      vpcId: {fromUnit: {unit: network, output: /vpcId}}
+  outputs: [host, port]
+---
+apiVersion: orchestration.nyl/v1
+kind: Unit
+metadata: {name: kubernetes}
+spec:
+  environment: dev
+  driver: KubernetesPublication
+  inputs:
+    target: dev          # DeploymentTarget whose Release inputs use fromUnit
+```
+
+The environment association of a DeploymentTarget is a proposal: a Kubernetes
+publication unit places its target into the unit's environment, and that
+target's `fromUnit` and `fromPromotion` bindings resolve there. A target that no
+publication unit references rejects those bindings.
+
+- A `fromUnit` reference is a dependency edge. It resolves against the
+  producer's current receipt: the receipt must match the producer's current
+  desired unit. Missing or stale evidence blocks the consumer; invalid evidence
+  fails validation.
+- Only outputs listed in `outputs` are persisted. Drivers reject outputs marked
+  sensitive by the native tool. Credentials and private keys never enter
+  desired state, receipts, public artifacts, or diagnostic transcripts.
+- When upstream outputs are unavailable, retain the unresolved desired intent
+  and resolve dependents as evidence arrives, without rereading unrelated
+  mutable source. Each run is bounded to one source revision; the contract
+  defines how desired revisions advance within that run.
+- Artifacts (image digests, rendered trees) are recorded as immutable
+  descriptors with integrity digests; large payloads stay outside Git.
+- The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
+  DeploymentTarget, because one target owns one publication tree and ownership
+  index. Its desired unit contains the resolved Release input snapshot, keyed by
+  `<applicationGroup>/<release>`; its recorded result is the published commit
+  and index digest.
+  Publication, Argo CD acceptance, and observed health are distinct evidence
+  levels; a publication-only result cannot satisfy a dependency that requires a
+  healthy deployment.
+
+**Command unit (M3).** A constrained escape hatch for tools without a driver:
+
+```yaml
+spec:
+  driver: Command
+  inputs:
+    files: ["scripts/seed/**"]
+    values: {bucket: {fromUnit: {unit: storage, output: /bucket}}}
+  command: ["./scripts/seed/run.sh"]
+  outputs: [seedVersion]
+```
+
+The command runs in a checkout at the pinned source revision and receives
+resolved values in a JSON file whose path is passed in the environment. It writes
+its outputs to a second JSON file; stdout and stderr are the transcript and are
+never parsed. Only declared outputs are recorded, and outputs declared
+`sensitive` are validated but never persisted. Nyl requires but cannot enforce
+idempotency for identical inputs, so the contract documents it as the author's
+obligation and treats an interrupted run as uncertain completion. An optional
+`verify` command exits with a documented clean, drift, or error status and
+records no receipt. The environment, secret admission, and sandboxing are M1
+decisions. Command units exist to learn which typed drivers are worth building.
+
+**Pinned source trees.** Units that execute repository content (Terraform, image
+contexts, commands) record the exact source commit and path in their desired
+unit and execute from a worktree at that commit. Relative Terraform modules are
+resolved inside that checkout, so pinning the root configuration pins its local
+modules too; a module that needs independent versioning is a separate unit or a
+versioned remote module. The input fingerprint covers the selected bytes,
+including `.terraform.lock.hcl`, not the commit value, so re-pinning to
+identical inputs plans no change. A pinned commit must remain fetchable: require
+it to be reachable from a protected ref, or retain it with a Nyl-owned keep ref.
+
+### Promotion paths (M6)
+
+A PromotionPath is the explicit link between source selectors and target
+bindings. Source and target may differ in unit names, input names, and document
+shape; the path states the mapping. Names and fields below are proposals.
+
+```yaml
+apiVersion: orchestration.nyl/v1
+kind: PromotionPath
+metadata: {name: dev-to-staging}
+spec:
+  from: {environment: dev}
+  to: {environment: staging}
+  evidence: healthy            # publication | accepted | healthy, per driver
+  changeGate: pullRequest      # or: none
+  values:
+    webImage:
+      select: {unit: kubernetes, input: /releases/platform~1web/image}
+    databaseSource:
+      select: {unit: database, input: /source}
+```
+
+Target consumers name the path and value, never the source unit:
+
+```yaml
+# staging DeploymentTarget
+releaseInputs:
+  platform/web:
+    image: {fromPromotion: {path: dev-to-staging, value: webImage}}
+---
+# staging Terraform unit
+inputs:
+  source: {fromPromotion: {path: dev-to-staging, value: databaseSource}}
+```
+
+- `select` reads either a source unit's **resolved input** from its desired unit
+  (what the source environment actually ran, such as the deployed image digest
+  or the applied Terraform source commit) or its recorded **output**.
+- All values of one promotion come from one consistent source snapshot: a single
+  source desired revision and a single observed revision. The default is the
+  newest desired revision at which every selected unit has a matching receipt at
+  the required evidence level; `--from-revision` selects an exact one. Values
+  from different source revisions were never run together and are not combined.
+- Evidence levels are those the source driver records in receipts. For the
+  Kubernetes publication unit, publication alone does not prove a deployment;
+  promotion from it normally requires acceptance or health evidence. Drift
+  verification writes no receipt and is therefore not a promotion evidence level.
+- `nyl orchestrate promote --path dev-to-staging [--value …]` writes a
+  PromotionRecord into the target environment's desired state: each value, its
+  selector, the source unit's identity and incarnation, both pinned source
+  revisions, and the receipt digest. With `changeGate: pullRequest` it opens a
+  reviewable change instead.
+- Promoting a path moves all of its values together by default. Selecting a
+  subset is explicit and leaves the other values at their previously recorded
+  lineage.
+- `plan` validates every path: missing source units, unresolvable pointers, and
+  type mismatches with the target binding are reported before promotion.
+  Renaming or replacing a source unit breaks future promotions until the path is
+  updated; recorded lineage keeps the old identity and stays valid.
+- A binding to a path that has not been promoted yet blocks with an actionable
+  message. A broken selector in an existing path is an error, not a wait.
+- Native state is never promoted; the staging Terraform unit applies the
+  promoted source commit and variables against staging's own backend.
+
+Because promotion records live in Git, a target that does not use orchestration
+can still consume a promoted value through a locked `fromGit` binding once the
+state layout is fixed in M3.
+
+### State, evidence, and recovery
+
+| State | Authority |
+| --- | --- |
+| Authored intent | Source Git |
+| Resolved desired units and promotion records | Desired-state Git ref per environment |
+| Receipts, public outputs, artifact descriptors | Observed-state Git ref per environment |
+| Terraform resource state | Terraform/OpenTofu backend |
+| Credentials and private keys | Secret store or execution environment |
+| Render cache | Disposable local storage |
+| Execution coordination | Explicit claims/leases and recovery records |
+
+Desired and observed refs are distinct so desired state can advance while each
+receipt continues to identify the exact desired unit it observed. Preserve the
+distinction between rendered-file ownership, published desired state,
+successful execution evidence, and current external observations. A matching
+receipt proves success for particular inputs; it does not prove the system is
+still healthy or free of drift. Rollback publishes a new forward desired
+revision; it never rewinds a ref or observed history.
+
+The lifecycle contract must address:
+
+- Effects that succeed before receipt publication fails: inspect or resume
+  safely; missing evidence does not imply that nothing happened.
+- Competing or stale runners: Git compare-and-swap protects publication, while
+  execution leases and native locks protect effects. Lease loss must have an
+  explicit cancellation and recovery policy.
+- Timeouts and disconnected processes: represent uncertain completion and
+  recover before blindly repeating an operation.
+- Partial input: omission requests deletion only within a declared authoritative
+  ownership set; selecting a subset is not an instruction to destroy the rest.
+- Deletion: retain sufficient desired inputs and evidence for retry-safe teardown
+  and fence it against a new incarnation of the same name.
+- Ordering: creation dependencies do not automatically define safe replacement
+  or decommissioning order. Unsupported teardown remains visibly blocked.
+
+### Kubernetes rendering path
 
 Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
 contract from another declared Cluster. Effective capabilities drive both
@@ -147,110 +444,21 @@ Reports retain completed results on operational failure and distinguish invalid
 resources from unchecked inputs; rendering caches retain the provenance needed
 for identical reports on cache hits.
 
-Separate authoring membership, unit identity, and native resource ownership.
-Stable identities and incarnation fences protect against stale operations after
-deletion and recreation. Different unit names do not imply disjoint native
-ownership: validate backend/workspace, cluster/resource, and host scopes where
-the driver can establish them.
-
-### Rendering, references, and artifacts
-
-The execution flow is:
-
-```text
-source and components -> composition -> desired units and artifacts
-                                            |
-                                            v
-                                   execute ready units
-                                            |
-                                            v
-                                 receipts and public outputs
-                                            |
-                                            v
-                           resolve dependent inputs and repeat
-```
-
-Ordinary `nyl render` remains a rendering operation and requires no orchestration
-store. It must not perform enrollment or deployment, or implicitly read the
-latest receipt. Orchestration-dependent rendering receives an explicit, pinned
-input snapshot.
-
-Typed references expose dependency edges and identify exact producer evidence.
-Missing or stale evidence blocks consumers. Invalid evidence fails validation.
-Do not hide runtime dependencies inside opaque template lookups.
-
-Retain durable composition intent when upstream outputs are unavailable. Resolve
-and materialize dependent units as evidence becomes available, without rereading
-unrelated mutable source. Bound each run's source intent and define how generated
-desired revisions advance within that run.
-
-Artifacts can be typed documents or file trees. Kubernetes normalization,
-namespace handling, deduplication, and policy processing belong to the Kubernetes
-path. Terraform and Nix files may be referenced and packaged in their native
-formats. Every input affecting rendered bytes participates in dependency
-recording; cache entries are disposable and never establish execution success.
-
-### State, evidence, and recovery
-
-| State | Authority |
-| --- | --- |
-| Authored intent | Source Git |
-| Resolved units and immutable payload descriptors | Desired-state Git |
-| Receipts and deliberately public outputs | Observed-state Git |
-| Terraform resource state | Terraform/OpenTofu backend |
-| Private host keys and credentials | Host or secret store |
-| Render cache | Disposable local storage |
-| Execution coordination | Explicit claims/leases and recovery records |
-
-Preserve the distinction between rendered-file ownership, published desired
-state, successful execution evidence, and current external observations. A
-matching receipt proves success for particular inputs; it does not prove the
-system remains healthy or free of drift.
-
-Keep large artifacts outside Git when appropriate, with immutable descriptors
-and integrity checks. Persist only outputs explicitly admitted as public. Reject
-sensitive native-tool outputs from public receipts, and keep credentials and
-private keys out of desired state, public artifacts, and diagnostic transcripts.
-
-The lifecycle contract must address:
-
-- Effects that succeed before receipt publication fails: inspect or resume
-  safely; missing evidence does not imply that nothing happened.
-- Competing or stale runners: Git compare-and-swap protects publication, while
-  execution leases and native locks protect effects. Lease loss must have an
-  explicit cancellation and recovery policy.
-- Timeouts and disconnected processes: represent uncertain completion and
-  recover before blindly repeating an operation.
-- Partial input: omission requests deletion only within a declared authoritative
-  ownership set; selecting a subset is not an instruction to destroy the rest.
-- Deletion: retain sufficient desired inputs and evidence for retry-safe teardown
-  and fence it against a new incarnation of the same name.
-- Ordering: creation dependencies do not automatically define safe rotation or
-  decommissioning order. Unsupported teardown remains visibly blocked.
-- Rollback: publish forward desired intent and reconcile it; do not promise
-  universal reversal of effects or rewind observed history.
-
-### Execution ownership
+Kubernetes normalization, namespace handling, deduplication, and policy
+processing belong to this path. Every input affecting rendered bytes, including
+resolved Release inputs, participates in dependency recording; cache entries are
+disposable and never establish execution success.
 
 Kubernetes delivery distinguishes publication for an external reconciler,
-publication plus observation, and direct execution through Nyl. A unit's mode
-makes the executor explicit. Observation of Argo CD does not authorize Nyl to
-apply or prune its workloads.
-
-Dependencies distinguish artifacts being published, API acceptance, and observed
-readiness. A publication-only unit cannot satisfy a dependency that requires a
-healthy deployment. Ownership changes require a deliberate handoff.
-
-Validate conflicts within the inventory Nyl and its drivers can establish; do not
-claim automatic discovery of every independent external manager. Reusing Nyl's
-direct Kubernetes lifecycle requires explicit compatibility decisions about
-release history, pruning, and readiness.
+publication plus observation, and direct application through Nyl. Observation of
+Argo CD does not authorize Nyl to apply or prune its workloads. Reusing Nyl's
+direct Kubernetes lifecycle inside orchestration requires explicit compatibility
+decisions about release history, pruning, and readiness.
 
 ## User and machine interfaces
 
 Preserve `nyl render`, `diff`, `apply`, `render-tree`, and `publish-tree` with their
-Kubernetes meanings. Ordinary usage must not require understanding receipts,
-execution leases, or orchestration storage.
+Kubernetes meanings. Release inputs extend them without new required flags.
 
 `nyl comment upsert` publishes supplied Markdown as a sticky PR/MR comment on
 GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
@@ -258,128 +466,137 @@ comment keys and authenticated account ownership require no orchestration state
 or Nyl project configuration.
 
 The working CLI design uses an explicit `nyl orchestrate` group. Names and flags
-are proposals to validate in M1/M2:
+are proposals to validate in M1/M3:
 
 ```bash
-nyl orchestrate plan --environment production -f platform.yaml
-nyl orchestrate publish --environment production -f platform.yaml
-nyl orchestrate reconcile --environment production
-nyl orchestrate status --environment production
-nyl orchestrate verify --environment production
+nyl update input-locks          # or an extension of source-locks
+nyl orchestrate plan --environment dev
+nyl orchestrate reconcile --environment dev
+nyl orchestrate status --environment dev
+nyl orchestrate verify --environment dev
+nyl orchestrate promote --path dev-to-staging
+nyl orchestrate delete --environment dev --unit web-image
 ```
 
 | Operation | Contract |
 | --- | --- |
-| plan | Preview effects and unresolved inputs without deploying |
-| publish | Record desired state; an authorized runner may subsequently execute it |
-| reconcile | Drive eligible work from published intent through bounded dependency waves |
-| status / get | Inspect intent, evidence, ownership, progress, and blockers |
-| verify | Observe external state and report drift |
+| plan | Preview effects and unresolved inputs without executing |
+| reconcile | Resolve source into desired state and drive ready units through dependency waves |
+| status / get | Inspect intent, evidence, progress, promotion lineage, and blockers |
+| verify | Observe external state and report drift without writing receipts |
+| promote | Record selected source values into target desired state, or open a change for review |
 | delete | Record explicit deletion intent for reconciliation |
 
-Avoid a second meaning for `apply`. Expose both `reconcile` and `converge` only if
-their distinction provides a demonstrated operator benefit. Specify command
-effects, selection defaults, non-interactive behavior, deadlines, and exit
-categories before stabilizing the CLI.
+Avoid a second meaning for `apply`. Specify command effects, selection defaults,
+non-interactive behavior, deadlines, and exit categories before stabilizing the
+CLI.
 
 A plan with unavailable upstream outputs is incomplete and must say so. Preview
-values cannot become deployment inputs. Approval policy must define whether
-newly resolved downstream plans execute automatically or require further review.
-Do not promise execution of an approved native plan unless the driver preserves
-and validates that exact plan and its input/state preconditions.
+values cannot become execution inputs. Approval policy must define whether newly
+resolved downstream plans execute automatically or require further review. Do
+not promise execution of an approved native plan unless the driver preserves and
+validates that exact plan and its input/state preconditions.
 
 Inspection explains desired revision, matching or stale evidence, the precise
-dependency blocking progress, execution owner, and when external state was last
-verified. Do not collapse recorded success and current health into one ambiguous
-status. Human tables and machine output derive from the same backend snapshot.
-
-The machine contract includes versioned requests/results, capability negotiation,
-structured diagnostics and progress, operation identity, cancellation behavior,
-and explicit source/desired/observed revision selection. Keep machine output on
-stdout and human diagnostics on stderr. A future UI consumes the same contract;
-it must not implement another interpretation of lifecycle state.
-
-Drivers advertise materialization, planning, reconciliation, verification, and
-teardown capabilities. Inputs include resolved values, artifact/source digests,
-execution context, previous evidence, and lifecycle fences. Results distinguish
-success, pending, unsupported behavior, failure, and uncertain completion. Keep
-resource schema, process protocol, and driver implementation versions separate.
+dependency or promotion blocking progress, execution owner, and when external
+state was last verified. Do not collapse recorded success and current health
+into one status. Human tables and machine output derive from the same snapshot.
+Keep machine output on stdout and human diagnostics on stderr, with versioned
+structured results.
 
 ## Milestones and acceptance criteria
 
-### M1 — Shared resource, lifecycle, and interface contract
+### M1 — Unit, input, state, and promotion contract
 
-- [ ] Inventory the relevant Nyl and gitopsctr APIs and persistence contracts;
-  distinguish reusable behavior from compatibility gaps.
-- [ ] Define identity, ownership scopes, typed references, evidence freshness,
-  artifact contracts, lifecycle states, and deletion/recovery invariants.
-- [ ] Specify the minimum process protocol and CLI effects, including revision
-  selection, partial plans, cancellation, and execution authorization.
-- [ ] Resolve the bootstrap identity, trust system, private-key custody, and
-  Terraform/OpenTofu choice for the first workflow.
+- [ ] Define Release input declarations, DeploymentTarget bindings, types, and
+  lock semantics for `fromGit`.
+- [ ] Define Unit, Environment, and PromotionPath schemas; typed references;
+  output admission; and artifact descriptors.
+- [ ] Define desired/observed ref layout, receipt freshness, identity fences,
+  leases, deletion, and recovery invariants.
+- [ ] Define the driver trait, capabilities, and the command unit's process
+  contract.
+- [ ] Specify CLI effects, revision selection, partial plans, and exit
+  categories.
 
-**Exit criterion:** the contract can explain a successful run, an unavailable
-upstream output, effects without a receipt, competing runners, and deletion
-without relying on hidden state or ambiguous command semantics.
+**Exit criterion:** the contract explains a successful dependency wave, an
+unavailable upstream output, effects without a receipt, competing runners, a
+promotion with stale source evidence, and deletion, without hidden state or
+ambiguous command semantics.
 
-### M2 — Nyl orchestration interface over one backend
+### M2 — Release inputs without orchestration
 
-- [ ] Implement the versioned backend adapter and explicit orchestration group.
-- [ ] Connect Nyl authoring to canonical composition inputs without duplicating
-  lifecycle decisions in Rust.
-- [ ] Provide structured inspection, actionable blockers, and local/CI parity.
-- [ ] Keep backend installation optional for ordinary Kubernetes rendering.
-- [ ] Establish compatibility fixtures and meaningful protocol-boundary tests.
+- [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
+  `fromFile`, and `fromGit`, with type validation and defaults.
+- [ ] Add a path-addressed lock update for `fromGit` bindings with a `--check`
+  mode for CI.
+- [ ] Record resolved inputs in the dependency recorder, render-cache key, and
+  the existing ownership-index `inputs` map as digests.
+- [ ] Define the remote ApplicationGroup admission policy for bound inputs.
+- [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
+  an actionable message.
+- [ ] Document the feature and regenerate resource schemas.
 
-**Exit criterion:** Nyl can publish, plan, reconcile, inspect, and verify a small
-composition through one backend, and ordinary Kubernetes workflows retain their
-interfaces and independent rendering path.
+**Exit criterion:** a target renders Releases from static and locked external
+inputs through `render-tree` and `publish-tree`; projects without inputs produce
+byte-identical output to the previous release.
 
-### M3 — Host identity to Terraform trust registration
+### M3 — Orchestration core with a constrained command unit
 
-- [ ] Implement authenticated enrollment with stable identity and private-key
-  custody that survives interrupted execution.
-- [ ] Export a typed public identity and resolve it into a trust-registration
-  unit using exact producer evidence.
-- [ ] Preserve native Terraform/OpenTofu state and locking; enforce public-output
-  admission and explain incomplete plans.
-- [ ] Prove safe retries, stale-evidence blocking, competing-runner behavior, and
-  recovery after effects succeed but publication fails.
+- [ ] Implement environments, desired/observed refs, receipts, and leases.
+- [ ] Implement `plan`, `reconcile`, `status`, and `verify` for a dependency
+  graph of command units with `fromUnit` references.
+- [ ] Implement pinned source worktrees and content-based input fingerprints.
+- [ ] Prove stale-evidence blocking, competing runners, and recovery after an
+  effect succeeds but receipt publication fails.
 
-**Exit criterion:** a reusable composition enrolls a host and registers its trust
-through Nyl; repeat execution converges without accidental identity replacement
-or duplicate ownership, and interruption has a demonstrated recovery path.
+**Exit criterion:** two dependent command units reconcile locally and in CI with
+identical results; repeat execution is a no-op; interruption has a demonstrated
+recovery path.
 
-### M4 — NixOS deployment and lifecycle recovery
+### M4 — Container image and Terraform units
 
-- [ ] Add a NixOS unit consuming the required identity and trust evidence, with
-  an explicit deployment mechanism and readiness checks.
-- [ ] Exercise key rotation, partial failure, disconnected execution, failed
-  evidence publication, and recovery across the full composition.
-- [ ] Define and verify decommissioning and rollback limits, retaining blocked
-  intent when a driver cannot safely complete teardown.
-- [ ] Verify direct versus external Kubernetes execution boundaries alongside
-  the cross-system workflow.
-- [ ] Document an end-to-end local/CI example and operational recovery actions.
+- [ ] Add an image-build unit recording immutable digest references.
+- [ ] Add a Terraform/OpenTofu unit with native state and locking, declared
+  output admission, planning, and verification.
+- [ ] Support a local-module Terraform configuration pinned to a source commit
+  and path.
+- [ ] Demonstrate Terraform-to-Terraform output references.
 
-**Exit criterion:** host enrollment, trust registration, and NixOS deployment
-work as one observable composition whose update, interruption, rotation, and
-deletion behavior is supported by tests or reproducible acceptance exercises.
+**Exit criterion:** a network configuration's outputs feed a dependent
+configuration; an image build records a digest; unchanged inputs plan no change.
 
-### M5 — Distribution and implementation consolidation decision
+### M5 — Images and Terraform outputs into Kubernetes releases
 
-- [ ] Evaluate installation, dual-runtime support, performance, protocol
-  stability, maintenance cost, and driver extensibility using M2–M4 evidence.
-- [ ] Select the implementation and distribution direction and record its
-  rationale and constraints in this roadmap.
-- [ ] If a port is selected, define behavioral parity and persisted-state
-  compatibility criteria before scheduling it.
-- [ ] Set the next scope based on demonstrated needs, including whether a
-  continuous runner or additional drivers warrant investment.
+- [ ] Add the Kubernetes publication unit over `render-tree`/`publish-tree`.
+- [ ] Resolve `fromUnit` Release input bindings into an explicit pinned input
+  snapshot for rendering.
+- [ ] Distinguish publication, acceptance, and health evidence for dependents.
+- [ ] Document an end-to-end local/CI example.
 
-**Exit criterion:** the selected architecture has an explicit support and
-distribution model, and any consolidation has measurable compatibility gates.
-Completing this milestone does not require a Rust port.
+**Exit criterion:** one reconcile builds an image, applies Terraform, and
+publishes Kubernetes manifests consuming both; the same Releases still render
+with static inputs in a target that does not use orchestration.
+
+### M6 — Promotion paths
+
+- [ ] Implement PromotionPath, PromotionRecord, and `nyl orchestrate promote`
+  with evidence checks and an optional pull-request change gate.
+- [ ] Promote an image digest and a Terraform source commit from dev to staging
+  across differently named units and inputs, from one consistent snapshot.
+- [ ] Show promotion lineage in `status` and consume a promoted value through
+  `fromGit` in a non-orchestrated target.
+
+**Exit criterion:** staging runs exactly the image digest and Terraform source
+dev proved, with auditable lineage; stale or missing source evidence blocks
+promotion.
+
+### M7 — Continuous operation and scope decision
+
+- [ ] Evaluate a scheduled or long-running runner, observation cadence, and
+  drift-repair policy using M3–M6 evidence.
+- [ ] Decide which command-unit uses warrant typed drivers.
+- [ ] Record the selected direction and constraints in this roadmap.
 
 ## Open decisions
 
@@ -388,29 +605,30 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Composition schema and mapping to gitopsctr Stack/Unit contracts | M1 |
-| Environment configuration and relationship to existing project/target configuration | M1 |
-| Source, desired, observed, and coordination ref layout and authorization | M1 |
-| Enrollment trust root, key purpose/custody, and trust-registration destination | M1 |
-| Terraform versus OpenTofu executable support and native plan approval semantics | M1/M3 |
-| Dependency readiness, evidence freshness, and automatic downstream execution policy | M1/M3 |
-| Process protocol transport, cancellation guarantees, and supported backend versions | M2 |
-| NixOS deployment mechanism, rotation, and decommissioning behavior | M4 |
-| Single-binary requirement versus an optional orchestration runtime | M5 |
-| Continuous runner ownership, observation cadence, and drift-repair policy | After M4 |
+| Binding location: DeploymentTarget only, or also ApplicationGroup defaults | M1/M2 |
+| Lock update: extend `nyl update source-locks` or add a separate command | M2 |
+| Remote ApplicationGroup admission of centrally bound inputs | M2 |
+| Input type system: JSON Schema subset versus a small scalar/object type set | M1/M2 |
+| Environment declaration and how a DeploymentTarget joins one | M1 |
+| Per-driver evidence levels and their names | M1/M5 |
+| Desired, observed, and coordination ref names and authorization | M1 |
+| Command unit sandboxing, environment variables, and secret admission | M1/M3 |
+| Terraform versus OpenTofu executable support and plan approval semantics | M4 |
+| Image build backend (BuildKit, Docker, Buildah) and registry authentication | M4 |
+| Automatic downstream execution policy after new evidence | M3/M5 |
+| Promotion record location for pull-request gates | M6 |
+| Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
 ## Implementation reference points
 
 - [Nyl rendering session and bundle](nyl/src/render/session.rs)
 - [Nyl components](nyl/src/components/mod.rs)
 - [Kubernetes GitOps resource model](nyl/src/resources/gitops.rs)
+- [Source-lock updates](nyl/src/cli/commands/source.rs)
 - [Rendered-file ownership reconciliation](nyl/src/gitops/reconcile.rs)
 - [Rendered-tree publication](nyl/src/cli/commands/publish_tree.rs)
+- [Git worktrees](nyl/src/git/worktree.rs)
 - [Direct Kubernetes application](nyl/src/cli/commands/apply.rs)
 - [Kubernetes release state](nyl/src/kubernetes/state.rs)
-- [gitopsctr concepts](https://github.com/NiklasRosenstein/gitopsctr/blob/main/docs/concepts.md)
-- [gitopsctr driver contracts](https://github.com/NiklasRosenstein/gitopsctr/blob/main/src/gitopsctr/driver.py)
-- [gitopsctr Kubernetes delivery](https://github.com/NiklasRosenstein/gitopsctr/blob/main/docs/drivers/kubernetes-manifests.md)
 
-These are navigation aids, not frozen API guarantees. Verify the implementation
-revision used by an integration before depending on its behavior.
+These are navigation aids, not frozen API guarantees.
