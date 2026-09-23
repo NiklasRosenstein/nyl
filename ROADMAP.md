@@ -400,9 +400,52 @@ inputs:
 - Native state is never promoted; the staging Terraform unit applies the
   promoted source commit and variables against staging's own backend.
 
-Because promotion records live in Git, a target that does not use orchestration
-can still consume a promoted value through a locked `fromGit` binding once the
-state layout is fixed in M3.
+**Promotion sources.** `from` selects either an environment, as above, or a
+DeploymentTarget. A target source lets a dev target that renders from `value`,
+`fromGit`, or `fromPublication` bindings (including `carry`) feed an
+orchestrated environment without being orchestrated itself:
+
+```yaml
+apiVersion: orchestration.nyl/v1
+kind: PromotionPath
+metadata: {name: dev-to-production}
+spec:
+  from: {target: dev}
+  to: {environment: production}
+  evidence: published
+  changeGate: pullRequest
+  values:
+    webImage:
+      select: {input: platform/web/image}   # <group>/<release>/<input>
+```
+
+- A target source reads one publication commit of that target: the newest by
+  default, or an exact one with `--from-revision`. All values come from that
+  commit, which already contains the manifests rendered from them.
+- The ownership index stores input digests, not values. Promotion recovers each
+  value from its recorded provenance: the carried or base-commit state file, the
+  locked `fromGit` blob, or the binding at the recorded source commit. It then
+  verifies the value against the recorded `@input` digest. A publication made
+  from a dirty source worktree is not a promotion source.
+- The only evidence level is `published`. Acceptance and health need
+  observation that a non-orchestrated target does not record.
+- The PromotionRecord adds the source target, publication repository, branch,
+  and commit, and the input digest to its lineage.
+- `to` is always an environment, because the PromotionRecord lives in that
+  environment's desired state.
+
+**Promotion without orchestration.** A target that belongs to no environment
+promotes through a locked `fromGit` binding to the source target's published
+state instead: `nyl update source-locks --target production` moves the lock to
+the newest source publication, and the pull request that commits the lock is the
+review. The two routes coexist:
+
+| | Locked `fromGit` (M2) | PromotionPath (M6) |
+| --- | --- | --- |
+| Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a path and value |
+| Promote with | `nyl update source-locks --target …`, then a pull request | `nyl orchestrate promote --path …` |
+| Record | The lock in source | A PromotionRecord in target desired state |
+| Adds | — | Evidence gates, atomic multi-value promotion, lineage |
 
 ### State, evidence, and recovery
 
@@ -606,8 +649,9 @@ with static inputs in a target that does not use orchestration.
   with evidence checks and an optional pull-request change gate.
 - [ ] Promote an image digest and a Terraform source commit from dev to staging
   across differently named units and inputs, from one consistent snapshot.
-- [ ] Show promotion lineage in `status` and consume a promoted value through
-  `fromGit` in a non-orchestrated target.
+- [ ] Promote from a non-orchestrated target's published inputs, including a
+  carried state file, with values verified against the recorded digests.
+- [ ] Show promotion lineage in `status`.
 
 **Exit criterion:** staging runs exactly the image digest and Terraform source
 dev proved, with auditable lineage; stale or missing source evidence blocks

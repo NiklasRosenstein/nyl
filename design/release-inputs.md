@@ -270,6 +270,44 @@ releaseInputs:
   the carried value. That is the same trust already given to the job that
   produced it, such as an image build.
 
+**Promoting published state.** A carried or committed state file in one
+target's publication branch can feed another target:
+
+- Without orchestration, the other target binds it with `fromGit`, locked to a
+  source publication commit. `nyl update source-locks --target <name>` promotes
+  by moving the lock, and the pull request that commits it is the review. The
+  targets may share a publication branch under different prefixes or publish to
+  different branches; the lock makes promotion explicit either way. A shared
+  branch cannot be followed with `fromPublication`, because the state path is
+  owned by the source target.
+- With orchestration, a PromotionPath with `from: {target: <name>}` selects the
+  source target's published inputs; see the roadmap's promotion section.
+
+Example: dev carries image IDs from its CI build, and production promotes them
+by lock.
+
+```yaml
+# DeploymentTarget dev
+releaseInputs:
+  platform/web:
+    image:
+      fromPublication:
+        path: dev/state/images.json
+        pointer: /web
+        carry: build/images.json
+---
+# DeploymentTarget production
+releaseInputs:
+  platform/web:
+    image:
+      fromGit:
+        repository: {repoURL: https://git.example.com/deploy.git}
+        revision: deploy/dev
+        commit: 9c1e…              # moved by `nyl update source-locks --target production`
+        path: dev/state/images.json
+        pointer: /web
+```
+
 `fromUnit` and `fromPromotion`:
 
 - Their shapes are defined with the orchestration contract.
