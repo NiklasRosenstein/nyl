@@ -1,11 +1,12 @@
 # Release inputs and bindings
 
-**Status:** draft M1 contract, implemented by M2. See [ROADMAP.md](../ROADMAP.md).
+**Status:** M1 contract for M2, all M2 questions settled. See [ROADMAP.md](../ROADMAP.md).
 
 This contract lets a Release declare typed inputs and a DeploymentTarget bind
 them. Bindings in M2 resolve without orchestration: from inline values, from
-project files, from locked Git state, or from state files committed to the
-target's own publication branch. The orchestration-only binding kinds
+project files, from locked Git state, or from state files in the target's own
+publication branch, either committed by another tool or carried from the
+working tree by `publish-tree`. The orchestration-only binding kinds
 are reserved here so that M5 and M6 can add them without changing the schema
 shape.
 
@@ -166,10 +167,16 @@ Each binding sets exactly one of these fields:
 - The blob is read at `commit:path`. A commit missing from the local cache is
   fetched by commit. Offline rendering fails with an actionable message when the
   commit is not cached.
-- Locks are refreshed by a path-addressed update, because one target can hold
-  many `fromGit` bindings. The update's `--check` mode reports stale locks
-  without writing files, for CI. Whether this extends
-  `nyl update source-locks` or is a new `nyl update input-locks` is still open.
+- `nyl update source-locks` refreshes `fromGit` locks together with
+  ApplicationGroup source locks, so CI has one `--check` gate for every Git
+  lock. A new `--target` filter selects one DeploymentTarget, alongside the
+  existing `--group` filter.
+- One target can hold many `fromGit` locks, and several bindings often lock the
+  same repository at the same commit. The updater therefore groups locks by
+  repository and `revision`: it resolves each group once and moves every lock
+  in it to the same new commit. Bindings that share a current commit but name
+  different revisions are addressed individually by their position in the
+  document, never by matching the commit text alone.
 
 `fromPublication`:
 
@@ -200,8 +207,9 @@ releaseInputs:
   and `publish-tree` creates no commit for an unchanged tree. A CI job
   triggered by pushes to the deploy branch therefore stops after Nyl's own
   publication.
-- **Placement.** The path must not be a file owned by any target on that
-  publication revision, and it must lie outside every directory synced by a
+- **Placement.** Without `carry`, the path must not be a file owned by any
+  target on that publication revision; with `carry`, only this target may own
+  it. It must always lie outside every directory synced by a
   generated Argo CD Application: workload Release directories, `_nyl`, and the
   catalog. Otherwise Argo CD would try to apply the state file as a manifest.
   Nyl validates both. Reconciliation already preserves files it does not own.
@@ -221,6 +229,47 @@ releaseInputs:
   Nyl preserves unowned files but cannot merge a concurrent state change into
   its own commit.
 
+**Carried state.** A state file does not have to be committed by another tool.
+With `carry`, a file produced in the working tree during this run, and left
+uncommitted, is written by `publish-tree` into the same commit as the manifests
+derived from it:
+
+```yaml
+releaseInputs:
+  platform/web:
+    image:
+      fromPublication:
+        path: state/web.json       # location in the publication branch
+        pointer: /image
+        carry: build/web.json      # optional working-tree file from this run
+```
+
+- **File present.** Nyl reads `carry`, renders from it, and writes its bytes to
+  `path` in the compare-and-swap publication commit. Every published commit
+  thereby contains the input its manifests were rendered from.
+- **File absent.** Nyl reads `path` at the base commit B and writes the same
+  bytes back. The last carried value persists across source-only publications,
+  and unchanged bytes produce no commit. When neither exists, the bootstrap
+  rule applies.
+- **Ownership.** With `carry`, `path` is a file owned by this target and listed
+  in the ownership index, so a commit to it by another writer is rejected as a
+  modification outside Nyl. A path is either carried by Nyl or committed by
+  another tool, never both. The placement rule otherwise applies unchanged:
+  the path lies outside every Argo CD-synced directory.
+- **Working-tree rules.** `carry` is a normalized project-relative path that must
+  not be tracked by Git; a tracked file is source and uses `fromFile`. It
+  should normally be ignored through `.gitignore`. Declared `carry` paths are
+  excluded from the source dirty check, and the clean-`HEAD` verification
+  render receives the same carried bytes, so a carried file never forces
+  `--allow-dirty`.
+- **Local commands.** `render-tree`, `diff-tree`, and direct commands use the
+  carried file when present, otherwise the base copy. In a pull-request build,
+  `diff-tree` therefore shows the state change with the manifest changes it
+  causes.
+- **Trust.** Whoever controls the working tree of the publishing run controls
+  the carried value. That is the same trust already given to the job that
+  produced it, such as an image build.
+
 `fromUnit` and `fromPromotion`:
 
 - Their shapes are defined with the orchestration contract.
@@ -232,28 +281,44 @@ releaseInputs:
 
 ## Direct commands
 
-`nyl render`, `diff`, and `apply` (proposal):
+`nyl render`, `diff`, and `apply` resolve inputs so that `render --target dev`
+matches what `render-tree` produces for the same Release:
 
-- With `--target`, bindings apply when the Release file belongs to exactly one
-  of the target's selected ApplicationGroups. When it belongs to more than one,
-  `--application-group` chooses.
-- Without a target, only defaults apply.
-- `--input <name>=<json>` and `--inputs <file>` override bindings, for local
-  experimentation. The overrides are recorded as provenance.
-- Tree commands (`render-tree`, `diff-tree`, `publish-tree`) accept no input
-  overrides, so published output always reproduces from committed source and,
-  for `fromPublication`, the recorded publication base commit.
+```text
+effective input = --input / --inputs override, if present
+                  otherwise target binding, if a target is selected
+                  otherwise Release default
+```
+
+- With `--target`, Nyl finds the target's selected ApplicationGroup whose source
+  contains the Release file and applies that `<group>/<release>` binding. When
+  two selected groups contain the file, `--application-group` chooses; when
+  none does, only defaults and overrides apply.
+- Without a target, only defaults and overrides apply.
+- `--input <name>=<json>` sets one input; `--inputs <file>` reads a YAML or JSON
+  object of inputs. Individual `--input` flags win over `--inputs`. Overrides
+  are validated like bindings and recorded as provenance.
+- `fromGit` resolves at its lock. `fromPublication` fetches the publication
+  branch, reads its head (or the carried file when present), and reports the
+  commit it used.
+- Tree commands (`render-tree`, `diff-tree`, `publish-tree`) accept no
+  overrides. Published output always reproduces from committed source, the
+  recorded publication base commit, and carried files, which are part of the
+  published commit.
 
 ## Remote ApplicationGroup sources
 
 A remote source renders in a restricted session without secrets or the process
-environment. Centrally bound inputs pass data from the platform project into
-remote templates.
+environment. It already receives the target's `values`, and it receives inputs
+the same way as a local group: no opt-in field exists.
 
-Proposal: a remote group rejects input bindings unless its source opts in, for
-example with `rendererConfig.admitInputs: true`. `fromFile`, `fromGit`, and
-`fromPublication` still resolve centrally, and the remote session receives only the resolved values of
-its own Releases.
+- The binding key is the admission. Values reach a remote Release only because
+  the platform names that `<group>/<release>` and input on its own target.
+- `fromFile`, `fromGit`, and `fromPublication` resolve centrally. The remote
+  session receives only the resolved values for its own Releases, never binding
+  definitions, file paths, or repository credentials.
+- Remote code can declare inputs but cannot choose where their values come
+  from, and it still receives no secrets.
 
 ## Provenance, caching, and validation
 
@@ -264,7 +329,9 @@ its own Releases.
   - `@git/<credential-free-url>@<commit>/<path>` → `sha256:<blob digest>` for each
     `fromGit` source
   - `@publication/<path>` → `sha256:<blob digest>` for each `fromPublication`
-    source; the base commit is the published commit's parent
+    value read from the base commit, which is the published commit's parent
+  - `@carried/<path>` → `sha256:<blob digest>` for each `fromPublication` value
+    taken from a `carry` file in this run
 - Keys starting with `@` are not project paths, following the existing `@remote`
   convention, so project-file hashing never interprets them.
 - Inputs are not a secret channel. Their digests and the rendered manifests are
@@ -312,8 +379,5 @@ it belongs to the layer that sees all targets on that Cluster.
 
 ## Remaining questions
 
-| Question | Needed by |
-| --- | --- |
-| Lock update command: extend `source-locks` or a new `input-locks` | M2 |
-| Remote group admission field name and default | M2 |
-| Direct-command flag names and override precedence | M2 |
+None for M2. Orchestration binding shapes (`fromUnit`, `fromPromotion`) are
+settled with the M1 unit and promotion contract.

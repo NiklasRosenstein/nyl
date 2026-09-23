@@ -35,9 +35,9 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** review the draft [Release inputs contract](design/release-inputs.md),
-settle its remaining M2 questions, then continue M1 with the unit, state, and
-environment contract.
+**Next step:** the [Release inputs contract](design/release-inputs.md) settles
+M2's design, so M2 implementation can start. In parallel, continue M1 with the
+unit, state, and environment contract.
 
 ## Product direction
 
@@ -210,23 +210,23 @@ spec:
 ```
 
 - `fromGit` follows the ApplicationGroup source-lock pattern: rendering reads
-  only the locked commit, and an update command refreshes locks. Unlike source
-  locks, one target can hold many `fromGit` locks, so the updater addresses each
-  binding by path rather than by one `commit` field per document.
+  only the locked commit, and `nyl update source-locks` refreshes these locks
+  together with ApplicationGroup locks, grouped by repository and revision.
 - `fromPublication` supports write-back workflows where an external tool commits
   state to the deploy branch. `publish-tree` reads the file at the branch head it
   builds on and pushes with a compare-and-swap, so the published commit holds
   the state and the manifests rendered from it, and the index records the state
-  digest. The file must stay outside Nyl-owned files and Argo CD-synced
-  directories.
+  digest. The file must stay outside Argo CD-synced directories. With `carry`,
+  the state file is instead produced uncommitted in the working tree and
+  written by `publish-tree` itself, alongside the manifests derived from it.
 - Rendering validates bound values against declared types and fails on an
   unbound input without a default. Inputs are opt-in by the Release author, so
   this never affects an existing Release.
-- Direct `nyl render`, `diff`, and `apply` have no target. They use input
-  defaults and accept optional explicit input flags or files.
-- A remote ApplicationGroup source renders in a restricted session. Bound input
-  values are data supplied by the central project; admitting them into a remote
-  session is an explicit per-group policy, never implied.
+- Direct `nyl render`, `diff`, and `apply` apply the selected target's bindings,
+  so they match `render-tree`, and accept `--input`/`--inputs` overrides that
+  tree commands never accept.
+- Remote ApplicationGroups receive inputs exactly like local groups, as they
+  already receive target `values`; the platform's binding key is the admission.
 - Resolved inputs participate in the dependency recorder and render-cache key.
   The rendered ownership index records a digest and provenance per input in its
   existing `inputs` map, not raw values, and without a format version change;
@@ -486,7 +486,7 @@ The working CLI design uses an explicit `nyl orchestrate` group. Names and flags
 are proposals to validate in M1/M3:
 
 ```bash
-nyl update input-locks          # or an extension of source-locks
+nyl update source-locks --check
 nyl orchestrate plan --environment dev
 nyl orchestrate reconcile --environment dev
 nyl orchestrate status --environment dev
@@ -546,17 +546,20 @@ ambiguous command semantics.
 - [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
   `fromFile`, `fromGit`, and `fromPublication`, with type validation and
   defaults.
-- [ ] Add a path-addressed lock update for `fromGit` bindings with a `--check`
-  mode for CI.
+- [ ] Support `carry` for `fromPublication`, excluding carried files from the
+  dirty check.
+- [ ] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
+  `--target` filter.
+- [ ] Apply target bindings in direct commands and add `--input`/`--inputs`.
 - [ ] Record resolved inputs in the dependency recorder, render-cache key, and
   the existing ownership-index `inputs` map as digests.
-- [ ] Define the remote ApplicationGroup admission policy for bound inputs.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
 
 **Exit criterion:** a target renders Releases from static, locked external, and
-same-branch publication state inputs through `render-tree` and `publish-tree`;
+same-branch publication state inputs, committed or carried, through
+`render-tree` and `publish-tree`;
 a concurrent state push makes publication fail rather than interleave; projects without inputs produce
 byte-identical output to the previous release.
 
@@ -624,9 +627,6 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Lock update: extend `nyl update source-locks` or add a separate command | M2 |
-| Remote ApplicationGroup admission of centrally bound inputs | M2 |
-| Direct-command input flags and override precedence | M2 |
 | Environment declaration and state ref configuration | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
 | Desired, observed, and coordination ref names and authorization | M1 |
