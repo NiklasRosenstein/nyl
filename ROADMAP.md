@@ -70,8 +70,8 @@ exact values proven in one environment to the next.
 
 ### Initial scope
 
-- Declared, typed Release inputs bound to static values, project files, or
-  pinned external Git state.
+- Declared, typed Release inputs bound to static values, project files, pinned
+  external Git state, or state in the target's own publication branch.
 - Units with declared inputs, public outputs, and artifact descriptors; a
   constrained command unit; container image and Terraform units; a Kubernetes
   publication unit over the existing rendered GitOps path.
@@ -186,6 +186,7 @@ bindings are errors. Each binding selects exactly one source:
 | `value` | Inline static value | No |
 | `fromFile` | Project file plus JSON Pointer | No |
 | `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
+| `fromPublication` | State file in the target's own publication branch at the publication base commit | No |
 | `fromUnit` | Recorded public output of a unit in the same environment | Yes (M5) |
 | `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
 
@@ -212,6 +213,12 @@ spec:
   only the locked commit, and an update command refreshes locks. Unlike source
   locks, one target can hold many `fromGit` locks, so the updater addresses each
   binding by path rather than by one `commit` field per document.
+- `fromPublication` supports write-back workflows where an external tool commits
+  state to the deploy branch. `publish-tree` reads the file at the branch head it
+  builds on and pushes with a compare-and-swap, so the published commit holds
+  the state and the manifests rendered from it, and the index records the state
+  digest. The file must stay outside Nyl-owned files and Argo CD-synced
+  directories.
 - Rendering validates bound values against declared types and fails on an
   unbound input without a default. Inputs are opt-in by the Release author, so
   this never affects an existing Release.
@@ -537,7 +544,8 @@ ambiguous command semantics.
 ### M2 — Release inputs without orchestration
 
 - [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
-  `fromFile`, and `fromGit`, with type validation and defaults.
+  `fromFile`, `fromGit`, and `fromPublication`, with type validation and
+  defaults.
 - [ ] Add a path-addressed lock update for `fromGit` bindings with a `--check`
   mode for CI.
 - [ ] Record resolved inputs in the dependency recorder, render-cache key, and
@@ -547,8 +555,9 @@ ambiguous command semantics.
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
 
-**Exit criterion:** a target renders Releases from static and locked external
-inputs through `render-tree` and `publish-tree`; projects without inputs produce
+**Exit criterion:** a target renders Releases from static, locked external, and
+same-branch publication state inputs through `render-tree` and `publish-tree`;
+a concurrent state push makes publication fail rather than interleave; projects without inputs produce
 byte-identical output to the previous release.
 
 ### M3 — Orchestration core with a constrained command unit
@@ -618,6 +627,7 @@ reasons to delay independent work.
 | Lock update: extend `nyl update source-locks` or add a separate command | M2 |
 | Remote ApplicationGroup admission of centrally bound inputs | M2 |
 | Direct-command input flags and override precedence | M2 |
+| Bounded retry of a lost publication compare-and-swap for `fromPublication` | M2 |
 | Environment declaration and state ref configuration | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
 | Desired, observed, and coordination ref names and authorization | M1 |

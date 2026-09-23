@@ -4,7 +4,8 @@
 
 This contract lets a Release declare typed inputs and a DeploymentTarget bind
 them. Bindings in M2 resolve without orchestration: from inline values, from
-project files, or from locked Git state. The orchestration-only binding kinds
+project files, from locked Git state, or from state files committed to the
+target's own publication branch. The orchestration-only binding kinds
 are reserved here so that M5 and M6 can add them without changing the schema
 shape.
 
@@ -144,6 +145,7 @@ Each binding sets exactly one of these fields:
 | `value` | Yes | Inline literal. DeploymentTargets are static, so this is never templated |
 | `fromFile` | Yes | Project-relative YAML or JSON file; `pointer` defaults to `""` |
 | `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
+| `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
 | `fromUnit` | Reserved | Recorded unit output in an orchestrated environment (M5) |
 | `fromPromotion` | Reserved | A value recorded through a PromotionPath (M6) |
 
@@ -169,6 +171,56 @@ Each binding sets exactly one of these fields:
   without writing files, for CI. Whether this extends
   `nyl update source-locks` or is a new `nyl update input-locks` is still open.
 
+`fromPublication`:
+
+This binding covers write-back workflows: a tool outside Nyl, such as an image
+build job, commits a state file to the deploy branch, and Nyl renders manifests
+from it into the same branch.
+
+```yaml
+releaseInputs:
+  platform/web:
+    image:
+      fromPublication:
+        path: state/web.json
+        pointer: /image
+```
+
+- The path is relative to the root of the target's publication repository at
+  its publication revision. It is normalized; absolute paths, parent traversal,
+  and symlinks are rejected.
+- **Base commit.** `publish-tree` already checks out the publication branch
+  head B, commits the rendered tree on top of B, and pushes with a
+  compare-and-swap that expects B. The state file is read at B. The published
+  commit therefore contains the state file and the manifests rendered from it,
+  and a concurrent writer makes the push fail instead of interleaving.
+- **Provenance.** The ownership index records the state file's blob digest at
+  B. Source commit S plus the state at B reproduce the render.
+- **Idempotence.** Rendering the same state again produces an unchanged tree,
+  and `publish-tree` creates no commit for an unchanged tree. A CI job
+  triggered by pushes to the deploy branch therefore stops after Nyl's own
+  publication.
+- **Placement.** The path must not be a file owned by any target on that
+  publication revision, and it must lie outside every directory synced by a
+  generated Argo CD Application: workload Release directories, `_nyl`, and the
+  catalog. Otherwise Argo CD would try to apply the state file as a manifest.
+  Nyl validates both. Reconciliation already preserves files it does not own.
+- **Bootstrap.** When the publication branch or the file does not exist, the
+  input is treated as unbound: its Release default applies, or rendering fails
+  as for any required input. A file that exists but does not resolve `pointer`
+  is an error.
+- **Local commands.** `render-tree` and `diff-tree` fetch the publication
+  branch and read the file at its current head. They report which commit they
+  used, because their output is reproducible only together with it. `--offline`
+  uses the cached head and says so.
+- **Scope.** Only the target's own publication branch can be read. Another
+  target's branch or another repository uses `fromGit`.
+- **Review.** State changes arrive without a source-repository review. Use
+  `fromGit` locks or promotion where review is required.
+- **Concurrent writers.** Other writers must also push with a compare-and-swap.
+  Nyl preserves unowned files but cannot merge a concurrent state change into
+  its own commit.
+
 `fromUnit` and `fromPromotion`:
 
 - Their shapes are defined with the orchestration contract.
@@ -189,7 +241,8 @@ Each binding sets exactly one of these fields:
 - `--input <name>=<json>` and `--inputs <file>` override bindings, for local
   experimentation. The overrides are recorded as provenance.
 - Tree commands (`render-tree`, `diff-tree`, `publish-tree`) accept no input
-  overrides, so published output always reproduces from committed source.
+  overrides, so published output always reproduces from committed source and,
+  for `fromPublication`, the recorded publication base commit.
 
 ## Remote ApplicationGroup sources
 
@@ -198,8 +251,8 @@ environment. Centrally bound inputs pass data from the platform project into
 remote templates.
 
 Proposal: a remote group rejects input bindings unless its source opts in, for
-example with `rendererConfig.admitInputs: true`. `fromFile` and `fromGit` still
-resolve centrally, and the remote session receives only the resolved values of
+example with `rendererConfig.admitInputs: true`. `fromFile`, `fromGit`, and
+`fromPublication` still resolve centrally, and the remote session receives only the resolved values of
 its own Releases.
 
 ## Provenance, caching, and validation
@@ -210,6 +263,8 @@ its own Releases.
   - `@input/<group>/<release>/<input>` → `sha256:<digest of canonical JSON>`
   - `@git/<credential-free-url>@<commit>/<path>` → `sha256:<blob digest>` for each
     `fromGit` source
+  - `@publication/<path>` → `sha256:<blob digest>` for each `fromPublication`
+    source; the base commit is the published commit's parent
 - Keys starting with `@` are not project paths, following the existing `@remote`
   convention, so project-file hashing never interprets them.
 - Inputs are not a secret channel. Their digests and the rendered manifests are
@@ -262,3 +317,4 @@ it belongs to the layer that sees all targets on that Cluster.
 | Lock update command: extend `source-locks` or a new `input-locks` | M2 |
 | Remote group admission field name and default | M2 |
 | Direct-command flag names and override precedence | M2 |
+| Whether `publish-tree` retries a lost compare-and-swap by re-reading state, re-rendering, and pushing again, and its bound | M2 |
