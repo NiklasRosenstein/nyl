@@ -317,4 +317,3 @@ it belongs to the layer that sees all targets on that Cluster.
 | Lock update command: extend `source-locks` or a new `input-locks` | M2 |
 | Remote group admission field name and default | M2 |
 | Direct-command flag names and override precedence | M2 |
-| Whether `publish-tree` retries a lost compare-and-swap by re-reading state, re-rendering, and pushing again, and its bound | M2 |

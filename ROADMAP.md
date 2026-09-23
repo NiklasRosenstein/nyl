@@ -627,7 +627,6 @@ reasons to delay independent work.
 | Lock update: extend `nyl update source-locks` or add a separate command | M2 |
 | Remote ApplicationGroup admission of centrally bound inputs | M2 |
 | Direct-command input flags and override precedence | M2 |
-| Bounded retry of a lost publication compare-and-swap for `fromPublication` | M2 |
 | Environment declaration and state ref configuration | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
 | Desired, observed, and coordination ref names and authorization | M1 |
