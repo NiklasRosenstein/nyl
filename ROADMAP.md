@@ -35,10 +35,9 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** produce the M1 contract. Start with the resource schemas for
-Release inputs and input bindings, because M2 can ship independently of the
-orchestration core and constrains how orchestrated values later reach
-rendering.
+**Next step:** review the draft [Release inputs contract](design/release-inputs.md),
+settle its remaining M2 questions, then continue M1 with the unit, state, and
+environment contract.
 
 ## Product direction
 
@@ -148,7 +147,14 @@ scopes where the driver can establish them.
 
 A Release may declare named, typed inputs. Templates read them as
 `inputs.<name>`, alongside the existing `values`. A Release without declared
-inputs renders exactly as today.
+inputs renders exactly as today. The draft contract is
+[design/release-inputs.md](design/release-inputs.md).
+
+Inputs use a small closed type set (`string`, `integer`, `number`, `boolean`,
+`object`, `array`, with optional `default` and scalar `enum`). It needs no new
+validator, keeps source/target compatibility checks for promotion decidable,
+and is a JSON Schema subset, so a richer schema can be added later. Deeper
+structure is left to downstream validators such as chart value schemas.
 
 ```yaml
 apiVersion: k8s.gitops.nyl/v1
@@ -167,8 +173,10 @@ then known at discovery time, before the file is rendered, so Nyl can build the
 `inputs` context from bindings and check required inputs and types without a
 second rendering pass.
 
-The proposed binding location is the DeploymentTarget, which is static and
-already carries per-target values. Bindings are keyed by the Release's rendered
+Bindings live on the DeploymentTarget, which is static and already carries
+per-target values; Release defaults cover environment-independent values.
+Group-level defaults can be added later if repetition across targets proves to
+be a problem. Bindings are keyed by the Release's rendered
 identity, `<applicationGroup>/<release>`, because one Release name can appear in
 several groups on one target. Unknown keys, unknown input names, and duplicate
 bindings are errors. Each binding selects exactly one source:
@@ -605,11 +613,10 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Binding location: DeploymentTarget only, or also ApplicationGroup defaults | M1/M2 |
 | Lock update: extend `nyl update source-locks` or add a separate command | M2 |
 | Remote ApplicationGroup admission of centrally bound inputs | M2 |
-| Input type system: JSON Schema subset versus a small scalar/object type set | M1/M2 |
-| Environment declaration and how a DeploymentTarget joins one | M1 |
+| Direct-command input flags and override precedence | M2 |
+| Environment declaration and how a DeploymentTarget joins one; several targets, and so several environments, may share one Cluster | M1 |
 | Per-driver evidence levels and their names | M1/M5 |
 | Desired, observed, and coordination ref names and authorization | M1 |
 | Command unit sandboxing, environment variables, and secret admission | M1/M3 |
