@@ -352,7 +352,16 @@ nyl get environments                                         # declared environm
   squash-merged therefore still finds its source. It needs push access to that
   ref pattern; hosts that reject custom refs can use
   `refs/heads/nyl/keep/<instance>`. `keepSource: false` turns it off, and the
-  pipeline must then remove instances before their branches disappear.
+  pipeline should then remove instances before their branches disappear.
+- When an instance's recorded source commit cannot be fetched, teardown fails
+  with a message suggesting `--source <revision>`. `nyl teardown --all` and
+  `nyl state delete --teardown` accept `--source` to take the units' source
+  files from another revision, typically the protected branch right after the
+  pull request was squash-merged. Teardown uses the stored resolved specs, so
+  only the source files come from that revision. When they differ from the
+  recorded source, Nyl warns and records the substitution in the transition
+  commit; it never refuses, so a lost commit cannot lock anyone out of
+  removing an instance.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
   `fromUnit: {environment: dev, unit: network, output: vpcId}`. It is
@@ -1222,7 +1231,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--renew`, `--no-extend`, `--template`, `--local`,
+`--allow-teardown`, `--allow-incomplete`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
