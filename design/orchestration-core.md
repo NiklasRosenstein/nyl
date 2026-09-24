@@ -624,19 +624,25 @@ lifecycle:
     blocked until the new receipt exists, then run with its outputs. This
     rebuilds corrupted resources or rotates something that can only be
     recreated.
-  - With `--hold`, the incarnation is torn down and then held (see below):
-    the unit stays down with no incarnation, and its dependents stay blocked,
-    until `nyl resume`; the next `reconcile` then writes a new uid.
+  - `--hold` holds the unit in the same operation, so no run can recreate it
+    between the teardown and a separate `nyl hold`. It is equivalent to
+    `teardown` followed by `hold`.
 - **Holds freeze a unit.** `nyl hold -e <env> --unit <u> [--reason <text>]`
-  stops reconciling any change to the unit without touching its resources:
-  - The desired file gets `state: held` and keeps the last executed desired
-    document. Resolution records newer source changes under `hold.pending`,
-    with their source commit and execution key, but does not apply them, and
-    `reconcile` never executes a held unit.
-  - The receipt stays current against the frozen document, so consumers keep
-    resolving from it; the frozen state is what actually runs.
+  makes `reconcile` change nothing about the unit, whatever state it is in,
+  without touching its resources. Resolution records what source would change
+  under `hold.pending`, with its source commit and execution key, but applies
+  nothing:
+  - A unit with a running incarnation keeps its last executed desired
+    document. Its receipt stays current against that document, so consumers
+    keep resolving from it; the frozen state is what actually runs.
+  - A unit without an incarnation (after a teardown, or declared but never
+    executed) is not created. Its desired file has no uid, and its dependents
+    stay blocked.
+  - A unit that is `deleting` pauses: no retention or teardown happens.
   - A held unit that leaves the ownership set is not deleted; it is reported
     as held with a pending deletion.
+  - An explicit `nyl teardown` of a held unit is still allowed, because it is
+    an operator action; the unit stays held afterwards and is not recreated.
   - `nyl resume -e <env> --unit <u>` lifts the hold. The next `reconcile`
     renders the unit from source again and applies whatever changed, including
     a pending deletion.
