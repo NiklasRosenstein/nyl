@@ -43,6 +43,7 @@ spec:
     repositoryRef: {name: platform-state}   # or inline `repository`
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
+  protectedRefs: [main, 'release/*']        # default: the source repository's default branch
 ```
 
 - An Environment is static at discovery, like a DeploymentTarget.
@@ -58,6 +59,8 @@ spec:
   the source checkout's `origin` remote; CI should name a GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
   either way (see [State layout](#state-layout)).
+- `protectedRefs` lists the refs that pinned commits must be reachable from
+  (see [Pinned commits](#pinned-commits)).
 
 ### Units
 
@@ -87,16 +90,19 @@ spec:
   rendered once per selecting Environment.
 - Every unit kind shares the common fields `enabled` (evaluated after
   rendering; `false` leaves the ownership set), `outputs`, `dependsOn`,
-  `approval` (`auto` or `manual`), `deletionPolicy` (`Retain` or `Teardown`),
-  and `timeout`. They are one Rust struct flattened into each kind's spec, so
+  `approval` (see [Approval](#approval)), `deletionPolicy` (`Retain` or
+  `Teardown`), `timeout`, and `env` (see [Credentials](#credentials)). They are one Rust struct flattened into each kind's spec, so
   their schema and documentation are identical everywhere. The remaining fields
   belong to the kind, and each kind has its own schema and generated reference
   page.
 - References may appear in any field the kind's schema marks as accepting
   them.
-- `outputs` declares public outputs with the Release input type set (`string`,
-  `integer`, `number`, `boolean`, `object`, `array`), optional `description`,
-  and optional `sensitive`. Only declared outputs are recorded. A `sensitive`
+- A kind either defines its outputs itself (`OciImage`,
+  `KubernetesPublication`), in which case `outputs` is rejected, or lets the
+  unit declare them (`Command`, `Terraform`, `OpenTofu`). Declared outputs use
+  the Release input type set (`string`, `integer`, `number`, `boolean`,
+  `object`, `array`), optional `description`, and optional `sensitive`. Only
+  kind-defined or declared outputs are recorded. A `sensitive`
   output is validated but never persisted and cannot be referenced; secrets
   move through the secrets provider, not through outputs. Drivers reject
   native-tool sensitive outputs that are not declared sensitive.
@@ -183,25 +189,33 @@ Desired and observed documents live under fixed top-level directories, so the
 layout does not depend on whether the two refs coincide:
 
 ```text
+state.yaml                             # state location and history, written by `nyl state`
 desired/
-  environment.json                     # resolved Environment, source commit, ownership set
-  units/<unit>.json                    # desired unit documents
-  tombstones/<unit>.json               # deletion intent, uid-fenced
-  promotions/<path>.json               # PromotionRecords
-  holds/<unit>.json                    # operator holds after explicit teardown
+  environment.yaml                     # resolved Environment, source commit, ownership set
+  units/<unit>.yaml                    # desired unit documents
+  tombstones/<unit>.yaml               # deletion intent, uid-fenced
+  promotions/<path>.yaml               # PromotionRecords
+  holds/<unit>.yaml                    # operator holds after explicit teardown
 observed/
   units/<unit>/receipt.yaml            # latest receipt, or absent
   units/<unit>/artifacts/<name>.yaml   # artifacts of the latest receipt
-  units/<unit>/attempt.json            # open or most recent attempt
-  observations/<unit>/<timestamp>.json
+  units/<unit>/attempt.yaml            # open or most recent attempt
+  observations/<unit>/<timestamp>.yaml
 ```
 
 With separate refs, `desired/` exists only on the desired ref and `observed/`
-only on the observed ref. Every state file carries `apiVersion` and `kind` so
-its schema can evolve.
+only on the observed ref; `state.yaml` exists on both.
+
+Every state file is YAML and carries `apiVersion: gitops.nyl/v1` and a kind
+(`StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `Tombstone`,
+`PromotionRecord`, `Hold`, `Receipt`, `Artifact`, `Attempt`, `Observation`).
+Their JSON Schemas are generated from the Rust types and published with the
+other resource references. Digests, including execution keys, are computed
+over a canonical JSON form, so formatting never affects them. A reader rejects
+a state file whose kind version it does not know.
 
 Each unit has one receipt file: the latest receipt, or none after teardown or
-retention. Receipts and artifacts are YAML for readability. Earlier receipts
+retention. Earlier receipts
 exist only in Git history, which is enough for audit and promotion: a consumer
 cites a producer's receipt by execution key and the observed commit that holds
 it, and promotion walks the history of one receipt path.
@@ -297,21 +311,23 @@ was given, and `Nyl-Reason` when one was supplied.
 
 | Event | Ref | Changes |
 | --- | --- | --- |
-| `desired-updated` | desired | `desired/environment.json`, `desired/units/*` |
-| `tombstone` | desired | `desired/tombstones/<unit>.json`, unit document removed |
-| `promotion` | desired | `desired/promotions/<path>.json` |
-| `attempt-started` | observed | `attempt.json` opened (execution or teardown) |
+| `desired-updated` | desired | `desired/environment.yaml`, `desired/units/*` |
+| `tombstone` | desired | `desired/tombstones/<unit>.yaml`, unit document removed |
+| `promotion` | desired | `desired/promotions/<path>.yaml` |
+| `attempt-started` | observed | `attempt.yaml` opened (execution or teardown) |
 | `receipt` | observed | receipt and artifacts added, attempt closed |
 | `attempt-failed` | observed | attempt closed with category and retryability |
 | `attempt-uncertain` | observed | attempt marked uncertain after its deadline |
 | `attempt-superseded` | observed | a late runner records its result after replacement |
 | `recovery` | observed | an operator clears an uncertain or failed attempt for re-execution |
-| `hold` | desired | `desired/holds/<unit>.json` added after an explicit teardown with `--hold` |
+| `hold` | desired | `desired/holds/<unit>.yaml` added after an explicit teardown with `--hold` |
 | `hold-released` | desired | hold removed |
 | `retained` | observed | receipts and attempt moved out of `observed/units/<unit>/` |
 | `teardown` | observed | teardown recorded, unit files removed |
 | `tombstone-closed` | desired | tombstone removed after `retained` or `teardown` |
 | `observation` | observed | `observed/observations/…` |
+| `state-initialized` | both | `state.yaml` created, or reset with `--fresh` |
+| `state-copied` | both | `state.yaml` records the copy source |
 
 Invariants:
 
@@ -360,14 +376,63 @@ apply to desired state without competing with the frequent observed commits.
 - Only the named units execute. A dependency without a current receipt leaves
   the named unit `blocked`; dependencies and dependents are not executed.
 
-**Approval:**
+### Approval
 
-- A unit with `approval: manual` executes only when the invocation passes
-  `--approve <unit>`. The approval authorizes one execution of the current
-  desired document and is recorded in the `attempt-started` commit.
+```yaml
+spec:
+  approval: auto                       # default
+  # or
+  approval: {mode: manual, bind: plan} # bind: desired | plan
+```
+
+- A manual unit executes only when the invocation approves it. `approval:
+  manual` is short for `{mode: manual, bind: desired}`.
+- `bind: desired` approves one execution of the current desired document:
+  `--approve database`.
+- `bind: plan` approves exactly the changes a reviewed plan showed. It requires
+  a kind whose `plan` reports a change digest (Terraform and OpenTofu do).
+  `nyl plan` prints each manual unit's digest, and `--approve
+  database=sha256:…` authorizes that digest. At execution the driver plans
+  again in the same run and applies that plan only if its digest matches;
+  otherwise the attempt ends without effects and the unit waits for a new
+  approval. Plan files never leave the runner.
 - `--approve` for a unit excluded by `--unit`/`--units` is an error.
-- Binding an approval to an exact native plan is a driver capability
-  (Terraform plan approval is an M4 decision).
+- Teardown of a manual unit needs approval the same way; for `bind: plan` the
+  digest is that of the destroy plan.
+
+Recording. The `attempt-started` commit records every approval:
+
+```text
+Nyl-Approved-By: alice
+Nyl-Approval-Source: github-environment production https://github.com/acme/infra/actions/runs/1234
+Nyl-Approval-Digest: sha256:9f2c…
+```
+
+- `--approved-by` and `--approval-source` set the identity and source
+  explicitly. Without them, a local run records the Git user, and a CI run
+  records the CI run URL.
+- Approvals can be automated with a CI approval gate. With GitHub environment
+  protection rules, a `plan` job runs `nyl plan --output json` and passes the
+  digest as a job output; an apply job with `environment: production` runs
+  `nyl reconcile --approve database=<digest>` only after GitHub's reviewers
+  approve. When a GitHub token with read access to Actions is available, Nyl
+  reads the run's approvers from GitHub's run-approvals API and records them as
+  `Nyl-Approved-By`.
+
+```yaml
+# .github/workflows/production.yaml (excerpt)
+jobs:
+  plan:
+    outputs: {digest: ${{ steps.plan.outputs.digest }}}
+    steps:
+      - id: plan
+        run: echo "digest=$(nyl plan -e production --unit database --output json | jq -r '.units.database.changeDigest')" >> "$GITHUB_OUTPUT"
+  apply:
+    needs: plan
+    environment: production        # required reviewers approve here
+    steps:
+      - run: nyl reconcile -e production --unit database --approve "database=${{ needs.plan.outputs.digest }}"
+```
 
 **Compare-and-swap.** Each event has a read set: the paths it read and the
 commits named in `Nyl-Read-Desired` and `Nyl-Read-Observed`. When a push loses
@@ -383,19 +448,17 @@ execution key and is simply not current if the desired document moved on.
 An attempt is the claim, the lease, and the recovery record for one execution
 or teardown:
 
-```json
-{
-  "apiVersion": "gitops.nyl/v1",
-  "kind": "Attempt",
-  "id": "91c4…",
-  "operation": "reconcile",
-  "unit": {"environment": "dev", "name": "database", "uid": "5d2a…"},
-  "executionKey": "sha256:…",
-  "runner": "https://ci.example.com/runs/1234",
-  "startedAt": "2026-09-24T10:00:00Z",
-  "deadline": "2026-09-24T10:35:00Z",
-  "state": "running"
-}
+```yaml
+apiVersion: gitops.nyl/v1
+kind: Attempt
+id: 91c4…
+operation: reconcile
+unit: {environment: dev, name: database, uid: 5d2a…}
+executionKey: sha256:…
+runner: https://ci.example.com/runs/1234
+startedAt: 2026-09-24T10:00:00Z
+deadline: 2026-09-24T10:35:00Z
+state: running
 ```
 
 1. **Claim.** The runner writes `attempt-started`. The winning commit holds the
@@ -483,6 +546,106 @@ possible only through `inspect`.
 - **Fencing.** A new unit with a tombstoned name stays blocked until the
   tombstone closes, then receives a new uid. Teardown attempts carry the old
   uid.
+
+## Credentials
+
+Every driver starts its tools from an empty environment plus what the unit
+admits, so nothing leaks by default and a plugin driver follows the same rule:
+
+```yaml
+spec:
+  env:
+    passthrough: [AWS_REGION, AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE]
+    secrets:
+      TF_VAR_db_password: database-password   # key in the project's secrets provider
+```
+
+- `env.passthrough` copies named variables from the runner environment;
+  `env.secrets` reads keys from the project's secrets provider. A string secret
+  is passed as is; an object or array secret is passed as compact JSON.
+- Kinds add fixed variables they always need, such as `PATH` and `HOME`, and
+  document them.
+- A kind may offer typed helpers for well-known credentials, such as
+  `registryAuth` for `OciImage`. Nyl turns a helper into environment variables
+  or temporary files, validates it against the kind's schema, and removes the
+  files after the attempt.
+- Secret values and everything a helper derives from them are masked in
+  transcripts and never recorded.
+- The execution key covers the names in `env` and helper structure, never
+  values: rotating a secret does not re-run a unit.
+
+## State lifecycle
+
+### Initialization and moves
+
+`state.yaml` records where the state lives (repository and refs) and every
+initialization, copy, or fresh start, each as its own event.
+
+- The first run for an environment requires `nyl state init -e <env>`, which
+  writes `state.yaml` at the configured location. `reconcile` never creates
+  state implicitly.
+- When an Environment's `state` points to a location without `state.yaml`,
+  `reconcile` refuses and names both ways forward:
+  - `nyl state copy -e <env> --from <repository> [--desired-ref …]
+    [--observed-ref …]` pushes the existing refs' history to the new location
+    and records a `state-copied` event. Units keep their uids and receipts.
+  - `nyl state init -e <env> --fresh` starts over deliberately. Every unit
+    becomes a new incarnation and executes again: Terraform and OpenTofu
+    converge against their existing backends, images are rebuilt, and
+    non-idempotent commands run again. The command prints what that means and
+    records a `state-initialized` event marked fresh.
+- A location whose `state.yaml` names a different environment is an error, so
+  two environments can never share state by accident.
+
+### Local runs
+
+`--local` runs orchestration against local-only state, for developing units and
+trying changes against real evidence before CI:
+
+- The first local run for an environment copies the remote state refs to local
+  refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`; later
+  local runs continue from them. `--local --reset` copies again.
+- Local runs write state commits only to those refs, with a `Nyl-Local: true`
+  trailer, and never push. `nyl status -e <env> --local` shows the local view.
+- Effects are real, and local state is never pushed. CI's next run executes
+  those units again. That is safe for `converge` drivers; a local run
+  therefore executes units with other recovery policies only when they are
+  named with `--approve`, and warns that CI will run them again.
+
+### Pinned commits
+
+Every commit Nyl pins must stay fetchable: locked unit sources, promoted source
+revisions, and locked `fromGit` bindings.
+
+- A pinned commit must be reachable from one of the Environment's
+  `protectedRefs` in its repository. The default is that repository's default
+  branch. Resolution checks this when a lock or promotion enters desired
+  state; `nyl promote` checks it against the target environment.
+- An unreachable commit is a resolution error that names the commit and the
+  refs searched. A commit from a squash-merged branch is therefore rejected
+  before anything depends on it.
+- The source commit S of a run itself may be any commit, so a dev environment
+  can reconcile from a feature branch; its revisions are checked only when
+  they are promoted.
+
+### Credentials and branch protection
+
+- State pushes use the same Git credentials as `publish-tree`: an SSH key, an
+  SSH agent, or an HTTPS token, through the GitRepository's `publishURL`.
+- Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
+  as corruption and stops every command until an operator repairs it.
+- Recommended protection: only the runner identity may push to the observed
+  ref; the desired ref accepts pushes from the runner and promotion pull
+  requests with required reviews; force pushes and deletion are disabled on
+  both.
+
+### Defaults
+
+| Setting | Default | Configured in |
+| --- | --- | --- |
+| Concurrency per wave | 4 | `nyl.toml`, `--concurrency` |
+| Attempt grace period | 10 minutes | `nyl.toml` |
+| `timeout` | Command 30m, Terraform/OpenTofu 60m, OciImage 60m, KubernetesPublication 10m | unit `timeout` |
 
 ## Drivers
 
@@ -581,10 +744,8 @@ spec:
   - `NYL_INPUTS`: path to a JSON file with the resolved `values`;
   - `NYL_OUTPUTS`: path where the command writes one JSON object of outputs;
   - `NYL_UNIT` and `NYL_ENVIRONMENT`;
-  - variables named in `env.passthrough`, from the runner environment;
-  - secrets named in `env.secrets`, from the project's secrets provider. A
-    string secret is passed as is; an object or array secret is passed as
-    compact JSON.
+  - variables and secrets admitted through the common `env` field (see
+    [Credentials](#credentials)).
 - Following the general rule, the execution key covers `command`, `verify`,
   `fingerprint`, `idempotent`, `outputs`, the files matched by `files`,
   resolved `values`, the names in
@@ -622,6 +783,8 @@ spec:
 | `recover` | Clear one uncertain or non-retryable attempt for re-execution | `recovery` |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone (plus a hold with `--hold`), then teardown events |
 | `resume` | Remove a hold | `hold-released` |
+| `state init` | Create state at the configured location; `--fresh` starts over deliberately | `state-initialized` |
+| `state copy` | Copy state history from another location | `state-copied` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
@@ -629,8 +792,9 @@ history and `delete` by source editing, so removing a hold is `resume` and
 tearing down is `teardown`. `nyl get environments`, `nyl get units`, and `nyl
 get promotion-paths` list declarations; `nyl status` shows state.
 
-Common options: `-e`/`--environment`, `--unit`/`--units`, `--approve <unit>`,
-`--allow-teardown`, and `--output json` for versioned machine results on
+Common options: `-e`/`--environment`, `--unit`/`--units`,
+`--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
+`--allow-teardown`, `--local`, `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
@@ -700,9 +864,6 @@ meantime waits for that and then receives a new uid.
 
 | Question | Needed by |
 | --- | --- |
-| Branch protection guidance for state refs and runner credentials | M3 |
-| Default concurrency limit and grace period | M3 |
-| JSON schemas for state files and artifact descriptors | M3 |
-| Moving an environment to a different state repository or ref | M3 |
-| Keep refs for pinned source commits that may become unreachable | M3 |
-| Terraform plan approval: binding `--approve` to an exact saved plan | M4 |
+| Approver lookup for CI systems other than GitHub | M3 |
+
+Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).

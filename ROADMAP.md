@@ -35,7 +35,8 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** review the draft [orchestration core contract](design/orchestration-core.md).
+**Next step:** review the draft [orchestration core contract](design/orchestration-core.md)
+(M3) and [infrastructure units contract](design/infrastructure-units.md) (M4).
 The [Release inputs contract](design/release-inputs.md) settles M2's design, so
 M2 implementation can start independently.
 
@@ -135,7 +136,7 @@ supply cluster or Argo CD configuration.
 Orchestration is still GitOps, so its resources join the existing groups.
 Environment and PromotionPath use `gitops.nyl/v1`, next to the shared
 GitRepository, which also names environment state repositories. Built-in unit
-kinds (`Command`, `Terraform`, `OciImage`, `KubernetesPublication`) use
+kinds (`Command`, `Terraform`, `OpenTofu`, `OciImage`, `KubernetesPublication`) use
 `units.gitops.nyl/v1`, where every kind is a unit and the kind selects the
 driver, as in `components.k8s.nyl/v1`. Kubernetes compiler resources keep
 `k8s.gitops.nyl/v1`; HelmChart and RemoteManifest keep `k8s.nyl/v1`. Resource reference pages derive
@@ -725,10 +726,16 @@ byte-identical output to the previous release.
 
 ### M3 — Orchestration core with a constrained command unit
 
-- [ ] Implement environments, desired/observed refs, receipts, and leases.
-- [ ] Implement `plan`, `reconcile`, `status`, and `verify` for a dependency
-  graph of command units with `fromUnit` references.
-- [ ] Implement pinned source worktrees and content-based input fingerprints.
+- [ ] Implement environments, YAML state files with published schemas,
+  `nyl state init`/`copy`, attempts, and receipts with machine-readable commit
+  trailers.
+- [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`,
+  and `resume` for a dependency graph of command units with `fromUnit`
+  references, including `--local` runs.
+- [ ] Implement approvals bound to the desired document, with recorded approval
+  sources, and the common `env` credential admission.
+- [ ] Implement pinned source worktrees, reachability checks against protected
+  refs, and content-based execution keys.
 - [ ] Prove stale-evidence blocking, competing runners, and recovery after an
   effect succeeds but receipt publication fails.
 
@@ -738,9 +745,11 @@ recovery path.
 
 ### M4 — Container image and Terraform units
 
-- [ ] Add an image-build unit recording immutable digest references.
-- [ ] Add a Terraform/OpenTofu unit with native state and locking, declared
-  output admission, planning, and verification.
+- [ ] Add the `OciImage` kind over `docker buildx`, recording digest references
+  and a `ContainerImage` artifact, with the `registryAuth` helper.
+- [ ] Add the `Terraform` and `OpenTofu` kinds over one implementation, with
+  native state and locking, declared output admission, change digests, plan
+  approval (`bind: plan`), verification, and teardown.
 - [ ] Support a local-module Terraform configuration pinned to a source commit
   and path.
 - [ ] Demonstrate Terraform-to-Terraform output references.
@@ -799,11 +808,10 @@ reasons to delay independent work.
 | Decision | Needed by |
 | --- | --- |
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
-| State ref branch protection and runner credentials | M3 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
-| Terraform versus OpenTofu executable support and plan approval semantics | M4 |
-| Image build backend (BuildKit, Docker, Buildah) and registry authentication | M4 |
+| Approver lookup for CI systems other than GitHub | M3 |
+| Additional image build backends and registry-specific image deletion | After M4 |
 | Promotion record location for pull-request gates | M6 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
