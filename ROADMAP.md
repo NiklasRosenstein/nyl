@@ -637,7 +637,7 @@ nyl orchestrate reconcile --environment dev [--unit …] [--approve …] [--allo
 nyl orchestrate status --environment dev
 nyl orchestrate verify --environment dev
 nyl orchestrate promote --path dev-to-staging
-nyl orchestrate delete --environment dev --unit web-image
+nyl orchestrate teardown --environment dev --unit web-image [--hold]
 ```
 
 | Operation | Contract |
@@ -647,7 +647,7 @@ nyl orchestrate delete --environment dev --unit web-image
 | status / get | Inspect intent, evidence, progress, promotion lineage, and blockers |
 | verify | Observe external state and report drift without writing receipts |
 | promote | Record selected source values into target desired state, or open a change for review |
-| delete | Record explicit deletion intent for reconciliation |
+| teardown | Tear down a unit: complete a deletion, replace a selected unit, or hold it down |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,
 non-interactive behavior, deadlines, and exit categories before stabilizing the

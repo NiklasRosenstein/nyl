@@ -99,6 +99,9 @@ spec:
   published uid.
 - The uid fences every attempt, receipt, and tombstone. A name held by a
   tombstone cannot start a new incarnation until the tombstone closes.
+- An explicit teardown closes an incarnation even while the unit stays in the
+  ownership set; the next incarnation receives a new uid (see
+  [Deletion](#deletion)).
 
 ### References
 
@@ -135,15 +138,17 @@ spec:
   referenced by none rejects `fromUnit` and `fromPromotion` bindings.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
-- Its resolved inputs contain every Release input that resolution can fix
-  before execution (`value`, `fromFile` at the source commit, locked `fromGit`,
-  `fromUnit`, `fromPromotion`), keyed as `releases.<group>/<release>.<input>`.
-- `fromPublication` values, carried or not, depend on the publication branch at
-  publication time. They are resolved by `publish-tree` during execution and
-  recorded in the receipt, never in the desired document. Because they can
-  change without any desired change, a publication unit whose target has
-  `fromPublication` bindings executes on every `reconcile`; `publish-tree`
-  makes no commit when nothing changed.
+- Its resolved inputs contain every Release input of its target, keyed as
+  `releases.<group>/<release>.<input>`: `value`, `fromFile` at the source
+  commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
+- `fromPublication` is resolved like every other binding. Resolution reads the
+  state file from the publication branch head B, or the carried file from the
+  runner's working tree, and records the value and B. A new state file
+  therefore changes the execution key and triggers an ordinary execution.
+- At execution, `publish-tree` builds on the current branch head. If the head
+  has moved past B but the state file is unchanged, it proceeds on the new
+  head; if the state file changed, the execution ends without publishing and
+  the unit is resolved again in the next wave.
 - Its receipt records the published commit and ownership-index digest
   (`published`). `mode: observe` additionally records Argo CD acceptance and
   health observations (M5), per the roadmap's health evidence section. Direct
@@ -160,10 +165,11 @@ desired/
   units/<unit>.json                    # desired unit documents
   tombstones/<unit>.json               # deletion intent, uid-fenced
   promotions/<path>.json               # PromotionRecords
+  holds/<unit>.json                    # operator holds after explicit teardown
 observed/
-  units/<unit>/receipts/<key>.json     # one receipt per execution key
+  units/<unit>/receipt.yaml            # latest receipt, or absent
+  units/<unit>/artifacts/<name>.yaml   # artifacts of the latest receipt
   units/<unit>/attempt.json            # open or most recent attempt
-  units/<unit>/artifacts/<key>/<name>.json
   observations/<unit>/<timestamp>.json
 ```
 
@@ -171,10 +177,11 @@ With separate refs, `desired/` exists only on the desired ref and `observed/`
 only on the observed ref. Every state file carries `apiVersion` and `kind` so
 its schema can evolve.
 
-Receipts are kept per execution key instead of overwritten. Checking whether a
-past desired document was executed, which promotion needs, is then a file
-lookup rather than a history walk. Retention of old receipts is an M3 decision;
-Git history keeps everything regardless.
+Each unit has one receipt file: the latest receipt, or none after teardown or
+retention. Receipts and artifacts are YAML for readability. Earlier receipts
+exist only in Git history, which is enough for audit and promotion: a consumer
+cites a producer's receipt by execution key and the observed commit that holds
+it, and promotion walks the history of one receipt path.
 
 ### Desired unit
 
@@ -190,30 +197,41 @@ A desired unit is the execution snapshot of one incarnation:
   `input: /releases/platform~1web/image` are JSON Pointers into this document;
 - `provenance`: for each reference, the producer unit, uid, and execution key
   of the receipt it came from, or the PromotionRecord and value;
-- `executionKey`: a digest of the driver kind, the rendered spec without
-  references, `resolvedInputs`, and the selected source bytes. It excludes the
-  source commit ID, provenance, and readiness, so a new source commit with
-  identical inputs, or a producer re-execution that yields identical outputs,
-  does not change it;
+- `executionKey`: a digest of the driver kind and its behavior version, the
+  rendered spec without references, `resolvedInputs`, the selected source
+  bytes, and any command-unit fingerprint output. It excludes the source commit
+  ID, provenance, readiness, Nyl's release version, and external tool
+  versions, so a new source commit with identical inputs, a producer
+  re-execution that yields identical outputs, or a Nyl upgrade does not change
+  it;
 - `readiness`: `ready`, or `blocked` with each unresolved reference and why.
 
 A blocked unit keeps its rendered spec and source commit, so it resolves later
 from new evidence without rereading source.
 
+**Behavior versions.** Each driver declares a behavior version and bumps it
+only when its execution semantics change in a way that requires re-execution.
+When a unit's execution key changed only because of a behavior version, and its
+driver's recovery policy is not `converge`, the unit waits for `--approve`
+instead of re-running automatically. External tool versions, such as
+Terraform's, are recorded in receipts for audit; a unit that should re-run on a
+tool change pins the version as an input, such as `terraform: {version: 1.9.5}`.
+
 ### Receipt
 
 A receipt records one successful execution:
 
-- subject: environment, unit, uid; and the execution key;
+- subject: environment, unit, uid; the execution key and driver behavior
+  version;
 - the desired commit that held the executed document;
-- attempt ID, driver name and version, start and finish times;
+- attempt ID, Nyl version, external tool versions, start and finish times;
 - `provenance` as resolved at execution time;
-- `outputs` (declared, non-sensitive), artifact descriptors with digests, and
-  execution-time inputs such as `fromPublication` values.
+- `outputs` (declared, non-sensitive) and artifact descriptors with digests.
 
 A receipt is **current** when its uid and execution key equal those of the
-unit's current desired document. A unit whose desired document changes keeps
-its old receipts; they document what ran but satisfy no reference.
+unit's current desired document. When the desired document changes, the
+existing receipt remains until the next execution replaces it; it documents
+what ran but satisfies no reference.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -247,8 +265,9 @@ Nyl-Version: 0.7.0
 ```
 
 `Nyl-Read-Desired` and `Nyl-Read-Observed` name the state commits the decision
-was based on. Approvals and recovery decisions add `Nyl-Approved-By` or
-`Nyl-Recovery` with the operator identity the runner was given.
+was based on. Approvals, recovery decisions, teardowns, and holds add
+`Nyl-Approved-By` or `Nyl-Requested-By` with the operator identity the runner
+was given, and `Nyl-Reason` when one was supplied.
 
 | Event | Ref | Changes |
 | --- | --- | --- |
@@ -260,7 +279,9 @@ was based on. Approvals and recovery decisions add `Nyl-Approved-By` or
 | `attempt-failed` | observed | attempt closed with category and retryability |
 | `attempt-uncertain` | observed | attempt marked uncertain after its deadline |
 | `attempt-superseded` | observed | a late runner records its result after replacement |
-| `attempt-abandoned` | observed | an operator closes an uncertain attempt as not applied |
+| `recovery` | observed | an operator clears an uncertain or failed attempt for re-execution |
+| `hold` | desired | `desired/holds/<unit>.json` added after an explicit teardown with `--hold` |
+| `hold-released` | desired | hold removed |
 | `retained` | observed | receipts and attempt moved out of `observed/units/<unit>/` |
 | `teardown` | observed | teardown recorded, unit files removed |
 | `tombstone-closed` | desired | tombstone removed after `retained` or `teardown` |
@@ -283,7 +304,7 @@ Invariants:
    `desired-updated` and `tombstone` commits for what changed.
 2. **Select.** A unit is ready when its desired document is `ready`, it has no
    current receipt, its provenance receipts are all still current, it has no
-   open or uncertain attempt, and it is not awaiting approval.
+   open or uncertain attempt, it is not held, and it is not awaiting approval.
 3. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit (see [Attempts](#attempts)).
 4. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
@@ -374,12 +395,15 @@ declares a recovery policy for execution and for teardown:
 | --- | --- | --- |
 | `converge` | Re-executing the same document is safe; the next `reconcile` retries automatically | Terraform, image build, Kubernetes publication, command with `idempotent: true` |
 | `inspect` | The driver's `inspect` reports applied (with outputs), not applied, or unknown; applied writes the receipt, not applied retries, unknown falls back to `manual` | Drivers that can observe their effects |
-| `manual` | Blocked until an operator runs `recover` | Command units without `idempotent: true` |
+| `manual` | Blocked until an operator runs `recover --retry` | Command units without `idempotent: true` |
 
-`nyl orchestrate recover --environment <env> --unit <u>` takes one decision:
-`--retry` re-executes, and `--abandon` closes the attempt as not applied after
-the operator has verified that nothing happened. Accepting an uncertain
-attempt as applied requires outputs, so it is possible only through `inspect`.
+`nyl orchestrate recover --environment <env> --unit <u> --retry [--reason
+<text>]` clears an uncertain attempt, or a failed non-retryable one, and
+records the operator's decision and reason, such as "verified nothing was
+applied". It does not execute by itself: the unit becomes ready and runs in the
+current or next `reconcile`, so an operator can decide locally while CI
+executes. Accepting an uncertain attempt as applied requires outputs, so it is
+possible only through `inspect`.
 
 ## Deletion
 
@@ -400,11 +424,23 @@ attempt as applied requires outputs, so it is possible only through `inspect`.
   is `pending-teardown`. A driver without teardown support leaves the
   tombstone visibly blocked. Success writes `teardown`, then
   `tombstone-closed`.
-- **Explicit delete.** `nyl orchestrate delete --environment <env> --unit <u>`
-  records teardown intent for a unit outside the ownership set: a pending
-  tombstone or a retained unit, whose last desired document is recovered from
-  history. The command is itself explicit intent, so the following teardown
-  needs no `--allow-teardown`. It fails for a unit still in the ownership set.
+- **Explicit teardown.** `nyl orchestrate teardown --environment <env> --unit
+  <u>` tears a unit down whether or not it is in the ownership set. The command
+  is itself explicit intent, so it needs no `--allow-teardown`.
+  - For a unit outside the ownership set (a pending tombstone, or a retained
+    unit whose last desired document is recovered from history), it completes
+    the deletion.
+  - For a unit still in the ownership set, it replaces the unit: the current
+    incarnation is torn down and closed, and the next `reconcile` creates a new
+    incarnation with a new uid. Dependents are blocked until the new receipt
+    exists, then run with its outputs. This rebuilds corrupted resources or
+    rotates something that can only be recreated.
+  - With `--hold`, a hold is recorded in the desired ref and `reconcile` does
+    not recreate the unit; `status` shows it as `held`, and its dependents stay
+    blocked. `nyl orchestrate release --environment <env> --unit <u>` removes
+    the hold. A hold is the only desired state that does not come from source;
+    it is an explicit, recorded operator event. Long-term removal still belongs
+    in source, through `enabled: false` or removing the unit.
 - **Fencing.** A new unit with a tombstoned name stays blocked until the
   tombstone closes, then receives a new uid. Teardown attempts carry the old
   uid.
@@ -416,6 +452,7 @@ Drivers are Rust implementations behind one trait:
 ```rust
 trait Driver {
     fn kind(&self) -> &'static str;
+    fn behavior_version(&self) -> u32;
     fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
     fn spec_schema(&self) -> Schema;        // inputs plus driver-specific spec fields
@@ -459,6 +496,7 @@ spec:
       bucket: {fromUnit: {unit: storage, output: bucket}}
   command: ['./scripts/seed/run.sh']
   verify: ['./scripts/seed/verify.sh']
+  fingerprint: ['./scripts/seed/tool-versions.sh']
   env:
     passthrough: [AWS_REGION, AWS_PROFILE]
     secrets:
@@ -478,10 +516,17 @@ spec:
   - secrets named in `env.secrets`, from the project's secrets provider. A
     string secret is passed as is; an object or array secret is passed as
     compact JSON.
-- The execution key covers `command`, `verify`, `idempotent`, the files
-  matched by `inputs.files`, resolved `values`, and the names in
-  `env.passthrough` and `env.secrets`, but not their values. Changing a
-  passthrough variable or rotating a secret does not re-run the command.
+- The execution key covers `command`, `verify`, `fingerprint`, `idempotent`,
+  the files matched by `inputs.files`, resolved `values`, the names in
+  `env.passthrough` and `env.secrets` but not their values, and the output of
+  `fingerprint`. Changing a passthrough variable or rotating a secret does not
+  re-run the command.
+- `fingerprint` lets the unit contribute to its own execution key, for example
+  by printing the versions of the tools it uses. It runs during resolution in
+  the same worktree with the passthrough variables but no secrets, must be
+  fast and deterministic, and must exit 0. Its stdout is digested into the
+  execution key and stored in the desired document, truncated to 4 KiB, for
+  audit. A change in its output re-runs the unit like any other input change.
 - Files outside `inputs.files` may be read but do not trigger re-execution.
 - Stdout and stderr form the transcript and are never parsed. Secret values
   and `sensitive` outputs are masked in it.
@@ -504,8 +549,9 @@ spec:
 | `reconcile` | Resolve, then execute waves until nothing is ready | Desired updates, tombstones, attempts, receipts, retention, teardowns |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | Observations |
-| `recover` | Resolve one uncertain or non-retryable attempt with `--retry` or `--abandon` | Attempt events |
-| `delete` | Record teardown intent for a unit outside the ownership set | Tombstone |
+| `recover` | Clear one uncertain or non-retryable attempt for re-execution | `recovery` |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone or hold, then teardown events |
+| `release` | Remove a hold | `hold-released` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 Common options: `--environment`, `--unit`/`--units`, `--approve <unit>`,
@@ -514,8 +560,8 @@ stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
 non-current dependency), `ready`, `awaiting-approval`, `running` (with the
-holding attempt), `expired`, `uncertain`, `failed`, `current`, `retained`,
-`pending-teardown`, or `tearing-down`. Whether the latest receipt is current is
+holding attempt), `expired`, `uncertain`, `failed`, `current`, `held`,
+`retained`, `pending-teardown`, or `tearing-down`. Whether the latest receipt is current is
 shown as a separate attribute.
 
 Exit categories, where "selected" means the units the invocation was allowed to
@@ -557,9 +603,10 @@ later run recovers it.
 
 **Promotion with stale source evidence.** Dev's `web-image` has a new desired
 document without a receipt for its execution key. Promoting from `dev` at
-`published` looks for the newest desired revision whose selected units each
-have a receipt under their execution key in `observed/units/<unit>/receipts/`;
-the new, unexecuted document is skipped and the previous one is promoted. At
+`published` walks the history of each selected unit's `receipt.yaml` and takes
+the newest desired revision whose selected units each had a receipt for their
+execution key; the new, unexecuted document is skipped and the previous one is
+promoted. At
 `healthy`, the value comes from the publication the consuming Application
 runs. If no revision meets the required level, promotion blocks and reports
 which unit lacks evidence.
@@ -576,7 +623,7 @@ meantime waits for that and then receives a new uid.
 | Question | Needed by |
 | --- | --- |
 | Branch protection guidance for state refs and runner credentials | M3 |
-| Default concurrency limit, grace period, and receipt retention | M3 |
+| Default concurrency limit and grace period | M3 |
 | JSON schemas for state files and artifact descriptors | M3 |
 | Moving an environment to a different state repository or ref | M3 |
 | Keep refs for pinned source commits that may become unreachable | M3 |
