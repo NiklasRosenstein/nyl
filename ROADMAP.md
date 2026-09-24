@@ -736,6 +736,8 @@ ambiguous command semantics.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
+- [ ] Extract `nyl-core` and `nyl-render` from the current crate without
+  behavior change, per the implementation architecture.
 
 **Exit criterion:** a target renders Releases from static, locked external, and
 same-branch publication state inputs, committed or carried, through
@@ -757,6 +759,8 @@ byte-identical output to the previous release.
   refs, and content-based execution keys.
 - [ ] Prove stale-evidence blocking, competing runners, and recovery after an
   effect succeeds but receipt publication fails.
+- [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
+  crates with the scenario harness, property tests, and crash injection.
 
 **Exit criterion:** two dependent command units reconcile locally and in CI with
 identical results; repeat execution is a no-op; interruption has a demonstrated
@@ -841,6 +845,9 @@ reasons to delay independent work.
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
 ## Implementation reference points
+
+- [Implementation architecture](design/implementation-architecture.md): crate
+  boundaries, pure decisions, rule ownership, and scenario tests for M2–M7
 
 - [Nyl rendering session and bundle](nyl/src/render/session.rs)
 - [Nyl components](nyl/src/components/mod.rs)

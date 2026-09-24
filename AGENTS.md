@@ -44,6 +44,32 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
   Historical reasoning belongs in commit messages, pull requests, or dedicated
   decision notes; the roadmap records the selected direction and why it fits.
 
+## Orchestration Architecture
+
+Orchestration follows [design/implementation-architecture.md](design/implementation-architecture.md).
+These rules keep it maintainable:
+
+- Respect the crate dependency direction: `nyl-core` depends on nothing Nyl;
+  `nyl-render` never depends on orchestration crates; `nyl-orchestration`
+  reaches Git, processes, and clusters only through traits; `nyl-cli` holds no
+  business rules.
+- Decisions are pure functions over snapshots. Only the orchestration shell
+  performs effects, and nothing outside it reads the clock, the process
+  environment, or generates identifiers; those are passed in.
+- Every rule in the design contracts has one owning module whose doc comment
+  links the contract section, and at least one test. Bindings, promotion
+  selectors, and `nyl get` value forms share one reference resolver.
+- Contract walkthroughs are executable scenarios. Changing a contract rule
+  updates its scenario, and changing a scenario updates the contract, in the
+  same change.
+- Use typed identifiers and data-carrying enums for lifecycle and conditions;
+  add lifecycle transitions only to the transition table.
+- Render every output (tables, JSON/YAML, transition commit summaries, status,
+  exit categories) from the operation's single typed report; give errors and
+  warnings stable codes with the fix attached.
+- State-file formats are versioned with golden files; a format change adds a
+  version and a migration.
+
 ## Repository Structure
 
 ```

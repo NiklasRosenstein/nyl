@@ -349,7 +349,9 @@ request would deploy.
   `--allow-teardown` when the template sets `allowTeardown`.
 - `nyl reconcile --template preview` reconciles every instance, each at its own
   recorded source commit: after a Nyl upgrade, a driver behavior-version
-  change, or new evidence in shared infrastructure. It never renders an
+  change, or new evidence in shared infrastructure. It is maintenance, not
+  activity: it never extends expiry, and it removes expired instances (see
+  [Expiry](#expiry)). It never renders an
   instance's units with a template from another commit, because that
   combination was never reviewed together; pulling the default branch into
   every pull request remains a pipeline choice.
@@ -359,19 +361,24 @@ request would deploy.
 Nyl has no daemon, so expiry works through ordinary CI runs, and a continuous
 runner (M7) could add timely enforcement later:
 
-- `state.yaml` records `expiresAt`. Each successful `reconcile` of an instance
-  moves it to now plus `ttl`, so an active pull request keeps its preview.
-- `reconcile` refuses an expired instance unless given `--renew`; `status` and
-  `get environments` show it as expired, so a forgotten instance stops being
-  updated.
-- A scheduled job runs `nyl state delete --expired --teardown [--template
-  preview]` to remove expired instances.
+- `state.yaml` records `expiresAt`. Only activity on one instance extends it:
+  `state init --template` and a successful `reconcile -e <instance>` move it to
+  now plus `ttl`, so an active pull request keeps its preview.
+- `reconcile -e <instance>` refuses an expired instance unless given `--renew`;
+  `status` and `get environments` show it as expired, so a forgotten instance
+  stops being updated.
+- `reconcile --template <name>` never extends expiry. For each expired instance
+  it runs `teardown --all` and then `state delete` instead of reconciling it.
+  The template's `allowTeardown` authorizes that teardown; an instance whose
+  teardown readiness is incomplete is reported and left in place unless the run
+  passes `--allow-incomplete`.
 - At `maxInstances`, `state init --template` first removes expired instances of
-  that template; if none are expired, it refuses.
+  that template the same way; if none are expired, it refuses.
 
-A typical pipeline runs `state init --template` and `reconcile` when a pull
-request opens or updates, `state delete --teardown` when it closes, and the
-expiry job on a schedule.
+A typical pipeline runs `state init --template` and `reconcile -e` when a pull
+request opens or updates, `state delete --teardown` when it closes, and
+`reconcile --template` on a schedule, which both maintains live instances and
+removes expired ones.
 
 ## Artifacts
 
@@ -1106,7 +1113,7 @@ spec:
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
-| `state delete` | Remove a template instance's state after all its units are torn down; `--teardown`, `--expired` | One commit removing the instance's state |
+| `state delete` | Remove a template instance's state after all its units are torn down; `--teardown` tears them down first | One commit removing the instance's state |
 | `state copy` | Copy state history from another location | Copied history plus `state.yaml` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
