@@ -55,10 +55,13 @@ to consumers when the registry holds it.
   execution key>`, so a pushed image can be found from its desired document.
   `tags` adds further tags, which move; consumers use the artifact's
   `reference`.
-- **Credentials:** `registryAuth` writes a temporary Docker configuration with
-  the listed registries' credentials from the secrets provider and points
-  `DOCKER_CONFIG` at it. Without it, `env.passthrough: [DOCKER_CONFIG]` reuses
-  the runner's configuration, including credential helpers.
+- **Credentials:** `registryAuth` writes a temporary Docker configuration
+  directory and points `DOCKER_CONFIG` at it. It holds the listed registries'
+  credentials from the secrets provider, plus the runner's buildx and context
+  state (`buildx/`, `contexts/`, and the current context) copied from the
+  runner's configuration, so `builder` still finds the runner's builders.
+  Without `registryAuth`, `env.passthrough: [DOCKER_CONFIG]` reuses the
+  runner's configuration, including credential helpers.
 
 ### Execution key
 
@@ -81,7 +84,7 @@ then changes the Dockerfile and rebuilds.
 | reconcile | Build and push; record outputs and the artifact |
 | verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
-| teardown | Not supported: registry deletion differs between registries and may break consumers. `deletionPolicy: Teardown` is rejected for this kind; an EnvironmentTemplate's forced `Teardown` skips it, so the image is retained when an instance is removed |
+| teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
 
 ## Terraform and OpenTofu
@@ -126,17 +129,24 @@ requires `--allow-teardown`.
 ### Execution
 
 1. `init -input=false -lockfile=readonly` with `backend` passed as a temporary
-   backend configuration file. A missing or outdated `.terraform.lock.hcl` fails
+   backend configuration file, in the execution's own worktree and with
+   `TF_DATA_DIR` in its own temporary directory, so units sharing a
+   `source.path` never share `.terraform/`. A missing or outdated `.terraform.lock.hcl` fails
    the execution instead of being rewritten on the runner.
 2. `plan -input=false -out=<planfile>` with `variables` in a temporary
    variables file and `varFiles` in order. The plan file stays in the runner's
    temporary directory and is deleted after the execution.
 3. For `approval: {mode: manual, bind: plan}`, compute the change digest (see
-   below) and compare it with the approved digest. A mismatch ends the execution
-   without effects, and the unit waits for a new approval.
+   below) and compare it with the approved digest from the execution context.
+   A mismatch returns `AwaitingApproval` with the new digest, without effects,
+   and the unit waits for a new approval.
 4. `apply -input=false <planfile>`.
 5. `output -json`. Each declared output must exist and match its type.
    Undeclared outputs are ignored, whether sensitive or not.
+
+The driver parses `show -json` and `output -json` in memory; their stdout never
+reaches the transcript, because it contains every sensitive value, including
+undeclared sensitive outputs. Only declared, non-sensitive outputs are kept.
 
 Output sensitivity is checked before any effect: after step 2, the driver reads
 the plan's outputs, and a declared output that the tool marks sensitive but
@@ -144,7 +154,10 @@ the unit does not declare `sensitive` fails the execution before `apply`. A
 secret can therefore never be recorded by accident, and the check never leaves
 changes applied without a receipt.
 
-A plan with no changes skips `apply` and records the receipt directly.
+A plan with no changes skips `apply` and records the receipt directly. "No
+changes" means the plan would change nothing at all, as `plan
+-detailed-exitcode` exit 0 reports: no resource changes, no outputs, and no
+`moved` or `import` operations.
 
 ### Change digest
 
@@ -152,11 +165,18 @@ The change digest identifies what an apply would do, so an approval can be
 bound to it:
 
 - It is computed from `show -json <planfile>`: every resource change whose
-  actions are not `no-op`, with its address, actions, and before and after
-  values, plus changed outputs.
-- Values the plan marks sensitive are replaced by a fixed marker before
-  digesting, so no secret is part of the digest or of anything printed next to
-  it.
+  actions are not `no-op`, plus every change that has a `previous_address`
+  (`moved`) or is importing, even with `no-op` actions. Each contributes its
+  address, previous address, actions, import identity, and before and after
+  values; changed outputs are included too.
+- Values the plan marks sensitive, and values known to come from the secrets
+  provider, are replaced by a fixed marker before digesting and printing.
+- The tools' sensitivity marks do not follow a value that a provider copies
+  into an attribute it does not mark sensitive, so such a copy is printed in
+  the change summary and digested like any other value. Keeping secrets out of
+  non-sensitive attributes remains the configuration's responsibility; the
+  contract promises masking only for values marked sensitive or known from the
+  secrets provider.
 - The digest is SHA-256 over the canonical JSON of that document. `nyl plan`
   prints it with a change summary; `--output json` includes it per unit as
   `changeDigest`.
@@ -203,15 +223,17 @@ commit itself is excluded; the matched bytes stand for it.
 
 | Capability | Behavior |
 | --- | --- |
-| plan | `init` and `plan`; reports the change summary and change digest; nothing is applied or recorded |
+| plan | `init` and `plan -lock=false`; reports the change summary and change digest; nothing is applied or recorded. For a `deleting` unit with teardown intent, `plan -destroy -lock=false` and the destroy plan's digest |
 | reconcile | Execution steps above |
-| verify | `plan -detailed-exitcode` against the current desired document. Exit 0 is clean; exit 2 means applying would change something, reported as drift with the change summary |
+| verify | `plan -lock=false -detailed-exitcode` against the current desired document. Exit 0 is clean; exit 2 means applying would change something, reported as drift with the change summary |
 | inspect | Not supported; recovery is `converge` |
-| teardown | `plan -destroy -out=<planfile>`, then `apply`. For manual units, the approval binds to the destroy plan's digest |
+| teardown | `plan -destroy -out=<planfile>`, then `apply`. For `bind: plan` units, the destroy plan's digest is compared with the approved digest from the execution context, and a mismatch returns `AwaitingApproval` without effects |
 | recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain execution shows what is still missing |
 
-A state lock left behind by a lost runner makes the next execution fail with the
-lock ID, as a non-retryable failure. The operator releases it with the tool's
+`plan` and `verify` only read, so they never take the backend's state lock and
+never collide with a running `reconcile`. A state lock left behind by a lost
+runner makes the next execution fail with the lock ID, as a non-retryable
+failure. The operator releases it with the tool's
 `force-unlock` and then runs `nyl recover --retry`; Nyl never releases locks
 itself.
 

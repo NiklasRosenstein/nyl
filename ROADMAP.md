@@ -396,8 +396,8 @@ spec:
 - Evidence levels are one list for every source:
   - `published`: the source produced the value, as a receipt or, for a target
     source, a publication commit.
-  - `accepted`: Argo CD's last successful sync of each covered Application is
-    at a revision whose Application directory tree matches the publication that
+  - `accepted`: the newest deployment of each covered Application is at a
+    revision whose Application directory tree matches the publication that
     carries the value.
   - `healthy`: accepted, and each covered Application is `Healthy`.
 
@@ -506,8 +506,12 @@ Cluster.
 - **Running revision.** Argo CD's Synced/OutOfSync status compares against the
   branch head, so an Application still running an older commit reports
   OutOfSync as soon as a newer publication changes its files. Nyl ignores it.
-  The running revision is that of the last successful sync (its sync result, or
-  the newest deployment history entry); health is Argo CD's live health.
+  The running revision is that of the newest `status.history` entry, which
+  Argo CD appends only for full, non-dry-run syncs. The sync result is not
+  used, because Argo CD also records selective and dry-run syncs there as
+  succeeded. A selective sync newer than that entry leaves the Application
+  running a mix of revisions, which proves no revision. Health is Argo CD's
+  live health.
 - **Matching a publication.** The running revision R may be another target's
   commit or a state write-back on a shared branch. For each covered
   Application, Nyl finds the source target's publication commits (commits that
@@ -583,8 +587,10 @@ The lifecycle contract must address:
 - Effects that succeed before receipt publication fails: inspect or resume
   safely; missing evidence does not imply that nothing happened.
 - Competing or stale runners: Git compare-and-swap protects publication, while
-  execution leases and native locks protect effects. Lease loss must have an
-  explicit cancellation and recovery policy.
+  execution leases and native locks protect effects. A run's final state
+  commit is pushed atomically with a check of its lease, so a run that lost
+  its lease writes no state; its checkpointed results are imported by the next
+  run.
 - Timeouts and disconnected processes: represent uncertain completion and
   recover before blindly repeating an operation.
 - Partial input: omission requests deletion only within a declared authoritative
@@ -592,7 +598,14 @@ The lifecycle contract must address:
 - Deletion: retain sufficient desired inputs and evidence for retry-safe teardown
   and fence it against a new incarnation of the same name.
 - Ordering: creation dependencies do not automatically define safe replacement
-  or decommissioning order. Unsupported teardown remains visibly blocked.
+  or decommissioning order. Units are torn down before the units they depend
+  on, and the units a Kubernetes publication depends on also wait until its
+  workloads are gone, per the publication's `teardownWait` strategy (observed
+  removal, a fixed delay, or operator confirmation).
+- Deletion defaults: `deletionPolicy` defaults to `Teardown` where a kind
+  supports it, gated by `--allow-teardown` for omissions, so an accidental
+  omission destroys nothing and is undone by restoring the unit. A declared
+  `Retain` keeps a tombstone, so restoring a retained unit never re-runs it.
 
 ### Kubernetes rendering path
 
@@ -650,6 +663,7 @@ nyl teardown -e dev --unit web-image [--hold]
 nyl hold -e dev --unit web-image --reason "incident 4711"
 nyl resume -e dev --unit web-image
 nyl recover -e dev --unit seed --retry
+nyl state forget -e dev --unit worker   # drop a retained tombstone, resources untouched
 nyl get units                        # declarations
 nyl get units -e dev                 # state of an environment
 nyl get output network/vpcId -e dev
@@ -680,6 +694,7 @@ policy.
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
+| state init / move / forget | Create state, relocate it and retire the old location, or drop a unit from state without touching its resources |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,
 non-interactive behavior, deadlines, and exit categories before stabilizing the
@@ -730,9 +745,15 @@ ambiguous command semantics.
   dirty check.
 - [ ] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
   `--target` filter.
-- [ ] Apply target bindings in direct commands and add `--input`/`--inputs`.
+- [ ] Apply target bindings in direct commands and add `--input`/`--inputs`;
+  a target that selects no group containing the Release fails unless
+  `--application-group` or `--defaults-only` is given.
+- [ ] Require unique generated Argo CD names across every pair of targets whose
+  instances resolve to the same cluster and namespace, including implicit
+  per-target instances.
 - [ ] Record resolved inputs in the dependency recorder, render-cache key, and
-  the existing ownership-index `inputs` map as digests.
+  the existing ownership-index `inputs` map as digests under reserved
+  `@`-prefixed keys, with an index format version and migration.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
@@ -748,11 +769,15 @@ byte-identical output to the previous release.
 ### M3 — Orchestration core with a constrained command unit
 
 - [ ] Implement environments, YAML state files with published schemas,
-  `nyl state init`/`copy`, leases and run checkpoints, and one transition
-  commit per operation with a machine-readable summary.
+  `nyl state init`/`move`/`forget`, leases and run checkpoints, and one
+  transition commit per operation with a machine-readable summary, pushed
+  atomically with the lease check.
+- [ ] Support SSH keys and HTTPS tokens, besides the SSH agent, for state
+  pushes and `publish-tree`.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
-  units with `fromUnit` references, including `--local` runs.
+  units with `fromUnit` references, including `--local` runs with and without
+  remote state.
 - [ ] Implement approvals bound to the desired document, with recorded approval
   sources, and the common `env` credential admission.
 - [ ] Implement pinned source worktrees, reachability checks against protected
@@ -791,7 +816,8 @@ configuration; an image build records a digest; unchanged inputs plan no change.
   commits by Application directory tree, and record the observations.
 - [ ] Document an end-to-end local/CI example.
 - [ ] Support inline DeploymentTargets on `KubernetesPublication`, its
-  teardown, and the teardown readiness check with its warnings.
+  two-phase teardown with the `teardownWait` strategies, ownership-index
+  owner fencing, and the teardown readiness check with its warnings.
 - [ ] Add EnvironmentTemplates for preview environments: instances through
   `nyl state init --template`, `teardown --all`, `state delete`, shared state
   refs through `state.path`, cross-environment references to declared

@@ -191,7 +191,10 @@ Each binding sets exactly one of these fields:
     Applications run different values of the same file and pointer, the lock
     does not move and the updater reports the conflict.
   - Without `--require healthy`, a group moves to one new commit as described
-    above.
+    above. When the locked file lies inside a target's prefix on that branch,
+    that commit is the target's newest publication commit, never a later
+    commit made by another tool, such as a state file write-back the target
+    has not yet published. Otherwise it is the branch head.
 - With `--require healthy`, the updater writes the observation that justified
   the move next to each lock, so the pull request commits the evidence together
   with the lock:
@@ -378,8 +381,12 @@ effective input = --input / --inputs override, if present
 
 - With `--target`, Nyl finds the target's selected ApplicationGroup whose source
   contains the Release file and applies that `<group>/<release>` binding. When
-  two selected groups contain the file, `--application-group` chooses; when
-  none does, only defaults and overrides apply.
+  two selected groups contain the file, `--application-group` chooses. When
+  none does, which is always the case for a Release of a remote group rendered
+  from a local checkout, the command fails and names the target's groups:
+  `--application-group` names the group whose bindings apply, or
+  `--defaults-only` deliberately renders with defaults and overrides only. A
+  target never silently falls back to defaults.
 - Without a target, only defaults and overrides apply.
 - `--input <name>=<json>` sets one input; `--inputs <file>` reads a YAML or JSON
   object of inputs. Individual `--input` flags win over `--inputs`. Overrides
@@ -410,17 +417,21 @@ the same way as a local group: no opt-in field exists.
 
 - Each resolved input is recorded in the dependency recorder as canonical JSON
   keyed by `<group>/<release>/<input>`. It is part of the render-cache key.
-- The ownership index's `inputs` map gains:
-  - `@input/<group>/<release>/<input>` → `sha256:<digest of canonical JSON>`
-  - `@git/<credential-free-url>@<commit>/<path>` → `sha256:<blob digest>` for each
+- The ownership index's `inputs` map gains new keys, with bare hex SHA-256
+  digests like its existing entries:
+  - `@input/<group>/<release>/<input>` → digest of the canonical JSON value
+  - `@git/<credential-free-url>@<commit>/<path>` → blob digest for each
     `fromGit` source
-  - `@publication/<path>` → `sha256:<blob digest>` for each `fromPublication`
-    value read from the base commit, which is the published commit's parent
-  - `@carried/<path>` → `sha256:<blob digest>` for each `fromPublication` value
-    taken from a `carry` file in this run
-  - Both use the prefix-relative path, like the index's `files` entries.
-- Keys starting with `@` are not project paths, following the existing `@remote`
-  convention, so project-file hashing never interprets them.
+  - `@publication/<path>` → blob digest for each `fromPublication` value read
+    from the base commit, which is the published commit's parent
+  - `@carried/<path>` → blob digest for each `fromPublication` value taken
+    from a `carry` file in this run
+  - Both publication forms use the prefix-relative path, like the index's
+    `files` entries.
+- Today only remote source files use an `@`-prefixed key (`@remote/<path>`).
+  M2 reserves every key starting with `@` for entries that are not project
+  paths, so project-file hashing never interprets them; the index format
+  change adds a version and a migration.
 - Inputs are not a secret channel. Their digests and the rendered manifests are
   published. Secrets continue to flow through the secrets provider, and a
   `sensitive` input flag is out of scope for M2.
@@ -458,8 +469,12 @@ checks:
 
 - Namespace collisions between environments.
 - Cluster-scoped resources, such as CRDs, that only one environment may own.
-- Argo CD names generated into one control-plane namespace. These are already
-  required to be target-qualified.
+- Argo CD names generated into one control-plane namespace. Today's check
+  compares only targets sharing an explicit ArgoCDInstance, so targets on
+  implicit per-target instances of one Cluster can generate the same
+  Application and AppProject names in the same namespace. M2 extends the check
+  to every pair of targets whose instances resolve to the same cluster and
+  namespace.
 
 Detecting cross-target conflicts on a shared Cluster is a later validation, and
 it belongs to the layer that sees all targets on that Cluster.

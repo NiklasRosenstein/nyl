@@ -71,7 +71,8 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   `Uid`, `ExecutionKey`, `CommitId`, `RunId`, `JsonPointer`, `ChangeDigest`.
 - Lifecycle and conditions are enums that carry their data, such as
   `Lifecycle::Held { hold, pending }`, `Lifecycle::Deleting { reason, intent }`,
-  and `Condition::Uncertain { run, since }`, so exhaustive matching forces every
+  `Lifecycle::Retained { tombstone }`, and `Condition::Uncertain { run, since }`,
+  so exhaustive matching forces every
   new state through every decision.
 - Lifecycle transitions live in one table, `lifecycle::transition(current,
   event) -> Result<Next>`. Rules such as "a hold survives teardown" or "a kind
@@ -84,7 +85,7 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 
 - Each rule in the contracts has one owning module, such as `rules::freshness`,
   `rules::execution_key`, `rules::approval`, `rules::lifecycle`,
-  `rules::teardown_readiness`, or `rules::expiry`. Its doc comment links the
+  `rules::teardown_readiness`, `rules::teardown_wait`, or `rules::expiry`. Its doc comment links the
   contract section.
 - Contract walkthroughs are executable scenarios against an in-memory
   `StateStore`, fake drivers, and a fake clock, for example

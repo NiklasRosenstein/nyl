@@ -56,8 +56,13 @@ spec:
   an empty selector selects every unit. The selected, enabled units are the
   environment's authoritative ownership set: leaving it is how deletion is
   requested (see [Deletion](#deletion)).
-- `values` is exposed to unit templates as `values`, and the sanitized
-  Environment as `environment`. Repository credentials are never exposed.
+- Unit templates see only `values`, the sanitized Environment as
+  `environment`, and, in template instances, `params`. They never see secrets,
+  the process environment, or repository credentials; secrets reach a unit only
+  through its `env` field at execution (see [Credentials](#credentials)).
+- Environment names are unique across declared Environments and all
+  EnvironmentTemplate instances, because leases, run refs, and keep refs are
+  named after them.
 - `state` follows the shape of DeploymentTarget `publication`: a GitRepository
   reference (`repositoryRef`) or inline `repository`, reading through its
   `repoURL` and writing through its `publishURL`. Without either, state uses
@@ -102,8 +107,9 @@ spec:
   rendered once per selecting Environment.
 - Every unit kind shares the common fields `enabled` (evaluated after
   rendering; `false` leaves the ownership set), `outputs`, `dependsOn`,
-  `approval` (see [Approval](#approval)), `deletionPolicy` (`Retain` or
-  `Teardown`), `timeout`, and `env` (see [Credentials](#credentials)). They are one Rust struct flattened into each kind's spec, so
+  `approval` (see [Approval](#approval)), `deletionPolicy` (`Teardown` or
+  `Retain`; see [Deletion](#deletion)), `timeout`, and `env` (see
+  [Credentials](#credentials)). They are one Rust struct flattened into each kind's spec, so
   their schema and documentation are identical everywhere. The remaining fields
   belong to the kind, and each kind has its own schema and generated reference
   page.
@@ -118,11 +124,25 @@ spec:
   declared outputs are recorded. A `sensitive`
   output is validated but never persisted and cannot be referenced; secrets
   move through the secrets provider, not through outputs. Undeclared outputs
-  are ignored, sensitive or not; a declared output that the native tool marks
-  sensitive must be declared `sensitive`, and drivers check this before any
-  effect where the tool allows.
-- `dependsOn` lists units that must have a current receipt first, for ordering
-  without a data reference. References add dependencies implicitly.
+  are ignored by every kind, sensitive or not; the Command kind warns about
+  them. A declared output that the native tool marks sensitive must be
+  declared `sensitive`, and drivers check this before any effect where the
+  tool allows.
+- `dependsOn` lists units, by name or as `{unit, evidence}`, that must have a
+  current receipt first, for ordering without a data reference. References add
+  dependencies implicitly.
+- A `dependsOn` entry or a `fromUnit` reference may require stronger evidence
+  from its producer with `evidence: published | accepted | healthy` (default
+  `published`, which is a current receipt). `accepted` and `healthy` use the
+  levels defined in the roadmap's health evidence section, so they apply only
+  to producers that record them, such as a `KubernetesPublication` in
+  `mode: observe`; requiring them from any other producer is a resolution
+  error. A consumer whose producer lacks the evidence is `blocked` on it:
+
+  ```yaml
+  dependsOn:
+    - {unit: kubernetes, evidence: healthy}   # smoke tests run against healthy workloads
+  ```
 - Repository content from elsewhere uses the ApplicationGroup source shape in
   the kind's `source` field: `repositoryRef` or `repository`, a human
   `revision`, a locked `commit`, and `path`. `nyl update source-locks` refreshes
@@ -134,9 +154,12 @@ spec:
 - Unit names are unique per environment across all unit kinds, so references
   name only the unit. A unit's address is `<environment>/<unit>`.
 - Each incarnation has a `uid`, a UUIDv7 generated when resolution first
-  publishes its desired document. Two resolvers racing to create the same unit
-  are serialized by compare-and-swap; the loser re-reads and adopts the
-  published uid.
+  creates its desired document in a run. Runs of one environment are
+  serialized by its lease, so only one run can create it. The run's
+  checkpoints carry every desired document it created, with its uid, so a run
+  that takes over after a crash adopts them (see
+  [Runs and leases](#runs-and-leases)) and a new unit's checkpointed result is
+  never mistaken for another incarnation's.
 - The uid fences every receipt, checkpoint, and deletion. A name whose desired
   file is `deleting` cannot start a new incarnation until the deletion
   completes.
@@ -153,8 +176,8 @@ spec:
 
 | Reference | Resolves to | Freshness |
 | --- | --- | --- |
-| `fromUnit: {unit, output, pointer}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current |
-| `fromUnit: {unit, artifact, kind, pointer}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current and list the artifact's digest |
+| `fromUnit: {unit, output, pointer, evidence}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
+| `fromUnit: {unit, artifact, kind, pointer, evidence}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
 | `fromPromotion: {path, value}` | A value in a PromotionRecord in this environment's desired state | The record must exist; broken selectors are errors |
 | `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in a declared environment, read from a template instance only (see [Environment templates](#environment-templates-and-previews)) | As `fromUnit`, against the other environment's current receipt |
 
@@ -178,6 +201,7 @@ metadata:
 spec:
   target: '{{ values.target }}'   # a static DeploymentTarget, or `inline:` (see below)
   mode: publish        # publish | observe
+  teardownWait: {strategy: manual}   # observe | delay | manual; see Teardown
 ```
 
 - `target` names a static DeploymentTarget, or defines one inline as a
@@ -199,17 +223,52 @@ spec:
             image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
   ```
 
-  An inline target is named after the environment, or `<environment>-<unit>`
-  when an environment has several publication units. Static DeploymentTargets
-  remain for rendering without orchestration.
+  An inline target is named `<environment>-<unit>`, so adding or removing
+  publication units never renames another unit's target. `target.name`
+  overrides the name; it must be unique like every target name. Changing the
+  name, like any change to the target's identity, replaces the unit through
+  teardown. Static DeploymentTargets remain for rendering without
+  orchestration.
+- Generated Argo CD Application and AppProject names must be unique among all
+  targets whose Argo CD instance resolves to the same cluster and namespace:
+  static targets on explicit or implicit instances, and inline targets alike.
+  Validation checks this across every target it can see, including every
+  instance of an EnvironmentTemplate, whose inline targets must therefore
+  template their names, for example from `environment.name`. Extending today's
+  check, which compares only targets sharing an explicit ArgoCDInstance, is an
+  M2 item.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
   referenced by none rejects `fromUnit` and `fromPromotion` bindings.
+- The ownership index of every tree the unit publishes records the owning
+  environment and unit uid next to the existing target, cluster, and
+  publication identity. Publish and teardown refuse a prefix whose index names
+  another environment's or another incarnation's unit while that incarnation
+  still exists in its environment's state, active, deleting, or retained. A
+  target moves between environments once the old environment's incarnation is
+  gone: torn down, or released with `nyl state forget` (see
+  [Deletion](#deletion)). The first publish of the new owner then records
+  itself in the index.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
-- Its execution key also covers the renderer version, so a Nyl upgrade that
-  changes rendered output republishes; publishing an unchanged tree creates no
-  commit, so this is cheap.
+- Its execution key covers the target render's complete input record from
+  Nyl's dependency recorder, plus `mode`: every file and directory listing,
+  value, chart, Kubernetes capability, resolved source identity, and external
+  tool fingerprint that can affect rendered bytes. Resolution renders the
+  target to obtain it, through the render cache, so an unchanged target is
+  cheap. Unlike other kinds, a publication's key therefore changes when a
+  renderer or tool upgrade changes what rendering depends on. Publishing an
+  unchanged tree creates no publication commit; only the receipt records the
+  new key.
+  - The key uses a portable form of the record: repository-relative paths and
+    content digests, never machine paths or cache-local keys.
+  - Secret inputs, admitted only when the invocation allows them (as for tree
+    commands today), enter the key through a keyed fingerprint whose key comes
+    from the project's secrets provider, so rotating a rendered secret
+    republishes and no guessable digest of it is stored.
+  - A render the recorder marks uncacheable, because an input cannot be
+    observed completely, has no stable key: the unit executes on every
+    reconcile.
 - Its resolved spec contains every Release input of its target, keyed as
   `releases.<group>/<release>.<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
@@ -230,34 +289,51 @@ spec:
   application through Nyl is not a mode in the initial scope.
 
 **Teardown.** A publication unit supports teardown when its target is
-configured so that removing the manifests removes the workloads:
+configured so that removing the manifests removes the workloads. It proceeds
+in two phases, both through Git:
 
-1. The unit publishes a tree whose catalog is empty for the target's prefix:
-   every workload tree is removed, and `_nyl/catalog` stays with a placeholder
-   so the catalog Application can still sync. The removal commit is the
-   teardown's `published` evidence.
-2. Argo CD syncs the catalog Application, which prunes the workload
-   Applications; their finalizers delete the workloads, and owned Namespaces
-   are deleted according to namespace policy.
-3. In `mode: observe`, the unit waits within its `timeout` until the target's
-   Applications are gone, then removes the rest of the prefix, including the
-   catalog, and records the teardown as observed complete;
-   Applications that remain make the teardown uncertain, and `status` names
-   them. In `mode: publish`, teardown ends at step 1 and reports that deletion
-   was not observed.
+1. **Remove the workload Applications.** The unit publishes a tree whose
+   `_nyl/catalog` still contains the catalog Application and the generated
+   AppProjects but no workload Applications; the workload trees stay. The
+   catalog is never empty, so Argo CD's empty-tree guard and the catalog's own
+   self-prune policy never come into play, and the AppProjects outlive the
+   Applications that use them. This commit is the teardown's `published`
+   evidence. Argo CD's catalog sync prunes the workload Applications, and
+   their finalizers delete the workloads.
+2. **Remove the rest.** Once phase 1 counts as complete under `teardownWait`,
+   the unit removes the remaining files it owns: exactly the files recorded in
+   `_nyl/index.json`, which includes the workload trees and the catalog.
+   Unowned files in the prefix, such as state files committed by other tools,
+   are preserved, as in every reconciliation.
+
+`teardownWait` decides when phase 1 counts as complete. The same point gates
+phase 2 and the teardown of every unit the publication depends on, such as the
+IAM roles, subnets, or databases its workloads use:
+
+| Strategy | Phase 1 completes when | Default for |
+| --- | --- | --- |
+| `observe` | Argo CD no longer reports any of the target's workload Applications, within the unit's `timeout`; Applications that remain make the teardown uncertain, and `status` names them | `mode: observe` |
+| `delay` | `duration` has passed since the phase 1 commit, such as `{strategy: delay, duration: 10m}`; the teardown is recorded as not observed | |
+| `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | `mode: publish` |
+
+`observe` needs read access to the Argo CD cluster, as `mode: observe` does.
+`--allow-incomplete` skips the wait: phase 2 and the dependencies' teardown
+proceed at once, and the teardown is recorded with a condition saying removal
+was not confirmed.
 
 Teardown readiness is checked statically from the target's effective settings:
 
 | Requirement | Setting | If unmet |
 | --- | --- | --- |
-| The catalog syncs on its own | catalog `syncPolicy.automated` enabled | Removal waits for a manual catalog sync |
-| The catalog may prune workload Applications | their prune policy is `Automatic`, not `Confirm` or `Retain` | Applications stay until a prune is confirmed, or forever |
-| Deleting an Application deletes its workloads | `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Workloads keep running without an Application |
-| Owned Namespaces are deleted | namespace `deletePolicy` is not `Retain` | Empty Namespaces remain |
-| The catalog Application itself has an owner | for example a parent Application over a shared preview branch | The catalog Application remains, syncing an empty catalog |
+| The catalog prunes removed workload Applications on its own | catalog `syncPolicy.automated` enabled with `prune: true` | Blocking: the Applications stay until someone syncs the catalog with pruning |
+| Deleting an Application deletes its workloads | catalog `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Blocking: workloads keep running without an Application |
+| Owned Namespaces do not stop deletion | namespace `deletePolicy` is `Automatic` or `Retain`; the default `Confirm` renders `Delete=confirm`, which holds the Application's finalizer until someone confirms | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
+| Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain |
+| The catalog Application and AppProjects are removed | a parent Application owns the catalog Application, for example over a shared preview branch | Remnant: the catalog Application and AppProjects remain after phase 2 |
 
-The first three requirements decide whether teardown can succeed; the last two
-leave remnants. Nyl reports unmet requirements where they matter:
+The three blocking requirements decide whether teardown can succeed; the
+remnant rows leave objects behind. Nyl reports unmet requirements where they
+matter:
 
 - `nyl plan` and `nyl reconcile` warn for every `KubernetesPublication` whose
   `deletionPolicy` is `Teardown`, including every unit of a template instance,
@@ -266,11 +342,13 @@ leave remnants. Nyl reports unmet requirements where they matter:
   units that are not teardown-ready, because instances are always torn down.
 - `nyl get units -e <env> -o wide` and `nyl status` show teardown readiness per
   publication unit (`ready`, or `incomplete: <reasons>`).
-- `nyl teardown` and `nyl state delete` run a preflight listing what would
-  remain. When one of the first three requirements is unmet they refuse unless
-  given `--allow-incomplete`; the teardown is then recorded with a condition
-  listing what may remain, so state never claims a clean teardown that did not
-  happen.
+- Every teardown runs a preflight listing what would remain, however it was
+  requested: omission during `reconcile`, expiry, `teardown --unit`,
+  `teardown --all`, and `state delete --teardown`. When a blocking requirement
+  is unmet, the teardown does not start unless the invocation passes
+  `--allow-incomplete`; the unit is reported as pending teardown with the
+  reasons, exit 2. An incomplete teardown is recorded with a condition listing
+  what may remain, so state never claims a clean teardown that did not happen.
 - `nyl validate` does not check teardown readiness, because it cannot know
   whether a target will ever be torn down.
 
@@ -309,10 +387,14 @@ spec:
 
 The template has the Environment's fields plus `parameters` (typed like Release
 inputs and exposed as `params`), `deletionPolicy`, `allowTeardown`, `ttl`,
-`maxInstances`, and `keepSource`. `deletionPolicy: Teardown` applies to every
-unit whose kind supports teardown; units of other kinds, such as `OciImage`,
-are retained when an instance is removed. It knows nothing about Kubernetes; a preview's cluster and
-publication come from `KubernetesPublication` units with inline targets.
+`maxInstances`, and `keepSource`. The template's `deletionPolicy: Teardown`
+overrides every unit's own policy, including an explicit `Retain`, for kinds
+that support teardown. Units of other kinds, such as `OciImage`, are left in
+place and dropped from state when an instance is removed, and the transition
+commit lists what was left, such as the image reference. Removing unused
+images is the registry's retention policy's job. The template knows nothing
+about Kubernetes; a preview's cluster and publication come from
+`KubernetesPublication` units with inline targets.
 
 ### Instances
 
@@ -329,18 +411,24 @@ nyl get environments                                         # declared environm
 
 - `nyl state init --template` writes the instance's `state.yaml` with the
   template name, parameters, and expiry. Run again for an existing instance, it
-  updates the parameters; the next reconcile applies them. Afterwards the
-  instance behaves like a declared environment for every command.
+  updates the parameters; the next reconcile applies them. It refuses a name
+  already used by a declared Environment or by an instance of another
+  template. Afterwards the instance behaves like a declared environment for
+  every command.
 - Instances are discovered by listing the template's state location, so no
   central index exists.
 - `nyl teardown -e <env> --all` tears down every unit, dependents first, and
   holds each unit that is still in the ownership set, so nothing is recreated.
   It also decommissions declared environments: run `teardown --all`, then
   remove the Environment from source. Units whose kind has no teardown support
-  are retained.
+  are left in place and dropped from state. Units that depend on a publication
+  are torn down only once the publication's teardown completes under its
+  `teardownWait`, so with the `manual` strategy `teardown --all` stops after
+  the publication and exits 2 until `--confirm-removed`.
 - `nyl state delete -e <env>` removes an instance's state: its directory in a
   shared ref, or its refs. It works only for template instances whose units
-  have no incarnation left; `--teardown` runs `teardown --all` first. History
+  have no incarnation left, and it removes everything, including records of
+  units that were left in place; `--teardown` runs `teardown --all` first. History
   keeps the removed state. The recommended layout for previews is a shared
   ref with `state.path`, so `state delete` removes a directory instead of a
   ref; separate refs per instance need permission to delete refs matching the
@@ -405,8 +493,12 @@ runner (M7) could add timely enforcement later:
   The template's `allowTeardown` authorizes that teardown; without it, the
   instance is reported as pending teardown and the run exits 2. An instance
   whose teardown readiness is incomplete is reported and left in place unless
-  the run passes `--allow-incomplete`. `status` and `get environments` show
-  expired instances until they are removed.
+  the run passes `--allow-incomplete`. Removal also waits for each
+  publication's `teardownWait`: with the `manual` default of `mode: publish`,
+  it stops after phase 1 until `--confirm-removed`, so templates meant to
+  expire unattended use `observe` or `delay`, and `state init --template`
+  warns otherwise. `status` and `get environments` show expired instances
+  until they are removed.
 - `--renew` is the only way to keep an expired instance: it extends the expiry
   and then reconciles.
 - `reconcile -e <instance>` extends a live instance's expiry;
@@ -517,7 +609,7 @@ apiVersion: gitops.nyl/v1
 kind: DesiredUnit
 unit: {environment: dev, name: database, uid: 5d2a…, apiVersion: units.gitops.nyl/v1, kind: OpenTofu}
 lifecycle:
-  state: active                            # active | deleting | held
+  state: active                            # active | deleting | held | retained
 sourceCommit: 3e7b…
 sourceRevision: 3e7b…                      # effective revision for repository content
 spec:                                      # rendered, references still as expressions
@@ -533,6 +625,7 @@ resolvedSpec:                              # references replaced by values
   approval: {mode: manual, bind: plan}
 provenance:
   /variables/vpc_id: {unit: network, uid: 8c1f…, executionKey: sha256:…, observedCommit: 41f0…}
+  # a value produced earlier in the same run cites the run instead: {…, run: 0b8f…}
 executionKey: sha256:…
 readiness: {state: ready}
 # while blocked:
@@ -548,7 +641,11 @@ readiness: {state: ready}
 - `resolvedSpec` is what PromotionPath selectors such as `input: /source` or
   `input: /releases/platform~1web/image` point into.
 - `provenance` records, per reference, the receipt or PromotionRecord the value
-  came from.
+  came from, citing the observed commit it was read from. A value from a
+  receipt produced earlier in the same run cites the run ID instead, which
+  identifies the transition commit through its `Nyl-Run-Id` trailer; run refs
+  are disposable, so provenance never points at a checkpoint. Provenance never
+  names the commit it is written in.
 - `executionKey` is a digest of the unit's `apiVersion`, `kind`, and driver
   behavior version, `resolvedSpec` without the common fields that do not affect
   what runs (`enabled`, `dependsOn`, `approval`, `deletionPolicy`, `timeout`),
@@ -560,8 +657,10 @@ readiness: {state: ready}
   release version, and external tool versions, so a new source commit with
   identical inputs, a producer re-execution that yields identical outputs, or a
   Nyl upgrade does not change it.
-- A blocked unit keeps its rendered spec and source commit, so it resolves
-  later from new evidence without rereading source.
+- A blocked unit keeps its rendered spec and source commit, so a later wave of
+  the same run resolves it from new evidence without rereading source. Each
+  run renders every unit from its own source commit S, so the next run
+  replaces a blocked unit's kept spec with that run's rendering.
 - `lifecycle` carries deletion and holds (see [Deletion](#deletion)).
 
 **Behavior versions.** Each driver declares a behavior version and bumps it
@@ -584,7 +683,7 @@ receipt:
   executionKey: sha256:…
   behaviorVersion: 1
   run: 0b8f6c1e-…
-  desiredCommit: 77aa…
+  readDesired: 77aa…                 # desired commit the run started from
   startedAt: 2026-09-24T10:00:00Z
   finishedAt: 2026-09-24T10:07:12Z
   versions: {nyl: 0.7.0, tofu: 1.9.5}
@@ -654,7 +753,8 @@ Nyl-Version: 0.7.0
 - Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
-  `recover`, `verify`, `state-init`, `state-copy`, `state-delete`.
+  `recover`, `verify`, `state-init`, `state-move`, `state-delete`,
+  `state-forget`.
 - Replaying operations in order, from the read commits and evaluation times
   they name, reproduces every state decision.
 
@@ -663,10 +763,10 @@ Nyl-Version: 0.7.0
 `nyl reconcile -e <env>`:
 
 1. **Lease.** Take the environment's run lease (see
-   [Runs and leases](#runs-and-leases)) and import results left behind by
-   earlier runs.
+   [Runs and leases](#runs-and-leases)).
 2. **Resolve.** Render the environment's units at source commit S and resolve
-   references against current receipts and PromotionRecords.
+   references against current receipts and PromotionRecords, then import
+   results left behind by earlier runs against that resolution.
 3. **Select.** A unit is ready when its desired document is `ready` and
    `active`, it has no current receipt, its provenance receipts are all still
    current, and it is not awaiting approval. A unit with an `uncertain`
@@ -680,8 +780,8 @@ Nyl-Version: 0.7.0
 5. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
    same S.
 6. **Repeat** from step 3 until nothing is ready.
-7. **Commit.** Write one transition commit per state ref, release the lease,
-   and delete the run ref.
+7. **Commit.** Write one transition commit per state ref, fenced by the lease,
+   then release the lease and delete the run ref.
 
 A run never reads a source commit newer than S; later source changes are
 picked up by the next run.
@@ -700,14 +800,17 @@ apply to desired state without mixing with observed commits.
   the named unit `blocked`; dependencies and dependents are not executed.
 
 **Transition commit conflicts.** Operations on one environment are serialized
-by its lease, so a final push loses only to a commit made outside Nyl,
-typically a merged promotion pull request, or to another environment sharing
-the same ref through `state.path`, whose paths never overlap. Nyl then fetches
+by its lease, and the final push is fenced by it (see
+[Runs and leases](#runs-and-leases)), so a push that still holds the lease
+loses only to a commit made outside Nyl, typically a merged promotion pull
+request, or to another environment sharing the same ref through `state.path`,
+whose paths never overlap. Nyl then fetches
 and rebases its commit if the winning commits
 changed none of the paths it writes or read. Otherwise it keeps its results,
 which are facts, resolves again against the new state, and commits that. When
-desired and observed are separate refs, the observed commit is written first,
-so evidence is never lost to a desired conflict.
+desired and observed are separate refs, both commits and the lease check go in
+one atomic push, so a desired conflict rejects the whole push; the results stay
+on the run ref meanwhile, so no evidence is lost.
 
 ### Approval
 
@@ -720,8 +823,10 @@ spec:
 
 - A manual unit executes only when the invocation approves it. `approval:
   manual` is short for `{mode: manual, bind: desired}`.
-- `bind: desired` approves one execution of the current desired document:
-  `--approve database`.
+- `bind: desired` approves one execution of the desired document the unit had
+  when the invocation started, identified by its execution key: `--approve
+  database`. If re-resolution later in the same run changes the key, the new
+  document is not approved and the unit waits for a new approval, exit 2.
 - `bind: plan` approves exactly the changes a reviewed plan showed. It requires
   a kind whose `plan` reports a change digest (Terraform and OpenTofu do).
   `nyl plan` prints each manual unit's digest, and `--approve
@@ -731,7 +836,13 @@ spec:
   approval. Plan files never leave the runner.
 - `--approve` for a unit excluded by `--unit`/`--units` is an error.
 - Teardown of a manual unit needs approval the same way; for `bind: plan` the
-  digest is that of the destroy plan.
+  digest is that of the destroy plan. `nyl plan` covers `deleting` units with
+  teardown intent and prints their destroy-plan digest, and `nyl teardown`
+  accepts `--approve` like `reconcile`.
+- The approved digest reaches the driver through `ExecutionContext`, and the
+  driver compares it with the plan it is about to apply. A mismatch returns
+  `Outcome::AwaitingApproval` with the new digest: no effects, the unit waits,
+  and the run exits 2.
 
 Recording. Each approval is recorded in the receipt and in the transition
 commit's summary: who approved (`by`), where (`source`), and the digest.
@@ -751,7 +862,8 @@ commit's summary: who approved (`by`), where (`source`), and the digest.
 # .github/workflows/production.yaml (excerpt)
 jobs:
   plan:
-    outputs: {digest: ${{ steps.plan.outputs.digest }}}
+    outputs:
+      digest: ${{ steps.plan.outputs.digest }}
     steps:
       - id: plan
         run: echo "digest=$(nyl plan -e production --unit database --output json | jq -r '.units.database.changeDigest')" >> "$GITHUB_OUTPUT"
@@ -764,7 +876,9 @@ jobs:
 
 ### Runs and leases
 
-Coordination and progress live outside the desired and observed refs:
+Coordination and progress live outside the desired and observed refs, in the
+same state repository, so one atomic push can cover a transition and its lease
+check:
 
 | Ref | Content | Lifetime |
 | --- | --- | --- |
@@ -775,19 +889,33 @@ Coordination and progress live outside the desired and observed refs:
    exists and has not expired, the run exits 2 and reports who holds it. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
    `teardown`, `hold`, `resume`, `recover`, `verify`, `state init`,
-   `state copy`, `state delete`), so only one runs per environment at a time.
+   `state move`, `state delete`, `state forget`), so only one runs per
+   environment at a time.
 2. **Deadline.** The deadline is the latest finish time of the units executing,
    by their `timeout`, plus a grace period that also absorbs clock skew. The
    runner updates the lease when it starts a unit; there are no heartbeats.
 3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
-   the next wave. A crash loses no evidence.
+   the next wave, together with the desired document it executed and its uid,
+   including documents the run created. A crash loses no evidence.
 4. **Takeover.** A run that finds an expired lease replaces it with
-   compare-and-swap. It imports every leftover run ref: checkpointed results
-   whose unit uid and execution key still match become receipts, the others
-   are reported as superseded. Units the dead run was executing without a
-   checkpoint get an `uncertain` condition. All of this lands in the new run's
-   transition commit, under `imported` and `recovered`.
-5. **Lost lease.** A runner whose lease update fails stops starting units,
+   compare-and-swap. After resolving, it imports every leftover run ref. A
+   checkpointed result becomes a receipt when the new resolution of that unit
+   has the same execution key; for a unit the dead run created, the new run
+   adopts the checkpointed desired document and uid instead of generating a
+   new one. Other results are reported as superseded; their effects are real,
+   so a superseded result of a unit whose recovery policy is not `converge`
+   gives it an `uncertain` condition rather than letting it run again. Units
+   the dead run was executing without a checkpoint get an `uncertain`
+   condition. All of this lands in the new run's transition commit, under
+   `imported` and `recovered`.
+5. **Fenced commit.** The final transition commit is pushed with
+   `git push --atomic`, together with a compare-and-swap of the lease ref that
+   expects the run's own lease commit, so either both land or neither does.
+   Releasing the lease is a compare-and-swap too. A run whose lease was taken
+   over pushes nothing to the state refs and exits 4; its results stay on its
+   run ref for the next run to import. Atomic pushes work on GitHub, GitLab,
+   and plain Git servers.
+6. **Lost lease.** A runner whose lease update fails stops starting units,
    checkpoints the units still running to its own run ref, and exits 4. The
    next run imports those results as above.
 
@@ -824,7 +952,7 @@ teardown is already there:
 
 ```yaml
 lifecycle:
-  state: deleting                    # active | deleting | held
+  state: deleting                    # active | deleting | held | retained
   deletion:
     reason: omission                 # omission | teardown | replace | kind-change
     intent: teardown                 # retain | teardown
@@ -851,22 +979,41 @@ lifecycle:
   its desired file with `state: deleting`, `reason: omission`, and the intent
   from its `deletionPolicy`. Units still referencing it make resolution fail,
   so a unit and its consumers are removed together.
-- **Retain** (default). The run removes the desired and observed files. Native
-  resources are untouched and history keeps everything. The transition
-  commit's summary lists the retained unit, so an unintended omission, such as
-  a selector typo, is visible without having destroyed anything.
+- **Default policy.** `deletionPolicy` defaults to `Teardown` for kinds that
+  support teardown and to `Retain` for kinds that do not, such as `OciImage`
+  and a `Command` without a teardown step.
 - **Teardown.** The driver's teardown runs from the desired file's spec, with
   the driver's teardown recovery policy. Among deleting units, units are torn
-  down before the units they depended on. Teardown caused by omission requires
-  `--allow-teardown` on `reconcile`; without it the unit is
-  `pending-teardown`. A driver without teardown support leaves the unit
-  visibly blocked. When teardown succeeds, the run removes both files.
+  down before the units they depended on; units a `KubernetesPublication`
+  depends on also wait for its `teardownWait`. Teardown caused by omission
+  requires `--allow-teardown` on `reconcile`; without it the unit is
+  `pending-teardown` and the run exits 2, so an unintended omission, such as a
+  selector typo, destroys nothing, and fixing it returns the unit to `active`
+  with its uid and receipt. When teardown succeeds, the run removes both
+  files.
+- **Retain, declared.** A unit that declares `deletionPolicy: Retain` keeps
+  its resources when it leaves the ownership set. The run replaces its desired
+  and observed files with a `retained` tombstone: the last desired document,
+  uid, and receipt, under `lifecycle.state: retained`. A unit that returns with
+  the same name and kind adopts the tombstone: with an unchanged execution key
+  it is current at once, otherwise it runs as an ordinary change of the same
+  incarnation, so restoring an accidentally omitted unit never re-runs it.
+  `nyl status` lists tombstones, and the transition commit's summary lists
+  every newly retained unit.
+- **Retain, by kind.** A unit whose kind cannot tear down and that does not
+  declare `Retain` leaves no tombstone: the run removes its files and lists
+  what was left in place, such as an image reference, in the transition
+  commit's summary. Returning later starts a new incarnation.
+- **Forgetting.** `nyl state forget -e <env> --unit <u>` drops a `retained`
+  tombstone or a `pending-teardown` unit from state without touching its
+  resources, for example to let a Teardown unit go without destroying it.
+  A returning unit then starts a new incarnation.
 - **Explicit teardown.** `nyl teardown -e <env> --unit <u>` tears a unit down
   whether or not it is in the ownership set. The command is itself explicit
   intent, so it needs no `--allow-teardown`.
-  - For a unit outside the ownership set (a deleting unit, or a retained unit
-    whose last desired file is recovered from history), it completes the
-    deletion.
+  - For a unit outside the ownership set (a `deleting` unit, or a `retained`
+    tombstone, whose last desired document it holds), it completes the
+    deletion and removes the files, including the tombstone.
   - For a unit still in the ownership set, it replaces the unit
     (`reason: replace`): the incarnation is torn down, and the next
     `reconcile` writes a new desired file with a new uid. Dependents are
@@ -909,7 +1056,9 @@ lifecycle:
   teardown` acts on state directly and never edits source.
 - **Fencing.** A new incarnation cannot take a name whose desired file is
   `deleting`; it waits until the file is removed, then receives a new uid. A
-  kind change under the same name is a deletion with `reason: kind-change`.
+  kind change under the same name is a deletion with `reason: kind-change`; a
+  `retained` tombstone of another kind is dropped, with its resources left in
+  place, and the new kind starts a new incarnation.
 
 ## Credentials
 
@@ -943,16 +1092,27 @@ spec:
 ### Initialization and moves
 
 `state.yaml` records where the state lives (repository and refs) and every
-initialization, copy, or fresh start, each as its own event.
+initialization, move, or fresh start, each as its own event.
 
 - The first run for an environment requires `nyl state init -e <env>`, which
   writes `state.yaml` at the configured location. `reconcile` never creates
   state implicitly.
 - When an Environment's `state` points to a location without `state.yaml`,
   `reconcile` refuses and names both ways forward:
-  - `nyl state copy -e <env> --from <repository> [--desired-ref …]
-    [--observed-ref …]` pushes the existing refs' history to the new location
-    and records a `state-copied` event. Units keep their uids and receipts.
+  - `nyl state move -e <env> --from <repository> [--desired-ref …]
+    [--observed-ref …]` relocates the state. It holds the lease at both
+    locations throughout, pushes the existing refs' history to the new
+    location, and then writes a final transition commit to the old location
+    whose `state.yaml` records a `state-moved` event naming the new one. Units
+    keep their uids and receipts. Every command against the old location then
+    refuses and names the new one, including runs from older source commits
+    that still point there. The old refs are kept for audit, and removing them
+    is a manual step. An interrupted move is completed by running it again:
+    it finds the matching history at the new location and writes the marker.
+    The new location is usable only once the marker exists.
+  - Copying state into another environment is deliberately not offered: a new
+    environment owns none of the old one's resources, so its units start as
+    new incarnations with `state init`.
   - `nyl state init -e <env> --fresh` starts over deliberately. Every unit
     becomes a new incarnation and executes again: Terraform and OpenTofu
     converge against their existing backends, images are rebuilt, and
@@ -963,12 +1123,21 @@ initialization, copy, or fresh start, each as its own event.
 
 ### Local runs
 
-`--local` runs orchestration against local-only state, for developing units and
-trying changes against real evidence before CI:
+Runs from a workstation are ordinary runs. Without CI wired up yet, `nyl
+reconcile -e <env>` from a workstation takes the remote lease and pushes
+transition commits to the remote state exactly like a CI job; its source
+commit must be pushed and reachable per [Pinned commits](#pinned-commits). CI
+later continues from the state those runs recorded.
 
-- The first local run for an environment copies the remote state refs to local
-  refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`; later
-  local runs continue from them. `--local --reset` copies again.
+`--local` runs orchestration against local-only state, for environments
+without a remote and for scratch experiments:
+
+- `nyl state init -e <env> --local` starts local state from scratch at local
+  refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`,
+  for an environment with no remote state.
+- Otherwise the first local run for an environment copies the remote state refs
+  to those local refs; later local runs continue from them. `--local --reset`
+  copies again.
 - Local runs write transition commits and run checkpoints only to local refs,
   with a `Nyl-Local: true` trailer, and never push state.
   `nyl status -e <env> --local` shows the local view.
@@ -976,11 +1145,15 @@ trying changes against real evidence before CI:
   coordination, not state: a local run and a CI run of the same environment
   never execute at the same time. This needs push access to the lease ref.
 - `--local-lease` explicitly opts into a local lease instead, for working
-  without that access, and accepts that CI may run at the same time.
-- Effects are real, and local state is never pushed. CI's next run executes
-  those units again. That is safe for `converge` drivers; a local run
-  therefore executes units with other recovery policies only when they are
-  named with `--approve`, and warns that CI will run them again.
+  without that access, and accepts that CI may run at the same time. Local
+  state without a remote always uses a local lease.
+- Effects are real, and local state is never pushed, so remote runs do not
+  notice them: a unit whose remote receipt is current is not executed again,
+  and the remote state keeps describing what ran before. A local run next to
+  remote state warns about every unit it executes and names the remote
+  command that records it again, such as `nyl reconcile -e <env> --unit
+  <u>` after the change is committed. Units whose recovery policy is not
+  `converge` run locally only when named with `--approve`.
 
 ### Pinned commits
 
@@ -1006,8 +1179,9 @@ revisions, and locked `fromGit` bindings.
 
 ### Credentials and branch protection
 
-- State pushes use the same Git credentials as `publish-tree`: an SSH key, an
-  SSH agent, or an HTTPS token, through the GitRepository's `publishURL`.
+- State pushes use the same Git credentials as `publish-tree`, through the
+  GitRepository's `publishURL`. Today `publish-tree` authenticates through the
+  SSH agent only; SSH keys and HTTPS tokens for both are an M3 item.
 - Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
   as corruption and stops every command until an operator repairs it.
 - Recommended protection: force pushes and deletion are disabled on both state
@@ -1055,15 +1229,19 @@ enum Supported<T> {
 
 enum Outcome {
     Succeeded { outputs: Outputs, artifacts: Vec<Artifact> }, // typed artifact documents
+    AwaitingApproval { digest: ChangeDigest },               // plan changed since approval; no effects
     Failed { category: FailureCategory, retryable: bool },
     Uncertain,
 }
 ```
 
 - `ExecutionContext` provides the worktree at the effective source revision,
-  the resolved spec, admitted environment variables and secrets, the deadline,
-  a cancellation signal, the unit's observed file, and a transcript sink that
-  masks secret values.
+  the resolved spec, admitted environment variables and secrets, the approved
+  change digest for `bind: plan` units, the deadline, a cancellation signal,
+  the unit's observed file, and a transcript sink that masks secret values.
+- Every execution gets its own worktree and its own temporary directory for
+  tool state, such as `TF_DATA_DIR`, so parallel units sharing a `source.path`
+  never share a working directory.
 - Drivers run external tools only through the context, so transcripts,
   masking, and deadlines are uniform.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
@@ -1143,8 +1321,10 @@ spec:
 - Stdout and stderr form the transcript and are never parsed. Secret values
   and `sensitive` outputs are masked in it.
 - Exit code 0 with a valid outputs file is success. Any other exit code is a
-  failure; a missing or invalid outputs file, or an undeclared output, also
-  fails the execution. Failures are not retryable unless `idempotent: true`.
+  failure; a missing or invalid outputs file, or a declared output that is
+  missing or has the wrong type, also fails the execution. Undeclared outputs
+  are ignored with a warning. Failures are not retryable unless
+  `idempotent: true`.
 - `verify` exits 0 for clean, 2 for drift, and anything else for an error. It
   records a drift observation, never a receipt.
 - There is no sandbox beyond the working directory and the environment; the
@@ -1157,17 +1337,18 @@ spec:
 
 | Command | Effect | Writes |
 | --- | --- | --- |
-| `plan` | Resolve and run driver planning for ready units; report blocked units and incomplete plans | Nothing |
+| `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report blocked units and incomplete plans | Nothing |
 | `reconcile` | Resolve, then execute waves until nothing is ready | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit | One transition commit per state ref |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` completes a publication's `manual` teardown wait | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
 | `state delete` | Remove a template instance's state after all its units are torn down; `--teardown` tears them down first | One commit removing the instance's state |
-| `state copy` | Copy state history from another location | Copied history plus `state.yaml` |
+| `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
+| `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
@@ -1231,14 +1412,14 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
+`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
 non-current dependency), `ready`, `awaiting-approval`, `running` (with the run
 holding the lease), `uncertain`, `failed`, `current`, `held`,
-`pending-teardown`, or `tearing-down`. Whether the latest receipt is current is
+`pending-teardown`, `tearing-down`, or `retained`. Whether the latest receipt is current is
 shown as a separate attribute.
 
 Exit categories, where "selected" means the units the invocation was allowed to
@@ -1298,17 +1479,20 @@ and reports which unit lacks evidence.
 ago. The next reconcile that reaches it, whether a maintenance job's
 `reconcile -e pr-123 --no-extend` or the scheduled `reconcile --template
 preview`, finds it expired, runs `teardown --all` (its publication unit is
-teardown-ready, so Argo CD removes the workloads), and removes its state
+teardown-ready and uses `teardownWait: {strategy: observe}`, so the run waits
+until Argo CD has removed the workloads before removing the rest of the tree
+and the units the workloads used), and removes its state
 directory; the fleet reconcile then reconciles the other, live instances
 without extending them. Had the pull request been updated in the meantime, its
 pipeline's `state init --template` would have extended the expiry first.
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
-`cache` has `deletionPolicy: Teardown`, `worker` the default `Retain`. The next
-run marks both `deleting`, removes `worker`'s files, and reports `cache` as
-`pending-teardown`, exiting 2. A run with `--allow-teardown` tears `cache` down
-and removes its files. A new `cache` added in the meantime waits for that and
-then receives a new uid.
+`cache` has the default `Teardown` policy, `worker` declares `Retain`. The next
+run marks both `deleting`, replaces `worker`'s files with a `retained`
+tombstone, and reports `cache` as `pending-teardown`, exiting 2. A run with
+`--allow-teardown` tears `cache` down and removes its files. A new `cache`
+added in the meantime waits for that and then receives a new uid. When
+`worker` is restored unchanged, it adopts its tombstone and does not run.
 
 ## Remaining questions
 
