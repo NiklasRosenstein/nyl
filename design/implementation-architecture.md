@@ -61,6 +61,11 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Time, identifiers such as UUIDs, and the process environment are inputs,
   never read globally. This matches the AGENTS.md rule that tests must not
   depend on global state.
+- `nyl-cli` constructs the `Clock`. Built with the `test-clock` Cargo feature,
+  it reads the current time from `NYL_TEST_NOW` and turns waits, such as a
+  `delay` teardown wait, into clock advances instead of sleeps, so end-to-end
+  tests of the real binary control time per child process. Release builds do
+  not contain the feature and always use the system clock.
 - Replay is the same function applied to history: the machine-audit
   requirement ("replaying operations reproduces every decision") becomes an
   executable check, and a later `nyl audit` can verify a state ref's history.

@@ -786,6 +786,9 @@ byte-identical output to the previous release.
   effect succeeds but receipt publication fails.
 - [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
+- [ ] Add the `test-clock` Cargo feature and the two-tier harness for the
+  reference scenarios: in-process with fake tool drivers, and through the real
+  binary where the tools are installed.
 
 **Exit criterion:** two dependent command units reconcile locally and in CI with
 identical results; repeat execution is a no-op; interruption has a demonstrated
