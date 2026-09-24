@@ -364,6 +364,9 @@ runner (M7) could add timely enforcement later:
 - `state.yaml` records `expiresAt`. Only activity on one instance extends it:
   `state init --template` and a successful `reconcile -e <instance>` move it to
   now plus `ttl`, so an active pull request keeps its preview.
+  `reconcile -e <instance> --no-extend` reconciles one instance as maintenance,
+  like the fleet reconcile, without extending its expiry; an expired instance
+  is then removed instead of reconciled.
 - `reconcile -e <instance>` refuses an expired instance unless given `--renew`;
   `status` and `get environments` show it as expired, so a forgotten instance
   stops being updated.
@@ -1178,7 +1181,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--renew`, `--template`, `--local`,
+`--allow-teardown`, `--allow-incomplete`, `--renew`, `--no-extend`, `--template`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
