@@ -49,10 +49,11 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 Orchestration follows [design/implementation-architecture.md](design/implementation-architecture.md).
 These rules keep it maintainable:
 
-- Respect the crate dependency direction: `nyl-core` depends on nothing Nyl;
-  `nyl-render` never depends on orchestration crates; `nyl-orchestration`
-  reaches Git, processes, and clusters only through traits; `nyl-cli` holds no
-  business rules.
+- Respect the crate dependency direction: `nyl-core` depends on nothing Nyl
+  and owns the orchestration traits; `nyl-render` never depends on
+  orchestration crates; `nyl-orchestration` depends only on `nyl-core`;
+  `nyl-state` and `nyl-drivers` implement the traits; `nyl-cli` wires them
+  together and holds no business rules.
 - Decisions are pure functions over snapshots. Only the orchestration shell
   performs effects, and nothing outside it reads the clock, the process
   environment, or generates identifiers; those are passed in.

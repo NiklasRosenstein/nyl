@@ -117,8 +117,10 @@ spec:
   `object`, `array`), optional `description`, and optional `sensitive`. Only
   declared outputs are recorded. A `sensitive`
   output is validated but never persisted and cannot be referenced; secrets
-  move through the secrets provider, not through outputs. Drivers reject
-  native-tool sensitive outputs that are not declared sensitive.
+  move through the secrets provider, not through outputs. Undeclared outputs
+  are ignored, sensitive or not; a declared output that the native tool marks
+  sensitive must be declared `sensitive`, and drivers check this before any
+  effect where the tool allows.
 - `dependsOn` lists units that must have a current receipt first, for ordering
   without a data reference. References add dependencies implicitly.
 - Repository content from elsewhere uses the ApplicationGroup source shape in
@@ -205,6 +207,9 @@ spec:
   referenced by none rejects `fromUnit` and `fromPromotion` bindings.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
+- Its execution key also covers the renderer version, so a Nyl upgrade that
+  changes rendered output republishes; publishing an unchanged tree creates no
+  commit, so this is cheap.
 - Its resolved spec contains every Release input of its target, keyed as
   `releases.<group>/<release>.<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
@@ -227,13 +232,16 @@ spec:
 **Teardown.** A publication unit supports teardown when its target is
 configured so that removing the manifests removes the workloads:
 
-1. The unit publishes an empty tree for the target's prefix. The removal commit
-   is the teardown's `published` evidence.
+1. The unit publishes a tree whose catalog is empty for the target's prefix:
+   every workload tree is removed, and `_nyl/catalog` stays with a placeholder
+   so the catalog Application can still sync. The removal commit is the
+   teardown's `published` evidence.
 2. Argo CD syncs the catalog Application, which prunes the workload
    Applications; their finalizers delete the workloads, and owned Namespaces
    are deleted according to namespace policy.
 3. In `mode: observe`, the unit waits within its `timeout` until the target's
-   Applications are gone and records the teardown as observed complete;
+   Applications are gone, then removes the rest of the prefix, including the
+   catalog, and records the teardown as observed complete;
    Applications that remain make the teardown uncertain, and `status` names
    them. In `mode: publish`, teardown ends at step 1 and reports that deletion
    was not observed.
@@ -246,7 +254,7 @@ Teardown readiness is checked statically from the target's effective settings:
 | The catalog may prune workload Applications | their prune policy is `Automatic`, not `Confirm` or `Retain` | Applications stay until a prune is confirmed, or forever |
 | Deleting an Application deletes its workloads | `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Workloads keep running without an Application |
 | Owned Namespaces are deleted | namespace `deletePolicy` is not `Retain` | Empty Namespaces remain |
-| The catalog Application itself has an owner | for example a parent Application over a shared preview branch | The catalog Application remains |
+| The catalog Application itself has an owner | for example a parent Application over a shared preview branch | The catalog Application remains, syncing an empty catalog |
 
 The first three requirements decide whether teardown can succeed; the last two
 leave remnants. Nyl reports unmet requirements where they matter:
@@ -292,15 +300,18 @@ spec:
     observedRef: nyl/previews
     path: '{{ environment.name }}'       # all instances share one ref
   allowUnprotectedSource: true           # instances run from pull request branches
-  deletionPolicy: Teardown               # forced for every unit of an instance
+  keepSource: true                       # default: keep each instance's source commit fetchable
+  deletionPolicy: Teardown               # forced for every unit kind that supports teardown
   allowTeardown: true                    # omission teardown without --allow-teardown
   ttl: 7d
   maxInstances: 20
 ```
 
 The template has the Environment's fields plus `parameters` (typed like Release
-inputs and exposed as `params`), `deletionPolicy`, `allowTeardown`, `ttl`, and
-`maxInstances`. It knows nothing about Kubernetes; a preview's cluster and
+inputs and exposed as `params`), `deletionPolicy`, `allowTeardown`, `ttl`,
+`maxInstances`, and `keepSource`. `deletionPolicy: Teardown` applies to every
+unit whose kind supports teardown; units of other kinds, such as `OciImage`,
+are retained when an instance is removed. It knows nothing about Kubernetes; a preview's cluster and
 publication come from `KubernetesPublication` units with inline targets.
 
 ### Instances
@@ -322,12 +333,26 @@ nyl get environments                                         # declared environm
   instance behaves like a declared environment for every command.
 - Instances are discovered by listing the template's state location, so no
   central index exists.
-- `nyl teardown -e <env> --all` tears down every unit, dependents first. It is
-  generic and also decommissions declared environments.
+- `nyl teardown -e <env> --all` tears down every unit, dependents first, and
+  holds each unit that is still in the ownership set, so nothing is recreated.
+  It also decommissions declared environments: run `teardown --all`, then
+  remove the Environment from source. Units whose kind has no teardown support
+  are retained.
 - `nyl state delete -e <env>` removes an instance's state: its directory in a
   shared ref, or its refs. It works only for template instances whose units
   have no incarnation left; `--teardown` runs `teardown --all` first. History
-  keeps the removed state.
+  keeps the removed state. The recommended layout for previews is a shared
+  ref with `state.path`, so `state delete` removes a directory instead of a
+  ref; separate refs per instance need permission to delete refs matching the
+  template's ref pattern.
+- With `keepSource` (the default), Nyl keeps each instance's latest source
+  commit fetchable with a keep ref in the source repository,
+  `refs/nyl/keep/<instance>`, moved by every reconcile and removed by
+  `state delete`. Teardown after the pull request branch is deleted or
+  squash-merged therefore still finds its source. It needs push access to that
+  ref pattern; hosts that reject custom refs can use
+  `refs/heads/nyl/keep/<instance>`. `keepSource: false` turns it off, and the
+  pipeline must then remove instances before their branches disappear.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
   `fromUnit: {environment: dev, unit: network, output: vpcId}`. It is
@@ -348,8 +373,8 @@ request would deploy.
   again; a unit removed from the template is torn down, without
   `--allow-teardown` when the template sets `allowTeardown`.
 - `nyl reconcile --template preview` reconciles every instance, each at its own
-  recorded source commit: after a Nyl upgrade, a driver behavior-version
-  change, or new evidence in shared infrastructure. It is maintenance, not
+  recorded source commit: after a Nyl upgrade that changes rendered output, a
+  driver behavior-version change, or new evidence in shared infrastructure. It is maintenance, not
   activity: it never extends expiry, and it removes expired instances (see
   [Expiry](#expiry)). It never renders an
   instance's units with a template from another commit, because that
@@ -620,7 +645,7 @@ Nyl-Version: 0.7.0
 - Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
-  `recover`, `verify`, `state-init`, `state-copy`.
+  `recover`, `verify`, `state-init`, `state-copy`, `state-delete`.
 - Replaying operations in order, from the read commits and evaluation times
   they name, reproduces every state decision.
 
@@ -638,7 +663,9 @@ Nyl-Version: 0.7.0
    current, and it is not awaiting approval. A unit with an `uncertain`
    condition is selected only when its driver's recovery policy allows it:
    `converge` executes it again, and `inspect` runs `inspect` first (see
-   [Recovery](#recovery)). Under `manual`, the unit waits for `recover`.
+   [Recovery](#recovery)). Under `manual`, the unit waits for `recover`. A unit
+   with a non-retryable `failed` condition is not selected until
+   `recover --retry` clears it.
 4. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit, and checkpoint each result on the run ref.
 5. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
@@ -663,9 +690,11 @@ apply to desired state without mixing with observed commits.
 - Only the named units execute. A dependency without a current receipt leaves
   the named unit `blocked`; dependencies and dependents are not executed.
 
-**Transition commit conflicts.** Nyl's own operations are serialized by the
-lease, so a final push can only lose to a commit made outside Nyl, typically a
-merged promotion pull request. Nyl then fetches and rebases its commit if the winning commits
+**Transition commit conflicts.** Operations on one environment are serialized
+by its lease, so a final push loses only to a commit made outside Nyl,
+typically a merged promotion pull request, or to another environment sharing
+the same ref through `state.path`, whose paths never overlap. Nyl then fetches
+and rebases its commit if the winning commits
 changed none of the paths it writes or read. Otherwise it keeps its results,
 which are facts, resolves again against the new state, and commits that. When
 desired and observed are separate refs, the observed commit is written first,
@@ -736,8 +765,8 @@ Coordination and progress live outside the desired and observed refs:
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
    exists and has not expired, the run exits 2 and reports who holds it. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
-   `teardown`, `hold`, `resume`, `recover`, `verify`), so only one runs per
-   environment at a time.
+   `teardown`, `hold`, `resume`, `recover`, `verify`, `state init`,
+   `state copy`, `state delete`), so only one runs per environment at a time.
 2. **Deadline.** The deadline is the latest finish time of the units executing,
    by their `timeout`, plus a grace period that also absorbs clock skew. The
    runner updates the lease when it starts a unit; there are no heartbeats.
@@ -978,7 +1007,9 @@ revisions, and locked `fromGit` bindings.
   machine; the desired ref additionally accepts promotion pull requests with
   required reviews. A team that wants only the runner to push runs operator
   commands through a manually triggered CI workflow instead. The lease ref
-  needs the same pushers.
+  needs the same pushers. Template instances with their own refs also need
+  ref deletion for `state delete`, limited to the template's ref pattern;
+  instances sharing a ref through `state.path` do not.
 
 ### Defaults
 

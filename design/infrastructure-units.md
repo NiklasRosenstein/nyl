@@ -81,7 +81,7 @@ then changes the Dockerfile and rebuilds.
 | reconcile | Build and push; record outputs and the artifact |
 | verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
-| teardown | Not supported: registry deletion differs between registries and may break consumers. `deletionPolicy: Teardown` is rejected for this kind |
+| teardown | Not supported: registry deletion differs between registries and may break consumers. `deletionPolicy: Teardown` is rejected for this kind; an EnvironmentTemplate's forced `Teardown` skips it, so the image is retained when an instance is removed |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
 
 ## Terraform and OpenTofu

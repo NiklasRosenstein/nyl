@@ -143,7 +143,7 @@ Each binding sets exactly one of these fields:
 
 | Field | M2 | Resolves from |
 | --- | --- | --- |
-| `value` | Yes | Inline literal. DeploymentTargets are static, so this is never templated |
+| `value` | Yes | Inline literal. DeploymentTargets are static, so this is never templated; the inline targets of orchestration's `KubernetesPublication` units are the one exception, rendered per environment |
 | `fromFile` | Yes | Project-relative YAML or JSON file; `pointer` defaults to `""` |
 | `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
 | `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |

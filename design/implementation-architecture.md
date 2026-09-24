@@ -15,21 +15,21 @@ Nyl is currently one crate. Orchestration is split into crates whose dependency
 direction the compiler enforces:
 
 ```text
-nyl-cli ──► nyl-orchestration ──► nyl-core
-   │              │                  ▲
-   │              ├──► nyl-state ────┤
-   │              └──► nyl-drivers ──┤
-   └──► nyl-render ──────────────────┘
+nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
+         ├─► nyl-state ─────────► nyl-core
+         ├─► nyl-drivers ─┬──────► nyl-core
+         │                └──────► nyl-render ─► nyl-core
+         └─► nyl-render
 ```
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
-| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution | Git, processes, network, clock, environment |
+| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
 | `nyl-render` | Today's Kubernetes rendering and rendered GitOps, unchanged in behavior | Orchestration crates |
-| `nyl-state` | State refs: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap | Drivers, rendering |
-| `nyl-drivers` | The driver trait, execution context, process runner with masking, built-in unit kinds | State layout |
-| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Concrete Git, processes, or clusters; only traits |
-| `nyl-cli` | Argument parsing, output formats, exit categories | Business rules |
+| `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap | Drivers, rendering, orchestration |
+| `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
+| `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` |
+| `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
 
 - Crate boundaries are the only boundaries the compiler enforces; module
   boundaries inside one crate erode.
@@ -38,6 +38,9 @@ nyl-cli ──► nyl-orchestration ──► nyl-core
 - The `KubernetesPublication` driver is a thin adapter over a narrow rendering
   API, such as `render_target(target, input_snapshot) -> Tree`. Rendering never
   learns about environments, receipts, or state refs.
+- `nyl-orchestration` depends only on `nyl-core`, so the compiler rejects any
+  direct Git, process, or cluster call from orchestration; `nyl-cli` passes in
+  the implementations from `nyl-state` and `nyl-drivers`.
 - Plugin drivers, when added, implement the same driver trait through a
   process adapter in `nyl-drivers`.
 

@@ -291,8 +291,8 @@ Cluster.
   fails validation.
 - Only outputs declared in `outputs` are persisted, typed with the Release
   input type set. Outputs declared `sensitive` are validated but never
-  persisted or referenceable; drivers reject native-tool sensitive outputs that
-  are not declared sensitive. Credentials and private keys never enter
+  persisted or referenceable; undeclared outputs are ignored, and a declared
+  output the native tool marks sensitive must be declared sensitive. Credentials and private keys never enter
   desired state, receipts, public artifacts, or diagnostic transcripts.
 - When upstream outputs are unavailable, retain the unresolved desired intent
   and resolve dependents as evidence arrives, without rereading unrelated
@@ -841,7 +841,7 @@ reasons to delay independent work.
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
-| Promotion record location for pull-request gates | M6 |
+| Ownership of an inline target's catalog Application when no parent Application owns it | M5 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
 ## Implementation reference points
