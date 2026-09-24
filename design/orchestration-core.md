@@ -644,13 +644,16 @@ execute (all of them without `--unit`/`--units`):
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Every selected unit is current, held, retained, or torn down, or blocked only by a held dependency |
+| 0 | Every selected unit is current, retained, or torn down |
 | 1 | Configuration, resolution, or operational error |
-| 2 | Blocked: waiting for evidence, approval, `--allow-teardown`, or another runner; nothing failed |
+| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, or another runner |
 | 3 | At least one attempt failed |
 | 4 | At least one attempt is uncertain and needs recovery |
 
-The highest applicable category wins.
+The highest applicable category wins. Holds are reported as exit 2 on purpose:
+a run that leaves units unreconciled says so. A pipeline that expects a hold
+names the units it should reconcile with `--unit`/`--units`, and then exits 0
+when those are current.
 
 ## Walkthroughs
 
