@@ -786,6 +786,12 @@ configuration; an image build records a digest; unchanged inputs plan no change.
   Applications' last successful sync and health, match them to publication
   commits by Application directory tree, and record the observations.
 - [ ] Document an end-to-end local/CI example.
+- [ ] Support inline DeploymentTargets on `KubernetesPublication`, its
+  teardown, and the teardown readiness check with its warnings.
+- [ ] Add EnvironmentTemplates for preview environments: instances through
+  `nyl state init --template`, `teardown --all`, `state delete`, shared state
+  refs through `state.path`, cross-environment references to declared
+  environments, sliding expiry, and `maxInstances`.
 
 **Exit criterion:** one reconcile builds an image, applies Terraform, and
 publishes Kubernetes manifests consuming both; the same Releases still render

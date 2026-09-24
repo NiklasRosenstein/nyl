@@ -16,7 +16,7 @@ units never touches orchestration state.
 
 | Resources | API group |
 | --- | --- |
-| Environment, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
+| Environment, EnvironmentTemplate, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
 | Built-in unit kinds: `Command`, `Terraform`, `OpenTofu`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
 | Artifact kinds: `ContainerImage`, `PublishedTree` | `artifacts.gitops.nyl/v1` (see [Artifacts](#artifacts)) |
 | Plugin unit and artifact kinds | The plugin's own groups, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
@@ -46,6 +46,7 @@ spec:
     repositoryRef: {name: platform-state}   # or inline `repository`
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
+    path: ''                                # optional directory within the refs; default the root
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
 ```
@@ -63,6 +64,12 @@ spec:
   the source checkout's `origin` remote; CI should name a GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
   either way (see [State layout](#state-layout)).
+- `path` places the environment's state in a directory of those refs, so several
+  environments can share one ref, each with its own `state.yaml`, `desired/`,
+  and `observed/`. Leases stay per environment, so environments sharing a ref
+  still run in parallel; their pushes serialize on the ref and, touching
+  disjoint paths, rebase under the transition commit conflict rule. Branch
+  protection and retention are then shared.
 - `protectedRefs` lists the refs that pinned commits and run source commits
   must be reachable from; `allowUnprotectedSource` relaxes that for run source
   commits (see [Pinned commits](#pinned-commits)).
@@ -147,6 +154,7 @@ spec:
 | `fromUnit: {unit, output, pointer}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current |
 | `fromUnit: {unit, artifact, kind, pointer}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current and list the artifact's digest |
 | `fromPromotion: {path, value}` | A value in a PromotionRecord in this environment's desired state | The record must exist; broken selectors are errors |
+| `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in a declared environment, read from a template instance only (see [Environment templates](#environment-templates-and-previews)) | As `fromUnit`, against the other environment's current receipt |
 
 - References are structured objects, never template lookups, so every
   dependency edge is visible in the rendered spec. Templating may compute a
@@ -166,10 +174,32 @@ metadata:
   name: kubernetes
   labels: {tier: platform}
 spec:
-  target: '{{ values.target }}'
+  target: '{{ values.target }}'   # a static DeploymentTarget, or `inline:` (see below)
   mode: publish        # publish | observe
 ```
 
+- `target` names a static DeploymentTarget, or defines one inline as a
+  DeploymentTarget spec rendered per environment and owned by the unit:
+
+  ```yaml
+  spec:
+    target:
+      inline:
+        clusterRef: {name: preview-cluster}
+        applicationGroupSelector: {matchLabels: {preview: 'true'}}
+        publication:
+          repositoryRef: {name: deploy}
+          revision: previews
+          pathPrefix: '{{ environment.name }}'
+        values: {hostname: '{{ values.hostname }}'}
+        releaseInputs:
+          platform/web:
+            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+  ```
+
+  An inline target is named after the environment, or `<environment>-<unit>`
+  when an environment has several publication units. Static DeploymentTargets
+  remain for rendering without orchestration.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
   referenced by none rejects `fromUnit` and `fromPromotion` bindings.
@@ -193,6 +223,155 @@ spec:
   commit and ownership-index digest (`published`). `mode: observe` additionally records Argo CD acceptance and
   health observations (M5), per the roadmap's health evidence section. Direct
   application through Nyl is not a mode in the initial scope.
+
+**Teardown.** A publication unit supports teardown when its target is
+configured so that removing the manifests removes the workloads:
+
+1. The unit publishes an empty tree for the target's prefix. The removal commit
+   is the teardown's `published` evidence.
+2. Argo CD syncs the catalog Application, which prunes the workload
+   Applications; their finalizers delete the workloads, and owned Namespaces
+   are deleted according to namespace policy.
+3. In `mode: observe`, the unit waits within its `timeout` until the target's
+   Applications are gone and records the teardown as observed complete;
+   Applications that remain make the teardown uncertain, and `status` names
+   them. In `mode: publish`, teardown ends at step 1 and reports that deletion
+   was not observed.
+
+Teardown readiness is checked statically from the target's effective settings:
+
+| Requirement | Setting | If unmet |
+| --- | --- | --- |
+| The catalog syncs on its own | catalog `syncPolicy.automated` enabled | Removal waits for a manual catalog sync |
+| The catalog may prune workload Applications | their prune policy is `Automatic`, not `Confirm` or `Retain` | Applications stay until a prune is confirmed, or forever |
+| Deleting an Application deletes its workloads | `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Workloads keep running without an Application |
+| Owned Namespaces are deleted | namespace `deletePolicy` is not `Retain` | Empty Namespaces remain |
+| The catalog Application itself has an owner | for example a parent Application over a shared preview branch | The catalog Application remains |
+
+The first three requirements decide whether teardown can succeed; the last two
+leave remnants. Nyl reports unmet requirements where they matter:
+
+- `nyl plan` and `nyl reconcile` warn for every `KubernetesPublication` whose
+  `deletionPolicy` is `Teardown`, including every unit of a template instance,
+  naming each unmet requirement and the setting that fixes it.
+- `nyl state init --template` warns when the template contains publication
+  units that are not teardown-ready, because instances are always torn down.
+- `nyl get units -e <env> -o wide` and `nyl status` show teardown readiness per
+  publication unit (`ready`, or `incomplete: <reasons>`).
+- `nyl teardown` and `nyl state delete` run a preflight listing what would
+  remain. When one of the first three requirements is unmet they refuse unless
+  given `--allow-incomplete`; the teardown is then recorded with a condition
+  listing what may remain, so state never claims a clean teardown that did not
+  happen.
+- `nyl validate` does not check teardown readiness, because it cannot know
+  whether a target will ever be torn down.
+
+## Environment templates and previews
+
+A preview environment is an environment whose definition lives in state
+instead of source. Source holds only an EnvironmentTemplate describing what
+such an environment looks like; each instance is created from it with
+parameters.
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata:
+  name: preview
+spec:
+  parameters:
+    - {name: pr, type: integer}
+  unitSelector:
+    matchLabels: {preview: 'true'}
+  values:
+    stateKey: 'previews/pr-{{ params.pr }}'
+    hostname: 'pr-{{ params.pr }}.preview.example.com'
+  state:
+    repositoryRef: {name: platform-state}
+    desiredRef: nyl/previews
+    observedRef: nyl/previews
+    path: '{{ environment.name }}'       # all instances share one ref
+  allowUnprotectedSource: true           # instances run from pull request branches
+  deletionPolicy: Teardown               # forced for every unit of an instance
+  allowTeardown: true                    # omission teardown without --allow-teardown
+  ttl: 7d
+  maxInstances: 20
+```
+
+The template has the Environment's fields plus `parameters` (typed like Release
+inputs and exposed as `params`), `deletionPolicy`, `allowTeardown`, `ttl`, and
+`maxInstances`. It knows nothing about Kubernetes; a preview's cluster and
+publication come from `KubernetesPublication` units with inline targets.
+
+### Instances
+
+Instances use the ordinary commands:
+
+```bash
+nyl state init -e pr-123 --template preview --param pr=123   # create or update an instance
+nyl reconcile -e pr-123
+nyl get units -e pr-123 / nyl status -e pr-123
+nyl teardown -e pr-123 --all                                 # tear down every unit
+nyl state delete -e pr-123                                   # remove the instance's state
+nyl get environments                                         # declared environments and instances
+```
+
+- `nyl state init --template` writes the instance's `state.yaml` with the
+  template name, parameters, and expiry. Run again for an existing instance, it
+  updates the parameters; the next reconcile applies them. Afterwards the
+  instance behaves like a declared environment for every command.
+- Instances are discovered by listing the template's state location, so no
+  central index exists.
+- `nyl teardown -e <env> --all` tears down every unit, dependents first. It is
+  generic and also decommissions declared environments.
+- `nyl state delete -e <env>` removes an instance's state: its directory in a
+  shared ref, or its refs. It works only for template instances whose units
+  have no incarnation left; `--teardown` runs `teardown --all` first. History
+  keeps the removed state.
+- An instance's units read shared infrastructure from declared environments
+  with a cross-environment reference, such as
+  `fromUnit: {environment: dev, unit: network, output: vpcId}`. It is
+  read-only, allowed only from template instances to declared environments,
+  and blocks like any reference when the producer's receipt is not current.
+- Instances cannot be a PromotionPath source; previews build and test, and
+  promotion starts from declared environments.
+
+### Template changes
+
+An instance renders its template and units at its own source commit S,
+typically the pull request's head, so a preview always shows what that pull
+request would deploy.
+
+- A template change on the default branch reaches an instance when the pull
+  request picks it up and CI reconciles the new head. Changed values, units,
+  or inline targets change execution keys, so exactly the affected units run
+  again; a unit removed from the template is torn down, without
+  `--allow-teardown` when the template sets `allowTeardown`.
+- `nyl reconcile --template preview` reconciles every instance, each at its own
+  recorded source commit: after a Nyl upgrade, a driver behavior-version
+  change, or new evidence in shared infrastructure. It never renders an
+  instance's units with a template from another commit, because that
+  combination was never reviewed together; pulling the default branch into
+  every pull request remains a pipeline choice.
+
+### Expiry
+
+Nyl has no daemon, so expiry works through ordinary CI runs, and a continuous
+runner (M7) could add timely enforcement later:
+
+- `state.yaml` records `expiresAt`. Each successful `reconcile` of an instance
+  moves it to now plus `ttl`, so an active pull request keeps its preview.
+- `reconcile` refuses an expired instance unless given `--renew`; `status` and
+  `get environments` show it as expired, so a forgotten instance stops being
+  updated.
+- A scheduled job runs `nyl state delete --expired --teardown [--template
+  preview]` to remove expired instances.
+- At `maxInstances`, `state init --template` first removes expired instances of
+  that template; if none are expired, it refuses.
+
+A typical pipeline runs `state init --template` and `reconcile` when a pull
+request opens or updates, `state delete --teardown` when it closes, and the
+expiry job on a schedule.
 
 ## Artifacts
 
@@ -923,10 +1102,11 @@ spec:
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | One transition commit per state ref |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
-| `state init` | Create state at the configured location; `--fresh` starts over deliberately | `state.yaml` on each ref |
+| `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
+| `state delete` | Remove a template instance's state after all its units are torn down; `--teardown`, `--expired` | One commit removing the instance's state |
 | `state copy` | Copy state history from another location | Copied history plus `state.yaml` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
@@ -991,7 +1171,8 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--local`, `--concurrency`, and `--output json` for versioned machine results on
+`--allow-teardown`, `--allow-incomplete`, `--renew`, `--template`, `--local`,
+`--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
@@ -1064,5 +1245,6 @@ then receives a new uid.
 | Question | Needed by |
 | --- | --- |
 | Approver lookup for CI systems other than GitHub | M3 |
+| Creating and removing an inline target's catalog Application when no parent Application owns it | M5 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
