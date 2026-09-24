@@ -307,19 +307,36 @@ in two phases, both through Git:
    are preserved, as in every reconciliation.
 
 `teardownWait` decides when phase 1 counts as complete. The same point gates
-phase 2 and the teardown of every unit the publication depends on, such as the
-IAM roles, subnets, or databases its workloads use:
+phase 2 and the teardown of the units the publication depends on, such as the
+IAM roles, subnets, or databases its workloads use, and through the reverse
+dependency order the units those depend on in turn. Units with no dependency
+path to the publication are not held back by its wait (see
+[Deletion](#deletion)):
 
 | Strategy | Phase 1 completes when | Default for |
 | --- | --- | --- |
-| `observe` | Argo CD no longer reports any of the target's workload Applications, within the unit's `timeout`; Applications that remain make the teardown uncertain, and `status` names them | `mode: observe` |
+| `observe` | Argo CD no longer reports any of the target's workload Applications, within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the error, such as missing credentials for the Argo CD cluster) | `mode: observe` |
 | `delay` | `duration` has passed since the phase 1 commit, such as `{strategy: delay, duration: 10m}`; the teardown is recorded as not observed | |
 | `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | `mode: publish` |
 
 `observe` needs read access to the Argo CD cluster, as `mode: observe` does.
-`--allow-incomplete` skips the wait: phase 2 and the dependencies' teardown
-proceed at once, and the teardown is recorded with a condition saying removal
-was not confirmed.
+Two escape hatches end any wait, whatever the strategy, once phase 1 is
+published and the wait is pending or uncertain. Both are needed because a
+`deleting` unit is torn down from its stored desired document, so changing
+`teardownWait` in source cannot rescue it:
+
+- `nyl teardown -e <env> --unit <u> --confirm-removed [--reason <text>]` is
+  the operator's assertion that the workloads are gone, for example after an
+  `observation-failed` condition and a manual check. It clears the condition,
+  runs phase 2, and lets the dependencies' teardown proceed. The transition
+  commit records who confirmed (`Nyl-Requested-By`), the reason, and that
+  completion was confirmed by an operator rather than observed.
+- `--allow-incomplete` proceeds without any claim: phase 2 and the
+  dependencies' teardown run at once, and the teardown is recorded with a
+  condition saying removal was not confirmed.
+
+`status` suggests both for an uncertain wait: fix the observer configuration
+and retry, or confirm after checking by hand.
 
 Teardown readiness is checked statically from the target's effective settings:
 
@@ -983,9 +1000,13 @@ lifecycle:
   support teardown and to `Retain` for kinds that do not, such as `OciImage`
   and a `Command` without a teardown step.
 - **Teardown.** The driver's teardown runs from the desired file's spec, with
-  the driver's teardown recovery policy. Among deleting units, units are torn
-  down before the units they depended on; units a `KubernetesPublication`
-  depends on also wait for its `teardownWait`. Teardown caused by omission
+  the driver's teardown recovery policy. Teardown follows the reverse of
+  creation order: a unit is torn down only after every deleting unit that
+  depends on it, so consumers go first and producers follow once nothing uses
+  them. A `KubernetesPublication` counts as torn down only once its
+  `teardownWait` completes, so the units it depends on, and transitively
+  theirs, wait for it. Units with no dependency path to a waiting unit are
+  torn down in the same run without waiting. Teardown caused by omission
   requires `--allow-teardown` on `reconcile`; without it the unit is
   `pending-teardown` and the run exits 2, so an unintended omission, such as a
   selector typo, destroys nothing, and fixing it returns the unit to `active`
@@ -1342,7 +1363,7 @@ spec:
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` completes a publication's `manual` teardown wait | One transition commit per state ref |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
