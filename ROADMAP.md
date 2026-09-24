@@ -216,7 +216,8 @@ spec:
   state to the deploy branch. `publish-tree` reads the file at the branch head it
   builds on and pushes with a compare-and-swap, so the published commit holds
   the state and the manifests rendered from it, and the index records the state
-  digest. The file must stay outside Argo CD-synced directories. With `carry`,
+  digest. The path is relative to the target's publication prefix and must stay
+  outside Argo CD-synced directories. With `carry`,
   the state file is instead produced uncommitted in the working tree and
   written by `publish-tree` itself, alongside the manifests derived from it.
 - Rendering validates bound values against declared types and fails on an
@@ -349,7 +350,7 @@ metadata: {name: dev-to-staging}
 spec:
   from: {environment: dev}
   to: {environment: staging}
-  evidence: healthy            # publication | accepted | healthy, per driver
+  evidence: healthy            # published | accepted | healthy
   changeGate: pullRequest      # or: none
   values:
     webImage:
@@ -374,19 +375,39 @@ inputs:
 - `select` reads either a source unit's **resolved input** from its desired unit
   (what the source environment actually ran, such as the deployed image digest
   or the applied Terraform source commit) or its recorded **output**.
-- All values of one promotion come from one consistent source snapshot: a single
-  source desired revision and a single observed revision. The default is the
-  newest desired revision at which every selected unit has a matching receipt at
-  the required evidence level; `--from-revision` selects an exact one. Values
-  from different source revisions were never run together and are not combined.
-- Evidence levels are those the source driver records in receipts. For the
-  Kubernetes publication unit, publication alone does not prove a deployment;
-  promotion from it normally requires acceptance or health evidence. Drift
-  verification writes no receipt and is therefore not a promotion evidence level.
+- Evidence levels are one list for every source:
+  - `published`: the source produced the value, as a receipt or, for a target
+    source, a publication commit.
+  - `accepted`: Argo CD's last successful sync of each covered Application is
+    at a revision whose Application directory tree matches the publication that
+    carries the value.
+  - `healthy`: accepted, and each covered Application is `Healthy`.
+
+  `accepted` and `healthy` are defined by Argo CD for Kubernetes publications.
+  Units without a deployment observation, such as Terraform, image builds, and
+  commands, satisfy every level with a current receipt, and the revision such a
+  unit "runs" is that of its current receipt; a driver may record stronger
+  evidence, such as post-apply checks, in its receipt. Drift verification
+  writes no receipt and is not an evidence level.
+- One rule selects values: promote, per value, the newest source revision whose
+  evidence proves the required level. At `accepted` and `healthy`, that is the
+  revision each value's consumer runs now, so `promote` first takes a fresh
+  observation of the covered Applications. The observation is always stored in
+  the PromotionRecord; environment sources also record it in observed state.
+- All values of one promotion come from one consistent source state. At
+  `published`, that is a single source revision: the newest at which every
+  selected unit has a matching receipt or, for a target source, the newest
+  publication commit; `--from-revision` selects an exact one. At `accepted` and
+  `healthy`, `--from-revision` is rejected, and the state is what the source
+  runs at the moment of the observation: each
+  value comes from the revision its own consuming Application or unit runs, so
+  values proven together in the source are promoted together even when manual
+  syncs left Applications at different revisions.
 - `nyl orchestrate promote --path dev-to-staging [--value …]` writes a
-  PromotionRecord into the target environment's desired state: each value, its
-  selector, the source unit's identity and incarnation, both pinned source
-  revisions, and the receipt digest. With `changeGate: pullRequest` it opens a
+  PromotionRecord into the target environment's desired state: per value, its
+  selector, the source unit's identity and incarnation, the source revision it
+  came from, and its receipt or input digest; plus the observation that proved
+  the set at `accepted` or `healthy`. With `changeGate: pullRequest` it opens a
   reviewable change instead.
 - Promoting a path moves all of its values together by default. Selecting a
   subset is explicit and leaves the other values at their previously recorded
@@ -419,26 +440,32 @@ spec:
       select: {input: platform/web/image}   # <group>/<release>/<input>
 ```
 
-- A target source reads one publication commit of that target: the newest by
-  default, or an exact one with `--from-revision`. All values come from that
-  commit, which already contains the manifests rendered from them.
+- A target's publication commits are the commits that change
+  `<prefix>/_nyl/index.json`. Commits by other targets on a shared branch and
+  external state write-backs are never value sources.
+- At `published`, a target source reads one publication commit: the newest by
+  default, or an exact one with `--from-revision`. That commit already contains
+  the manifests rendered from the values. At `accepted` and `healthy`, each
+  value comes from the publication its consuming Application runs, as described
+  under health evidence.
 - The ownership index stores input digests, not values. Promotion recovers each
   value from its recorded provenance: the carried or base-commit state file, the
   locked `fromGit` blob, or the binding at the recorded source commit. It then
   verifies the value against the recorded `@input` digest. A publication made
   from a dirty source worktree is not a promotion source.
-- Recorded evidence for a target source is `published`. `accepted` and
-  `healthy` are checked live when promoting, as described under health
-  evidence below; a non-orchestrated target records no observations of its own.
-- The PromotionRecord adds the source target, publication repository, branch,
-  and commit, and the input digest to its lineage.
+- A non-orchestrated target records no observations of its own, so `accepted`
+  and `healthy` come from the fresh observation taken when promoting.
+- The PromotionRecord adds, per value, the source target, publication
+  repository, branch, and commit, and the input digest to its lineage, plus the
+  observation that proved the set.
 - `to` is always an environment, because the PromotionRecord lives in that
   environment's desired state.
 
 **Promotion without orchestration.** A target that belongs to no environment
 promotes through a locked `fromGit` binding to the source target's published
 state instead: `nyl update source-locks --target production` moves the lock to
-the newest source publication, and the pull request that commits the lock is the
+the newest source publication (with `--require healthy`, to the publication the
+consuming source Application runs), and the pull request that commits the lock is the
 review. The two routes coexist:
 
 | | Locked `fromGit` (M2) | PromotionPath (M6) |
@@ -446,41 +473,56 @@ review. The two routes coexist:
 | Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a path and value |
 | Promote with | `nyl update source-locks --target …`, then a pull request | `nyl orchestrate promote --path …` |
 | Health gate | `--require healthy` on the lock update | `evidence: healthy` on the path |
-| Record | The lock in source | A PromotionRecord in target desired state |
+| Record | The lock in source, with an `observed` block under `--require healthy` | A PromotionRecord in target desired state |
 | Adds | — | Evidence gates, atomic multi-value promotion, lineage |
 
 ### Health evidence
 
-Promoting only what is healthy in the source requires observing Argo CD. Each
-workload Application already reports its synced revision, sync status, and
-health; Nyl knows the Applications it generates for a target, their
-ArgoCDInstance, and its Cluster.
+Promoting only what is healthy in the source requires observing Argo CD. Nyl
+knows the Applications it generates for a target, their ArgoCDInstance, and its
+Cluster.
 
 - **Observer.** Nyl reads the target's generated Applications from the Argo CD
-  control-plane Cluster through its local context. `accepted` means synced;
-  `healthy` means synced and `Healthy`. Health checks need credentials for that
-  Cluster, which publication does not.
-- **Revision matching.** Argo CD reports the branch commit it synced. When
-  targets share a publication branch, other targets' commits change that
-  commit ID without changing this target's files. Nyl therefore compares the
-  Git tree of each Application's source directory at the synced revision with
-  the tree at the candidate publication commit. A different tree means the
-  candidate is not what runs, so it is not proven healthy.
+  control-plane Cluster through its local context. Health checks need
+  credentials for that Cluster, which publication does not.
+- **Running revision.** Argo CD's Synced/OutOfSync status compares against the
+  branch head, so an Application still running an older commit reports
+  OutOfSync as soon as a newer publication changes its files. Nyl ignores it.
+  The running revision is that of the last successful sync (its sync result, or
+  the newest deployment history entry); health is Argo CD's live health.
+- **Matching a publication.** The running revision R may be another target's
+  commit or a state write-back on a shared branch. For each covered
+  Application, Nyl finds the source target's publication commits (commits that
+  change `<prefix>/_nyl/index.json`) that are R or an ancestor of it, and whose
+  Application directory tree and recorded inputs for that Release equal those
+  at R. Values are always recovered from a matching publication commit, never
+  from R.
+- **Recorded commit.** The running publication is what gets promoted. Among the
+  publication commits equivalent to it, the PromotionRecord (or the lock's
+  `commit`) names the oldest in the unbroken run of matching commits ending at
+  R: the commit that introduced what runs now. A change that was later reverted
+  starts a new run, so a tree that went A → B → A records the second A. When no Application changed between the publications that
+  different Applications run, every value names the same commit, so the audit
+  trail stays a single commit; otherwise each value names the commit that last
+  changed its own Application.
 - **Coverage.** By default, the Applications whose Releases produced the
-  promoted values must be healthy. A PromotionPath may list Applications
-  explicitly instead.
-- **Evidence at promotion.** Health is knowable only for what runs now.
-  `nyl orchestrate promote` with `evidence: healthy`, and
-  `nyl update source-locks --require healthy`, check the Applications live and
-  promote the publication commit that is currently synced and healthy, which
-  may be older than the newest publication. The observation (time,
-  Application, synced revision, sync status, health) is stored in the
-  PromotionRecord or reported alongside the lock update.
-- **Recorded observations.** Promoting an older healthy commit or requiring a
-  minimum healthy duration needs observations over time, because Argo CD does
-  not reliably report how long an Application has been healthy. The
-  publication unit's observe mode records them in an environment's observed
-  state; periodic observation is part of continuous operation.
+  promoted values must be accepted or healthy. A PromotionPath may add
+  Applications that must be healthy at whatever publication they run, without
+  contributing values.
+- **Manual syncs.** Applications synced to different publications do not
+  block promotion. Promotion blocks only when a covered Application runs a
+  revision that matches no source publication, or does not meet the level.
+- **Decision evidence is always recorded.** The observation behind every
+  promotion (time, Application, running revision, health) is stored in the
+  PromotionRecord, additionally in observed state for environment sources, and
+  in the lock's `observed` block for the lock route.
+- **Observation history.** One observation proves what runs now. Promoting a
+  commit that no longer runs, requiring a minimum healthy duration, and
+  guarding against Applications that flap between healthy and unhealthy need
+  observations over time; Argo CD does not reliably report how long an
+  Application has been healthy. The publication unit's observe mode records
+  them in an environment's observed state; periodic observation is part of
+  continuous operation.
 - **Meaning.** Argo CD health means Kubernetes considers the resources ready,
   such as a completed Deployment rollout. It does not prove the application
   works. Application-level checks, such as HTTP probes or smoke tests, can be
@@ -676,10 +718,10 @@ configuration; an image build records a digest; unchanged inputs plan no change.
 - [ ] Add the Kubernetes publication unit over `render-tree`/`publish-tree`.
 - [ ] Resolve `fromUnit` Release input bindings into an explicit pinned input
   snapshot for rendering.
-- [ ] Distinguish publication, acceptance, and health evidence for dependents.
+- [ ] Distinguish `published`, `accepted`, and `healthy` evidence for dependents.
 - [ ] Add the publication unit's observe mode: read generated Argo CD
-  Applications, match them to publication commits by source-directory tree, and
-  record acceptance and health observations.
+  Applications' last successful sync and health, match them to publication
+  commits by Application directory tree, and record the observations.
 - [ ] Document an end-to-end local/CI example.
 
 **Exit criterion:** one reconcile builds an image, applies Terraform, and
@@ -691,11 +733,12 @@ with static inputs in a target that does not use orchestration.
 - [ ] Implement PromotionPath, PromotionRecord, and `nyl orchestrate promote`
   with evidence checks and an optional pull-request change gate.
 - [ ] Promote an image digest and a Terraform source commit from dev to staging
-  across differently named units and inputs, from one consistent snapshot.
+  across differently named units and inputs, from one consistent source state.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
-- [ ] Gate promotion on live health for both PromotionPath sources and add
-  `nyl update source-locks --require healthy`, recording the observation.
+- [ ] Gate promotion on a fresh Argo CD observation for both PromotionPath
+  sources, sourcing each value from the publication its Application runs, and
+  add `nyl update source-locks --require healthy` with an `observed` block.
 - [ ] Show promotion lineage in `status`.
 
 **Exit criterion:** staging runs exactly the image digest and Terraform source
@@ -707,8 +750,8 @@ promotion.
 - [ ] Evaluate a scheduled or long-running runner, observation cadence, and
   drift-repair policy using M3–M6 evidence.
 - [ ] Decide which command-unit uses warrant typed drivers.
-- [ ] Support minimum healthy durations and promotion of older healthy commits
-  from recorded observations.
+- [ ] Support minimum healthy durations, flapping guards, and promotion of
+  commits that no longer run, from recorded observations.
 - [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 

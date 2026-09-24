@@ -177,6 +177,49 @@ Each binding sets exactly one of these fields:
   in it to the same new commit. Bindings that share a current commit but name
   different revisions are addressed individually by their position in the
   document, never by matching the commit text alone.
+- `--require healthy` follows the per-value promotion rule in the roadmap's
+  health evidence section, so locks of one group may move to different
+  commits. Each lock is one value:
+  - The file it reads must lie inside one source target's prefix on that
+    branch. A lock that reads a file outside every target prefix is an error
+    that suggests dropping `--require healthy` for it.
+  - Its covered Applications are the source target's Releases whose bindings
+    read the same file and pointer.
+  - The lock moves to a publication commit of the source target at which the
+    value equals the value each covered Application runs; among equivalent
+    commits it names the oldest, per the recorded-commit rule. If covered
+    Applications run different values of the same file and pointer, the lock
+    does not move and the updater reports the conflict.
+  - Without `--require healthy`, a group moves to one new commit as described
+    above.
+- With `--require healthy`, the updater writes the observation that justified
+  the move next to each lock, so the pull request commits the evidence together
+  with the lock:
+
+  ```yaml
+  fromGit:
+    revision: deploy/dev
+    commit: 9c1e…
+    path: dev/state/images.json
+    observed:                     # written by source-locks, never authored
+      at: 2026-09-24T10:15:00Z
+      applications:
+        - name: web
+          revision: 4b7d…         # last successful Argo CD sync
+          health: Healthy
+  ```
+
+  - `observed` is a tool-written `fromGit` field in the binding schema; authors
+    never write it. It contributes neither to the `@input` digest nor to the
+    render-cache key, so it never changes rendered output. Like any edit, it
+    changes the DeploymentTarget file and therefore its source provenance.
+  - A lock with an `observed` block is health-gated: it deliberately lags the
+    branch head. Plain `--check` does not compare it with the head; it verifies
+    only that the observed publication commit equals `commit`, and needs no
+    cluster access.
+  - `--check --require healthy` takes a fresh observation, which needs Argo CD
+    credentials, and reports a lock as stale when a newer publication is
+    running and healthy, or when a lock without `observed` would move.
 
 `fromPublication`:
 
@@ -193,9 +236,9 @@ releaseInputs:
         pointer: /image
 ```
 
-- The path is relative to the root of the target's publication repository at
-  its publication revision. It is normalized; absolute paths, parent traversal,
-  and symlinks are rejected.
+- The path is relative to the target's publication path prefix, the same root
+  the ownership index uses for its file entries. It is normalized; absolute
+  paths, parent traversal, paths outside the prefix, and symlinks are rejected.
 - **Base commit.** `publish-tree` already checks out the publication branch
   head B, commits the rendered tree on top of B, and pushes with a
   compare-and-swap that expects B. The state file is read at B. The published
@@ -207,12 +250,12 @@ releaseInputs:
   and `publish-tree` creates no commit for an unchanged tree. A CI job
   triggered by pushes to the deploy branch therefore stops after Nyl's own
   publication.
-- **Placement.** Without `carry`, the path must not be a file owned by any
-  target on that publication revision; with `carry`, only this target may own
-  it. It must always lie outside every directory synced by a
-  generated Argo CD Application: workload Release directories, `_nyl`, and the
-  catalog. Otherwise Argo CD would try to apply the state file as a manifest.
-  Nyl validates both. Reconciliation already preserves files it does not own.
+- **Placement.** Without `carry`, the path must not be a file owned by this
+  target; with `carry`, this target owns it. Either way it lies inside the
+  target's prefix but outside every directory synced by a generated Argo CD
+  Application: workload Release directories, `_nyl`, and the catalog.
+  Otherwise Argo CD would try to apply the state file as a manifest. Nyl
+  validates both. Reconciliation already preserves files it does not own.
 - **Bootstrap.** When the publication branch or the file does not exist, the
   input is treated as unbound: its Release default applies, or rendering fails
   as for any required input. A file that exists but does not resolve `pointer`
@@ -221,8 +264,9 @@ releaseInputs:
   branch and read the file at its current head. They report which commit they
   used, because their output is reproducible only together with it. `--offline`
   uses the cached head and says so.
-- **Scope.** Only the target's own publication branch can be read. Another
-  target's branch or another repository uses `fromGit`.
+- **Scope.** Only the target's own prefix on its own publication branch can be
+  read. Another target's prefix or branch, or another repository, uses
+  `fromGit`.
 - **Review.** State changes arrive without a source-repository review. Use
   `fromGit` locks or promotion where review is required.
 - **Concurrent writers.** Other writers must also push with a compare-and-swap.
@@ -278,8 +322,12 @@ target's publication branch can feed another target:
   by moving the lock, and the pull request that commits it is the review. The
   targets may share a publication branch under different prefixes or publish to
   different branches; the lock makes promotion explicit either way. A shared
-  branch cannot be followed with `fromPublication`, because the state path is
-  owned by the source target.
+  branch cannot be followed with `fromPublication`, because the state path lies
+  in the source target's prefix.
+- `nyl update source-locks --target <name> --require healthy` moves a lock group
+  only to a source publication that is running and healthy, as described in
+  the roadmap's health evidence section, and writes the observation next to
+  the lock (see `fromGit`).
 - With orchestration, a PromotionPath with `from: {target: <name>}` selects the
   source target's published inputs; see the roadmap's promotion section.
 
@@ -287,12 +335,12 @@ Example: dev carries image IDs from its CI build, and production promotes them
 by lock.
 
 ```yaml
-# DeploymentTarget dev
+# DeploymentTarget dev, publication prefix `dev`
 releaseInputs:
   platform/web:
     image:
       fromPublication:
-        path: dev/state/images.json
+        path: state/images.json    # relative to the prefix: dev/state/images.json
         pointer: /web
         carry: build/images.json
 ---
@@ -304,7 +352,7 @@ releaseInputs:
         repository: {repoURL: https://git.example.com/deploy.git}
         revision: deploy/dev
         commit: 9c1e…              # moved by `nyl update source-locks --target production`
-        path: dev/state/images.json
+        path: dev/state/images.json  # fromGit paths are repository-relative
         pointer: /web
 ```
 
@@ -370,6 +418,7 @@ the same way as a local group: no opt-in field exists.
     value read from the base commit, which is the published commit's parent
   - `@carried/<path>` → `sha256:<blob digest>` for each `fromPublication` value
     taken from a `carry` file in this run
+  - Both use the prefix-relative path, like the index's `files` entries.
 - Keys starting with `@` are not project paths, following the existing `@remote`
   convention, so project-file hashing never interprets them.
 - Inputs are not a secret channel. Their digests and the rendered manifests are
