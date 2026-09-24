@@ -789,7 +789,8 @@ byte-identical output to the previous release.
 
 **Exit criterion:** two dependent command units reconcile locally and in CI with
 identical results; repeat execution is a no-op; interruption has a demonstrated
-recovery path.
+recovery path; the M3 part of the
+[reference scenarios](design/reference-scenarios.md) passes.
 
 ### M4 — Container image and Terraform units
 
@@ -803,7 +804,8 @@ recovery path.
 - [ ] Demonstrate Terraform-to-Terraform output references.
 
 **Exit criterion:** a network configuration's outputs feed a dependent
-configuration; an image build records a digest; unchanged inputs plan no change.
+configuration; an image build records a digest; unchanged inputs plan no change;
+the M4 part of the reference scenarios passes with the real tools.
 
 ### M5 — Images and Terraform outputs into Kubernetes releases
 
@@ -825,7 +827,8 @@ configuration; an image build records a digest; unchanged inputs plan no change.
 
 **Exit criterion:** one reconcile builds an image, applies Terraform, and
 publishes Kubernetes manifests consuming both; the same Releases still render
-with static inputs in a target that does not use orchestration.
+with static inputs in a target that does not use orchestration; all three
+reference scenarios, including preview closure and expiry, pass in both tiers.
 
 ### M6 — Promotion paths
 
@@ -874,6 +877,9 @@ reasons to delay independent work.
 
 - [Implementation architecture](design/implementation-architecture.md): crate
   boundaries, pure decisions, rule ownership, and scenario tests for M2–M7
+- [Reference scenarios](design/reference-scenarios.md): end-to-end acceptance
+  scenarios for M3–M5, runnable without hosted repositories, CI, or pull
+  requests
 
 - [Nyl rendering session and bundle](nyl/src/render/session.rs)
 - [Nyl components](nyl/src/components/mod.rs)

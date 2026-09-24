@@ -91,6 +91,10 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   `StateStore`, fake drivers, and a fake clock, for example
   `tests/scenarios/effects_without_receipt.yaml`. A contract change updates
   its scenario in the same change.
+- The [reference scenarios](reference-scenarios.md) run whole workflows, from
+  Git operations and clock changes to `nyl` invocations, against local bare
+  repositories: in-process with fake tool drivers in every CI run, and through
+  the real binary and tools where those are installed.
 - Property tests (proptest) cover invariants: no unit executes with non-current
   provenance; a held unit's desired document never changes; replaying
   transition commits reproduces the state; a transition commit touches only its
