@@ -872,8 +872,55 @@ spec:
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so removing a hold is `resume` and
-tearing down is `teardown`. `nyl get environments`, `nyl get units`, and `nyl
-get promotion-paths` list declarations; `nyl status` shows state.
+tearing down is `teardown`.
+
+### Inspection
+
+`nyl get` inspects both declarations and state. Without `-e`, it reads source;
+with `-e <env>`, it reads that environment's state.
+
+```bash
+nyl get units                      # declarations: kind, labels, environments selecting each
+nyl get units -e dev               # state: joins desired and observed
+NAME        KIND                   STATE     RECEIPT   LAST RUN
+network     OpenTofu               current   current   0b8f… 10:07
+database    OpenTofu               blocked   stale     0b8f… 10:07   network has no current receipt
+web-image   OciImage               failed    current   0b8f… 10:05   tool-error (retryable)
+kubernetes  KubernetesPublication  held      —         —
+
+nyl get unit database -e dev -o yaml             # exact DesiredUnit and ObservedUnit documents
+nyl get unit database -e dev -o yaml --observed  # only one of them (--desired, --observed)
+nyl get unit database -e dev --pointer /receipt/outputs/host
+
+nyl get artifacts -e dev
+UNIT        NAME   KIND            SUMMARY
+web-image   image  ContainerImage  registry.example.com/web@sha256:4f0c…
+kubernetes  tree   PublishedTree   deploy/dev@9c1e…
+
+nyl get artifact web-image/image -e dev -o yaml
+nyl get artifact web-image/image -e dev --pointer /spec/reference
+
+nyl get environments
+nyl get promotion-paths
+nyl get promotions -e staging      # PromotionRecords with each value's source and evidence
+```
+
+- Tables join desired and observed state for reading. `-o yaml` and `-o json`
+  return the exact persisted documents, never a synthesized merge.
+- `--pointer` prints one value selected by a JSON Pointer, for scripts. Reading
+  an artifact verifies its digest against the receipt first.
+- `--revision <commit>` reads state as of an earlier state commit; `--local`
+  reads a local run's state. Output formats: `table` (default), `wide`,
+  `yaml`, `json`, `name`.
+- `get` only reads: it needs read access to the state repository, never takes
+  the lease, and exits 0 whenever it can read the requested state.
+- `nyl create` and `nyl delete` stay source-only, for environments, units, and
+  promotion paths. Artifacts and state records have no `create` or `delete`:
+  drivers produce them, and state changes only through the operations above.
+- `nyl status -e <env>` remains the environment overview: the run holding the
+  lease and what it is executing, blockers, and suggested next actions. It
+  keeps the exit categories below, so CI can check whether everything is
+  reconciled.
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,

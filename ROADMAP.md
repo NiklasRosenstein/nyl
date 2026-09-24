@@ -647,9 +647,16 @@ nyl promote dev-to-staging
 nyl teardown -e dev --unit web-image [--hold]
 nyl resume -e dev --unit web-image
 nyl recover -e dev --unit seed --retry
-nyl get environments | units | promotion-paths
+nyl get units                        # declarations
+nyl get units -e dev                 # state of an environment
+nyl get artifact web-image/image -e dev --pointer /spec/reference
+nyl get promotions -e staging
 nyl delete unit web-image            # removes the declaration from source
 ```
+
+`nyl get` reads source without `-e` and an environment's state with it; `-o
+yaml` returns exact persisted documents and `--pointer` prints single values
+for scripts.
 
 `nyl release` (Kubernetes release history) and `nyl delete` (source editing)
 keep their meanings. `nyl create`, `nyl get`, and `nyl delete` gain
