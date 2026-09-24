@@ -645,23 +645,27 @@ nyl status -e dev
 nyl verify -e dev
 nyl promote dev-to-staging
 nyl teardown -e dev --unit web-image [--hold]
+nyl hold -e dev --unit web-image --reason "incident 4711"
 nyl resume -e dev --unit web-image
 nyl recover -e dev --unit seed --retry
 nyl get units                        # declarations
 nyl get units -e dev                 # state of an environment
-nyl get artifact web-image/image -e dev --pointer /spec/reference
+nyl get output network/vpcId -e dev
+nyl get artifact web-image/image -e dev --pointer /reference
 nyl get promotions -e staging
 nyl delete unit web-image            # removes the declaration from source
 ```
 
 `nyl get` reads source without `-e` and an environment's state with it; `-o
-yaml` returns exact persisted documents and `--pointer` prints single values
-for scripts.
+yaml` returns exact persisted documents, and `get output` and `get artifact
+--pointer` return single values that resolve exactly like `fromUnit`
+references, failing when those would.
 
 `nyl release` (Kubernetes release history) and `nyl delete` (source editing)
-keep their meanings. `nyl create`, `nyl get`, and `nyl delete` gain
-environments, units, and promotion paths; deleting a unit declaration is the
-GitOps way to remove it, handled by the next `reconcile` under its deletion
+keep their meanings. `nyl create` and `nyl delete` gain environments, units,
+and promotion paths; `nyl get` covers those declarations and, with `-e`, an
+environment's units, outputs, artifacts, and promotions. Deleting a unit
+declaration is the GitOps way to remove it, handled by the next `reconcile` under its deletion
 policy.
 
 | Operation | Contract |
@@ -671,7 +675,8 @@ policy.
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
 | verify | Observe external state and report drift without writing receipts |
 | promote | Record selected source values into target desired state, or open a change for review |
-| teardown / resume | Tear down a unit: complete a deletion, replace a selected unit, or hold it down; resume removes a hold |
+| teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
+| hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,

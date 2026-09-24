@@ -24,8 +24,10 @@ units never touches orchestration state.
 Every resource in a unit group is a unit; the group identifies the family and
 the kind selects the driver, as `components.k8s.nyl/v1` does for component
 invocations. Discovery follows Git visibility across the project, like the
-rendered GitOps resources. `nyl create`, `nyl get`, and `nyl delete` gain
-`environment`, `unit`, and `promotion-path` resources.
+rendered GitOps resources. `nyl create` and `nyl delete` gain `environment`,
+`unit`, and `promotion-path` resources; `nyl get` covers those declarations
+and, with `-e`, an environment's units, outputs, artifacts, and promotions
+(see [Inspection](#inspection)).
 
 ### Environment
 
@@ -578,7 +580,21 @@ lifecycle:
     reason: omission                 # omission | teardown | replace | kind-change
     intent: teardown                 # retain | teardown
     requested: {by: alice, at: 2026-09-24T12:00:00Z, reason: decommission}
-  # hold: {since: 2026-09-24T12:05:00Z, by: alice, reason: "incident 4711"}
+```
+
+A held unit's block looks like this:
+
+```yaml
+lifecycle:
+  state: held
+  hold:
+    since: 2026-09-24T12:05:00Z
+    by: alice
+    reason: "incident 4711"
+    pending:                         # newer source not applied while held
+      sourceCommit: 5a90…
+      executionKey: sha256:…
+      deletion: false                # true when the unit left the ownership set
 ```
 
 - **Omission.** A unit that leaves the ownership set (removed from source, for
@@ -608,17 +624,26 @@ lifecycle:
     blocked until the new receipt exists, then run with its outputs. This
     rebuilds corrupted resources or rotates something that can only be
     recreated.
-  - With `--hold`, the incarnation is torn down as above and the desired file
-    stays with `state: held` and a `hold` block, so `reconcile` does not create
-    the next incarnation; its dependents stay blocked. `nyl resume -e <env>
-    --unit <u>` removes the hold; the next `reconcile` then writes a new uid.
-- **Holds.** A hold is for incidents: it stops a broken unit from being
-  recreated or re-run while it is investigated, without a source change and
-  its review cycle. It suits units that can be recreated without losing data;
-  tearing down a database destroys its data. A hold is the only desired state
-  that does not come from source, and it is an explicit, recorded operator
-  action. Long-term removal belongs in source, through `enabled: false` or
-  removing the unit.
+  - With `--hold`, the incarnation is torn down and then held (see below):
+    the unit stays down with no incarnation, and its dependents stay blocked,
+    until `nyl resume`; the next `reconcile` then writes a new uid.
+- **Holds freeze a unit.** `nyl hold -e <env> --unit <u> [--reason <text>]`
+  stops reconciling any change to the unit without touching its resources:
+  - The desired file gets `state: held` and keeps the last executed desired
+    document. Resolution records newer source changes under `hold.pending`,
+    with their source commit and execution key, but does not apply them, and
+    `reconcile` never executes a held unit.
+  - The receipt stays current against the frozen document, so consumers keep
+    resolving from it; the frozen state is what actually runs.
+  - A held unit that leaves the ownership set is not deleted; it is reported
+    as held with a pending deletion.
+  - `nyl resume -e <env> --unit <u>` lifts the hold. The next `reconcile`
+    renders the unit from source again and applies whatever changed, including
+    a pending deletion.
+  - A hold is for incidents and investigations: stop reconciling a unit while
+    something is wrong, without a source change and its review cycle. It is
+    the only desired state that does not come from source, and it is an
+    explicit, recorded operator action. Long-term changes belong in source.
 - **Source removal and teardown.** `nyl delete unit <name>` edits source like
   the other `nyl delete` resources: it removes the declaration after checking
   that the remaining project is valid, which rejects removing a unit other
@@ -865,13 +890,14 @@ spec:
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | One transition commit per state ref |
-| `resume` | Remove a hold | One desired commit |
+| `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
+| `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately | `state.yaml` on each ref |
 | `state copy` | Copy state history from another location | Copied history plus `state.yaml` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
-history and `delete` by source editing, so removing a hold is `resume` and
+history and `delete` by source editing, so lifting a hold is `resume` and
 tearing down is `teardown`.
 
 ### Inspection
@@ -882,15 +908,16 @@ with `-e <env>`, it reads that environment's state.
 ```bash
 nyl get units                      # declarations: kind, labels, environments selecting each
 nyl get units -e dev               # state: joins desired and observed
-NAME        KIND                   STATE     RECEIPT   LAST RUN
-network     OpenTofu               current   current   0b8f… 10:07
-database    OpenTofu               blocked   stale     0b8f… 10:07   network has no current receipt
-web-image   OciImage               failed    current   0b8f… 10:05   tool-error (retryable)
-kubernetes  KubernetesPublication  held      —         —
+NAME        KIND                   STATE              RECEIPT   LAST RUN
+network     OpenTofu               current            current   0b8f… 10:07
+database    OpenTofu               awaiting-approval  stale     0b8f… 10:07   manual approval (bind: plan)
+web-image   OciImage               failed             stale     0b8f… 10:05   tool-error (retryable)
+kubernetes  KubernetesPublication  held               current   0a1d… 09:12   pending changes from 5a90…
 
 nyl get unit database -e dev -o yaml             # exact DesiredUnit and ObservedUnit documents
 nyl get unit database -e dev -o yaml --observed  # only one of them (--desired, --observed)
-nyl get unit database -e dev --pointer /receipt/outputs/host
+
+nyl get output network/vpcId -e dev              # resolves like {fromUnit: {unit: network, output: vpcId}}
 
 nyl get artifacts -e dev
 UNIT        NAME   KIND            SUMMARY
@@ -898,7 +925,7 @@ web-image   image  ContainerImage  registry.example.com/web@sha256:4f0c…
 kubernetes  tree   PublishedTree   deploy/dev@9c1e…
 
 nyl get artifact web-image/image -e dev -o yaml
-nyl get artifact web-image/image -e dev --pointer /spec/reference
+nyl get artifact web-image/image -e dev --pointer /reference   # pointer relative to spec, as in fromUnit
 
 nyl get environments
 nyl get promotion-paths
@@ -907,13 +934,19 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 - Tables join desired and observed state for reading. `-o yaml` and `-o json`
   return the exact persisted documents, never a synthesized merge.
-- `--pointer` prints one value selected by a JSON Pointer, for scripts. Reading
-  an artifact verifies its digest against the receipt first.
+- `nyl get output <unit>/<output>` and `nyl get artifact <unit>/<name>
+  --pointer …` return single values for scripts and resolve exactly like the
+  matching `fromUnit` reference: the same pointer base (inside the artifact's
+  `spec`), the same digest check, and the same freshness rule. When the
+  reference would not resolve (no current receipt, or a missing output,
+  artifact, or pointer target), they print nothing and exit 1. `--allow-stale`
+  prints the latest receipt's value with a warning instead.
 - `--revision <commit>` reads state as of an earlier state commit; `--local`
   reads a local run's state. Output formats: `table` (default), `wide`,
   `yaml`, `json`, `name`.
-- `get` only reads: it needs read access to the state repository, never takes
-  the lease, and exits 0 whenever it can read the requested state.
+- `get` only reads: it needs read access to the state repository and never
+  takes the lease. Document and table forms exit 0 whenever they can read the
+  requested state; value forms follow the rule above.
 - `nyl create` and `nyl delete` stay source-only, for environments, units, and
   promotion paths. Artifacts and state records have no `create` or `delete`:
   drivers produce them, and state changes only through the operations above.
