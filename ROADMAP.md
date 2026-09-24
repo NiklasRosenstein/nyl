@@ -349,8 +349,10 @@ resolved inside that checkout, so pinning the root configuration pins its local
 modules too; a module that needs independent versioning is a separate unit or a
 versioned remote module. The input fingerprint covers the selected bytes,
 including `.terraform.lock.hcl`, not the commit value, so re-pinning to
-identical inputs plans no change. A pinned commit must remain fetchable: require
-it to be reachable from a protected ref, or retain it with a Nyl-owned keep ref.
+identical inputs plans no change. A pinned commit must remain fetchable, so it
+must be reachable from a protected ref or its lock's own branch; run source
+commits must be reachable too, unless an environment opts into unprotected
+sources.
 
 ### Promotion paths (M6)
 
@@ -746,9 +748,9 @@ byte-identical output to the previous release.
 - [ ] Implement environments, YAML state files with published schemas,
   `nyl state init`/`copy`, leases and run checkpoints, and one transition
   commit per operation with a machine-readable summary.
-- [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`,
-  and `resume` for a dependency graph of command units with `fromUnit`
-  references, including `--local` runs.
+- [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
+  (including `--hold`), `hold`, and `resume` for a dependency graph of command
+  units with `fromUnit` references, including `--local` runs.
 - [ ] Implement approvals bound to the desired document, with recorded approval
   sources, and the common `env` credential admission.
 - [ ] Implement pinned source worktrees, reachability checks against protected

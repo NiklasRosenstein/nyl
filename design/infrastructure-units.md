@@ -62,10 +62,11 @@ to consumers when the registry holds it.
 
 ### Execution key
 
-The key covers the files in the context that the build can see (respecting
-`.dockerignore`), the Dockerfile, `target`, `platforms`, resolved `buildArgs`,
-`repository`, and `tags`. It excludes `builder` and `cache`, which change how an
-image is built but not what it contains.
+The key follows the core rule: the resolved spec without the common fields that
+do not affect what runs, plus the files in the context that the build can see
+(respecting `.dockerignore`) and the Dockerfile. `OciImage` declares `builder`
+and `cache` as fields that change how an image is built but not what it
+contains, so they are excluded as well.
 
 Base images referenced by tag (`FROM node:22`) can change without any change to
 the key, so a rebuild is not triggered by a new base image. Pin base images by
@@ -112,9 +113,15 @@ spec:
 ```
 
 `Terraform` runs the `terraform` binary and `OpenTofu` runs `tofu`. Everything
-else in this section applies to both. Changing a unit between the two kinds
-starts a new incarnation, as any kind change does; both converge against the
-same backend.
+else in this section applies to both.
+
+Switching a unit between the two kinds is a kind change and gets no special
+handling: the old incarnation is deleted under its deletion policy and the new
+kind starts a new incarnation. To switch without destroying anything, first set
+`deletionPolicy: Retain` and reconcile, then change the kind; the new
+incarnation converges against the same backend, after any state migration the
+tools require has been done by hand. A teardown caused by a kind change always
+requires `--allow-teardown`.
 
 ### Execution
 
@@ -128,10 +135,14 @@ same backend.
    below) and compare it with the approved digest. A mismatch ends the execution
    without effects, and the unit waits for a new approval.
 4. `apply -input=false <planfile>`.
-5. `output -json`. Each declared output must exist and match its type. An
-   output the tool marks sensitive must be declared `sensitive`; otherwise the
-   execution fails, so a secret can never be recorded by accident. Undeclared
-   outputs are ignored.
+5. `output -json`. Each declared output must exist and match its type.
+   Undeclared outputs are ignored, whether sensitive or not.
+
+Output sensitivity is checked before any effect: after step 2, the driver reads
+the plan's outputs, and a declared output that the tool marks sensitive but
+the unit does not declare `sensitive` fails the execution before `apply`. A
+secret can therefore never be recorded by accident, and the check never leaves
+changes applied without a receipt.
 
 A plan with no changes skips `apply` and records the receipt directly.
 
@@ -182,9 +193,11 @@ bound to it:
 
 ### Execution key
 
-The key covers the kind, the files matched by `files`, `backend`, resolved
-`variables`, `varFiles` and their contents, declared `outputs`, and `version`
-when set.
+The key follows the core rule: the kind, the resolved spec without the common
+fields that do not affect what runs (so `source`, `backend`, `variables`,
+`varFiles`, declared `outputs`, `version`, and the names in `env` all count),
+plus the files matched by `files` and the contents of `varFiles`. The source
+commit itself is excluded; the matched bytes stand for it.
 
 ### Lifecycle
 

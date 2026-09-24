@@ -17,7 +17,7 @@ units never touches orchestration state.
 | Resources | API group |
 | --- | --- |
 | Environment, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
-| Built-in unit kinds: `Command`, `Terraform`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
+| Built-in unit kinds: `Command`, `Terraform`, `OpenTofu`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
 | Artifact kinds: `ContainerImage`, `PublishedTree` | `artifacts.gitops.nyl/v1` (see [Artifacts](#artifacts)) |
 | Plugin unit and artifact kinds | The plugin's own groups, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
 
@@ -46,7 +46,8 @@ spec:
     repositoryRef: {name: platform-state}   # or inline `repository`
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
-  protectedRefs: [main, 'release/*']        # default: the source repository's default branch
+  protectedRefs: [main, 'release/*']        # default: each repository's default branch
+  allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
 ```
 
 - An Environment is static at discovery, like a DeploymentTarget.
@@ -62,8 +63,9 @@ spec:
   the source checkout's `origin` remote; CI should name a GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
   either way (see [State layout](#state-layout)).
-- `protectedRefs` lists the refs that pinned commits must be reachable from
-  (see [Pinned commits](#pinned-commits)).
+- `protectedRefs` lists the refs that pinned commits and run source commits
+  must be reachable from; `allowUnprotectedSource` relaxes that for run source
+  commits (see [Pinned commits](#pinned-commits)).
 
 ### Units
 
@@ -132,6 +134,8 @@ spec:
 - Changing a unit's `apiVersion` or `kind` under the same name ends the old
   incarnation: it is deleted under its deletion policy, and the new kind
   starts a new incarnation. A unit never inherits another kind's receipts.
+  A teardown caused by a kind change requires `--allow-teardown`, like one
+  caused by omission, so a kind change never destroys resources by accident.
 - An explicit teardown closes an incarnation even while the unit stays in the
   ownership set; the next incarnation receives a new uid (see
   [Deletion](#deletion)).
@@ -290,7 +294,7 @@ spec:                                      # rendered, references still as expre
   outputs: {host: {type: string}, port: {type: integer}}
   approval: {mode: manual, bind: plan}
 resolvedSpec:                              # references replaced by values
-  source: {path: infra/database}
+  source: {path: infra/database, commit: 3e7b…}
   variables: {vpc_id: vpc-0abc123}
   outputs: {host: {type: string}, port: {type: integer}}
   approval: {mode: manual, bind: plan}
@@ -305,7 +309,9 @@ readiness: {state: ready}
 ```
 
 - `sourceRevision` is S unless the unit's `source` field names a repository or
-  carries a promoted revision.
+  carries a promoted revision. Resolution always writes it into
+  `resolvedSpec.source.commit`, so a PromotionPath selector on `/source` carries
+  the path together with the exact commit the source environment executed.
 - `resolvedSpec` is what PromotionPath selectors such as `input: /source` or
   `input: /releases/platform~1web/image` point into.
 - `provenance` records, per reference, the receipt or PromotionRecord the value
@@ -313,8 +319,11 @@ readiness: {state: ready}
 - `executionKey` is a digest of the unit's `apiVersion`, `kind`, and driver
   behavior version, `resolvedSpec` without the common fields that do not affect
   what runs (`enabled`, `dependsOn`, `approval`, `deletionPolicy`, `timeout`),
-  the selected source bytes, and any command-unit fingerprint output. It
-  excludes the source commit ID, provenance, readiness, lifecycle, Nyl's
+  the selected source bytes, and any command-unit fingerprint output. Kinds may
+  declare further fields that change how a unit runs but not its result, such
+  as `OciImage`'s `builder` and `cache`, and exclude them too. The key excludes
+  the source commit ID (including `resolvedSpec.source.commit`; the selected
+  bytes stand for it), provenance, readiness, lifecycle, Nyl's
   release version, and external tool versions, so a new source commit with
   identical inputs, a producer re-execution that yields identical outputs, or a
   Nyl upgrade does not change it.
@@ -411,8 +420,8 @@ Nyl-Version: 0.7.0
   decisions such as lease expiry.
 - Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
   of the summary and of each receipt.
-- Operations: `reconcile`, `promote`, `teardown`, `resume`, `recover`,
-  `verify`, `state-init`, `state-copy`.
+- Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
+  `recover`, `verify`, `state-init`, `state-copy`.
 - Replaying operations in order, from the read commits and evaluation times
   they name, reproduces every state decision.
 
@@ -455,8 +464,9 @@ apply to desired state without mixing with observed commits.
 - Only the named units execute. A dependency without a current receipt leaves
   the named unit `blocked`; dependencies and dependents are not executed.
 
-**Transition commit conflicts.** When the final push loses the race, typically
-to a promotion, Nyl fetches and rebases its commit if the winning commits
+**Transition commit conflicts.** Nyl's own operations are serialized by the
+lease, so a final push can only lose to a commit made outside Nyl, typically a
+merged promotion pull request. Nyl then fetches and rebases its commit if the winning commits
 changed none of the paths it writes or read. Otherwise it keeps its results,
 which are facts, resolves again against the new state, and commits that. When
 desired and observed are separate refs, the observed commit is written first,
@@ -525,8 +535,10 @@ Coordination and progress live outside the desired and observed refs:
 | `nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
-   exists and has not expired, the run exits 2 and reports who holds it. Only
-   one state-writing operation runs per environment at a time.
+   exists and has not expired, the run exits 2 and reports who holds it. Every
+   state-writing operation takes the lease (`reconcile`, `promote`,
+   `teardown`, `hold`, `resume`, `recover`, `verify`), so only one runs per
+   environment at a time.
 2. **Deadline.** The deadline is the latest finish time of the units executing,
    by their `timeout`, plus a grace period that also absorbs clock skew. The
    runner updates the lease when it starts a unit; there are no heartbeats.
@@ -643,6 +655,8 @@ lifecycle:
     as held with a pending deletion.
   - An explicit `nyl teardown` of a held unit is still allowed, because it is
     an operator action; the unit stays held afterwards and is not recreated.
+    A held unit's desired file survives its teardown (held, without a uid),
+    even outside the ownership set, and is removed only after `resume`.
   - `nyl resume -e <env> --unit <u>` lifts the hold. The next `reconcile`
     renders the unit from source again and applies whatever changed, including
     a pending deletion.
@@ -718,9 +732,14 @@ trying changes against real evidence before CI:
 - The first local run for an environment copies the remote state refs to local
   refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`; later
   local runs continue from them. `--local --reset` copies again.
-- Local runs write transition commits only to those refs, with a
-  `Nyl-Local: true` trailer, keep their lease and run refs local too, and never
-  push. `nyl status -e <env> --local` shows the local view.
+- Local runs write transition commits and run checkpoints only to local refs,
+  with a `Nyl-Local: true` trailer, and never push state.
+  `nyl status -e <env> --local` shows the local view.
+- A local run takes the remote lease (`nyl/<env>/lease`), because the lease is
+  coordination, not state: a local run and a CI run of the same environment
+  never execute at the same time. This needs push access to the lease ref.
+- `--local-lease` explicitly opts into a local lease instead, for working
+  without that access, and accepts that CI may run at the same time.
 - Effects are real, and local state is never pushed. CI's next run executes
   those units again. That is safe for `converge` drivers; a local run
   therefore executes units with other recovery policies only when they are
@@ -732,15 +751,21 @@ Every commit Nyl pins must stay fetchable: locked unit sources, promoted source
 revisions, and locked `fromGit` bindings.
 
 - A pinned commit must be reachable from one of the Environment's
-  `protectedRefs` in its repository. The default is that repository's default
-  branch. Resolution checks this when a lock or promotion enters desired
-  state; `nyl promote` checks it against the target environment.
+  `protectedRefs` in its repository, or from the branch named by its lock's
+  own `revision`. The default `protectedRefs` is each repository's default
+  branch, so a lock to a long-lived deploy branch works without configuration.
+  Resolution checks this when a lock or promotion enters desired state;
+  `nyl promote` checks it against the target environment.
+- A run's source commit S must also be reachable from `protectedRefs`, because
+  later teardown and re-execution check it out again. An environment can set
+  `allowUnprotectedSource: true`, typical for dev and preview environments, to
+  run from any commit, such as a feature branch. Once such a branch is
+  deleted, teardown or re-execution of units last executed from it fails until
+  they are reconciled from a reachable commit again; `status` warns about
+  units in that state.
 - An unreachable commit is a resolution error that names the commit and the
   refs searched. A commit from a squash-merged branch is therefore rejected
   before anything depends on it.
-- The source commit S of a run itself may be any commit, so a dev environment
-  can reconcile from a feature branch; its revisions are checked only when
-  they are promoted.
 
 ### Credentials and branch protection
 
@@ -748,10 +773,13 @@ revisions, and locked `fromGit` bindings.
   SSH agent, or an HTTPS token, through the GitRepository's `publishURL`.
 - Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
   as corruption and stops every command until an operator repairs it.
-- Recommended protection: only the runner identity may push to the observed
-  ref; the desired ref accepts pushes from the runner and promotion pull
-  requests with required reviews; force pushes and deletion are disabled on
-  both.
+- Recommended protection: force pushes and deletion are disabled on both state
+  refs. Pushes are limited to the runner identity plus an operator group, since
+  `hold`, `resume`, `recover`, and `teardown` may run from an operator's
+  machine; the desired ref additionally accepts promotion pull requests with
+  required reviews. A team that wants only the runner to push runs operator
+  commands through a manually triggered CI workflow instead. The lease ref
+  needs the same pushers.
 
 ### Defaults
 
