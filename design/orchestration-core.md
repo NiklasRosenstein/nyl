@@ -364,23 +364,27 @@ runner (M7) could add timely enforcement later:
 - `state.yaml` records `expiresAt`. Only activity on one instance extends it:
   `state init --template` and a successful `reconcile -e <instance>` move it to
   now plus `ttl`, so an active pull request keeps its preview.
-- `reconcile -e <instance>` on an expired instance refuses and exits 2;
-  `status` and `get environments` show it as expired, so a forgotten instance
-  stops being updated. `--renew` extends the expiry first and then reconciles.
-- `reconcile -e <instance> --no-extend` reconciles a live instance as
-  maintenance, without extending its expiry. It never removes anything: on an
-  expired instance it refuses like plain `reconcile -e`.
+- Expiry is the declared intent to clean up, so every reconcile that finds an
+  instance expired removes it instead of reconciling it: `reconcile -e
+  <instance>`, `reconcile -e <instance> --no-extend`, and `reconcile
+  --template <name>`. Removal runs `teardown --all` and then `state delete`.
+  The template's `allowTeardown` authorizes that teardown; without it, the
+  instance is reported as pending teardown and the run exits 2. An instance
+  whose teardown readiness is incomplete is reported and left in place unless
+  the run passes `--allow-incomplete`. `status` and `get environments` show
+  expired instances until they are removed.
+- `--renew` is the only way to keep an expired instance: it extends the expiry
+  and then reconciles.
+- `reconcile -e <instance>` extends a live instance's expiry;
+  `reconcile -e <instance> --no-extend` reconciles it as maintenance without
+  extending; `reconcile --template <name>` never extends.
 - `--renew` and `--no-extend` conflict and are rejected together. Both are
   rejected for declared environments, which have no expiry, and with
-  `--template`, which never extends.
-- `reconcile --template <name>` never extends expiry and is the only
-  reconcile that removes expired instances: for each, it runs `teardown --all`
-  and then `state delete` instead of reconciling it. The template's
-  `allowTeardown` authorizes that teardown; without it, expired instances are
-  reported as pending teardown and the run exits 2. An instance whose teardown
-  readiness is incomplete is reported and left in place unless the run passes
-  `--allow-incomplete`. `state delete --teardown` removes one instance
-  explicitly, expired or not.
+  `--template`.
+- A pull request pipeline runs `state init --template` before reconciling,
+  which extends the expiry, so updating an active pull request never removes
+  its preview. `state delete --teardown` removes one instance explicitly,
+  expired or not.
 - At `maxInstances`, `state init --template` first removes expired instances of
   that template the same way; if none are expired, it refuses.
 
@@ -1251,13 +1255,13 @@ and reports which unit lacks evidence.
 
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days
-ago. A maintenance job's `reconcile -e pr-123 --no-extend` refuses it as
-expired and exits 2 without changing anything. The scheduled
-`reconcile --template preview` finds it expired, runs `teardown --all` (its
-publication unit is teardown-ready, so Argo CD removes the workloads), then
-removes its state directory, and reconciles the other, live instances without
-extending them. Had the pull request been updated in the meantime,
-`reconcile -e pr-123 --renew` would have extended it and reconciled.
+ago. The next reconcile that reaches it, whether a maintenance job's
+`reconcile -e pr-123 --no-extend` or the scheduled `reconcile --template
+preview`, finds it expired, runs `teardown --all` (its publication unit is
+teardown-ready, so Argo CD removes the workloads), and removes its state
+directory; the fleet reconcile then reconciles the other, live instances
+without extending them. Had the pull request been updated in the meantime, its
+pipeline's `state init --template` would have extended the expiry first.
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
 `cache` has `deletionPolicy: Teardown`, `worker` the default `Retain`. The next
