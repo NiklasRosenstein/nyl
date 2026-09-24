@@ -147,7 +147,7 @@ Each binding sets exactly one of these fields:
 | `fromFile` | Yes | Project-relative YAML or JSON file; `pointer` defaults to `""` |
 | `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
 | `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
-| `fromUnit` | Reserved | Recorded unit output in an orchestrated environment (M5) |
+| `fromUnit` | Reserved | A recorded unit output or artifact field in an orchestrated environment (M5) |
 | `fromPromotion` | Reserved | A value recorded through a PromotionPath (M6) |
 
 `fromFile`:

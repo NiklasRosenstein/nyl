@@ -45,14 +45,16 @@ arguments, cache options, and tags from the spec, and `--builder` when
 `builder` is set. The image is always pushed: a digest reference is only useful
 to consumers when the registry holds it.
 
-- **Outputs** are defined by the kind: `digestRef`
-  (`registry.example.com/web@sha256:…`), `digest`, `repository`, and `tags`.
-  They come from the metadata file, never from parsing build output.
-- **Artifact:** a `ContainerImage` artifact records the repository, digest,
-  platforms, and tags.
+- **Artifact:** the unit publishes a `ContainerImage` artifact named `image`
+  with `repository`, `digest`, `reference`
+  (`registry.example.com/web@sha256:…`), `platforms`, and `tags`, taken from
+  the metadata file, never from parsing build output. The kind declares no
+  outputs; consumers reference the artifact, for example
+  `{fromUnit: {unit: web-image, artifact: image, pointer: /reference}}`.
 - **Tags:** every push carries the tag `nyl-<first 16 hex digits of the
   execution key>`, so a pushed image can be found from its desired document.
-  `tags` adds further tags, which move; consumers use `digestRef`.
+  `tags` adds further tags, which move; consumers use the artifact's
+  `reference`.
 - **Credentials:** `registryAuth` writes a temporary Docker configuration with
   the listed registries' credentials from the secrets provider and points
   `DOCKER_CONFIG` at it. Without it, `env.passthrough: [DOCKER_CONFIG]` reuses
@@ -76,10 +78,10 @@ then changes the Dockerfile and rebuilds.
 | --- | --- |
 | plan | Reports whether the execution key changed and what would be built; no build runs |
 | reconcile | Build and push; record outputs and the artifact |
-| verify | Checks that `digestRef` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
+| verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. `deletionPolicy: Teardown` is rejected for this kind |
-| recovery | `converge`. A rebuild after an uncertain attempt pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
+| recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
 
 ## Terraform and OpenTofu
 
@@ -118,17 +120,17 @@ same backend.
 
 1. `init -input=false -lockfile=readonly` with `backend` passed as a temporary
    backend configuration file. A missing or outdated `.terraform.lock.hcl` fails
-   the attempt instead of being rewritten on the runner.
+   the execution instead of being rewritten on the runner.
 2. `plan -input=false -out=<planfile>` with `variables` in a temporary
    variables file and `varFiles` in order. The plan file stays in the runner's
-   temporary directory and is deleted after the attempt.
+   temporary directory and is deleted after the execution.
 3. For `approval: {mode: manual, bind: plan}`, compute the change digest (see
-   below) and compare it with the approved digest. A mismatch ends the attempt
+   below) and compare it with the approved digest. A mismatch ends the execution
    without effects, and the unit waits for a new approval.
 4. `apply -input=false <planfile>`.
 5. `output -json`. Each declared output must exist and match its type. An
    output the tool marks sensitive must be declared `sensitive`; otherwise the
-   attempt fails, so a secret can never be recorded by accident. Undeclared
+   execution fails, so a secret can never be recorded by accident. Undeclared
    outputs are ignored.
 
 A plan with no changes skips `apply` and records the receipt directly.
@@ -159,14 +161,14 @@ bound to it:
   The default is `<source.path>/**`, excluding `.terraform/`.
 - Relative local modules resolve inside the same worktree, so pinning the
   revision pins them too. After `init`, the driver reads the tool's module
-  manifest; a local module directory outside `files` fails the attempt with a
+  manifest; a local module directory outside `files` fails the execution with a
   message naming the glob to add, so a module change can never go unnoticed.
 
 ### Tool version
 
 - The binary comes from `PATH`; Nyl never downloads tools. Tool managers such as
   mise install them.
-- `version` sets an exact version. The driver fails the attempt when the binary
+- `version` sets an exact version. The driver fails the execution when the binary
   reports another version. `version` is part of the execution key, so changing
   it re-plans.
 - Without `version`, any installed version runs, and upgrading the tool does
@@ -193,9 +195,9 @@ when set.
 | verify | `plan -detailed-exitcode` against the current desired document. Exit 0 is clean; exit 2 means applying would change something, reported as drift with the change summary |
 | inspect | Not supported; recovery is `converge` |
 | teardown | `plan -destroy -out=<planfile>`, then `apply`. For manual units, the approval binds to the destroy plan's digest |
-| recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain attempt shows what is still missing |
+| recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain execution shows what is still missing |
 
-A state lock left behind by a lost runner makes the next attempt fail with the
+A state lock left behind by a lost runner makes the next execution fail with the
 lock ID, as a non-retryable failure. The operator releases it with the tool's
 `force-unlock` and then runs `nyl recover --retry`; Nyl never releases locks
 itself.

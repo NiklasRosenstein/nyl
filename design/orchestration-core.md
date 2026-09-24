@@ -18,7 +18,8 @@ units never touches orchestration state.
 | --- | --- |
 | Environment, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
 | Built-in unit kinds: `Command`, `Terraform`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
-| Plugin unit kinds | The plugin's own group, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
+| Artifact kinds: `ContainerImage`, `PublishedTree` | `artifacts.gitops.nyl/v1` (see [Artifacts](#artifacts)) |
+| Plugin unit and artifact kinds | The plugin's own groups, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
 
 Every resource in a unit group is a unit; the group identifies the family and
 the kind selects the driver, as `components.k8s.nyl/v1` does for component
@@ -97,12 +98,13 @@ spec:
   page.
 - References may appear in any field the kind's schema marks as accepting
   them.
-- A kind either defines its outputs itself (`OciImage`,
-  `KubernetesPublication`), in which case `outputs` is rejected, or lets the
-  unit declare them (`Command`, `Terraform`, `OpenTofu`). Declared outputs use
+- A kind either publishes fixed results as artifacts (`OciImage`,
+  `KubernetesPublication`; see [Artifacts](#artifacts)), in which case
+  `outputs` is rejected, or lets the unit declare outputs (`Command`,
+  `Terraform`, `OpenTofu`). Declared outputs use
   the Release input type set (`string`, `integer`, `number`, `boolean`,
   `object`, `array`), optional `description`, and optional `sensitive`. Only
-  kind-defined or declared outputs are recorded. A `sensitive`
+  declared outputs are recorded. A `sensitive`
   output is validated but never persisted and cannot be referenced; secrets
   move through the secrets provider, not through outputs. Drivers reject
   native-tool sensitive outputs that are not declared sensitive.
@@ -122,10 +124,11 @@ spec:
   publishes its desired document. Two resolvers racing to create the same unit
   are serialized by compare-and-swap; the loser re-reads and adopts the
   published uid.
-- The uid fences every attempt, receipt, and tombstone. A name held by a
-  tombstone cannot start a new incarnation until the tombstone closes.
+- The uid fences every receipt, checkpoint, and deletion. A name whose desired
+  file is `deleting` cannot start a new incarnation until the deletion
+  completes.
 - Changing a unit's `apiVersion` or `kind` under the same name ends the old
-  incarnation: it is tombstoned under its deletion policy, and the new kind
+  incarnation: it is deleted under its deletion policy, and the new kind
   starts a new incarnation. A unit never inherits another kind's receipts.
 - An explicit teardown closes an incarnation even while the unit stays in the
   ownership set; the next incarnation receives a new uid (see
@@ -136,6 +139,7 @@ spec:
 | Reference | Resolves to | Freshness |
 | --- | --- | --- |
 | `fromUnit: {unit, output, pointer}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current |
+| `fromUnit: {unit, artifact, kind, pointer}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current and list the artifact's digest |
 | `fromPromotion: {path, value}` | A value in a PromotionRecord in this environment's desired state | The record must exist; broken selectors are errors |
 
 - References are structured objects, never template lookups, so every
@@ -143,8 +147,9 @@ spec:
   reference's fields; the edge is known once the spec is rendered.
 - A reference to a unit outside the ownership set, to an undeclared or
   sensitive output, or one that closes a cycle, is a resolution error.
-- The value is checked against the producer's declared output type and, where
-  the consumer's schema declares one, the consumer field's type.
+- The value is checked against the producer's declared output type or the
+  artifact kind's schema and, where the consumer's schema declares one, the
+  consumer field's type.
 
 ### Kubernetes publication unit
 
@@ -178,10 +183,60 @@ spec:
   has moved past B but the state file is unchanged, it proceeds on the new
   head; if the state file changed, the execution ends without publishing and
   the unit is resolved again in the next wave.
-- Its receipt records the published commit and ownership-index digest
-  (`published`). `mode: observe` additionally records Argo CD acceptance and
+- It publishes a `PublishedTree` artifact named `tree` with the published
+  commit and ownership-index digest (`published`). `mode: observe` additionally records Argo CD acceptance and
   health observations (M5), per the roadmap's health evidence section. Direct
   application through Nyl is not a mode in the initial scope.
+
+## Artifacts
+
+Kinds with fixed results publish artifacts instead of outputs. Artifacts are
+their own kinds in `artifacts.gitops.nyl/v1`:
+
+| Kind | Published by | `spec` |
+| --- | --- | --- |
+| `ContainerImage` | `OciImage` | `repository`, `digest`, `reference` (`<repository>@<digest>`), `platforms`, `tags` |
+| `PublishedTree` | `KubernetesPublication` | `repository`, `branch`, `commit`, `indexDigest` |
+
+```yaml
+# observed/units/web-image/artifacts/image.yaml
+apiVersion: artifacts.gitops.nyl/v1
+kind: ContainerImage
+metadata:
+  name: image
+  unit: {environment: dev, name: web-image, uid: 2b90…}
+executionKey: sha256:…
+spec:
+  repository: registry.example.com/web
+  digest: sha256:4f0c…
+  reference: registry.example.com/web@sha256:4f0c…
+  platforms: [linux/amd64, linux/arm64]
+  tags: [nyl-1a2b3c4d5e6f7a8b, dev]
+```
+
+A reference reads an artifact through `fromUnit` with `artifact` instead of
+`output`, an optional `kind` assertion, and a `pointer` into the artifact's
+`spec`:
+
+```yaml
+# Release input on a DeploymentTarget
+releaseInputs:
+  platform/web:
+    image:
+      fromUnit: {unit: web-image, artifact: image, kind: ContainerImage, pointer: /reference}
+---
+# OpenTofu variables
+spec:
+  variables:
+    web_image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+    web_platforms: {fromUnit: {unit: web-image, artifact: image, pointer: /platforms}}
+```
+
+- A `kind` that does not match the artifact is a resolution error.
+- The receipt lists each artifact with the digest of its canonical form; the
+  artifact file is checked against that digest before any value is read.
+- PromotionPath selectors can read artifact fields the same way.
+- Plugin drivers may define artifact kinds in their own groups.
 
 ## State layout
 
@@ -189,63 +244,81 @@ Desired and observed documents live under fixed top-level directories, so the
 layout does not depend on whether the two refs coincide:
 
 ```text
-state.yaml                             # state location and history, written by `nyl state`
+state.yaml                                   # state location and history, written by `nyl state`
 desired/
-  environment.yaml                     # resolved Environment, source commit, ownership set
-  units/<unit>.yaml                    # desired unit documents
-  tombstones/<unit>.yaml               # deletion intent, uid-fenced
-  promotions/<path>.yaml               # PromotionRecords
-  holds/<unit>.yaml                    # operator holds after explicit teardown
+  environment.yaml                           # resolved Environment, source commit, ownership set
+  units/<unit>.yaml                          # DesiredUnit, including lifecycle (deletion, hold)
+  promotions/<path>.yaml                     # PromotionRecords
 observed/
-  units/<unit>/receipt.yaml            # latest receipt, or absent
-  units/<unit>/artifacts/<name>.yaml   # artifacts of the latest receipt
-  units/<unit>/attempt.yaml            # open or most recent attempt
-  observations/<unit>/<timestamp>.yaml
+  units/<unit>.yaml                          # ObservedUnit: latest receipt and condition
+  units/<unit>/artifacts/<name>.yaml         # artifacts of the latest receipt
+  units/<unit>/observations/<type>.yaml      # latest observation per type (drift, health)
 ```
 
 With separate refs, `desired/` exists only on the desired ref and `observed/`
 only on the observed ref; `state.yaml` exists on both.
 
-Every state file is YAML and carries `apiVersion: gitops.nyl/v1` and a kind
-(`StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `Tombstone`,
-`PromotionRecord`, `Hold`, `Receipt`, `Artifact`, `Attempt`, `Observation`).
-Their JSON Schemas are generated from the Rust types and published with the
-other resource references. Digests, including execution keys, are computed
-over a canonical JSON form, so formatting never affects them. A reader rejects
-a state file whose kind version it does not know.
+Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
+the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
+`ObservedUnit`, `Observation`, `Lease`, and `Run`; artifacts use their own
+kinds. JSON Schemas for all of them are generated from the Rust types and
+published with the other resource references. Digests, including execution
+keys, are computed over a canonical JSON form, so formatting never affects
+them. A reader rejects a state file whose kind version it does not know.
 
-Each unit has one receipt file: the latest receipt, or none after teardown or
-retention. Earlier receipts
-exist only in Git history, which is enough for audit and promotion: a consumer
-cites a producer's receipt by execution key and the observed commit that holds
-it, and promotion walks the history of one receipt path.
+Each unit has one desired file and at most one observed file, holding only the
+latest state. Earlier states exist in Git history, which is enough for audit
+and promotion: a consumer cites a producer's receipt by execution key and the
+observed commit that holds it, and promotion walks the history of one file.
 
 ### Desired unit
 
-A desired unit is the execution snapshot of one incarnation:
+```yaml
+apiVersion: gitops.nyl/v1
+kind: DesiredUnit
+unit: {environment: dev, name: database, uid: 5d2a…, apiVersion: units.gitops.nyl/v1, kind: OpenTofu}
+lifecycle:
+  state: active                            # active | deleting | held
+sourceCommit: 3e7b…
+sourceRevision: 3e7b…                      # effective revision for repository content
+spec:                                      # rendered, references still as expressions
+  source: {path: infra/database}
+  variables:
+    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+  outputs: {host: {type: string}, port: {type: integer}}
+  approval: {mode: manual, bind: plan}
+resolvedSpec:                              # references replaced by values
+  source: {path: infra/database}
+  variables: {vpc_id: vpc-0abc123}
+  outputs: {host: {type: string}, port: {type: integer}}
+  approval: {mode: manual, bind: plan}
+provenance:
+  /variables/vpc_id: {unit: network, uid: 8c1f…, executionKey: sha256:…, observedCommit: 41f0…}
+executionKey: sha256:…
+readiness: {state: ready}
+# while blocked:
+# readiness:
+#   state: blocked
+#   reasons: [{pointer: /variables/vpc_id, reason: network has no current receipt}]
+```
 
-- identity: environment, unit name, uid, `apiVersion` and `kind`;
-- the source commit S it was rendered from, and the effective source revision
-  for units that execute repository content: S, unless the unit's `source`
-  field names a repository or carries a promoted revision;
-- the rendered spec, with references still written as expressions;
-- `resolvedSpec`: the rendered spec with each reference replaced by its value.
-  PromotionPath selectors such as `input: /source` or
-  `input: /releases/platform~1web/image` are JSON Pointers into this document;
-- `provenance`: for each reference, the producer unit, uid, and execution key
-  of the receipt it came from, or the PromotionRecord and value;
-- `executionKey`: a digest of the unit's `apiVersion`, `kind`, and driver
+- `sourceRevision` is S unless the unit's `source` field names a repository or
+  carries a promoted revision.
+- `resolvedSpec` is what PromotionPath selectors such as `input: /source` or
+  `input: /releases/platform~1web/image` point into.
+- `provenance` records, per reference, the receipt or PromotionRecord the value
+  came from.
+- `executionKey` is a digest of the unit's `apiVersion`, `kind`, and driver
   behavior version, `resolvedSpec` without the common fields that do not affect
   what runs (`enabled`, `dependsOn`, `approval`, `deletionPolicy`, `timeout`),
-  the selected source bytes, and any command-unit fingerprint output. It excludes the source commit
-  ID, provenance, readiness, Nyl's release version, and external tool
-  versions, so a new source commit with identical inputs, a producer
-  re-execution that yields identical outputs, or a Nyl upgrade does not change
-  it;
-- `readiness`: `ready`, or `blocked` with each unresolved reference and why.
-
-A blocked unit keeps its rendered spec and source commit, so it resolves later
-from new evidence without rereading source.
+  the selected source bytes, and any command-unit fingerprint output. It
+  excludes the source commit ID, provenance, readiness, lifecycle, Nyl's
+  release version, and external tool versions, so a new source commit with
+  identical inputs, a producer re-execution that yields identical outputs, or a
+  Nyl upgrade does not change it.
+- A blocked unit keeps its rendered spec and source commit, so it resolves
+  later from new evidence without rereading source.
+- `lifecycle` carries deletion and holds (see [Deletion](#deletion)).
 
 **Behavior versions.** Each driver declares a behavior version and bumps it
 only when its execution semantics change in a way that requires re-execution.
@@ -253,25 +326,42 @@ only when its execution semantics change in a way that requires re-execution.
 declared output. When a unit's execution key changed only because of its
 driver's behavior version or its `outputs` declaration, and its driver's
 recovery policy is not `converge`, the unit waits for `--approve` instead of
-re-running automatically. External tool versions, such as
-Terraform's, are recorded in receipts for audit; a unit that should re-run on a
-tool change pins the version in its spec, such as `terraform: {version: 1.9.5}`.
+re-running automatically. External tool versions, such as Terraform's, are
+recorded in receipts for audit; a unit that should re-run on a tool change pins
+the version in its spec, such as `version: 1.9.5`.
 
-### Receipt
+### Observed unit
 
-A receipt records one successful execution:
+```yaml
+apiVersion: gitops.nyl/v1
+kind: ObservedUnit
+unit: {environment: dev, name: database, uid: 5d2a…, apiVersion: units.gitops.nyl/v1, kind: OpenTofu}
+receipt:
+  executionKey: sha256:…
+  behaviorVersion: 1
+  run: 0b8f6c1e-…
+  desiredCommit: 77aa…
+  startedAt: 2026-09-24T10:00:00Z
+  finishedAt: 2026-09-24T10:07:12Z
+  versions: {nyl: 0.7.0, tofu: 1.9.5}
+  approval: {by: alice, source: github-environment production https://github.com/acme/infra/actions/runs/1234, digest: sha256:9f2c…}
+  provenance:
+    /variables/vpc_id: {unit: network, uid: 8c1f…, executionKey: sha256:…, observedCommit: 41f0…}
+  outputs: {host: db.dev.internal, port: 5432}   # declared, non-sensitive only
+  artifacts: []                                   # e.g. [{name: image, kind: ContainerImage, digest: sha256:…}]
+condition: null
+# or, when an operator or retry is needed:
+# condition: {state: uncertain, since: 2026-09-24T11:12:00Z, run: 0b8f…, reason: run lost its lease}
+# condition: {state: failed, since: …, run: …, category: tool-error, retryable: false, message: "tofu apply exited 1"}
+```
 
-- subject: environment, unit, uid; the execution key and driver behavior
-  version;
-- the desired commit that held the executed document;
-- attempt ID, Nyl version, external tool versions, start and finish times;
-- `provenance` as resolved at execution time;
-- `outputs` (declared, non-sensitive) and artifact descriptors with digests.
-
-A receipt is **current** when its uid and execution key equal those of the
-unit's current desired document. When the desired document changes, the
-existing receipt remains until the next execution replaces it; it documents
-what ran but satisfies no reference.
+- A receipt is **current** when its unit uid and execution key equal those of
+  the unit's current desired document. When the desired document changes, the
+  receipt remains until the next execution replaces it; it documents what ran
+  but satisfies no reference.
+- `condition` records the latest failure or uncertainty and stays until the
+  unit next succeeds or an operator runs `recover`. A condition does not remove
+  the last receipt.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -281,84 +371,71 @@ consumer's existing receipt still documents what ran; the consumer executes
 again only after the producer's new receipt exists and re-resolution changes
 the consumer's execution key.
 
-### Commit metadata
+### Transition commits
 
-Every commit Nyl writes to a state ref records exactly one event. Its message
-carries Git trailers that machines parse with `git interpret-trailers`:
+Human review of the state refs is a goal, so each operation writes at most one
+commit per state ref: one reconcile, one promotion, one teardown, one verify.
+The commit is the complete transition, and an operation that changes nothing
+writes nothing. The per-unit progress of a run lives on a disposable run ref
+instead (see [Runs and leases](#runs-and-leases)).
+
+The commit message carries a summary that machines parse, followed by Git
+trailers:
 
 ```text
-nyl: dev/database receipt
+nyl: reconcile dev (2 executed, 1 failed, 1 blocked)
 
-Nyl-Event: receipt
+units:
+  network:    {result: current}
+  database:   {result: executed, executionKey: sha256:…, approval: {by: alice, source: …, digest: sha256:9f2c…}}
+  web-image:  {result: failed, category: tool-error, retryable: true}
+  kubernetes: {result: blocked, reason: web-image has no current receipt}
+recovered: []
+imported: []
+
 Nyl-Operation: reconcile
-Nyl-Operation-Id: 0b8f6c1e-…
+Nyl-Run-Id: 0b8f6c1e-…
 Nyl-Environment: dev
-Nyl-Unit: database
-Nyl-Unit-Uid: 5d2a…
-Nyl-Execution-Key: sha256:…
-Nyl-Attempt-Id: 91c4…
 Nyl-Source-Commit: 3e7b…
 Nyl-Read-Desired: 77aa…
 Nyl-Read-Observed: 41f0…
 Nyl-Runner: https://ci.example.com/runs/1234
+Nyl-Evaluated-At: 2026-09-24T10:07:30Z
 Nyl-Version: 0.7.0
 ```
 
-`Nyl-Read-Desired` and `Nyl-Read-Observed` name the state commits the decision
-was based on. Approvals, recovery decisions, teardowns, and holds add
-`Nyl-Approved-By` or `Nyl-Requested-By` with the operator identity the runner
-was given, and `Nyl-Reason` when one was supplied.
-
-| Event | Ref | Changes |
-| --- | --- | --- |
-| `desired-updated` | desired | `desired/environment.yaml`, `desired/units/*` |
-| `tombstone` | desired | `desired/tombstones/<unit>.yaml`, unit document removed |
-| `promotion` | desired | `desired/promotions/<path>.yaml` |
-| `attempt-started` | observed | `attempt.yaml` opened (execution or teardown) |
-| `receipt` | observed | receipt and artifacts added, attempt closed |
-| `attempt-failed` | observed | attempt closed with category and retryability |
-| `attempt-uncertain` | observed | attempt marked uncertain after its deadline |
-| `attempt-superseded` | observed | a late runner records its result after replacement |
-| `recovery` | observed | an operator clears an uncertain or failed attempt for re-execution |
-| `hold` | desired | `desired/holds/<unit>.yaml` added after an explicit teardown with `--hold` |
-| `hold-released` | desired | hold removed |
-| `retained` | observed | receipts and attempt moved out of `observed/units/<unit>/` |
-| `teardown` | observed | teardown recorded, unit files removed |
-| `tombstone-closed` | desired | tombstone removed after `retained` or `teardown` |
-| `observation` | observed | `observed/observations/…` |
-| `state-initialized` | both | `state.yaml` created, or reset with `--fresh` |
-| `state-copied` | both | `state.yaml` records the copy source |
-
-Invariants:
-
-- A commit changes only the paths that belong to its event and subject. An
-  auditor can check this from the trailers and the diff.
-- `Nyl-Operation-Id` links every commit of one invocation.
-- Replaying events in order, using the read commits they name, reproduces every
-  state decision without relying on commit order in time. Time-based decisions
-  record the time they used: `attempt-uncertain` and `attempt-superseded`
-  carry `Nyl-Evaluated-At` alongside the attempt's deadline, so a replay can
-  verify that the deadline had passed.
+- `Nyl-Read-Desired` and `Nyl-Read-Observed` name the state commits the
+  operation started from. `Nyl-Evaluated-At` is the time used for time-based
+  decisions such as lease expiry.
+- Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
+  of the summary and of each receipt.
+- Operations: `reconcile`, `promote`, `teardown`, `resume`, `recover`,
+  `verify`, `state-init`, `state-copy`.
+- Replaying operations in order, from the read commits and evaluation times
+  they name, reproduces every state decision.
 
 ## Execution
 
 `nyl reconcile -e <env>`:
 
-1. **Resolve.** Render the environment's units at source commit S, resolve
-   references against current receipts and PromotionRecords, and publish
-   `desired-updated` and `tombstone` commits for what changed.
-2. **Select.** A unit is ready when its desired document is `ready`, it has no
-   current receipt, its provenance receipts are all still current, it has no
-   open attempt, it is not held, and it is not awaiting approval. An uncertain
-   attempt does not block selection when the driver's recovery policy allows
-   it: `converge` starts a new attempt directly, and `inspect` runs `inspect`
-   first (see [Recovery](#recovery)). Under `manual`, the unit waits for
-   `recover --retry`.
-3. **Wave.** Execute ready units, independent units in parallel up to a
-   concurrency limit (see [Attempts](#attempts)).
-4. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
-   same S and publish what changed.
-5. **Repeat** from step 2 until nothing is ready, then report.
+1. **Lease.** Take the environment's run lease (see
+   [Runs and leases](#runs-and-leases)) and import results left behind by
+   earlier runs.
+2. **Resolve.** Render the environment's units at source commit S and resolve
+   references against current receipts and PromotionRecords.
+3. **Select.** A unit is ready when its desired document is `ready` and
+   `active`, it has no current receipt, its provenance receipts are all still
+   current, and it is not awaiting approval. A unit with an `uncertain`
+   condition is selected only when its driver's recovery policy allows it:
+   `converge` executes it again, and `inspect` runs `inspect` first (see
+   [Recovery](#recovery)). Under `manual`, the unit waits for `recover`.
+4. **Wave.** Execute ready units, independent units in parallel up to a
+   concurrency limit, and checkpoint each result on the run ref.
+5. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
+   same S.
+6. **Repeat** from step 3 until nothing is ready.
+7. **Commit.** Write one transition commit per state ref, release the lease,
+   and delete the run ref.
 
 A run never reads a source commit newer than S; later source changes are
 picked up by the next run.
@@ -368,13 +445,20 @@ source and observed evidence, so the reconcile runner writes it. Review happens
 on source commits (the pull requests that change units and bindings) and on
 promotions (`changeGate: pullRequest` opens a pull request against the desired
 ref). Separate refs let that promotion review and different branch protection
-apply to desired state without competing with the frequent observed commits.
+apply to desired state without mixing with observed commits.
 
 **Selection with `--unit`/`--units`:**
 
 - Resolution always covers the whole environment.
 - Only the named units execute. A dependency without a current receipt leaves
   the named unit `blocked`; dependencies and dependents are not executed.
+
+**Transition commit conflicts.** When the final push loses the race, typically
+to a promotion, Nyl fetches and rebases its commit if the winning commits
+changed none of the paths it writes or read. Otherwise it keeps its results,
+which are facts, resolves again against the new state, and commits that. When
+desired and observed are separate refs, the observed commit is written first,
+so evidence is never lost to a desired conflict.
 
 ### Approval
 
@@ -394,19 +478,14 @@ spec:
   `nyl plan` prints each manual unit's digest, and `--approve
   database=sha256:…` authorizes that digest. At execution the driver plans
   again in the same run and applies that plan only if its digest matches;
-  otherwise the attempt ends without effects and the unit waits for a new
+  otherwise the execution ends without effects and the unit waits for a new
   approval. Plan files never leave the runner.
 - `--approve` for a unit excluded by `--unit`/`--units` is an error.
 - Teardown of a manual unit needs approval the same way; for `bind: plan` the
   digest is that of the destroy plan.
 
-Recording. The `attempt-started` commit records every approval:
-
-```text
-Nyl-Approved-By: alice
-Nyl-Approval-Source: github-environment production https://github.com/acme/infra/actions/runs/1234
-Nyl-Approval-Digest: sha256:9f2c…
-```
+Recording. Each approval is recorded in the receipt and in the transition
+commit's summary: who approved (`by`), where (`source`), and the digest.
 
 - `--approved-by` and `--approval-source` set the identity and source
   explicitly. Without them, a local run records the Git user, and a CI run
@@ -417,7 +496,7 @@ Nyl-Approval-Digest: sha256:9f2c…
   `nyl reconcile --approve database=<digest>` only after GitHub's reviewers
   approve. When a GitHub token with read access to Actions is available, Nyl
   reads the run's approvers from GitHub's run-approvals API and records them as
-  `Nyl-Approved-By`.
+  the approval's `by`.
 
 ```yaml
 # .github/workflows/production.yaml (excerpt)
@@ -434,118 +513,121 @@ jobs:
       - run: nyl reconcile -e production --unit database --approve "database=${{ needs.plan.outputs.digest }}"
 ```
 
-**Compare-and-swap.** Each event has a read set: the paths it read and the
-commits named in `Nyl-Read-Desired` and `Nyl-Read-Observed`. When a push loses
-the race, Nyl fetches, and reapplies its commit only if the winning commits
-changed none of its write paths and none of its read-set paths on that ref.
-Otherwise it re-evaluates from step 2. When desired and observed are separate
-refs, a desired change during execution cannot be detected by the observed
-push; it does not need to be, because the resulting receipt carries the
-execution key and is simply not current if the desired document moved on.
+### Runs and leases
 
-### Attempts
+Coordination and progress live outside the desired and observed refs:
 
-An attempt is the claim, the lease, and the recovery record for one execution
-or teardown:
+| Ref | Content | Lifetime |
+| --- | --- | --- |
+| `nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
+| `nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
 
-```yaml
-apiVersion: gitops.nyl/v1
-kind: Attempt
-id: 91c4…
-operation: reconcile
-unit: {environment: dev, name: database, uid: 5d2a…}
-executionKey: sha256:…
-runner: https://ci.example.com/runs/1234
-startedAt: 2026-09-24T10:00:00Z
-deadline: 2026-09-24T10:35:00Z
-state: running
-```
+1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
+   exists and has not expired, the run exits 2 and reports who holds it. Only
+   one state-writing operation runs per environment at a time.
+2. **Deadline.** The deadline is the latest finish time of the units executing,
+   by their `timeout`, plus a grace period that also absorbs clock skew. The
+   runner updates the lease when it starts a unit; there are no heartbeats.
+3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
+   the next wave. A crash loses no evidence.
+4. **Takeover.** A run that finds an expired lease replaces it with
+   compare-and-swap. It imports every leftover run ref: checkpointed results
+   whose unit uid and execution key still match become receipts, the others
+   are reported as superseded. Units the dead run was executing without a
+   checkpoint get an `uncertain` condition. All of this lands in the new run's
+   transition commit, under `imported` and `recovered`.
+5. **Lost lease.** A runner whose lease update fails stops starting units,
+   checkpoints the units still running to its own run ref, and exits 4. The
+   next run imports those results as above.
 
-1. **Claim.** The runner writes `attempt-started`. The winning commit holds the
-   unit until the deadline: start plus `timeout` plus a grace period. The
-   grace period also absorbs clock skew between runners. A runner that sees an
-   open attempt skips the unit and reports who holds it.
-2. **Run.** The driver executes with the deadline and a cancellation signal.
-   Native locks, such as Terraform state locking, remain the second guard.
-3. **Record.** Success writes `receipt`, closing the attempt. A definite
-   failure writes `attempt-failed`, with the driver's retryability. A
-   retryable failure is retried by the next `reconcile`; a non-retryable one
-   waits for `recover --retry`.
-4. **Expire.** The next `reconcile` marks an attempt past its deadline
-   `attempt-uncertain`. `status` reports such an attempt as expired without
-   writing anything.
-5. **Late results.** A runner finishing after its attempt was marked uncertain
-   may still write its receipt as long as no other attempt has started; the
-   receipt closes the uncertain attempt. Once a new attempt has started, the
-   late runner writes `attempt-superseded` with its result instead.
-
-No heartbeats are written; executions that can exceed their timeout must raise
-`timeout`.
+`nyl status` reads the lease and run refs, so it shows a run in progress and
+the units it is executing.
 
 ### Recovery
 
-An uncertain attempt means effects may or may not have happened. Each driver
+An uncertain condition means effects may or may not have happened. Each driver
 declares a recovery policy for execution and for teardown:
 
 | Policy | Meaning | Initial drivers |
 | --- | --- | --- |
-| `converge` | Re-executing the same document is safe; the next `reconcile` retries automatically | Terraform, image build, Kubernetes publication, command with `idempotent: true` |
-| `inspect` | The driver's `inspect` reports applied (with outputs), not applied, or unknown; applied writes the receipt, not applied retries, unknown falls back to `manual` | Drivers that can observe their effects |
+| `converge` | Re-executing the same document is safe; the next `reconcile` executes it again | Terraform, OpenTofu, OciImage, KubernetesPublication, command with `idempotent: true` |
+| `inspect` | The driver's `inspect` reports applied (with outputs), not applied, or unknown; applied records the receipt, not applied executes again, unknown falls back to `manual` | Drivers that can observe their effects |
 | `manual` | Blocked until an operator runs `recover --retry` | Command units without `idempotent: true` |
 
-`nyl recover -e <env> --unit <u> --retry [--reason <text>]` clears an uncertain attempt, or a failed non-retryable one, and
-records the operator's decision and reason, such as "verified nothing was
-applied". It does not execute by itself: the unit becomes ready and runs in the
-current or next `reconcile`, so an operator can decide locally while CI
-executes. Accepting an uncertain attempt as applied requires outputs, so it is
-possible only through `inspect`.
+`nyl recover -e <env> --unit <u> --retry [--reason <text>]` clears an uncertain
+condition, or a non-retryable failure, and records the operator's decision and
+reason, such as "verified nothing was applied", in its transition commit. It
+does not execute by itself: the unit becomes ready and runs in the next
+`reconcile`, so an operator can decide locally while CI executes. Accepting an
+uncertain execution as applied requires outputs, so it is possible only through
+`inspect`.
+
+A retryable failure is retried by the next `reconcile`; a non-retryable one
+waits for `recover --retry`.
 
 ## Deletion
 
+Deletion and holds are recorded in the desired unit's `lifecycle` block, so a
+unit's whole history is one file's diff and the last desired spec needed for
+teardown is already there:
+
+```yaml
+lifecycle:
+  state: deleting                    # active | deleting | held
+  deletion:
+    reason: omission                 # omission | teardown | replace | kind-change
+    intent: teardown                 # retain | teardown
+    requested: {by: alice, at: 2026-09-24T12:00:00Z, reason: decommission}
+  # hold: {since: 2026-09-24T12:05:00Z, by: alice, reason: "incident 4711"}
+```
+
 - **Omission.** A unit that leaves the ownership set (removed from source, for
-  example with `nyl delete unit <name>`, deselected, or `enabled: false`) gets a `tombstone` carrying its uid, its last
-  desired document, and its deletion policy. Units still referencing it make
-  resolution fail, so a unit and its consumers are removed together.
-- **Retain** (default). The runner writes `retained`, moving the unit's
-  receipts out of `observed/`, then `tombstone-closed`. Native resources are
-  untouched; history keeps everything. Status lists recently retained units,
-  so an unintended omission, such as a selector typo, is visible without
-  having destroyed anything.
-- **Teardown.** The driver's teardown runs from the tombstone's desired
-  document, as an attempt with the driver's teardown recovery policy. Among
-  tombstones, units are torn down before the units they depended on, using the
-  dependency graph recorded in their last desired documents. Teardown caused
-  by omission requires `--allow-teardown` on `reconcile`; without it the unit
-  is `pending-teardown`. A driver without teardown support leaves the
-  tombstone visibly blocked. Success writes `teardown`, then
-  `tombstone-closed`.
-- **Explicit teardown.** `nyl teardown -e <env> --unit <u>` tears a unit down whether or not it is in the ownership set. The command
-  is itself explicit intent, so it needs no `--allow-teardown`.
-  - For a unit outside the ownership set (a pending tombstone, or a retained
-    unit whose last desired document is recovered from history), it completes
-    the deletion.
-  - For a unit still in the ownership set, it replaces the unit: the current
-    incarnation is torn down and closed, and the next `reconcile` creates a new
-    incarnation with a new uid. Dependents are blocked until the new receipt
-    exists, then run with its outputs. This rebuilds corrupted resources or
-    rotates something that can only be recreated.
-  - With `--hold`, the incarnation is tombstoned and torn down as above, and a
-    hold is recorded in the desired ref as well, so `reconcile` does not create
-    the next incarnation. `status` shows the unit as `held`, and its dependents
-    stay blocked. `nyl resume -e <env> --unit <u>` removes the hold; the next
-    `reconcile` then creates a new incarnation with a new uid. A hold is the
-    only desired state that does not come from source; it is an explicit,
-    recorded operator event. Long-term removal still belongs
-    in source, through `enabled: false` or removing the unit.
+  example with `nyl delete unit <name>`, deselected, or `enabled: false`) keeps
+  its desired file with `state: deleting`, `reason: omission`, and the intent
+  from its `deletionPolicy`. Units still referencing it make resolution fail,
+  so a unit and its consumers are removed together.
+- **Retain** (default). The run removes the desired and observed files. Native
+  resources are untouched and history keeps everything. The transition
+  commit's summary lists the retained unit, so an unintended omission, such as
+  a selector typo, is visible without having destroyed anything.
+- **Teardown.** The driver's teardown runs from the desired file's spec, with
+  the driver's teardown recovery policy. Among deleting units, units are torn
+  down before the units they depended on. Teardown caused by omission requires
+  `--allow-teardown` on `reconcile`; without it the unit is
+  `pending-teardown`. A driver without teardown support leaves the unit
+  visibly blocked. When teardown succeeds, the run removes both files.
+- **Explicit teardown.** `nyl teardown -e <env> --unit <u>` tears a unit down
+  whether or not it is in the ownership set. The command is itself explicit
+  intent, so it needs no `--allow-teardown`.
+  - For a unit outside the ownership set (a deleting unit, or a retained unit
+    whose last desired file is recovered from history), it completes the
+    deletion.
+  - For a unit still in the ownership set, it replaces the unit
+    (`reason: replace`): the incarnation is torn down, and the next
+    `reconcile` writes a new desired file with a new uid. Dependents are
+    blocked until the new receipt exists, then run with its outputs. This
+    rebuilds corrupted resources or rotates something that can only be
+    recreated.
+  - With `--hold`, the incarnation is torn down as above and the desired file
+    stays with `state: held` and a `hold` block, so `reconcile` does not create
+    the next incarnation; its dependents stay blocked. `nyl resume -e <env>
+    --unit <u>` removes the hold; the next `reconcile` then writes a new uid.
+- **Holds.** A hold is for incidents: it stops a broken unit from being
+  recreated or re-run while it is investigated, without a source change and
+  its review cycle. It suits units that can be recreated without losing data;
+  tearing down a database destroys its data. A hold is the only desired state
+  that does not come from source, and it is an explicit, recorded operator
+  action. Long-term removal belongs in source, through `enabled: false` or
+  removing the unit.
 - **Source removal and teardown.** `nyl delete unit <name>` edits source like
   the other `nyl delete` resources: it removes the declaration after checking
   that the remaining project is valid, which rejects removing a unit other
   units still reference. The removal takes effect in every environment that
   selected the unit, at the next `reconcile`, under its deletion policy. `nyl
   teardown` acts on state directly and never edits source.
-- **Fencing.** A new unit with a tombstoned name stays blocked until the
-  tombstone closes, then receives a new uid. Teardown attempts carry the old
-  uid.
+- **Fencing.** A new incarnation cannot take a name whose desired file is
+  `deleting`; it waits until the file is removed, then receives a new uid. A
+  kind change under the same name is a deletion with `reason: kind-change`.
 
 ## Credentials
 
@@ -568,7 +650,7 @@ spec:
 - A kind may offer typed helpers for well-known credentials, such as
   `registryAuth` for `OciImage`. Nyl turns a helper into environment variables
   or temporary files, validates it against the kind's schema, and removes the
-  files after the attempt.
+  files after the execution.
 - Secret values and everything a helper derives from them are masked in
   transcripts and never recorded.
 - The execution key covers the names in `env` and helper structure, never
@@ -605,8 +687,9 @@ trying changes against real evidence before CI:
 - The first local run for an environment copies the remote state refs to local
   refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`; later
   local runs continue from them. `--local --reset` copies again.
-- Local runs write state commits only to those refs, with a `Nyl-Local: true`
-  trailer, and never push. `nyl status -e <env> --local` shows the local view.
+- Local runs write transition commits only to those refs, with a
+  `Nyl-Local: true` trailer, keep their lease and run refs local too, and never
+  push. `nyl status -e <env> --local` shows the local view.
 - Effects are real, and local state is never pushed. CI's next run executes
   those units again. That is safe for `converge` drivers; a local run
   therefore executes units with other recovery policies only when they are
@@ -644,7 +727,7 @@ revisions, and locked `fromGit` bindings.
 | Setting | Default | Configured in |
 | --- | --- | --- |
 | Concurrency per wave | 4 | `nyl.toml`, `--concurrency` |
-| Attempt grace period | 10 minutes | `nyl.toml` |
+| Lease grace period | 10 minutes | `nyl.toml` |
 | `timeout` | Command 30m, Terraform/OpenTofu 60m, OciImage 60m, KubernetesPublication 10m | unit `timeout` |
 
 ## Drivers
@@ -664,7 +747,7 @@ trait Driver {
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
     fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Drift>>;
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
-    fn teardown(&self, ctx: &ExecutionContext, tombstone: &Tombstone) -> Result<Supported<Outcome>>;
+    fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
 }
 
 enum Supported<T> {
@@ -673,22 +756,22 @@ enum Supported<T> {
 }
 
 enum Outcome {
-    Succeeded { outputs: Outputs, artifacts: Vec<ArtifactDescriptor> },
+    Succeeded { outputs: Outputs, artifacts: Vec<Artifact> }, // typed artifact documents
     Failed { category: FailureCategory, retryable: bool },
     Uncertain,
 }
 ```
 
 - `ExecutionContext` provides the worktree at the effective source revision,
-  resolved inputs, admitted environment variables and secrets, the deadline, a
-  cancellation signal, previous receipts, and a transcript sink that masks
-  secret values.
+  the resolved spec, admitted environment variables and secrets, the deadline,
+  a cancellation signal, the unit's observed file, and a transcript sink that
+  masks secret values.
 - Drivers run external tools only through the context, so transcripts,
   masking, and deadlines are uniform.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
-- Every type crossing the trait (context, desired unit, receipt, tombstone,
-  outcome, plan report, inspection, drift) is plain data with a JSON
+- Every type crossing the trait (context, desired unit, observed unit,
+  artifact, outcome, plan report, inspection, drift) is plain data with a JSON
   representation. Handles such as the cancellation signal and transcript sink
   stay on Nyl's side and have message equivalents. This keeps a process adapter
   possible without changing the model.
@@ -704,12 +787,12 @@ drivers are needed.
   protocol over stdin and stdout.
 - Its `describe` call returns its unit kinds in a group it owns, such as
   `units.acme.example/v1` `Helmfile`, with their schemas, behavior versions,
-  capabilities, and recovery policies. Nyl treats every kind a registered
-  plugin describes as a unit. `units.gitops.nyl/v1` is reserved for built-in
+  capabilities, recovery policies, and any artifact kinds it publishes. Nyl
+  treats every unit kind a registered plugin describes as a unit. `units.gitops.nyl/v1` is reserved for built-in
   drivers.
 - The plugin implements `plan`, `reconcile`, `verify`, `inspect`, and
-  `teardown` over the same serialized types. Nyl keeps resolution, attempts,
-  receipts, state commits, secret admission, transcript masking, and deadlines.
+  `teardown` over the same serialized types. Nyl keeps resolution, leases,
+  checkpoints, receipts, transition commits, secret admission, transcript masking, and deadlines.
 - A plugin runs with the runner's permissions, like a command unit; pinning by
   digest is the supply-chain control.
 - The command unit is the protocol's step zero: one command, without a schema
@@ -763,9 +846,9 @@ spec:
   and `sensitive` outputs are masked in it.
 - Exit code 0 with a valid outputs file is success. Any other exit code is a
   failure; a missing or invalid outputs file, or an undeclared output, also
-  fails the attempt. Failures are not retryable unless `idempotent: true`.
+  fails the execution. Failures are not retryable unless `idempotent: true`.
 - `verify` exits 0 for clean, 2 for drift, and anything else for an error. It
-  records an observation, never a receipt.
+  records a drift observation, never a receipt.
 - There is no sandbox beyond the working directory and the environment; the
   command runs with the runner's permissions. Isolation such as containers is
   an M7 decision.
@@ -777,14 +860,14 @@ spec:
 | Command | Effect | Writes |
 | --- | --- | --- |
 | `plan` | Resolve and run driver planning for ready units; report blocked units and incomplete plans | Nothing |
-| `reconcile` | Resolve, then execute waves until nothing is ready | Desired updates, tombstones, attempts, receipts, retention, teardowns |
+| `reconcile` | Resolve, then execute waves until nothing is ready | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
-| `verify` | Run driver verification against current receipts | Observations |
-| `recover` | Clear one uncertain or non-retryable attempt for re-execution | `recovery` |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone (plus a hold with `--hold`), then teardown events |
-| `resume` | Remove a hold | `hold-released` |
-| `state init` | Create state at the configured location; `--fresh` starts over deliberately | `state-initialized` |
-| `state copy` | Copy state history from another location | `state-copied` |
+| `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
+| `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | One transition commit per state ref |
+| `resume` | Remove a hold | One desired commit |
+| `state init` | Create state at the configured location; `--fresh` starts over deliberately | `state.yaml` on each ref |
+| `state copy` | Copy state history from another location | Copied history plus `state.yaml` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
@@ -798,9 +881,9 @@ Common options: `-e`/`--environment`, `--unit`/`--units`,
 stdout, with human diagnostics on stderr.
 
 Each unit has one state in `status`: `blocked` (with the unresolved reference or
-non-current dependency), `ready`, `awaiting-approval`, `running` (with the
-holding attempt), `expired`, `uncertain`, `failed`, `current`, `held`,
-`retained`, `pending-teardown`, or `tearing-down`. Whether the latest receipt is current is
+non-current dependency), `ready`, `awaiting-approval`, `running` (with the run
+holding the lease), `uncertain`, `failed`, `current`, `held`,
+`pending-teardown`, or `tearing-down`. Whether the latest receipt is current is
 shown as a separate attribute.
 
 Exit categories, where "selected" means the units the invocation was allowed to
@@ -808,11 +891,11 @@ execute (all of them without `--unit`/`--units`):
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Every selected unit is current, retained, or torn down |
+| 0 | Every selected unit is current, or its deletion completed |
 | 1 | Configuration, resolution, or operational error |
-| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, or another runner |
-| 3 | At least one attempt failed |
-| 4 | At least one attempt is uncertain and needs recovery |
+| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, or another run's lease |
+| 3 | At least one execution failed |
+| 4 | At least one execution is uncertain and needs recovery, or the run lost its lease |
 
 The highest applicable category wins. Holds are reported as exit 2 on purpose:
 a run that leaves units unreconciled says so. A pipeline that expects a hold
@@ -822,43 +905,45 @@ when those are current.
 ## Walkthroughs
 
 **Successful dependency wave.** `network` has no references and runs in wave 1;
-its receipt records `vpcId`. Re-resolution makes `database` ready; it runs in
-wave 2 with `vpcId` in its resolved spec. `kubernetes` depends on `database`
-and `web-image` through its target's bindings and runs in wave 3. Every step is
-one commit with trailers sharing one operation ID. Exit 0.
+its receipt is checkpointed on the run ref. Re-resolution makes `database`
+ready; it runs in wave 2 with `vpcId` in its resolved spec. `kubernetes`
+depends on `database` and on `web-image`'s `ContainerImage` through its
+target's bindings and runs in wave 3. The run ends with one desired and one
+observed commit whose summary lists all three. Exit 0.
 
 **Unavailable upstream output.** `web-image` fails in wave 1 with a retryable
 failure. `kubernetes` stays `blocked` on `web-image` with its rendered spec
-retained; `database` is unaffected. Exit 3. The next run retries `web-image`;
-once its receipt exists, `kubernetes` resolves without rereading source.
+retained; `database` is unaffected. The transition commit records the failure
+as `web-image`'s condition. Exit 3. The next run retries `web-image`; once its
+receipt exists, `kubernetes` resolves without rereading source.
 
-**Effects without a receipt.** A runner applies Terraform for `database` and
-dies before writing its receipt. The attempt stays open until its deadline;
-the next `reconcile` marks it uncertain. Terraform's policy is `converge`, so
-the same run re-plans the same desired document, finds no changes, and writes
-the receipt. Nothing is assumed from the missing receipt.
+**Effects without a receipt.** A runner applies OpenTofu for `database` and dies
+before checkpointing. Its lease expires; the next run takes it over, imports
+the dead run's checkpoints, and gives `database` an `uncertain` condition.
+OpenTofu's policy is `converge`, so the same run plans the same desired
+document again, finds no changes, and records the receipt. Its transition
+commit lists `database` under `recovered`. Nothing is assumed from the missing
+checkpoint.
 
-**Competing runners.** Two CI jobs reconcile `dev` at once. Both try to claim
-`database`; one `attempt-started` commit wins, and the other job reports the
-unit as held and moves on. If the holder is lost, its attempt expires, and a
-later run recovers it.
+**Competing runners.** Two CI jobs reconcile `dev` at once. One creates the
+lease; the other finds it held, reports the holder, and exits 2. If the holder
+is lost, its lease expires, and a later run takes over as above.
 
 **Promotion with stale source evidence.** Dev's `web-image` has a new desired
 document without a receipt for its execution key. Promoting from `dev` at
-`published` walks the history of each selected unit's `receipt.yaml` and takes
+`published` walks the history of the selected units' observed files and takes
 the newest desired revision whose selected units each had a receipt for their
 execution key; the new, unexecuted document is skipped and the previous one is
-promoted. At
-`healthy`, the value comes from the publication the consuming Application
-runs. If no revision meets the required level, promotion blocks and reports
-which unit lacks evidence.
+promoted. At `healthy`, the value comes from the publication the consuming
+Application runs. If no revision meets the required level, promotion blocks
+and reports which unit lacks evidence.
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
-`cache` has `deletionPolicy: Teardown`, `worker` the default `Retain`.
-Resolution writes both tombstones. `worker` is retained immediately. `cache` is
-`pending-teardown` and `reconcile` exits 2 until run with `--allow-teardown`,
-which tears it down and closes its tombstone. A new `cache` added in the
-meantime waits for that and then receives a new uid.
+`cache` has `deletionPolicy: Teardown`, `worker` the default `Retain`. The next
+run marks both `deleting`, removes `worker`'s files, and reports `cache` as
+`pending-teardown`, exiting 2. A run with `--allow-teardown` tears `cache` down
+and removes its files. A new `cache` added in the meantime waits for that and
+then receives a new uid.
 
 ## Remaining questions
 

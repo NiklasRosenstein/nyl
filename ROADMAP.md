@@ -192,7 +192,7 @@ bindings are errors. Each binding selects exactly one source:
 | `fromFile` | Project file plus JSON Pointer | No |
 | `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
 | `fromPublication` | State file in the target's own publication branch at the publication base commit | No |
-| `fromUnit` | Recorded public output of a unit in the same environment | Yes (M5) |
+| `fromUnit` | Recorded public output or published artifact field of a unit in the same environment | Yes (M5) |
 | `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
 
 ```yaml
@@ -298,8 +298,10 @@ Cluster.
   and resolve dependents as evidence arrives, without rereading unrelated
   mutable source. Each run is bounded to one source revision; the contract
   defines how desired revisions advance within that run.
-- Artifacts (image digests, rendered trees) are recorded as immutable
-  descriptors with integrity digests; large payloads stay outside Git.
+- Artifacts are typed documents in `artifacts.gitops.nyl/v1`, such as
+  `ContainerImage` and `PublishedTree`, checked against digests recorded in the
+  receipt and referenced with `fromUnit: {unit, artifact, pointer}`; large
+  payloads stay outside Git.
 - The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
   DeploymentTarget, because one target owns one publication tree and ownership
   index. Its desired unit contains the resolved Release input snapshot, keyed by
@@ -387,7 +389,8 @@ spec:
 
 - `select` reads either a source unit's **resolved input** from its desired unit
   (what the source environment actually ran, such as the deployed image digest
-  or the applied Terraform source commit) or its recorded **output**.
+  or the applied Terraform source commit), a recorded **output**, or a field of
+  a published **artifact**.
 - Evidence levels are one list for every source:
   - `published`: the source produced the value, as a receipt or, for a target
     source, a publication commit.
@@ -547,12 +550,12 @@ Cluster.
 | State | Authority |
 | --- | --- |
 | Authored intent | Source Git |
-| Resolved desired units, tombstones, and promotion records | Desired-state Git ref per environment |
-| Receipts, attempts, public outputs, artifact descriptors, observations | Observed-state Git ref per environment |
+| Desired units (with deletion and hold lifecycle) and promotion records | Desired-state Git ref per environment |
+| Latest receipt and condition per unit, artifacts, latest observations | Observed-state Git ref per environment |
 | Terraform resource state | Terraform/OpenTofu backend |
 | Credentials and private keys | Secret store or execution environment |
 | Render cache | Disposable local storage |
-| Execution coordination | Attempt records: one compare-and-swap commit is the claim, lease, and recovery record |
+| Execution coordination | A per-environment lease ref and disposable per-run checkpoint refs, outside the desired and observed refs |
 
 Each Environment names a state repository (the source repository by default)
 and a desired and an observed ref. They may be the same ref; the layout uses
@@ -561,10 +564,12 @@ derived from source and evidence, so the reconcile runner writes it; review
 happens on source changes and on promotions, whose pull-request gate targets
 the desired ref. Separate refs keep that review and branch protection apart
 from the frequent observed commits. Each receipt identifies the execution key
-of the desired unit it executed. Every state commit
-records one event with Git trailers (event, operation ID, environment, unit,
-uid, attempt, source and desired commits, runner, Nyl version), so history can
-be audited and replayed by machines. Preserve the
+of the desired unit it executed. To keep the state refs reviewable, each
+operation writes at most one transition commit per ref: a whole reconcile is
+one commit, whose message carries a machine-readable summary and trailers
+(operation, run ID, source commit, the state commits read, runner, evaluation
+time, Nyl version), so history can be audited and replayed by machines.
+Per-unit progress and crash recovery use the disposable run refs. Preserve the
 distinction between rendered-file ownership, published desired state,
 successful execution evidence, and current external observations. A matching
 receipt proves success for particular inputs; it does not prove the system is
@@ -660,7 +665,7 @@ policy.
 | verify | Observe external state and report drift without writing receipts |
 | promote | Record selected source values into target desired state, or open a change for review |
 | teardown / resume | Tear down a unit: complete a deletion, replace a selected unit, or hold it down; resume removes a hold |
-| recover | Clear an uncertain or failed attempt for re-execution, with a recorded reason |
+| recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,
 non-interactive behavior, deadlines, and exit categories before stabilizing the
@@ -727,8 +732,8 @@ byte-identical output to the previous release.
 ### M3 — Orchestration core with a constrained command unit
 
 - [ ] Implement environments, YAML state files with published schemas,
-  `nyl state init`/`copy`, attempts, and receipts with machine-readable commit
-  trailers.
+  `nyl state init`/`copy`, leases and run checkpoints, and one transition
+  commit per operation with a machine-readable summary.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`,
   and `resume` for a dependency graph of command units with `fromUnit`
   references, including `--local` runs.
