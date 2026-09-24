@@ -5,22 +5,31 @@
 
 This contract defines environments, units, desired and observed state,
 execution, recovery, deletion, the driver interface, the command unit, and the
-`nyl orchestrate` command effects. Promotion rules are in the roadmap's
+effects of the orchestration commands. Promotion rules are in the roadmap's
 promotion and health evidence sections; this contract defines the state they
 read.
 
-Nothing here changes existing commands. A project without `orchestration.nyl/v1`
-resources never touches orchestration state.
+Nothing here changes existing commands. A project without Environments and
+units never touches orchestration state.
 
 ## Resources
 
-Orchestration resources use `apiVersion: orchestration.nyl/v1`. Discovery
-follows Git visibility across the project, like the rendered GitOps resources.
+| Resources | API group |
+| --- | --- |
+| Environment, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
+| Built-in unit kinds: `Command`, `Terraform`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
+| Plugin unit kinds | The plugin's own group, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
+
+Every resource in a unit group is a unit; the group identifies the family and
+the kind selects the driver, as `components.k8s.nyl/v1` does for component
+invocations. Discovery follows Git visibility across the project, like the
+rendered GitOps resources. `nyl create`, `nyl get`, and `nyl delete` gain
+`environment`, `unit`, and `promotion-path` resources.
 
 ### Environment
 
 ```yaml
-apiVersion: orchestration.nyl/v1
+apiVersion: gitops.nyl/v1
 kind: Environment
 metadata:
   name: production
@@ -31,40 +40,42 @@ spec:
     stateKey: production/database
     target: production
   state:
-    repositoryRef: {name: platform-state}   # optional; defaults to the source repository
+    repositoryRef: {name: platform-state}   # or inline `repository`
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
 ```
 
 - An Environment is static at discovery, like a DeploymentTarget.
-- `unitSelector` matches literal Unit `metadata.labels`; an empty selector
-  selects every Unit. The selected, enabled units are the environment's
-  authoritative ownership set: leaving it is how deletion is requested (see
-  [Deletion](#deletion)).
-- `values` is exposed to Unit templates as `values`, and the sanitized
-  Environment as `environment`. State repository credentials are never exposed.
+- `unitSelector` matches literal unit `metadata.labels` across all unit kinds;
+  an empty selector selects every unit. The selected, enabled units are the
+  environment's authoritative ownership set: leaving it is how deletion is
+  requested (see [Deletion](#deletion)).
+- `values` is exposed to unit templates as `values`, and the sanitized
+  Environment as `environment`. Repository credentials are never exposed.
+- `state` follows the shape of DeploymentTarget `publication`: a GitRepository
+  reference (`repositoryRef`) or inline `repository`, reading through its
+  `repoURL` and writing through its `publishURL`. Without either, state uses
+  the source checkout's `origin` remote; CI should name a GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
   either way (see [State layout](#state-layout)).
 
-### Unit
+### Units
 
 ```yaml
-apiVersion: orchestration.nyl/v1
-kind: Unit
+apiVersion: units.gitops.nyl/v1
+kind: Terraform
 metadata:
   name: database
   labels: {tier: platform}
 spec:
-  enabled: true
-  driver: Terraform
-  inputs:
-    source: {path: infra/database}
-    backend: {key: '{{ values.stateKey }}'}
-    variables:
-      vpcId: {fromUnit: {unit: network, output: vpcId}}
+  source: {path: infra/database}
+  backend: {key: '{{ values.stateKey }}'}
+  variables:
+    vpcId: {fromUnit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
     port: {type: integer}
+  enabled: true
   dependsOn: []
   approval: auto
   deletionPolicy: Retain
@@ -74,13 +85,15 @@ spec:
 - The envelope (`apiVersion`, `kind`, `metadata.name`, `metadata.labels`) is
   literal, so selection happens before rendering. `spec` is a Nyl template
   rendered once per selecting Environment.
-- Common fields: `enabled` (evaluated after rendering; `false` leaves the
-  ownership set), `driver`, `inputs`, `outputs`, `dependsOn`, `approval`
-  (`auto` or `manual`), `deletionPolicy` (`Retain` or `Teardown`), and
-  `timeout`. Every other `spec` field belongs to the driver's schema, such as a
-  command unit's `command` and `env`.
-- References may appear only inside `inputs`. `inputs` follows the driver's
-  input schema.
+- Every unit kind shares the common fields `enabled` (evaluated after
+  rendering; `false` leaves the ownership set), `outputs`, `dependsOn`,
+  `approval` (`auto` or `manual`), `deletionPolicy` (`Retain` or `Teardown`),
+  and `timeout`. They are one Rust struct flattened into each kind's spec, so
+  their schema and documentation are identical everywhere. The remaining fields
+  belong to the kind, and each kind has its own schema and generated reference
+  page.
+- References may appear in any field the kind's schema marks as accepting
+  them.
 - `outputs` declares public outputs with the Release input type set (`string`,
   `integer`, `number`, `boolean`, `object`, `array`), optional `description`,
   and optional `sensitive`. Only declared outputs are recorded. A `sensitive`
@@ -89,16 +102,25 @@ spec:
   native-tool sensitive outputs that are not declared sensitive.
 - `dependsOn` lists units that must have a current receipt first, for ordering
   without a data reference. References add dependencies implicitly.
+- Repository content from elsewhere uses the ApplicationGroup source shape in
+  the kind's `source` field: `repositoryRef` or `repository`, a human
+  `revision`, a locked `commit`, and `path`. `nyl update source-locks` refreshes
+  these locks with the others. Without a repository, `source.path` is read at
+  the source commit.
 
 ### Identity
 
-- A unit's address is `<environment>/<unit>`.
+- Unit names are unique per environment across all unit kinds, so references
+  name only the unit. A unit's address is `<environment>/<unit>`.
 - Each incarnation has a `uid`, a UUIDv7 generated when resolution first
   publishes its desired document. Two resolvers racing to create the same unit
   are serialized by compare-and-swap; the loser re-reads and adopts the
   published uid.
 - The uid fences every attempt, receipt, and tombstone. A name held by a
   tombstone cannot start a new incarnation until the tombstone closes.
+- Changing a unit's `apiVersion` or `kind` under the same name ends the old
+  incarnation: it is tombstoned under its deletion policy, and the new kind
+  starts a new incarnation. A unit never inherits another kind's receipts.
 - An explicit teardown closes an incarnation even while the unit stays in the
   ownership set; the next incarnation receives a new uid (see
   [Deletion](#deletion)).
@@ -116,21 +138,19 @@ spec:
 - A reference to a unit outside the ownership set, to an undeclared or
   sensitive output, or one that closes a cycle, is a resolution error.
 - The value is checked against the producer's declared output type and, where
-  the consumer declares one, the consumer's input type.
+  the consumer's schema declares one, the consumer field's type.
 
 ### Kubernetes publication unit
 
 ```yaml
-apiVersion: orchestration.nyl/v1
-kind: Unit
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
 metadata:
   name: kubernetes
   labels: {tier: platform}
 spec:
-  driver: KubernetesPublication
-  inputs:
-    target: '{{ values.target }}'
-    mode: publish        # publish | observe
+  target: '{{ values.target }}'
+  mode: publish        # publish | observe
 ```
 
 - The unit places its DeploymentTarget into the environment. A target
@@ -138,7 +158,7 @@ spec:
   referenced by none rejects `fromUnit` and `fromPromotion` bindings.
 - Its dependencies are the units named by the target's `fromUnit` bindings and
   the PromotionRecords named by its `fromPromotion` bindings.
-- Its resolved inputs contain every Release input of its target, keyed as
+- Its resolved spec contains every Release input of its target, keyed as
   `releases.<group>/<release>.<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
 - `fromPublication` is resolved like every other binding. Resolution reads the
@@ -187,18 +207,19 @@ it, and promotion walks the history of one receipt path.
 
 A desired unit is the execution snapshot of one incarnation:
 
-- identity: environment, unit name, uid, driver;
+- identity: environment, unit name, uid, `apiVersion` and `kind`;
 - the source commit S it was rendered from, and the effective source revision
   for units that execute repository content: S, unless the unit's `source`
-  input carries an explicit or promoted revision;
+  field names a repository or carries a promoted revision;
 - the rendered spec, with references still written as expressions;
-- `resolvedInputs`: the `inputs` document with each reference replaced by its
-  value. PromotionPath selectors such as `input: /source` or
+- `resolvedSpec`: the rendered spec with each reference replaced by its value.
+  PromotionPath selectors such as `input: /source` or
   `input: /releases/platform~1web/image` are JSON Pointers into this document;
 - `provenance`: for each reference, the producer unit, uid, and execution key
   of the receipt it came from, or the PromotionRecord and value;
-- `executionKey`: a digest of the driver kind and its behavior version, the
-  rendered spec without references, `resolvedInputs`, the selected source
+- `executionKey`: a digest of the unit's `apiVersion`, `kind`, and driver
+  behavior version, `resolvedSpec` without the common fields that do not affect
+  execution (`dependsOn`, `approval`, `deletionPolicy`), the selected source
   bytes, and any command-unit fingerprint output. It excludes the source commit
   ID, provenance, readiness, Nyl's release version, and external tool
   versions, so a new source commit with identical inputs, a producer
@@ -215,7 +236,7 @@ When a unit's execution key changed only because of a behavior version, and its
 driver's recovery policy is not `converge`, the unit waits for `--approve`
 instead of re-running automatically. External tool versions, such as
 Terraform's, are recorded in receipts for audit; a unit that should re-run on a
-tool change pins the version as an input, such as `terraform: {version: 1.9.5}`.
+tool change pins the version in its spec, such as `terraform: {version: 1.9.5}`.
 
 ### Receipt
 
@@ -297,7 +318,7 @@ Invariants:
 
 ## Execution
 
-`nyl orchestrate reconcile --environment <env>`:
+`nyl reconcile -e <env>`:
 
 1. **Resolve.** Render the environment's units at source commit S, resolve
    references against current receipts and PromotionRecords, and publish
@@ -352,7 +373,7 @@ or teardown:
 
 ```json
 {
-  "apiVersion": "orchestration.nyl/v1",
+  "apiVersion": "gitops.nyl/v1",
   "kind": "Attempt",
   "id": "91c4…",
   "operation": "reconcile",
@@ -397,8 +418,7 @@ declares a recovery policy for execution and for teardown:
 | `inspect` | The driver's `inspect` reports applied (with outputs), not applied, or unknown; applied writes the receipt, not applied retries, unknown falls back to `manual` | Drivers that can observe their effects |
 | `manual` | Blocked until an operator runs `recover --retry` | Command units without `idempotent: true` |
 
-`nyl orchestrate recover --environment <env> --unit <u> --retry [--reason
-<text>]` clears an uncertain attempt, or a failed non-retryable one, and
+`nyl recover -e <env> --unit <u> --retry [--reason <text>]` clears an uncertain attempt, or a failed non-retryable one, and
 records the operator's decision and reason, such as "verified nothing was
 applied". It does not execute by itself: the unit becomes ready and runs in the
 current or next `reconcile`, so an operator can decide locally while CI
@@ -407,8 +427,8 @@ possible only through `inspect`.
 
 ## Deletion
 
-- **Omission.** A unit that leaves the ownership set (removed from source,
-  deselected, or `enabled: false`) gets a `tombstone` carrying its uid, its last
+- **Omission.** A unit that leaves the ownership set (removed from source, for
+  example with `nyl delete unit <name>`, deselected, or `enabled: false`) gets a `tombstone` carrying its uid, its last
   desired document, and its deletion policy. Units still referencing it make
   resolution fail, so a unit and its consumers are removed together.
 - **Retain** (default). The runner writes `retained`, moving the unit's
@@ -424,8 +444,7 @@ possible only through `inspect`.
   is `pending-teardown`. A driver without teardown support leaves the
   tombstone visibly blocked. Success writes `teardown`, then
   `tombstone-closed`.
-- **Explicit teardown.** `nyl orchestrate teardown --environment <env> --unit
-  <u>` tears a unit down whether or not it is in the ownership set. The command
+- **Explicit teardown.** `nyl teardown -e <env> --unit <u>` tears a unit down whether or not it is in the ownership set. The command
   is itself explicit intent, so it needs no `--allow-teardown`.
   - For a unit outside the ownership set (a pending tombstone, or a retained
     unit whose last desired document is recovered from history), it completes
@@ -437,25 +456,31 @@ possible only through `inspect`.
     rotates something that can only be recreated.
   - With `--hold`, a hold is recorded in the desired ref and `reconcile` does
     not recreate the unit; `status` shows it as `held`, and its dependents stay
-    blocked. `nyl orchestrate release --environment <env> --unit <u>` removes
-    the hold. A hold is the only desired state that does not come from source;
+    blocked. `nyl resume -e <env> --unit <u>` removes the hold. A hold is the only desired state that does not come from source;
     it is an explicit, recorded operator event. Long-term removal still belongs
     in source, through `enabled: false` or removing the unit.
+- **Source removal and teardown.** `nyl delete unit <name>` edits source like
+  the other `nyl delete` resources: it removes the declaration after checking
+  that the remaining project is valid, which rejects removing a unit other
+  units still reference. The removal takes effect in every environment that
+  selected the unit, at the next `reconcile`, under its deletion policy. `nyl
+  teardown` acts on state directly and never edits source.
 - **Fencing.** A new unit with a tombstoned name stays blocked until the
   tombstone closes, then receives a new uid. Teardown attempts carry the old
   uid.
 
 ## Drivers
 
-Drivers are Rust implementations behind one trait:
+Built-in drivers are Rust implementations behind one trait:
 
 ```rust
 trait Driver {
+    fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
     fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
-    fn spec_schema(&self) -> Schema;        // inputs plus driver-specific spec fields
+    fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
 
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<PlanReport>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Outcome>;
@@ -480,20 +505,45 @@ enum Outcome {
   masking, and deadlines are uniform.
 - Methods for capabilities a driver lacks return `Unsupported`, which is
   reported, never silently skipped.
+- Every type crossing the trait (context, desired unit, receipt, tombstone,
+  outcome, plan report, inspection, drift) is plain data with a JSON
+  representation. Handles such as the cancellation signal and transcript sink
+  stay on Nyl's side and have message equivalents. This keeps a process adapter
+  possible without changing the model.
+
+### Plugin drivers
+
+Plugins are not part of the initial scope; this is the direction the serializable
+boundary keeps open, to be decided in M7 once command units have shown which
+drivers are needed.
+
+- A plugin is an executable, such as `nyl-driver-helmfile`, declared in
+  `nyl.toml` with a pinned version and digest. It speaks a versioned JSON
+  protocol over stdin and stdout.
+- Its `describe` call returns its unit kinds in a group it owns, such as
+  `units.acme.example/v1` `Helmfile`, with their schemas, behavior versions,
+  capabilities, and recovery policies. Nyl treats every kind a registered
+  plugin describes as a unit. `units.gitops.nyl/v1` is reserved for built-in
+  drivers.
+- The plugin implements `plan`, `reconcile`, `verify`, `inspect`, and
+  `teardown` over the same serialized types. Nyl keeps resolution, attempts,
+  receipts, state commits, secret admission, transcript masking, and deadlines.
+- A plugin runs with the runner's permissions, like a command unit; pinning by
+  digest is the supply-chain control.
+- The command unit is the protocol's step zero: one command, without a schema
+  or lifecycle verbs.
 
 ## Command unit
 
 ```yaml
-apiVersion: orchestration.nyl/v1
-kind: Unit
+apiVersion: units.gitops.nyl/v1
+kind: Command
 metadata:
   name: seed
 spec:
-  driver: Command
-  inputs:
-    files: ['scripts/seed/**']
-    values:
-      bucket: {fromUnit: {unit: storage, output: bucket}}
+  files: ['scripts/seed/**']
+  values:
+    bucket: {fromUnit: {unit: storage, output: bucket}}
   command: ['./scripts/seed/run.sh']
   verify: ['./scripts/seed/verify.sh']
   fingerprint: ['./scripts/seed/tool-versions.sh']
@@ -517,7 +567,7 @@ spec:
     string secret is passed as is; an object or array secret is passed as
     compact JSON.
 - The execution key covers `command`, `verify`, `fingerprint`, `idempotent`,
-  the files matched by `inputs.files`, resolved `values`, the names in
+  the files matched by `files`, resolved `values`, the names in
   `env.passthrough` and `env.secrets` but not their values, and the output of
   `fingerprint`. Changing a passthrough variable or rotating a secret does not
   re-run the command.
@@ -527,7 +577,7 @@ spec:
   fast and deterministic, and must exit 0. Its stdout is digested into the
   execution key and stored in the desired document, truncated to 4 KiB, for
   audit. A change in its output re-runs the unit like any other input change.
-- Files outside `inputs.files` may be read but do not trigger re-execution.
+- Files outside `files` may be read but do not trigger re-execution.
 - Stdout and stderr form the transcript and are never parsed. Secret values
   and `sensitive` outputs are masked in it.
 - Exit code 0 with a valid outputs file is success. Any other exit code is a
@@ -551,10 +601,15 @@ spec:
 | `verify` | Run driver verification against current receipts | Observations |
 | `recover` | Clear one uncertain or non-retryable attempt for re-execution | `recovery` |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone or hold, then teardown events |
-| `release` | Remove a hold | `hold-released` |
+| `resume` | Remove a hold | `hold-released` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
-Common options: `--environment`, `--unit`/`--units`, `--approve <unit>`,
+All are top-level `nyl` commands. `release` is taken by Kubernetes release
+history and `delete` by source editing, so removing a hold is `resume` and
+tearing down is `teardown`. `nyl get environments`, `nyl get units`, and `nyl
+get promotion-paths` list declarations; `nyl status` shows state.
+
+Common options: `-e`/`--environment`, `--unit`/`--units`, `--approve <unit>`,
 `--allow-teardown`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
@@ -581,7 +636,7 @@ The highest applicable category wins.
 
 **Successful dependency wave.** `network` has no references and runs in wave 1;
 its receipt records `vpcId`. Re-resolution makes `database` ready; it runs in
-wave 2 with `vpcId` in its resolved inputs. `kubernetes` depends on `database`
+wave 2 with `vpcId` in its resolved spec. `kubernetes` depends on `database`
 and `web-image` through its target's bindings and runs in wave 3. Every step is
 one commit with trailers sharing one operation ID. Exit 0.
 

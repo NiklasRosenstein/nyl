@@ -110,9 +110,11 @@ stores no event triggers. Continuous observation is an M7 decision.
 | Interfaces | One CLI and machine interface over the same operations and observations |
 
 Drivers are Rust implementations behind one internal trait with advertised
-capabilities (plan, reconcile, verify, teardown). The command unit is the
-extension point for tools without a dedicated driver. An out-of-process driver
-protocol is not part of the initial scope.
+capabilities (plan, reconcile, verify, inspect, teardown). The command unit is
+the extension point for tools without a dedicated driver. Every type crossing
+the trait is serializable, so plugin drivers (executables with their own unit
+API group, speaking a versioned JSON protocol) remain possible; the protocol
+itself is an M7 decision, not part of the initial scope.
 
 ### Resource model and scope
 
@@ -130,11 +132,13 @@ Kubernetes publication units. It does not require a Kubernetes destination.
 DeploymentTarget keeps its Kubernetes meaning; non-Kubernetes units never
 supply cluster or Argo CD configuration.
 
-Orchestration resources use a new API group, proposed as `orchestration.nyl/v1`,
-defined independently of the Kubernetes contracts. Kubernetes compiler resources
-keep `k8s.gitops.nyl/v1`; HelmChart and RemoteManifest keep `k8s.nyl/v1`;
-chart-backed component invocations keep `components.k8s.nyl/v1`; shared
-GitRepository resources keep `gitops.nyl/v1`. Resource reference pages derive
+Orchestration is still GitOps, so its resources join the existing groups.
+Environment and PromotionPath use `gitops.nyl/v1`, next to the shared
+GitRepository, which also names environment state repositories. Built-in unit
+kinds (`Command`, `Terraform`, `OciImage`, `KubernetesPublication`) use
+`units.gitops.nyl/v1`, where every kind is a unit and the kind selects the
+driver, as in `components.k8s.nyl/v1`. Kubernetes compiler resources keep
+`k8s.gitops.nyl/v1`; HelmChart and RemoteManifest keep `k8s.nyl/v1`. Resource reference pages derive
 from the Rust-generated JSON Schemas.
 
 Separate authoring membership, unit identity, and native resource ownership.
@@ -242,39 +246,35 @@ spec:
 
 The draft [orchestration core contract](design/orchestration-core.md) specifies
 environments, units, state, execution, recovery, deletion, drivers, and the
-command unit. In summary, an Environment selects labelled Unit templates and
-renders them with its values, mirroring how a DeploymentTarget selects
+command unit. In summary, an Environment selects labelled unit templates of any
+unit kind and renders them with its values, mirroring how a DeploymentTarget selects
 ApplicationGroups, so a unit is written once for every environment:
 
 ```yaml
-apiVersion: orchestration.nyl/v1
+apiVersion: gitops.nyl/v1
 kind: Environment
 metadata: {name: dev}
 spec:
   unitSelector: {matchLabels: {tier: platform}}
   values: {stateKey: dev/database, target: dev}
 ---
-apiVersion: orchestration.nyl/v1
-kind: Unit
+apiVersion: units.gitops.nyl/v1
+kind: Terraform
 metadata: {name: database, labels: {tier: platform}}
 spec:
-  driver: Terraform
-  inputs:
-    source: {path: infra/database}
-    backend: {key: '{{ values.stateKey }}'}
-    variables:
-      vpcId: {fromUnit: {unit: network, output: vpcId}}
+  source: {path: infra/database}
+  backend: {key: '{{ values.stateKey }}'}
+  variables:
+    vpcId: {fromUnit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
     port: {type: integer}
 ---
-apiVersion: orchestration.nyl/v1
-kind: Unit
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
 metadata: {name: kubernetes, labels: {tier: platform}}
 spec:
-  driver: KubernetesPublication
-  inputs:
-    target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use fromUnit
+  target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use fromUnit
 ```
 
 A Kubernetes publication unit places its target into the unit's environment,
@@ -311,11 +311,12 @@ Cluster.
 **Command unit (M3).** A constrained escape hatch for tools without a driver:
 
 ```yaml
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata: {name: seed}
 spec:
-  driver: Command
-  inputs:
-    files: ["scripts/seed/**"]
-    values: {bucket: {fromUnit: {unit: storage, output: bucket}}}
+  files: ["scripts/seed/**"]
+  values: {bucket: {fromUnit: {unit: storage, output: bucket}}}
   command: ["./scripts/seed/run.sh"]
   env:
     passthrough: [AWS_REGION]
@@ -355,7 +356,7 @@ bindings. Source and target may differ in unit names, input names, and document
 shape; the path states the mapping. Names and fields below are proposals.
 
 ```yaml
-apiVersion: orchestration.nyl/v1
+apiVersion: gitops.nyl/v1
 kind: PromotionPath
 metadata: {name: dev-to-staging}
 spec:
@@ -414,7 +415,7 @@ inputs:
   value comes from the revision its own consuming Application or unit runs, so
   values proven together in the source are promoted together even when manual
   syncs left Applications at different revisions.
-- `nyl orchestrate promote --path dev-to-staging [--value …]` writes a
+- `nyl promote dev-to-staging [--value …]` writes a
   PromotionRecord into the target environment's desired state: per value, its
   selector, the source unit's identity and incarnation, the source revision it
   came from, and its receipt or input digest; plus the observation that proved
@@ -438,7 +439,7 @@ DeploymentTarget. A target source lets a dev target that renders from `value`,
 orchestrated environment without being orchestrated itself:
 
 ```yaml
-apiVersion: orchestration.nyl/v1
+apiVersion: gitops.nyl/v1
 kind: PromotionPath
 metadata: {name: dev-to-production}
 spec:
@@ -482,7 +483,7 @@ review. The two routes coexist:
 | | Locked `fromGit` (M2) | PromotionPath (M6) |
 | --- | --- | --- |
 | Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a path and value |
-| Promote with | `nyl update source-locks --target …`, then a pull request | `nyl orchestrate promote --path …` |
+| Promote with | `nyl update source-locks --target …`, then a pull request | `nyl promote <path>` |
 | Health gate | `--require healthy` on the lock update | `evidence: healthy` on the path |
 | Record | The lock in source, with an `observed` block under `--require healthy` | A PromotionRecord in target desired state |
 | Adds | — | Evidence gates, atomic multi-value promotion, lineage |
@@ -627,27 +628,38 @@ GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
 comment keys and authenticated account ownership require no orchestration state
 or Nyl project configuration.
 
-The working CLI design uses an explicit `nyl orchestrate` group. Names and flags
-are proposals to validate in M1/M3:
+Orchestration commands are top-level, because it is all GitOps. Names and flags
+are proposals to validate in M3:
 
 ```bash
 nyl update source-locks --check
-nyl orchestrate plan --environment dev
-nyl orchestrate reconcile --environment dev [--unit …] [--approve …] [--allow-teardown]
-nyl orchestrate status --environment dev
-nyl orchestrate verify --environment dev
-nyl orchestrate promote --path dev-to-staging
-nyl orchestrate teardown --environment dev --unit web-image [--hold]
+nyl plan -e dev
+nyl reconcile -e dev [--unit …] [--approve …] [--allow-teardown]
+nyl status -e dev
+nyl verify -e dev
+nyl promote dev-to-staging
+nyl teardown -e dev --unit web-image [--hold]
+nyl resume -e dev --unit web-image
+nyl recover -e dev --unit seed --retry
+nyl get environments | units | promotion-paths
+nyl delete unit web-image            # removes the declaration from source
 ```
+
+`nyl release` (Kubernetes release history) and `nyl delete` (source editing)
+keep their meanings. `nyl create`, `nyl get`, and `nyl delete` gain
+environments, units, and promotion paths; deleting a unit declaration is the
+GitOps way to remove it, handled by the next `reconcile` under its deletion
+policy.
 
 | Operation | Contract |
 | --- | --- |
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
-| status / get | Inspect intent, evidence, progress, promotion lineage, and blockers |
+| status | Inspect intent, evidence, progress, promotion lineage, and blockers |
 | verify | Observe external state and report drift without writing receipts |
 | promote | Record selected source values into target desired state, or open a change for review |
-| teardown | Tear down a unit: complete a deletion, replace a selected unit, or hold it down |
+| teardown / resume | Tear down a unit: complete a deletion, replace a selected unit, or hold it down; resume removes a hold |
+| recover | Clear an uncertain or failed attempt for re-execution, with a recorded reason |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,
 non-interactive behavior, deadlines, and exit categories before stabilizing the
@@ -753,7 +765,7 @@ with static inputs in a target that does not use orchestration.
 
 ### M6 — Promotion paths
 
-- [ ] Implement PromotionPath, PromotionRecord, and `nyl orchestrate promote`
+- [ ] Implement PromotionPath, PromotionRecord, and `nyl promote`
   with evidence checks and an optional pull-request change gate.
 - [ ] Promote an image digest and a Terraform source commit from dev to staging
   across differently named units and inputs, from one consistent source state.
@@ -772,7 +784,8 @@ promotion.
 
 - [ ] Evaluate a scheduled or long-running runner, observation cadence, and
   drift-repair policy using M3–M6 evidence.
-- [ ] Decide which command-unit uses warrant typed drivers.
+- [ ] Decide which command-unit uses warrant typed drivers, and whether to add
+  the plugin driver protocol.
 - [ ] Support minimum healthy durations, flapping guards, and promotion of
   commits that no longer run, from recorded observations.
 - [ ] Evaluate application-level checks as promotion evidence.
@@ -788,6 +801,7 @@ reasons to delay independent work.
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
 | State ref branch protection and runner credentials | M3 |
 | Command unit isolation beyond the declared environment | M7 |
+| Plugin driver protocol, registration, and pinning | M7 |
 | Terraform versus OpenTofu executable support and plan approval semantics | M4 |
 | Image build backend (BuildKit, Docker, Buildah) and registry authentication | M4 |
 | Promotion record location for pull-request gates | M6 |
