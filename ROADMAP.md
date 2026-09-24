@@ -379,8 +379,8 @@ releaseInputs:
   platform/web:
     image: {fromPromotion: {path: dev-to-staging, value: webImage}}
 ---
-# staging Terraform unit
-inputs:
+# staging Terraform unit (units.gitops.nyl/v1 Terraform)
+spec:
   source: {fromPromotion: {path: dev-to-staging, value: databaseSource}}
 ```
 

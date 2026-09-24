@@ -163,8 +163,11 @@ spec:
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
 - `fromPublication` is resolved like every other binding. Resolution reads the
   state file from the publication branch head B, or the carried file from the
-  runner's working tree, and records the value and B. A new state file
-  therefore changes the execution key and triggers an ordinary execution.
+  runner's working tree. The value enters the resolved spec and the execution
+  key; B is recorded only as provenance. A new state file therefore changes
+  the execution key and triggers an ordinary execution, while unrelated commits
+  on a shared publication branch, including Nyl's own publications, change
+  nothing.
 - At execution, `publish-tree` builds on the current branch head. If the head
   has moved past B but the state file is unchanged, it proceeds on the new
   head; if the state file changed, the execution ends without publishing and
@@ -219,8 +222,8 @@ A desired unit is the execution snapshot of one incarnation:
   of the receipt it came from, or the PromotionRecord and value;
 - `executionKey`: a digest of the unit's `apiVersion`, `kind`, and driver
   behavior version, `resolvedSpec` without the common fields that do not affect
-  execution (`dependsOn`, `approval`, `deletionPolicy`), the selected source
-  bytes, and any command-unit fingerprint output. It excludes the source commit
+  what runs (`enabled`, `dependsOn`, `approval`, `deletionPolicy`, `timeout`),
+  the selected source bytes, and any command-unit fingerprint output. It excludes the source commit
   ID, provenance, readiness, Nyl's release version, and external tool
   versions, so a new source commit with identical inputs, a producer
   re-execution that yields identical outputs, or a Nyl upgrade does not change
@@ -232,9 +235,11 @@ from new evidence without rereading source.
 
 **Behavior versions.** Each driver declares a behavior version and bumps it
 only when its execution semantics change in a way that requires re-execution.
-When a unit's execution key changed only because of a behavior version, and its
-driver's recovery policy is not `converge`, the unit waits for `--approve`
-instead of re-running automatically. External tool versions, such as
+`outputs` stays in the execution key, because a receipt must contain every
+declared output. When a unit's execution key changed only because of its
+driver's behavior version or its `outputs` declaration, and its driver's
+recovery policy is not `converge`, the unit waits for `--approve` instead of
+re-running automatically. External tool versions, such as
 Terraform's, are recorded in receipts for audit; a unit that should re-run on a
 tool change pins the version in its spec, such as `terraform: {version: 1.9.5}`.
 
@@ -314,7 +319,10 @@ Invariants:
   auditor can check this from the trailers and the diff.
 - `Nyl-Operation-Id` links every commit of one invocation.
 - Replaying events in order, using the read commits they name, reproduces every
-  state decision without wall-clock order.
+  state decision without relying on commit order in time. Time-based decisions
+  record the time they used: `attempt-uncertain` and `attempt-superseded`
+  carry `Nyl-Evaluated-At` alongside the attempt's deadline, so a replay can
+  verify that the deadline had passed.
 
 ## Execution
 
@@ -325,7 +333,11 @@ Invariants:
    `desired-updated` and `tombstone` commits for what changed.
 2. **Select.** A unit is ready when its desired document is `ready`, it has no
    current receipt, its provenance receipts are all still current, it has no
-   open or uncertain attempt, it is not held, and it is not awaiting approval.
+   open attempt, it is not held, and it is not awaiting approval. An uncertain
+   attempt does not block selection when the driver's recovery policy allows
+   it: `converge` starts a new attempt directly, and `inspect` runs `inspect`
+   first (see [Recovery](#recovery)). Under `manual`, the unit waits for
+   `recover --retry`.
 3. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit (see [Attempts](#attempts)).
 4. **Re-resolve.** New receipts may unblock dependents. Resolve again at the
@@ -454,10 +466,13 @@ possible only through `inspect`.
     incarnation with a new uid. Dependents are blocked until the new receipt
     exists, then run with its outputs. This rebuilds corrupted resources or
     rotates something that can only be recreated.
-  - With `--hold`, a hold is recorded in the desired ref and `reconcile` does
-    not recreate the unit; `status` shows it as `held`, and its dependents stay
-    blocked. `nyl resume -e <env> --unit <u>` removes the hold. A hold is the only desired state that does not come from source;
-    it is an explicit, recorded operator event. Long-term removal still belongs
+  - With `--hold`, the incarnation is tombstoned and torn down as above, and a
+    hold is recorded in the desired ref as well, so `reconcile` does not create
+    the next incarnation. `status` shows the unit as `held`, and its dependents
+    stay blocked. `nyl resume -e <env> --unit <u>` removes the hold; the next
+    `reconcile` then creates a new incarnation with a new uid. A hold is the
+    only desired state that does not come from source; it is an explicit,
+    recorded operator event. Long-term removal still belongs
     in source, through `enabled: false` or removing the unit.
 - **Source removal and teardown.** `nyl delete unit <name>` edits source like
   the other `nyl delete` resources: it removes the declaration after checking
@@ -482,17 +497,21 @@ trait Driver {
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
 
-    fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<PlanReport>;
-    fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Outcome>;
-    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Drift>;
-    fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Inspection>;
-    fn teardown(&self, ctx: &ExecutionContext, tombstone: &Tombstone) -> Result<Outcome>;
+    fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
+    fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
+    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Drift>>;
+    fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
+    fn teardown(&self, ctx: &ExecutionContext, tombstone: &Tombstone) -> Result<Supported<Outcome>>;
+}
+
+enum Supported<T> {
+    Supported(T),
+    Unsupported,
 }
 
 enum Outcome {
     Succeeded { outputs: Outputs, artifacts: Vec<ArtifactDescriptor> },
     Failed { category: FailureCategory, retryable: bool },
-    Unsupported,
     Uncertain,
 }
 ```
@@ -503,7 +522,7 @@ enum Outcome {
   secret values.
 - Drivers run external tools only through the context, so transcripts,
   masking, and deadlines are uniform.
-- Methods for capabilities a driver lacks return `Unsupported`, which is
+- Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
 - Every type crossing the trait (context, desired unit, receipt, tombstone,
   outcome, plan report, inspection, drift) is plain data with a JSON
@@ -566,8 +585,9 @@ spec:
   - secrets named in `env.secrets`, from the project's secrets provider. A
     string secret is passed as is; an object or array secret is passed as
     compact JSON.
-- The execution key covers `command`, `verify`, `fingerprint`, `idempotent`,
-  the files matched by `files`, resolved `values`, the names in
+- Following the general rule, the execution key covers `command`, `verify`,
+  `fingerprint`, `idempotent`, `outputs`, the files matched by `files`,
+  resolved `values`, the names in
   `env.passthrough` and `env.secrets` but not their values, and the output of
   `fingerprint`. Changing a passthrough variable or rotating a secret does not
   re-run the command.
@@ -600,7 +620,7 @@ spec:
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | Observations |
 | `recover` | Clear one uncertain or non-retryable attempt for re-execution | `recovery` |
-| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone or hold, then teardown events |
+| `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down | Tombstone (plus a hold with `--hold`), then teardown events |
 | `resume` | Remove a hold | `hold-released` |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
@@ -624,7 +644,7 @@ execute (all of them without `--unit`/`--units`):
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Every selected unit is current, retained, or torn down |
+| 0 | Every selected unit is current, held, retained, or torn down, or blocked only by a held dependency |
 | 1 | Configuration, resolution, or operational error |
 | 2 | Blocked: waiting for evidence, approval, `--allow-teardown`, or another runner; nothing failed |
 | 3 | At least one attempt failed |
