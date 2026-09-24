@@ -448,7 +448,7 @@ production environment spanning two clusters has two targets.
 
 A target joins an environment when a Kubernetes publication unit in that
 environment references it. The unit also carries the execution mode (publish
-only, observe, or apply), and DeploymentTarget itself stays unchanged. A target
+or observe), and DeploymentTarget itself stays unchanged. A target
 referenced by no publication unit belongs to no environment and rejects
 `fromUnit` and `fromPromotion` bindings; a target referenced by publication
 units in two environments is an error.

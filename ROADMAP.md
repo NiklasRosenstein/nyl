@@ -35,9 +35,9 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** the [Release inputs contract](design/release-inputs.md) settles
-M2's design, so M2 implementation can start. In parallel, continue M1 with the
-unit, state, and environment contract.
+**Next step:** review the draft [orchestration core contract](design/orchestration-core.md).
+The [Release inputs contract](design/release-inputs.md) settles M2's design, so
+M2 implementation can start independently.
 
 ## Product direction
 
@@ -240,39 +240,41 @@ spec:
 
 ### Units, references, and artifacts (M3–M5)
 
-Units are declared per environment:
+The draft [orchestration core contract](design/orchestration-core.md) specifies
+environments, units, state, execution, recovery, deletion, drivers, and the
+command unit. In summary, an Environment selects labelled Unit templates and
+renders them with its values, mirroring how a DeploymentTarget selects
+ApplicationGroups, so a unit is written once for every environment:
 
 ```yaml
 apiVersion: orchestration.nyl/v1
-kind: Unit
-metadata: {name: web-image}
+kind: Environment
+metadata: {name: dev}
 spec:
-  environment: dev
-  driver: OciImage
-  inputs:
-    context: {path: services/web}
-  outputs: [digestRef]
+  unitSelector: {matchLabels: {tier: platform}}
+  values: {stateKey: dev/database, target: dev}
 ---
 apiVersion: orchestration.nyl/v1
 kind: Unit
-metadata: {name: database}
+metadata: {name: database, labels: {tier: platform}}
 spec:
-  environment: dev
   driver: Terraform
   inputs:
     source: {path: infra/database}
+    backend: {key: '{{ values.stateKey }}'}
     variables:
-      vpcId: {fromUnit: {unit: network, output: /vpcId}}
-  outputs: [host, port]
+      vpcId: {fromUnit: {unit: network, output: vpcId}}
+  outputs:
+    host: {type: string}
+    port: {type: integer}
 ---
 apiVersion: orchestration.nyl/v1
 kind: Unit
-metadata: {name: kubernetes}
+metadata: {name: kubernetes, labels: {tier: platform}}
 spec:
-  environment: dev
   driver: KubernetesPublication
   inputs:
-    target: dev          # DeploymentTarget whose Release inputs use fromUnit
+    target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use fromUnit
 ```
 
 A Kubernetes publication unit places its target into the unit's environment,
@@ -286,8 +288,10 @@ Cluster.
   producer's current receipt: the receipt must match the producer's current
   desired unit. Missing or stale evidence blocks the consumer; invalid evidence
   fails validation.
-- Only outputs listed in `outputs` are persisted. Drivers reject outputs marked
-  sensitive by the native tool. Credentials and private keys never enter
+- Only outputs declared in `outputs` are persisted, typed with the Release
+  input type set. Outputs declared `sensitive` are validated but never
+  persisted or referenceable; drivers reject native-tool sensitive outputs that
+  are not declared sensitive. Credentials and private keys never enter
   desired state, receipts, public artifacts, or diagnostic transcripts.
 - When upstream outputs are unavailable, retain the unresolved desired intent
   and resolve dependents as evidence arrives, without rereading unrelated
@@ -311,9 +315,13 @@ spec:
   driver: Command
   inputs:
     files: ["scripts/seed/**"]
-    values: {bucket: {fromUnit: {unit: storage, output: /bucket}}}
+    values: {bucket: {fromUnit: {unit: storage, output: bucket}}}
   command: ["./scripts/seed/run.sh"]
-  outputs: [seedVersion]
+  env:
+    passthrough: [AWS_REGION]
+    secrets: {DB_PASSWORD: database-password}
+  outputs:
+    seedVersion: {type: string}
 ```
 
 The command runs in a checkout at the pinned source revision and receives
@@ -324,8 +332,11 @@ never parsed. Only declared outputs are recorded, and outputs declared
 idempotency for identical inputs, so the contract documents it as the author's
 obligation and treats an interrupted run as uncertain completion. An optional
 `verify` command exits with a documented clean, drift, or error status and
-records no receipt. The environment, secret admission, and sandboxing are M1
-decisions. Command units exist to learn which typed drivers are worth building.
+records no receipt. The process starts from an empty environment plus declared
+runner variables and secrets from the project's secrets provider, which are
+masked in transcripts; there is no further sandbox. An interrupted command is
+re-run only when it declares `idempotent: true`, otherwise it waits for an
+operator. Command units exist to learn which typed drivers are worth building.
 
 **Pinned source trees.** Units that execute repository content (Terraform, image
 contexts, commands) record the exact source commit and path in their desired
@@ -534,15 +545,24 @@ Cluster.
 | State | Authority |
 | --- | --- |
 | Authored intent | Source Git |
-| Resolved desired units and promotion records | Desired-state Git ref per environment |
-| Receipts, public outputs, artifact descriptors | Observed-state Git ref per environment |
+| Resolved desired units, tombstones, and promotion records | Desired-state Git ref per environment |
+| Receipts, attempts, public outputs, artifact descriptors, observations | Observed-state Git ref per environment |
 | Terraform resource state | Terraform/OpenTofu backend |
 | Credentials and private keys | Secret store or execution environment |
 | Render cache | Disposable local storage |
-| Execution coordination | Explicit claims/leases and recovery records |
+| Execution coordination | Attempt records: one compare-and-swap commit is the claim, lease, and recovery record |
 
-Desired and observed refs are distinct so desired state can advance while each
-receipt continues to identify the exact desired unit it observed. Preserve the
+Each Environment names a state repository (the source repository by default)
+and a desired and an observed ref. They may be the same ref; the layout uses
+fixed `desired/` and `observed/` directories either way. Desired state is
+derived from source and evidence, so the reconcile runner writes it; review
+happens on source changes and on promotions, whose pull-request gate targets
+the desired ref. Separate refs keep that review and branch protection apart
+from the frequent observed commits. Each receipt identifies the execution key
+of the desired unit it executed. Every state commit
+records one event with Git trailers (event, operation ID, environment, unit,
+uid, attempt, source and desired commits, runner, Nyl version), so history can
+be audited and replayed by machines. Preserve the
 distinction between rendered-file ownership, published desired state,
 successful execution evidence, and current external observations. A matching
 receipt proves success for particular inputs; it does not prove the system is
@@ -613,7 +633,7 @@ are proposals to validate in M1/M3:
 ```bash
 nyl update source-locks --check
 nyl orchestrate plan --environment dev
-nyl orchestrate reconcile --environment dev
+nyl orchestrate reconcile --environment dev [--unit …] [--approve …] [--allow-teardown]
 nyl orchestrate status --environment dev
 nyl orchestrate verify --environment dev
 nyl orchestrate promote --path dev-to-staging
@@ -634,8 +654,11 @@ non-interactive behavior, deadlines, and exit categories before stabilizing the
 CLI.
 
 A plan with unavailable upstream outputs is incomplete and must say so. Preview
-values cannot become execution inputs. Approval policy must define whether newly
-resolved downstream plans execute automatically or require further review. Do
+values cannot become execution inputs. `reconcile` runs newly unblocked
+dependents in further waves of the same run; `--unit`/`--units` restricts
+execution, and units with `approval: manual` run only when named with
+`--approve`. Teardown caused by omission requires `--allow-teardown`. Exit
+categories distinguish converged, error, blocked, failed, and uncertain. Do
 not promise execution of an approved native plan unless the driver preserves and
 validates that exact plan and its input/state preconditions.
 
@@ -650,8 +673,8 @@ structured results.
 
 ### M1 — Unit, input, state, and promotion contract
 
-- [ ] Define Release input declarations, DeploymentTarget bindings, types, and
-  lock semantics for `fromGit`.
+- [x] Define Release input declarations, DeploymentTarget bindings, types, and
+  lock semantics for `fromGit` ([contract](design/release-inputs.md)).
 - [ ] Define Unit, Environment, and PromotionPath schemas; typed references;
   output admission; and artifact descriptors.
 - [ ] Define desired/observed ref layout, receipt freshness, identity fences,
@@ -762,14 +785,11 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Environment declaration and state ref configuration | M1 |
-| Per-driver evidence levels and their names | M1/M5 |
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
-| Desired, observed, and coordination ref names and authorization | M1 |
-| Command unit sandboxing, environment variables, and secret admission | M1/M3 |
+| State ref branch protection and runner credentials | M3 |
+| Command unit isolation beyond the declared environment | M7 |
 | Terraform versus OpenTofu executable support and plan approval semantics | M4 |
 | Image build backend (BuildKit, Docker, Buildah) and registry authentication | M4 |
-| Automatic downstream execution policy after new evidence | M3/M5 |
 | Promotion record location for pull-request gates | M6 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
