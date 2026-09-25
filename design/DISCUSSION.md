@@ -74,15 +74,25 @@ after a deliberate review:
 - Tier 2 skips when tools are missing, so "passes with the real tools" can pass
   without running; decide where tier 2 runs as a required check.
 
-### Direct image builds
+### Direct builds: a `build` capability
 
-An `OciImage` unit is a complete description of an image build, so it could
-serve as a build configuration on its own, the way `nyl render` uses Releases
-without orchestration. Sketch: `nyl build <unit> [-e <env>] [--push | --load]
-[--platform …]` renders the unit (with an environment's values and read-only
-references to its state when `-e` is given, defaults otherwise), runs the same
-buildx invocation, and writes no state. Open: whether `fromUnit` build
-arguments and image contexts without `-e` fail or take `--context`/`--build-arg`
+A kind whose only effect is producing an artifact from source can run outside
+orchestration and be discarded, the way `nyl render` uses Releases. Sketch:
+
+- A driver capability `build`, next to `plan`, `reconcile`, `verify`,
+  `teardown`, and `inspect`, declared by kinds that produce an artifact from
+  source with no effect other than publishing it. `OciImage` declares it
+  (`--load` or `--push`); plugin kinds may, such as chart packages or release
+  archives.
+- `nyl build <unit> [-e <env>] [--push | --load] [--platform …]` runs the
+  same driver path as `reconcile` without a lease, a receipt, or any state
+  write, and prints the artifact.
+- Kinds with external effects do not declare it: a Terraform apply without a
+  receipt would make state lie. Their direct forms already exist: `nyl plan
+  --unit` for Terraform and OpenTofu, `--local` runs for commands, and
+  `render-tree`/`publish-tree` for Kubernetes publications.
+
+Open: whether references without `-e` fail or take `--build-arg`/`--context`
 overrides, and whether it belongs in M4.
 
 ## Later
