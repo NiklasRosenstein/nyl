@@ -376,10 +376,11 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 | 1 | Clock T+3d; CI job for a new `pr-123` commit: `state init …` and `reconcile -e pr-123` → 0 | Activity extends `pr-123` to T+10d; `pr-124` keeps T+7d |
 | 2 | Clock T+8d; scheduled job: `nyl reconcile --template preview` → 0 | `pr-124` has expired and is removed, a `teardown --all` then `state delete` authorized by `allowTeardown`, with `kubernetes`'s delay wait; `pr-123` is reconciled as maintenance and its expiry stays T+10d |
 | 3 | `nyl get environments` | `pr-124` is gone |
-| 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second refuses | `maxInstances: 2` counts live instances; nothing is expired to make room |
-| 5 | Clock T+11d; `nyl state init -e pr-126 --template preview --param pr=126` → 0 | At the limit, the expired `pr-123` is removed first, then `pr-126` is created |
-| 6 | Clock T+19d; `nyl reconcile -e pr-125 --no-extend` → 0 | Any reconcile that finds an instance expired removes it, even one named explicitly |
-| 7 | Clock T+19d; `nyl reconcile -e pr-126 --renew` → 0 | `--renew` keeps an expired instance: its expiry moves to T+26d and it reconciles |
+| 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second exits 2 | `maxInstances: 2` counts live instances; nothing is expired, so the message names no instance to remove |
+| 5 | Clock T+11d; `nyl state init -e pr-126 --template preview --param pr=126` → 2 | At the limit, `pr-126`'s job does not remove the expired `pr-123`; the message names it and suggests the scheduled job or `--make-room` |
+| 6 | Same clock; `nyl state init -e pr-126 --template preview --param pr=126 --make-room` → 0 | With the opt-in, the expired `pr-123` is removed first, then `pr-126` is created |
+| 7 | Clock T+19d; `nyl reconcile -e pr-125 --no-extend` → 0 | Any reconcile that finds an instance expired removes it, even one named explicitly |
+| 8 | Clock T+19d; `nyl reconcile -e pr-126 --renew` → 0 | `--renew` keeps an expired instance: its expiry moves to T+26d and it reconciles |
 
 Tier 1 variants:
 

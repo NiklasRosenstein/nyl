@@ -7,18 +7,7 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ## Current
 
-### 1. Cleaning up expired instances at `maxInstances`
-
-At the instance limit, `state init --template` currently removes expired
-instances first, inside the new pull request's job, with their waits,
-destroys, and possible manual confirmations. Proposal: by default it refuses
-with exit 2 and names the removable instances, leaving removal to the
-scheduled fleet job; `--make-room` opts into removing them in the same job.
-Open: which of the two is the default.
-
-## Next
-
-### 2. Preview pipeline commands and source commits
+### 1. Preview pipeline commands and source commits
 
 - Every push needs `state init --template … --param …` and then `reconcile`;
   the name `init` hides that the step also extends expiry.
@@ -29,7 +18,9 @@ Candidate directions: `reconcile -e <instance>` refuses a checkout that is not
 the instance's recorded branch head unless given `--source`, and one command
 that creates, extends, and reconciles an instance.
 
-### 3. Reference project details
+## Next
+
+### 2. Reference project details
 
 - Argo CD names and namespaces per preview instance: confirm that
   `values.nameSuffix` reaches the ApplicationGroup's `applicationNameTemplate`,
@@ -43,7 +34,7 @@ that creates, extends, and reconciles an instance.
   and a condensed variant that colocates each environment's resources in one
   file.
 
-### 4. Scenario coverage by milestone
+### 3. Scenario coverage by milestone
 
 - M3's Command stand-ins cannot express `bind: plan` approvals or teardown
   steps, so the platform scenario's approval and teardown steps cannot pass in

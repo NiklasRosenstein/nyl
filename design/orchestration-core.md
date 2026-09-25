@@ -655,8 +655,12 @@ runner (M7) could add timely enforcement later:
   which extends the expiry, so updating an active pull request never removes
   its preview. `state delete --teardown` removes one instance explicitly,
   expired or not.
-- At `maxInstances`, `state init --template` first removes expired instances of
-  that template the same way; if none are expired, it refuses.
+- At `maxInstances`, `state init --template` refuses with exit 2 and names
+  the expired instances that could be removed. Removing them is the scheduled
+  fleet job's work, never a side effect of another pull request's job:
+  hitting the limit is a project configuration concern, not the new pull
+  request's. `--make-room` opts in to removing expired instances first, the
+  same way the fleet job does, and then creating the instance.
 
 A typical pipeline runs `state init --template` and `reconcile -e` when a pull
 request opens or updates, `state delete --teardown` when it closes, and
@@ -1629,7 +1633,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
+`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
