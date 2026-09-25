@@ -126,9 +126,10 @@ spec:
   `teardown`, for example to tear down after a recorded commit was lost. It is
   never persisted, it must satisfy the same reachability rules, the
   transition commit records it, and a fleet reconcile rejects it.
-- A unit's own `source` field, such as an image build context or a Terraform
-  module in another repository with its own `revision` and `commit`, says
-  where the unit builds from. It defaults to S. The environment's source says
+- A unit's own `source` field has the same shape plus `path` (see
+  [Units](#units)) and says where the unit builds from, such as an image build
+  context or a Terraform module at another revision or in another repository.
+  It defaults to S. The environment's source says
   where units are defined; a unit's source says what they build.
 
 ### Units
@@ -211,11 +212,21 @@ spec:
   dependsOn:
     - {unit: kubernetes, evidence: healthy}   # smoke tests run against healthy workloads
   ```
-- Repository content from elsewhere uses the ApplicationGroup source shape in
-  the kind's `source` field: `repositoryRef` or `repository`, a human
-  `revision`, a locked `commit`, and `path`. `nyl update source-locks` refreshes
-  these locks with the others. Without a repository, `source.path` is read at
-  the source commit.
+- Every kind that reads files names them in its `source` field, which has the
+  one Git source shape used everywhere: `path`, an optional `revision` and
+  `commit` lock, and an optional `repositoryRef` or `repository`. Omitted
+  fields fall back step by step: without a repository, this repository;
+  without `revision`, the environment's source commit S. Most units set only
+  `path`.
+  - `revision` alone resolves the ref's tip during resolution; the desired
+    document records the resolved commit in `resolvedSpec.source.commit`, so
+    every run is reproducible from state.
+  - `revision` with `commit` is a pin, with the reachability rule of
+    [Pinned commits](#pinned-commits); `nyl update source-locks` refreshes it
+    with the other locks.
+  - A PromotionPath selector on `/source` promotes a unit's build source,
+    which matters when a unit builds from another repository that the
+    environment's source does not pin.
 
 ### Identity
 

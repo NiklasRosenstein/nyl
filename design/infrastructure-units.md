@@ -18,8 +18,8 @@ metadata:
   name: web-image
   labels: {tier: platform}
 spec:
-  context: {path: services/web}      # or a repository source
-  dockerfile: Dockerfile             # relative to the context
+  source: {path: services/web}       # the build context; may name a revision or repository
+  dockerfile: Dockerfile             # relative to source.path
   target: runtime                    # optional build stage
   repository: registry.example.com/web
   platforms: [linux/amd64, linux/arm64]
@@ -66,7 +66,7 @@ to consumers when the registry holds it.
 ### Execution key
 
 The key follows the core rule: the resolved spec without the common fields that
-do not affect what runs, plus the files in the context that the build can see
+do not affect what runs, plus the files in the build context (`source`) that the build can see
 (respecting `.dockerignore`) and the Dockerfile. `OciImage` declares `builder`
 and `cache` as fields that change how an image is built but not what it
 contains, so they are excluded as well.
@@ -183,11 +183,12 @@ bound to it:
 
 ### Source
 
-- `source.path` is read from the worktree at the effective source revision.
-  With a repository (`repositoryRef` or `repository`, `revision`, locked
-  `commit`), the worktree is that repository at the locked commit, and
-  `nyl update source-locks` refreshes it. A promoted revision replaces the
-  commit, subject to the reachability rule in the core contract.
+- `source` has the core contract's Git source shape. `source.path` is read
+  from a worktree at the effective source revision: the environment's commit
+  by default, or the `revision` and `commit` the unit names, in this or
+  another repository. `nyl update source-locks` refreshes a `commit` lock. A
+  promoted revision replaces the commit, subject to the reachability rule in
+  the core contract.
 - `files` lists the repository-relative globs that enter the execution key.
   The default is `<source.path>/**`, excluding `.terraform/`.
 - Relative local modules resolve inside the same worktree, so pinning the
