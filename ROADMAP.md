@@ -957,6 +957,7 @@ reasons to delay independent work.
 | Approver lookup for CI systems other than GitHub | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
+| Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod | M6 |
 
 ## Implementation reference points
 
