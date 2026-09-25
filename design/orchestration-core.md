@@ -239,7 +239,10 @@ spec:
   M2 item.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
-  referenced by none rejects `fromUnit` and `fromPromotion` bindings.
+  referenced by none rejects `fromUnit` and `fromPromotion` bindings. A
+  publication unit that is `deleting` still owns its target until its
+  teardown completes or it is forgotten, so deselecting it does not make the
+  target's bindings invalid.
 - The ownership index of every tree the unit publishes records the owning
   environment and unit uid next to the existing target, cluster, and
   publication identity. Publish and teardown refuse a prefix whose index names
@@ -1358,7 +1361,7 @@ spec:
 
 | Command | Effect | Writes |
 | --- | --- | --- |
-| `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report blocked units and incomplete plans | Nothing |
+| `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report units leaving the ownership set, blocked units, and incomplete plans; `--teardown` previews a requested teardown (see [Planning](#planning)) | Nothing |
 | `reconcile` | Resolve, then execute waves until nothing is ready | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
@@ -1375,6 +1378,38 @@ spec:
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so lifting a hold is `resume` and
 tearing down is `teardown`.
+
+### Planning
+
+`nyl plan` is the review tool: a pull request pipeline runs it against the
+pull request's head and each affected environment's current state, so
+reviewers see what a merge would do before anything runs. It reads state and
+never takes the lease.
+
+- It reports every unit that would execute: first creations, updates with the
+  driver's change summary, and units waiting for evidence or approval.
+- It reports every unit that would leave the ownership set, grouped by what
+  would happen, in a section that always comes first:
+
+  ```text
+  Units leaving the ownership set of dev (5):
+    teardown, needs --allow-teardown:   network, database, kubernetes
+    dropped from state, resources kept: web-image, seed (re-created as new incarnations if they return)
+    retained as tombstones:             (none)
+  ```
+
+  Each leaving unit carries the reason (removed from source, deselected by
+  `unitSelector`, `enabled: false`), and a deselection names the labels that no
+  longer match, so a selector typo reads as one. The warning code is
+  `NYL-PLAN-UNITS-LEAVING`, and `--output json` lists the units under
+  `leaving` with their reason and consequence.
+- `--fail-on-leaving` exits 1 when any unit would leave, for pipelines that
+  want removals to need an explicit override, such as a pull request label.
+- `nyl plan --teardown -e <env> (--unit <u> | --all)` previews a teardown that
+  has not been requested yet: the destroy plans and digests of what
+  `nyl teardown` would remove, so manual units can be approved with
+  `nyl teardown … --approve <unit>=<digest>`. Without `--teardown`, `plan`
+  shows destroy plans only for units already `deleting`.
 
 ### Inspection
 

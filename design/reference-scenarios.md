@@ -124,7 +124,7 @@ units/
   network.yaml             # OpenTofu                labels: tier: platform
   database.yaml            # OpenTofu, manual approval  tier: platform
   web-image.yaml           # OciImage                tier: platform, preview: 'true'
-  announce.yaml            # Command, no dependencies   tier: platform
+  seed.yaml                # Command, not idempotent, no dependencies   tier: platform
   kubernetes.yaml          # KubernetesPublication, static target dev   tier: platform
   preview-db.yaml          # OpenTofu, per instance     preview: 'true'
   preview-site.yaml        # KubernetesPublication, inline target       preview: 'true'
@@ -228,8 +228,10 @@ spec:
 - The Cluster, ApplicationGroup, and catalog settings are teardown-ready:
   catalog `syncPolicy.automated` with `prune: true`, `Foreground` deletion,
   and namespace `deletePolicy: Automatic`.
-- `announce` is a Command with no dependencies and no dependents. It shows that
-  a teardown wait never holds back unrelated units.
+- `seed` is a Command that loads fixture data into a store of its own. It is
+  not `idempotent`, has no teardown step, and has no dependencies or
+  dependents: it shows that a teardown wait never holds back unrelated units,
+  and what dropping a unit's state costs.
 - The harness writes the temporary directory's absolute paths into the fixture
   when it commits it: the repository URLs and `values.backendDir` of dev and
   of the preview template, so
@@ -245,27 +247,28 @@ spec:
 | 1 | `nyl validate` → 0 | The project is valid, including that the preview template's inline target generates different Argo CD names per instance |
 | 2 | `nyl reconcile -e dev` → 1 | No state is created implicitly; the error names `state init` |
 | 3 | `nyl state init -e dev` → 0 | `state.yaml` exists on dev's refs in `state.git` |
-| 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `announce` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
-| 5 | `nyl reconcile -e dev` → 2 | Wave 1 runs `network`, `web-image`, `announce`; `database` waits for approval (`bind: plan`); `kubernetes` is blocked on it. One desired and one observed commit |
+| 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
+| 5 | `nyl reconcile -e dev` → 2 | Wave 1 runs `network`, `web-image`, `seed`; `database` waits for approval (`bind: plan`); `kubernetes` is blocked on it. One desired and one observed commit |
 | 6 | `nyl plan -e dev --unit database --output json` → 0, then `nyl reconcile -e dev --approve database=<digest>` → 0 | The approved digest is applied; `kubernetes` runs in a later wave of the same run and publishes `dev/` with the image's digest reference and the database host; the approval is in the receipt |
 | 7 | `nyl get output database/host -e dev`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no commit to `state.git` or `deploy.git` |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
 | 11 | Commit a change to the Release template only; reconcile → 0 | Only `kubernetes` executes, because its key covers the render's inputs |
-| 12 | Commit a selector typo in `environments/dev.yaml`; reconcile → 2 | Every unit is `pending-teardown`; nothing is destroyed and `deploy.git` is unchanged |
-| 13 | Revert the typo; reconcile → 0 | The units return with their uids and receipts; nothing executes |
-| 14 | `nyl teardown -e dev --all` → 2 | `announce`, a Command without a teardown step and with no dependency path to `kubernetes`, is released at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
-| 15 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
-| 16 | `nyl teardown -e dev --all --approve database=<destroy digest>` → 0 | `database` is destroyed with its approved destroy-plan digest, then `network`; `web-image`'s image is left in the registry |
-| 17 | `nyl get units -e dev`, then `nyl reconcile -e dev` → 2 | Every unit is `held` without an incarnation, because `--all` holds units that are still selected; reconcile recreates nothing and reports the holds |
+| 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `tier: platfrom` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
+| 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and `deploy.git` is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
+| 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
+| 15 | `nyl plan -e dev --teardown --all --output json` → 0, then `nyl teardown -e dev --all` → 2 | The preview shows `database`'s destroy-plan digest before anything is requested; then `seed`, which has no teardown step and no dependency path to `kubernetes`, is released at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
+| 16 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
+| 17 | `nyl teardown -e dev --all --approve database=<digest from step 15>` → 0 | `database` is destroyed with the previewed destroy plan, then `network`; `web-image`'s image is left in the registry |
+| 18 | `nyl get units -e dev`, then `nyl reconcile -e dev` → 2 | Every unit is `held` without an incarnation, because `--all` holds units that are still selected; reconcile recreates nothing and reports the holds |
 
 Tier 1 variants:
 
-- **Observe mode.** With `mode: observe`, step 14 waits on the fake observer.
+- **Observe mode.** With `mode: observe`, step 15 waits on the fake observer.
   The observer first reports `observation-failed`: the teardown is uncertain
   with that reason, and `status` suggests fixing the observer or confirming.
-  `--confirm-removed` then completes it as in step 15.
+  `--confirm-removed` then completes it as in step 16.
 - **Crash after an effect.** The run is killed after `network`'s effect and
   before its checkpoint. The next run takes over the expired lease, marks
   `network` uncertain, converges, and lists it under `recovered`.
