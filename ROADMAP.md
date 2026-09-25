@@ -823,6 +823,9 @@ ambiguous command semantics.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
+- [ ] Expand template values (`${ … }`) in fields rendered later than the
+  structural pass, starting with `applicationNameTemplate`, keeping the
+  `{% raw %}` form working.
 - [ ] Extract `nyl-core` and `nyl-render` from the current crate without
   behavior change, per the implementation architecture.
 

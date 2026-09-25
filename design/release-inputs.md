@@ -87,6 +87,32 @@ Static-declaration rules:
 - `target.spec.releaseInputs` is removed from the `target` template context.
   Templates see only the resolved, declared inputs of their own Release.
 
+## Template values
+
+A templated control resource is rendered as a whole before its fields are
+used. Some fields hold a template of their own that is expanded later, in a
+narrower context the structural pass does not have, such as
+`ApplicationGroup.spec.applicationNameTemplate`, which is expanded once per
+Release with `release` in scope. Such **template values** use `${ … }`:
+
+```yaml
+spec:
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+```
+
+- `${` is not template syntax in the structural pass, so the value reaches the
+  field untouched. The field then expands `${ expression }` with its own
+  context: the structural context plus what the field adds, such as
+  `release`. Expressions and filters work as in `{{ … }}`; blocks do not.
+- Each field that takes a template value says so in its schema description,
+  together with the extra variables it provides. Units follow the same rule
+  when they add such fields.
+- `$${` writes a literal `${`.
+- For compatibility, a template value that still contains `{{ … }}` after the
+  structural pass, because it was protected with `{% raw %}`, is expanded as
+  before. A value that mixes both forms is an error. The validation hint for
+  colliding Application names suggests the `${ … }` form.
+
 ## Bindings
 
 Bindings live on the DeploymentTarget. The target is static at discovery, and

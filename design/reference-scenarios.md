@@ -209,7 +209,7 @@ kind: ApplicationGroup
 metadata: {name: web, labels: {app: web}}
 spec:
   applicationNamespace: argocd
-  applicationNameTemplate: '{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}'   # late-bound syntax is an open topic
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'   # a template value, expanded per Release
   destinationNamespace: '{{ values.namespace | default("web") }}'
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
