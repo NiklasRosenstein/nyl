@@ -9,28 +9,36 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ### 1. Environments whose source moves along a promotion path
 
-Settled so far: every environment declares its source (`source: {ref: …}`),
-templates derive it from parameters, and runs never take it from the checkout.
+Settled so far:
 
-Open: prod should not follow `main`. A drastic change to a unit's shape must
-reach prod only after dev proved it, so prod's source commit itself moves
-along its promotion path. Proposal:
+- Every environment declares its source (`source: {ref: …}`), templates derive
+  it from parameters, and runs never take it from the checkout.
+- Prod declares `source: {promotion: dev-to-prod}`: it renders at the source
+  commit dev ran when it produced the promoted evidence. Its first run is a
+  promotion; before one exists, `reconcile -e prod` exits 2 and names
+  `nyl promote dev-to-prod`.
+- A PromotionPath always carries the source commit. Its value selectors carry
+  only results that must not be rebuilt, such as image digests; Terraform
+  source pins need no promotion, because prod runs `database` at the promoted
+  commit.
+- Prod avoids rebuilding by not selecting `web-image`; its target binds
+  `image` through `fromPromotion`. Selectors support only `matchLabels`, so
+  units carry one label per environment that selects them (`dev`, `prod`,
+  `preview`). Nyl warns when an environment selects a unit that nothing in
+  it consumes.
 
-- `source: {promotion: dev-to-prod}`: prod's S is the source commit recorded
-  by the latest promotion on that path, which is the commit dev ran when it
-  produced the promoted evidence.
-- A PromotionPath then always carries the source commit, and its value
-  selectors keep deciding which results are reused rather than rebuilt, such
-  as dev's image digest instead of a new build at the promoted commit.
-- Consistency: the promoted source commit and the promoted values come from
-  the same dev state, as the roadmap already requires for values.
+Open: which commit prod's own declarations are read from. The Environment
+must come from the checkout, because it declares the source policy. Options:
+(a) only the Environment comes from the checkout, so prod-only values change
+without promotion; (b) the Environment, prod's DeploymentTarget, and its
+Cluster come from the checkout, since they are prod's own, and only shared
+definitions travel along the promotion path. Leaning to (b). Either way, the
+declaration and the source commit must come from the same repository, and
+`plan -e prod` shows both commits.
 
-This diverges from the roadmap's M6, which promotes values while every
-environment renders at the checkout's commit, so it needs the deliberate
-review AGENTS.md asks for and a ROADMAP update. Questions to settle: how the
-first prod run gets a source before any promotion, whether values without a
-selector are rendered from the promoted commit or rejected, and how a prod
-hotfix bypasses dev.
+Afterwards: this diverges from the roadmap's M6, which promotes values while
+every environment renders at the checkout's commit, so it needs a deliberate
+review and a ROADMAP update before the contract changes.
 
 ## Next
 
@@ -59,6 +67,10 @@ hotfix bypasses dev.
   without running; decide where tier 2 runs as a required check.
 
 ## Later
+
+- Hotfixes for environments whose source is promoted, for example a second
+  source branch such as `release/prod` with its own environment and promotion
+  path into prod, once promotion sources are settled.
 
 - Promotion scenario (M6): staging or prod promoted from dev, extending the
   platform scenario.

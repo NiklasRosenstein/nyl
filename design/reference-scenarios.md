@@ -122,15 +122,15 @@ examples/platform/
     clusters/prod.yaml       # Cluster prod
     targets/dev.yaml         # DeploymentTarget dev  → branch deploy, prefix dev/
     targets/prod.yaml        # DeploymentTarget prod → branch deploy, prefix prod/
-    environments/dev.yaml    # Environment dev:  tier: platform
-    environments/prod.yaml   # Environment prod: tier: platform, requireDigest approvals
+    environments/dev.yaml    # Environment dev:  selects dev: 'true', follows main
+    environments/prod.yaml   # Environment prod: selects prod: 'true', requireDigest approvals
     environments/preview.yaml   # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
   units/
-    network.yaml             # OpenTofu               tier: platform
-    database.yaml            # OpenTofu               tier: platform, preview: 'true'
-    web-image.yaml           # OciImage               tier: platform, preview: 'true'
-    seed.yaml                # Command, not idempotent   tier: platform
-    kubernetes.yaml          # KubernetesPublication, target from values   tier: platform, preview: 'true'
+    network.yaml             # OpenTofu               labels: dev, prod
+    database.yaml            # OpenTofu               labels: dev, prod, preview
+    web-image.yaml           # OciImage               labels: dev, preview (prod reuses dev's image)
+    seed.yaml                # Command, not idempotent   labels: dev
+    kubernetes.yaml          # KubernetesPublication, target from values   labels: dev, prod, preview
   infra/network/main.tf
   infra/database/main.tf     # uses ../modules/postgres
   infra/modules/postgres/
@@ -157,20 +157,21 @@ apiVersion: gitops.nyl/v1
 kind: Environment
 metadata: {name: dev}
 spec:
-  unitSelector: {matchLabels: {tier: platform}}
+  unitSelector: {matchLabels: {dev: 'true'}}
   values:
     target: dev
     cidr: 10.0.0.0/16
     backendDir: <temporary directory>/tofu
     approval: auto
 ---
-# config/environments/prod.yaml differs only in values:
+# config/environments/prod.yaml selects prod: 'true' and differs in values:
 #   target: prod, cidr: 10.1.0.0/16, approval: {mode: manual, bind: plan, requireDigest: true}
+#   Its source moves along its promotion path, an open design topic (DISCUSSION.md).
 ---
 # units/database.yaml
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
-metadata: {name: database, labels: {tier: platform, preview: 'true'}}
+metadata: {name: database, labels: {dev: 'true', prod: 'true', preview: 'true'}}
 spec:
   source: {path: infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
@@ -183,7 +184,7 @@ spec:
 # units/kubernetes.yaml: one unit for every environment
 apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
-metadata: {name: kubernetes, labels: {tier: platform, preview: 'true'}}
+metadata: {name: kubernetes, labels: {dev: 'true', prod: 'true', preview: 'true'}}
 spec:
   target: {{ values.target | tojson }}    # dev, prod, or the preview template's inline target
   mode: publish                           # teardownWait defaults to manual
@@ -301,7 +302,7 @@ pushes and deletion disabled; preview credentials can push `previews`,
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
 | 11 | Commit a change to the Release template only; reconcile → 0 | Only `kubernetes` executes, because its key covers the render's inputs |
-| 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `tier: platfrom` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
+| 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `dve: 'true'` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
 | 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and the `deploy` branch is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
 | 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
 | 15 | `nyl plan -e dev --teardown --all --output json` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with `database`'s destroy-plan digest |
