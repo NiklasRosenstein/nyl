@@ -99,6 +99,7 @@ then changes the Dockerfile and rebuilds.
 | reconcile | Build and push; record outputs and the artifact |
 | verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
+| build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `--load`, or pushes it with `--push`, which is safe because nothing consumes an image until a reference names it. It pushes only the spec's `tags` and `--tag` values, never the `nyl-` tag that identifies recorded executions |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
 

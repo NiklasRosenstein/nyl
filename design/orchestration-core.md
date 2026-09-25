@@ -1466,7 +1466,7 @@ trait Driver {
     fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
-    fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe
+    fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe, build
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
 
@@ -1501,6 +1501,29 @@ enum Outcome {
   masking, and deadlines are uniform.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
+
+### Direct builds
+
+A kind whose only effect is producing an artifact from source declares the
+`build` capability, and `nyl build <unit> [-e <env>]` runs it outside
+orchestration:
+
+- It uses the driver's own execution path, without a lease, a receipt, or
+  any state write, and prints the artifact document.
+- Files come from the worktree it runs in, uncommitted changes included, like
+  `nyl render`; `--source <rev>` builds at a commit instead. Nothing is
+  recorded, so a dirty worktree cannot corrupt state.
+- With `-e`, templates see that environment's `values`, and references
+  resolve read-only against its current receipts, exactly as `nyl get output`
+  does. Without `-e`, a spec that uses environment values or references fails
+  with an error naming the reference and `-e`; there are no per-kind override
+  flags, so the command stays the same for every kind.
+- The capability declares whether publishing the artifact outside
+  orchestration is safe. `--push` is refused for a kind that does not declare
+  it, and names `reconcile` instead.
+- Kinds with external effects never declare `build`: a Terraform apply or a
+  command without a receipt would leave state describing something else. Their
+  direct forms are `nyl plan --unit` and `--local` runs.
 - Every type crossing the trait (context, desired unit, observed unit,
   artifact, outcome, plan report, inspection, drift) is plain data with a JSON
   representation. Handles such as the cancellation signal and transcript sink
@@ -1605,6 +1628,7 @@ spec:
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
+| `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release

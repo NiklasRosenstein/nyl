@@ -799,7 +799,10 @@ recovery path; the M3 part of the
 ### M4 — Container image and Terraform units
 
 - [ ] Add the `OciImage` kind over `docker buildx`, recording digest references
-  and a `ContainerImage` artifact, with the `registryAuth` helper.
+  and a `ContainerImage` artifact, with the `registryAuth` helper and named
+  build contexts.
+- [ ] Add `nyl build` for kinds with the `build` capability, starting with
+  `OciImage`: builds from the current worktree, `--load` or `--push`, no state.
 - [ ] Add the `Terraform` and `OpenTofu` kinds over one implementation, with
   native state and locking, declared output admission, change digests, plan
   approval (`bind: plan`), verification, and teardown.
@@ -821,6 +824,9 @@ the M4 part of the reference scenarios passes with the real tools.
   Applications' last successful sync and health, match them to publication
   commits by Application directory tree, and record the observations.
 - [ ] Document an end-to-end local/CI example.
+- [ ] Declare the `build` capability for `KubernetesPublication`: `nyl build`
+  renders the tree, `--diff` compares it with the published tree, and `--push`
+  publishes only targets no environment owns.
 - [ ] Support inline DeploymentTargets on `KubernetesPublication`, its
   two-phase teardown with the `teardownWait` strategies, ownership-index
   owner fencing, and the teardown readiness check with its warnings.

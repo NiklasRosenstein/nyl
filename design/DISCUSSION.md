@@ -74,36 +74,6 @@ after a deliberate review:
 - Tier 2 skips when tools are missing, so "passes with the real tools" can pass
   without running; decide where tier 2 runs as a required check.
 
-### Direct builds: a `build` capability
-
-A kind whose only effect is producing an artifact from source can run outside
-orchestration and be discarded, the way `nyl render` uses Releases. Sketch:
-
-- A driver capability `build`, next to `plan`, `reconcile`, `verify`,
-  `teardown`, and `inspect`, declared by kinds that produce an artifact from
-  source with no effect other than publishing it. `OciImage` declares it
-  (`--load` or `--push`); plugin kinds may, such as chart packages or release
-  archives.
-- `nyl build <unit> [-e <env>] [--push | --load] [--platform …]` runs the
-  same driver path as `reconcile` without a lease, a receipt, or any state
-  write, and prints the artifact.
-- `KubernetesPublication` declares it too, as the unit-level interface over
-  `render-tree`, `diff-tree`, and `publish-tree`: `nyl build <unit> -e <env>`
-  renders the tree (`--output-dir`), `--diff` compares it with the published
-  tree, and `--push` publishes. The existing tree commands stay unchanged for
-  static targets without a unit.
-- The capability states whether pushing outside orchestration is safe. It is
-  for images, which nothing consumes until a reference names them. For a
-  publication, it is safe only when no environment owns the target; for an
-  owned target, `--push` refuses and names `reconcile`, because an
-  unreceipted publish would deploy something state does not know about.
-- Kinds with external effects do not declare it: a Terraform apply without a
-  receipt would make state lie. Their direct forms already exist: `nyl plan
-  --unit` for Terraform and OpenTofu, and `--local` runs for commands.
-
-Open: whether references without `-e` fail or take `--build-arg`/`--context`
-overrides, and whether it belongs in M4.
-
 ## Later
 
 - Hotfixes for environments whose source is promoted, for example a second
