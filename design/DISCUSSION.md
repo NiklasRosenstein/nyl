@@ -27,18 +27,26 @@ Settled so far:
   `preview`). Nyl warns when an environment selects a unit that nothing in
   it consumes.
 
-Open: which commit prod's own declarations are read from. The Environment
-must come from the checkout, because it declares the source policy. Options:
-(a) only the Environment comes from the checkout, so prod-only values change
-without promotion; (b) the Environment, prod's DeploymentTarget, and its
-Cluster come from the checkout, since they are prod's own, and only shared
-definitions travel along the promotion path. Leaning to (b). Either way, the
-declaration and the source commit must come from the same repository, and
-`plan -e prod` shows both commits.
+- Both modes are valid configurations: a prod that selects `web-image`
+  rebuilds it from the promoted commit; a prod that does not binds dev's
+  proven digest through `fromPromotion`. Nothing prevents either.
+- The current source is authoritative except where a revision is needed to
+  build or produce something. Placement resources are read from the current
+  source: Environment, DeploymentTarget (including its `releaseInputs`),
+  Cluster, ArgoCDInstance, GitRepository. Definitions are read at the promoted
+  commit S: units, ApplicationGroups, Releases, AppProjectDefinitions, charts,
+  and everything units build from, such as Terraform modules, Docker contexts,
+  and Command files. Prod-only changes such as replicas or a database class
+  apply directly; changes to what the code does travel through dev.
+- All definitions of one run come from the same S, because a unit's
+  declaration and the source it builds from must match (a new variable in the
+  `database` unit must meet the module that declares it). `plan -e prod` shows
+  both commits.
 
-Afterwards: this diverges from the roadmap's M6, which promotes values while
+Next step: this diverges from the roadmap's M6, which promotes values while
 every environment renders at the checkout's commit, so it needs a deliberate
-review and a ROADMAP update before the contract changes.
+review of the promotion contract and a ROADMAP update, then the contract
+changes (Source section, PromotionPath, reference project's prod).
 
 ## Next
 
