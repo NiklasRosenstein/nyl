@@ -456,8 +456,10 @@ the same way as a local group: no opt-in field exists.
     `files` entries.
 - Today only remote source files use an `@`-prefixed key (`@remote/<path>`).
   M2 reserves every key starting with `@` for entries that are not project
-  paths, so project-file hashing never interprets them; the index format
-  change adds a version and a migration.
+  paths, so project-file hashing never interprets them. They are new entries of
+  the existing `inputs` map, which readers already accept as arbitrary keys, so
+  the index keeps format version 2 and projects without inputs publish
+  byte-identical indexes.
 - Inputs are not a secret channel. Their digests and the rendered manifests are
   published. Secrets continue to flow through the secrets provider, and a
   `sensitive` input flag is out of scope for M2.

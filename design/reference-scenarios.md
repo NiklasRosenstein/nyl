@@ -139,7 +139,7 @@ resources, and the native source files next to them.
 examples/platform/
   nyl.toml
   nyl/
-    platform.yaml            # GitRepository platform; PromotionPath dev-to-prod; units network, database, web-image, seed, kubernetes
+    platform.yaml            # GitRepository platform; ArgoCDInstances dev and prod; PromotionPath dev-to-prod; units
     dev.yaml                 # Cluster dev, DeploymentTarget dev, Environment dev (follows its worktree)
     prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source fromPromotion)
     preview.yaml             # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
@@ -188,7 +188,7 @@ spec:
     target: dev
     cidr: 10.0.0.0/16
     backendDir: <temporary directory>/tofu
-    approval: auto
+    approval: {mode: manual, bind: plan}
 ---
 # prod.yaml: prod runs definitions dev proved, and reuses dev's image
 apiVersion: gitops.nyl/v1
@@ -206,12 +206,23 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: prod}
 spec:
+  argocdRef: {name: prod}
   releaseInputs:
     web/web:
       image: {fromPromotion: {path: dev-to-prod, value: webImage}}
       database: {fromUnit: {unit: database, output: connection}}
 ---
-# platform.yaml
+# platform.yaml: one Argo CD instance per cluster with teardown-ready catalog
+# defaults; every target, inline ones included, names its instance
+apiVersion: k8s.gitops.nyl/v1
+kind: ArgoCDInstance
+metadata: {name: dev}
+spec:
+  clusterRef: {name: dev}
+  catalogApplicationDefaults:
+    syncPolicy: {automated: {prune: true}}
+---
+# platform.yaml (prod's ArgoCDInstance is the same for Cluster prod)
 apiVersion: gitops.nyl/v1
 kind: PromotionPath
 metadata: {name: dev-to-prod}
@@ -234,10 +245,16 @@ spec:
     name: '{{ target.metadata.name }}-web'
     destinationNamespaces: ['{{ values.namespace | default("web") }}']
 ---
-# platform.yaml: database
+# platform.yaml: database (block-style envelope, because the document is
+# not valid YAML before rendering)
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
-metadata: {name: database, labels: {dev: 'true', prod: 'true', preview: 'true'}}
+metadata:
+  name: database
+  labels:
+    dev: 'true'
+    prod: 'true'
+    preview: 'true'
 spec:
   source: {path: infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
@@ -250,7 +267,12 @@ spec:
 # platform.yaml: kubernetes, one unit for every environment
 apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
-metadata: {name: kubernetes, labels: {dev: 'true', prod: 'true', preview: 'true'}}
+metadata:
+  name: kubernetes
+  labels:
+    dev: 'true'
+    prod: 'true'
+    preview: 'true'
 spec:
   target: {{ values.target | tojson }}    # dev, prod, or the preview template's inline target
   mode: publish                           # teardownWait defaults to manual
@@ -278,6 +300,7 @@ spec:
     target:
       inline:
         clusterRef: {name: dev}
+        argocdRef: {name: dev}
         catalogApplication:
           shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}
@@ -297,9 +320,9 @@ spec:
 
 - One repository holds everything: the source on `main`, the rendered
   manifests on the `deploy` and `previews` branches, and the state refs.
-  `config/repository.yaml` names the repository's own URL, which is also what
+  The GitRepository in `nyl/platform.yaml` names the repository's own URL, which is also what
   Nyl uses without any GitRepository. Splitting the deploy branches or the
-  state into other repositories changes only that file; teams do it to give
+  state into other repositories changes only that resource; teams do it to give
   Argo CD or preview jobs narrower credentials, or to keep publication commits
   out of the source repository's history.
 - Every preview gets its own database, because preview images commonly run
@@ -356,8 +379,10 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 
 Branch protection: `main` requires review; `deploy`, `previews`, and the state
 refs accept pushes from the CI identity and the operator group only, with force
-pushes and deletion disabled; preview credentials can push `previews`,
-`nyl/previews`, and keep refs, and nothing else.
+pushes and deletion disabled, except that Nyl creates and deletes the lease,
+run, and signal refs of each environment. Preview credentials can push
+`previews`, `nyl/previews`, keep refs, and the lease, run, and signal refs of
+preview instances (`nyl/pr-*/…`), and nothing else.
 
 ## Scenario 1: platform environment
 
@@ -369,7 +394,7 @@ pushes and deletion disabled; preview credentials can push `previews`,
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
 | 5 | `nyl reconcile -e dev` → 2 | Wave 1 runs `network`, `web-image`, `seed`; `database` waits for approval (`bind: plan`); `kubernetes` is blocked on it. One desired and one observed commit |
 | 6 | `nyl plan -e dev --unit database --output json` → 0, then `nyl reconcile -e dev --approve database=<digest>` → 0 | The approved digest is applied; `kubernetes` runs in a later wave of the same run and publishes `dev/` with the image's digest reference and the database host; the approval is in the receipt |
-| 7 | `nyl get output database/host -e dev`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
+| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
@@ -383,7 +408,7 @@ pushes and deletion disabled; preview credentials can push `previews`,
 | 18 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
 | 19 | `nyl state delete -e dev --teardown --approve database=<digest from step 15>` → 0 | The command resumes: `database` is destroyed with the previewed destroy plan, then `network`; `web-image`'s image is left in the registry; dev's state is removed |
 | 20 | `nyl reconcile -e dev` → 1 | A pipeline still running dev fails visibly; the message names removing the Environment or `state init --fresh` |
-| 21 | Commit removing `environments/dev.yaml` and target `dev`; `nyl validate` → 0 | Decommissioning ends in source; the units stay declared and are selected by no environment |
+| 21 | Commit removing dev's Environment; `nyl validate` → 1 | Validation names what still needs dev: PromotionPath `dev-to-prod` and the preview template's reference to dev's `network`. Decommissioning an environment others depend on means rewiring them first |
 
 Tier 1 variants:
 
@@ -431,7 +456,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
 | 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
 | 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its recorded commit, not at `main`, and says so; nothing executes |
-| 9 | `nyl get environments` | Lists `dev` and `pr-124` only |
+| 9 | `nyl get environments` | Lists `dev`, `prod`, and `pr-124`; `pr-123` is gone |
 
 Tier 1 variants:
 
@@ -451,11 +476,11 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 | 1 | Clock T+3d; CI job for a new `pr-123` commit: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | Activity extends `pr-123` to T+10d; `pr-124` keeps T+7d |
 | 2 | Clock T+8d; scheduled job: `nyl reconcile --template preview` → 0 | `pr-124` has expired and is removed, a `teardown --all` then `state delete` authorized by `allowTeardown`, with `kubernetes`'s delay wait; `pr-123` is reconciled as maintenance and its expiry stays T+10d |
 | 3 | `nyl get environments` | `pr-124` is gone |
-| 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second exits 2 | `maxInstances: 2` counts live instances; nothing is expired, so the message names no instance to remove |
+| 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second exits 2 | `maxInstances: 2` counts every instance until it is removed; nothing is expired, so the message names no instance to remove |
 | 5 | Clock T+11d; `nyl state init -e pr-126 --template preview --param pr=126` → 2 | At the limit, `pr-126`'s job does not remove the expired `pr-123`; the message names it and suggests the scheduled job or `--make-room` |
 | 6 | Same clock; `nyl state init -e pr-126 --template preview --param pr=126 --make-room` → 0 | With the opt-in, the expired `pr-123` is removed first, then `pr-126` is created |
 | 7 | Clock T+19d; `nyl reconcile -e pr-125 --no-extend` → 0 | Any reconcile that finds an instance expired removes it, even one named explicitly |
-| 8 | Clock T+19d; `nyl reconcile -e pr-126 --renew` → 0 | `--renew` keeps an expired instance: its expiry moves to T+26d and it reconciles |
+| 8 | Clock T+19d; `nyl reconcile -e pr-126 --renew` → 0 | `--renew` keeps an expired instance: its expiry moves to T+26d and it reconciles at the commit `state init --template` recorded |
 
 Tier 1 variants:
 
@@ -475,6 +500,13 @@ Tier 1 variants:
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including a rollback, and a value-only path |
+
+The reference project grows with the milestones. A milestone's fixture omits
+resources whose kinds it does not have yet: M3 and M4 run scenario 1 without
+the preview template, the PromotionPath, and prod's promoted source, so step
+1's per-instance name check and step 21 join in M5 and M6. In tier 2, the
+`test-kinds` Cargo feature registers the fake kinds in the `nyl` binary, which
+is how M4 runs `FakePublication` through the real binary.
 
 A scenario's steps change together with the contract rules they prove, as the
 implementation architecture requires for walkthroughs.

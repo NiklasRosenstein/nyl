@@ -84,8 +84,10 @@ spec:
 
 Every run of an environment works in one worktree at one source commit S:
 discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
-and `carry` are all read there, and nothing else in the entry worktree is read
-again. The Environment's `source` field decides S:
+are all read there, and nothing else in the entry worktree is read again. The
+one exception is a `carry` file for a `fromPublication` binding: it exists only
+in the worktree of the job that produced it, so it is read from the entry
+worktree and recorded as carried, as release-inputs.md describes. The Environment's `source` field decides S:
 
 ```yaml
 spec:
@@ -122,10 +124,16 @@ spec:
   never moves an instance.
 - An EnvironmentTemplate takes the same field and may template it from
   `params`, for example `revision: 'refs/pull/{{ params.pr }}/merge'`.
-- `--source <rev>` overrides S for one single-environment `reconcile` or
-  `teardown`, for example to tear down after a recorded commit was lost. It is
-  never persisted, it must satisfy the same reachability rules, the
-  transition commit records it, and a fleet reconcile rejects it.
+- `--source <rev>` overrides S for one single-environment `plan`,
+  `reconcile`, or `teardown`, for example to preview what promoting a commit
+  would do to prod, or to tear down after a recorded commit was lost. It never
+  changes the environment's `source`: the run records it as that run's S, as
+  every run does, and the next run uses the environment's source again. It
+  must satisfy the same reachability rules, the transition commit marks it as
+  an override, and a fleet reconcile rejects it.
+- A run keeps its S to the end. When a promotion or a source change lands
+  while it runs, its final commit is resolved again against the new state but
+  at the same S, and the next run picks up the new source.
 - A unit's own source fields have the same shape plus `path` (see
   [Units](#units)) and say where the unit builds from, such as an image's
   build contexts or a Terraform module at another revision or in another
@@ -161,7 +169,10 @@ spec:
 - Units follow the rules of the other templatable control resources. A file
   is split into YAML documents before anything renders, each document is one
   resource, and a template never spans documents or generates several units:
-  composition happens through selection and values. Below the envelope, a
+  composition happens through selection and values. A document that is not
+  valid YAML before rendering must write its envelope in block style, one
+  literal key per line, because discovery then reads it with the static
+  envelope scanner, as it does for ApplicationGroups today. Below the envelope, a
   document may use structural templating, including text that is not valid
   YAML before rendering, so an environment's resources can be colocated in one
   file.
@@ -217,8 +228,9 @@ spec:
   `OciImage`: `path`, an optional `revision` and
   `commit` lock, and an optional `repositoryRef` or `repository`. Omitted
   fields fall back step by step: without a repository, this repository;
-  without `revision`, the environment's source commit S. Most units set only
-  `path`.
+  without `revision`, the environment's source commit S. A field that names
+  another repository must name its `revision`, because S is a commit of this
+  repository. Most units set only `path`.
   - `revision` alone resolves the ref's tip during resolution; the desired
     document records the resolved commit in `resolvedSpec.source.commit`, so
     every run is reproducible from state.
@@ -325,7 +337,10 @@ spec:
   target's bindings invalid.
 - The ownership index of every tree the unit publishes records the owning
   environment and unit uid next to the existing target, cluster, and
-  publication identity. Publish and teardown refuse a prefix whose index names
+  publication identity. These are new index fields, so orchestrated
+  publications write index format version 3 with a migration from version 2;
+  trees published without orchestration keep version 2 and stay
+  byte-identical. Publish and teardown refuse a prefix whose index names
   another environment's or another incarnation's unit while that incarnation
   still exists in its environment's state, active, deleting, or retained. A
   target moves between environments once the old environment's incarnation is
@@ -363,9 +378,14 @@ spec:
   on a shared publication branch, including Nyl's own publications, change
   nothing.
 - At execution, `publish-tree` builds on the current branch head. If the head
-  has moved past B but the state file is unchanged, it proceeds on the new
-  head; if the state file changed, the execution ends without publishing and
-  the unit is resolved again in the next wave.
+  has moved past B, including when another target's publication wins the
+  compare-and-swap, and neither the state file nor any file the target owns
+  changed, it rebuilds its commit on the new head and retries, a bounded
+  number of times; such commits touch disjoint files. If the state file
+  changed, the execution ends without publishing and the unit is resolved
+  again in the next wave. If a file the target owns changed outside Nyl, the
+  execution fails as a non-retryable ownership violation, as reconciliation
+  does today.
 - It publishes a `PublishedTree` artifact named `tree` with the published
   commit and ownership-index digest (`published`). `mode: observe` additionally records Argo CD acceptance and
   health observations (M5), per the roadmap's health evidence section. Direct
@@ -611,14 +631,20 @@ nyl get environments                                         # declared environm
   template. Afterwards the instance behaves like a declared environment for
   every command.
 - Instances are discovered by listing the template's state location, so no
-  central index exists.
+  central index exists. Changing a template's `state` would hide the
+  instances at the old location from the fleet job and the close jobs, so
+  `plan` and `reconcile` refuse such a change while instances exist at the
+  old location and name `nyl state move --template <name> --from …`, which
+  moves every instance like `state move` moves one environment.
+- `state init --template` records its entry worktree's commit as the
+  instance's source commit, so a later plain run of the instance has one.
 - `nyl teardown -e <env> --all` tears down every unit, dependents first, and
   holds every unit that is still in the ownership set, so nothing is
   recreated. Units whose kind has no teardown support are released: their
   resources are left in place, and they too become held desired files without
   an incarnation, so a later `reconcile` does not rebuild an image or re-run a
-  command. Units that depend on a publication
-  are torn down only once the publication's teardown completes under its
+  command. Consumers of a publication are torn down before it, and the units
+  the publication depends on wait until its teardown completes under its
   `teardownWait`, so with the `manual` strategy `teardown --all` stops after
   the publication and exits 2 until `--confirm-removed`.
 - `nyl state delete -e <env>` removes an environment's state: its directory in
@@ -660,6 +686,13 @@ nyl get environments                                         # declared environm
   `fromUnit: {environment: dev, unit: network, output: vpcId}`. It is
   read-only, allowed only from template instances to declared environments,
   and blocks like any reference when the producer's receipt is not current.
+- A declared environment's unit that live instances reference is protected
+  like a referenced unit in its own environment. `plan` lists the instances
+  that reference it, and a teardown, replacement, or omission of it, including
+  `state delete --teardown` of its environment, refuses while instances
+  reference it unless the invocation passes `--allow-dependents`, which the
+  transition commit records. Nyl finds these instances by listing the
+  templates' state locations, as below.
 - Instances cannot be a PromotionPath source; previews build and test, and
   promotion starts from declared environments.
 
@@ -715,8 +748,11 @@ runner (M7) could add timely enforcement later:
   `reconcile -e <instance> --no-extend` reconciles it as maintenance without
   extending; `reconcile --template <name>` never extends.
 - `--renew` and `--no-extend` conflict and are rejected together. Both are
-  rejected for declared environments, which have no expiry, and with
-  `--template`.
+  rejected for declared environments, which have no expiry, and for the fleet
+  reconcile, `--template` without `-e`.
+- The pull request job's `reconcile -e <instance> --template <name> --param …`
+  is activity by definition, so it renews an expired instance instead of
+  removing it: updating an active pull request never removes its preview.
 - A pull request pipeline runs `reconcile -e <instance> --template <name>
   --param …` on every push. It creates the instance when it is missing,
   updates its parameters when they changed, extends the expiry, and
@@ -849,10 +885,12 @@ readiness: {state: ready}
 #   reasons: [{pointer: /variables/vpc_id, reason: network has no current receipt}]
 ```
 
-- `sourceRevision` is S unless the unit's `source` field names a repository or
-  carries a promoted revision. Resolution always writes it into
-  `resolvedSpec.source.commit`, so a PromotionPath selector on `/source` carries
-  the path together with the exact commit the source environment executed.
+- `sourceRevision` is S. Resolution writes the resolved commit into every Git
+  source field of the unit, such as `resolvedSpec.source.commit` or
+  `resolvedSpec.contexts.shared.commit`, whether it is S, a locked commit, a
+  resolved `revision`, or a promoted revision, so a PromotionPath selector on
+  `/source` carries the path together with the exact commit the source
+  environment executed.
 - `resolvedSpec` is what PromotionPath selectors such as `input: /source` or
   `input: /releases/platform~1web/image` point into.
 - `provenance` records, per reference, the receipt or PromotionRecord the value
@@ -1127,7 +1165,9 @@ check:
    environment at a time.
 2. **Deadline.** The deadline is the latest finish time of the units executing,
    by their `timeout`, plus a grace period that also absorbs clock skew. The
-   runner updates the lease when it starts a unit; there are no heartbeats.
+   runner updates the lease when it starts a unit and when it enters a
+   teardown wait, whose deadline is the wait's end plus the grace period;
+   there are no heartbeats.
 3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
    the next wave, together with the desired document it executed and its uid,
    including documents the run created. A crash loses no evidence.
@@ -1624,7 +1664,7 @@ spec:
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
-| `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing the environment's state |
+| `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing its directory from a shared ref, or deletion of its own refs |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
@@ -1685,6 +1725,7 @@ nyl get unit database -e dev -o yaml             # exact DesiredUnit and Observe
 nyl get unit database -e dev -o yaml --observed  # only one of them (--desired, --observed)
 
 nyl get output network/vpcId -e dev              # resolves like {fromUnit: {unit: network, output: vpcId}}
+nyl get output database/connection -e dev --pointer /host   # pointer inside an object output
 
 nyl get artifacts -e dev
 UNIT        NAME   KIND            SUMMARY
@@ -1708,7 +1749,8 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
   reference would not resolve (no current receipt, or a missing output,
   artifact, or pointer target), they print nothing and exit 1. `--allow-stale`
   prints the latest receipt's value with a warning instead.
-- `--revision <commit>` reads state as of an earlier state commit; `--local`
+- `--state-revision <commit>` reads state as of an earlier state commit, the
+  same name `nyl promote` uses for a state commit; `--local`
   reads a local run's state. Output formats: `table` (default), `wide`,
   `yaml`, `json`, `name`.
 - `get` only reads: it needs read access to the state repository and never
@@ -1745,7 +1787,9 @@ execute (all of them without `--unit`/`--units`):
 | 3 | At least one execution failed |
 | 4 | At least one execution is uncertain and needs recovery, or the run lost its lease |
 
-The highest applicable category wins. Holds are reported as exit 2 on purpose:
+When several categories apply, the most severe wins, in the order 4, 3, 1, 2,
+0: an error is never reported as a harmless wait because something else is
+also waiting. Holds are reported as exit 2 on purpose:
 a run that leaves units unreconciled says so. A pipeline that expects a hold
 names the units it should reconcile with `--unit`/`--units`, and then exits 0
 when those are current.
@@ -1796,7 +1840,8 @@ until Argo CD has removed the workloads before removing the rest of the tree
 and the units the workloads used), and removes its state
 directory; the fleet reconcile then reconciles the other, live instances
 without extending them. Had the pull request been updated in the meantime, its
-pipeline's `state init --template` would have extended the expiry first.
+pipeline's `reconcile -e pr-123 --template preview --param pr=123` would have
+extended the expiry first.
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
 `cache` has the default `Teardown` policy, `worker` declares `Retain`. The next

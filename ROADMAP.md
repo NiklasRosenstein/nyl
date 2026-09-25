@@ -760,7 +760,9 @@ policy.
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
-| state init / move / forget | Create state, relocate it and retire the old location, or drop a unit from state without touching its resources |
+| state init / move / forget / delete | Create state, relocate it and retire the old location, drop a unit from state without touching its resources, or remove an environment's state after its units are torn down |
+| lease break | Declare a dead lease holder gone so the next run takes over at once |
+| build | Run a unit's `build` capability from the current worktree without writing state |
 
 Avoid a second meaning for `apply`. Specify command effects, selection defaults,
 non-interactive behavior, deadlines, and exit categories before stabilizing the
@@ -819,7 +821,7 @@ ambiguous command semantics.
   per-target instances.
 - [ ] Record resolved inputs in the dependency recorder, render-cache key, and
   the existing ownership-index `inputs` map as digests under reserved
-  `@`-prefixed keys, with an index format version and migration.
+  `@`-prefixed keys, keeping index format version 2.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.

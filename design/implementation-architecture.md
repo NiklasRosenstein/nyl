@@ -24,7 +24,7 @@ nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
-| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
 | `nyl-render` | Today's Kubernetes rendering and rendered GitOps, unchanged in behavior | Orchestration crates |
 | `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap | Drivers, rendering, orchestration |
 | `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
@@ -101,8 +101,11 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   its scenario in the same change.
 - The [reference scenarios](reference-scenarios.md) run whole workflows, from
   Git operations and clock changes to `nyl` invocations, against local bare
-  repositories: in-process with fake tool drivers in every CI run, and through
-  the real binary and tools where those are installed.
+  repositories: in-process with fake kinds in every CI run, and through the
+  real binary with the real tools in a required CI job under the `tier2`
+  Cargo feature. A `test-kinds` Cargo feature registers the fake kinds in the
+  binary, next to `test-clock`, so tier 2 can stand in for kinds a milestone
+  has not built yet.
 - Property tests (proptest) cover invariants: no unit executes with non-current
   provenance; a held unit's desired document never changes; replaying
   transition commits reproduces the state; a transition commit touches only its
@@ -138,8 +141,11 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - State-file structs are versioned explicitly with migration functions; readers
   reject unknown versions. Schemas are generated from the Rust types through the
   existing schemars pipeline.
-- Traits stay small: `StateStore`, `Driver`, `SourceRenderer`, `ArgoObserver`,
-  `Clock`, `IdGenerator`. Each has an in-memory or fake implementation used by
+- Traits stay small: `StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`,
+  `ArgoObserver`, `Clock`, `IdGenerator`. `SourceResolver` covers every Git
+  operation on sources that decisions depend on: resolving revisions,
+  reachability checks against protected refs, fetching commits, worktrees at a
+  commit, and keep refs. Each has an in-memory or fake implementation used by
   the scenario tests.
 - Concurrency lives in one place: a wave executor with a bounded semaphore on
   the existing tokio runtime, and a single writer task for state commits.
