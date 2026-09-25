@@ -400,7 +400,7 @@ Tier 1 variants:
 | M3 | Scenario 1 with `Command` units standing in for every kind, tier 1: waves, approval, repeat no-op, selector typo, teardown order, crash, and lease variants |
 | M4 | Scenario 1 steps 1–10 with the real `OciImage` and `OpenTofu` drivers in tier 2 |
 | M5 | All three scenarios in both tiers |
-| M6 | A fourth scenario extends scenario 1 with a `staging` environment and a PromotionPath for the image digest and the network source commit |
+| M6 | A fourth scenario promotes dev's source commit and image digest to prod, including a rollback, and a value-only path |
 
 A scenario's steps change together with the contract rules they prove, as the
 implementation architecture requires for walkthroughs.

@@ -43,8 +43,9 @@ M2 implementation can start independently.
 ## Product direction
 
 > Authoring declares units and how their inputs are bound. Reconciliation runs
-> ready units and records their evidence. Promotion copies selected, proven
-> values from one environment to another through an explicit path.
+> ready units and records their evidence. Promotion moves proven source commits
+> and selected, proven values from one environment to another through an
+> explicit path.
 
 An orchestration unit is a meaningful lifecycle boundary: an image build, a
 Terraform configuration, a command, or one Kubernetes publication. A unit takes
@@ -415,12 +416,16 @@ spec:
 - All values of one promotion come from one consistent source state. At
   `published`, that is a single source revision: the newest at which every
   selected unit has a matching receipt or, for a target source, the newest
-  publication commit; `--from-revision` selects an exact one. At `accepted` and
-  `healthy`, `--from-revision` is rejected, and the state is what the source
-  runs at the moment of the observation: each
-  value comes from the revision its own consuming Application or unit runs, so
-  values proven together in the source are promoted together even when manual
-  syncs left Applications at different revisions.
+  publication commit; `--state-revision <desired commit>` selects an exact one,
+  and `--revision <source commit>` the newest with that source commit. At
+  `accepted` and `healthy` the state is what the source runs at the moment of
+  the observation. For a path that promotes only values, each value comes from
+  the revision its own consuming Application or unit runs, so values proven
+  together in the source are promoted together even when manual syncs left
+  Applications at different revisions; a path that promotes the target's
+  source follows the stricter rule below. Promoting an older state than the
+  evidence level would select requires `--evidence published`, recorded as an
+  override, for example to roll back.
 - `nyl promote dev-to-staging [--value …]` writes a
   PromotionRecord into the target environment's desired state: per value, its
   selector, the source unit's identity and incarnation, the source revision it
@@ -438,6 +443,65 @@ spec:
   message. A broken selector in an existing path is an error, not a wait.
 - Native state is never promoted; the staging Terraform unit applies the
   promoted source commit and variables against staging's own backend.
+
+**Promoting an environment's source.** An environment whose `source` is
+`fromPromotion`, or a `revision` with a `commit` lock, runs its definitions
+at a source commit that dev proved, so a change to what the code does reaches
+it only through promotion. Values then carry only results that must not be
+rebuilt, such as image digests.
+
+```yaml
+# config/environments/prod.yaml
+spec:
+  source:
+    fromPromotion: {path: dev-to-prod}
+---
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: dev-to-prod}
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: healthy
+  values:
+    webImage:
+      select: {unit: web-image, artifact: image, pointer: /reference}
+```
+
+- The unit of promotion is one recorded dev state: a transition commit pair
+  that ties together dev's source commit, desired documents, and receipts
+  with their artifacts. The PromotionRecord records that state's desired and
+  observed commits, its source commit, and every value, so the promoted
+  source and the promoted values always come from the same dev run.
+- Evidence covers the whole source, not only the selected values: in that dev
+  state, every unit the target environment also selects has a current
+  receipt, and at `accepted` or `healthy` every covered Application runs that
+  state's publication. Mixed revisions block, because one source commit must
+  fit every value.
+- `nyl promote` moves the target's pin in the form it has: it records the
+  source commit in the PromotionRecord for `fromPromotion`, writes the
+  `commit` lock into the Environment file for `revision` with `commit`, and
+  opens a pull request merging the commit into `revision` for `revision`
+  alone; `changeGate: pullRequest` turns the first two into pull requests as
+  well. An environment that follows its entry worktree is not a promotion
+  target for its source.
+- A run uses a PromotionRecord's values only when the record's source commit
+  is the run's source commit, or an ancestor of it for a `revision` source.
+  Until a pending source change merges, the target's `fromPromotion` bindings
+  block instead of mixing new values with an old source.
+- Before the first promotion, an environment with a `fromPromotion` source has
+  no source commit, and `reconcile` exits 2 naming `nyl promote`.
+- The target may still select a unit dev also runs, such as `web-image`, and
+  rebuild it at the promoted commit instead of binding dev's result. The
+  PromotionRecord then says the result was rebuilt rather than claiming dev's
+  evidence for it, image tags include the environment, and Nyl warns only
+  when an environment builds a unit whose artifacts its `fromPromotion`
+  bindings replace.
+- A target source (`from: {target: …}`) promotes the source commit its
+  publication recorded, under the same rules.
+- Prod-only changes, such as a replica count, reach prod with the next
+  promotion of a commit that contains them. Hotfixes that cannot wait for dev
+  use a `revision` such as a `release/prod` branch.
 
 **Promotion sources.** `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from `value`,
@@ -531,9 +595,11 @@ Cluster.
   promoted values must be accepted or healthy. A PromotionPath may add
   Applications that must be healthy at whatever publication they run, without
   contributing values.
-- **Manual syncs.** Applications synced to different publications do not
-  block promotion. Promotion blocks only when a covered Application runs a
-  revision that matches no source publication, or does not meet the level.
+- **Manual syncs.** For a path that promotes only values, Applications synced
+  to different publications do not block promotion. Promotion blocks only when
+  a covered Application runs a revision that matches no source publication, or
+  does not meet the level. A path that promotes the target's source also
+  blocks on mixed revisions.
 - **Decision evidence is always recorded.** The observation behind every
   promotion (time, Application, running revision, health) is stored in the
   PromotionRecord, additionally in observed state for environment sources, and
@@ -690,7 +756,7 @@ policy.
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
 | verify | Observe external state and report drift without writing receipts |
-| promote | Record selected source values into target desired state, or open a change for review |
+| promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
 | recover | Clear an uncertain condition or non-retryable failure for re-execution, with a recorded reason |
@@ -844,8 +910,13 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
 
 - [ ] Implement PromotionPath, PromotionRecord, and `nyl promote`
   with evidence checks and an optional pull-request change gate.
-- [ ] Promote an image digest and a Terraform source commit from dev to staging
-  across differently named units and inputs, from one consistent source state.
+- [ ] Promote dev's source commit and image digest to prod from one recorded
+  dev state, for each source form (`fromPromotion`, `commit` lock, `revision`),
+  with the whole-source evidence rule, record matching, and rollback through
+  `--revision` with `--evidence published`.
+- [ ] Promote values only, such as an image digest and a Terraform source
+  commit, across differently named units and inputs, from one consistent
+  source state.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
 - [ ] Gate promotion on a fresh Argo CD observation for both PromotionPath
@@ -853,9 +924,10 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
   add `nyl update source-locks --require healthy` with an `observed` block.
 - [ ] Show promotion lineage in `status`.
 
-**Exit criterion:** staging runs exactly the image digest and Terraform source
-dev proved, with auditable lineage; stale or missing source evidence blocks
-promotion.
+**Exit criterion:** prod runs exactly the source commit and image digest dev
+proved, with auditable lineage; stale, missing, or mixed source evidence blocks
+promotion; a value-only path still promotes values from what each consuming
+Application runs.
 
 ### M7 — Continuous operation and scope decision
 

@@ -65,8 +65,10 @@ to consumers when the registry holds it.
   the metadata file, never from parsing build output. The kind declares no
   outputs; consumers reference the artifact, for example
   `{fromUnit: {unit: web-image, artifact: image, pointer: /reference}}`.
-- **Tags:** every push carries the tag `nyl-<first 16 hex digits of the
-  execution key>`, so a pushed image can be found from its desired document.
+- **Tags:** every push carries the tag `nyl-<environment>-<first 16 hex digits
+  of the execution key>`, so a pushed image can be found from its desired
+  document, and two environments building the same key never move each
+  other's tag.
   `tags` adds further tags, which move; consumers use the artifact's
   `reference`.
 - **Credentials:** `registryAuth` writes a temporary Docker configuration

@@ -103,7 +103,7 @@ spec:
 | omitted | The entry worktree's commit, typical for dev and previews |
 | `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
 | `revision` and `commit` | `commit`, a reviewed pin in source |
-| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in state (see the roadmap's promotion section) |
+| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in state; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
 
 - The three forms exclude each other. `commit` requires `revision`, as for
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
@@ -757,7 +757,7 @@ spec:
   digest: sha256:4f0c…
   reference: registry.example.com/web@sha256:4f0c…
   platforms: [linux/amd64, linux/arm64]
-  tags: [nyl-1a2b3c4d5e6f7a8b, dev]
+  tags: [nyl-dev-1a2b3c4d5e6f7a8b, dev]
 ```
 
 A reference reads an artifact through `fromUnit` with `artifact` instead of
