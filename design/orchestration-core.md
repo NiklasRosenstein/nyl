@@ -438,18 +438,28 @@ nyl get environments                                         # declared environm
 - Instances are discovered by listing the template's state location, so no
   central index exists.
 - `nyl teardown -e <env> --all` tears down every unit, dependents first, and
-  holds each unit that is still in the ownership set, so nothing is recreated.
-  It also decommissions declared environments: run `teardown --all`, then
-  remove the Environment from source. Units whose kind has no teardown support
-  are left in place and dropped from state. Units that depend on a publication
+  holds every unit that is still in the ownership set, so nothing is
+  recreated. Units whose kind has no teardown support are released: their
+  resources are left in place, and they too become held desired files without
+  an incarnation, so a later `reconcile` does not rebuild an image or re-run a
+  command. Units that depend on a publication
   are torn down only once the publication's teardown completes under its
   `teardownWait`, so with the `manual` strategy `teardown --all` stops after
   the publication and exits 2 until `--confirm-removed`.
-- `nyl state delete -e <env>` removes an instance's state: its directory in a
-  shared ref, or its refs. It works only for template instances whose units
-  have no incarnation left, and it removes everything, including records of
-  units that were left in place; `--teardown` runs `teardown --all` first. History
-  keeps the removed state. The recommended layout for previews is a shared
+- `nyl state delete -e <env>` removes an environment's state: its directory in
+  a shared ref, or its refs. It works for template instances and declared
+  environments alike, once no unit has an incarnation left, and it removes
+  everything, including held desired files and records of units that were
+  left in place. `--teardown` runs `teardown --all` first and continues to the
+  deletion in the same command; manual approvals and `manual` teardown waits
+  still stop it with exit 2, and running it again resumes. History keeps the
+  removed state.
+- Decommissioning a declared environment is `nyl state delete -e <env>
+  --teardown`, then removing its Environment from source. Until the
+  Environment is removed, every command for it fails with exit 1, because its
+  location has no `state.yaml`; the message names both ways forward (removing
+  the Environment, or `state init --fresh`), so a pipeline that still runs it
+  fails visibly instead of silently re-creating anything. The recommended layout for previews is a shared
   ref with `state.path`, so `state delete` removes a directory instead of a
   ref; separate refs per instance need permission to delete refs matching the
   template's ref pattern.
@@ -1370,7 +1380,7 @@ spec:
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
-| `state delete` | Remove a template instance's state after all its units are torn down; `--teardown` tears them down first | One commit removing the instance's state |
+| `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing the environment's state |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `promote` | See the roadmap's promotion section | PromotionRecord |

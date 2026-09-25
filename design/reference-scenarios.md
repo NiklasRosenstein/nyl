@@ -258,17 +258,20 @@ spec:
 | 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `tier: platfrom` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
 | 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and `deploy.git` is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
 | 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
-| 15 | `nyl plan -e dev --teardown --all --output json` → 0, then `nyl teardown -e dev --all` → 2 | The preview shows `database`'s destroy-plan digest before anything is requested; then `seed`, which has no teardown step and no dependency path to `kubernetes`, is released at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
-| 16 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
-| 17 | `nyl teardown -e dev --all --approve database=<digest from step 15>` → 0 | `database` is destroyed with the previewed destroy plan, then `network`; `web-image`'s image is left in the registry |
-| 18 | `nyl get units -e dev`, then `nyl reconcile -e dev` → 2 | Every unit is `held` without an incarnation, because `--all` holds units that are still selected; reconcile recreates nothing and reports the holds |
+| 15 | `nyl plan -e dev --teardown --all --output json` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with `database`'s destroy-plan digest |
+| 16 | `nyl state delete -e dev --teardown --approve database=<digest>` → 2 | `seed`, which has no teardown step and no dependency path to `kubernetes`, is released and held at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
+| 17 | A CI push meanwhile: `nyl reconcile -e dev` → 2 | Nothing is recreated: every unit is held or tearing down, so the image is not rebuilt and `seed` does not run again |
+| 18 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
+| 19 | `nyl state delete -e dev --teardown --approve database=<digest from step 15>` → 0 | The command resumes: `database` is destroyed with the previewed destroy plan, then `network`; `web-image`'s image is left in the registry; dev's state is removed |
+| 20 | `nyl reconcile -e dev` → 1 | A pipeline still running dev fails visibly; the message names removing the Environment or `state init --fresh` |
+| 21 | Commit removing `environments/dev.yaml` and target `dev`; `nyl validate` → 0 | Decommissioning ends in source; the units stay declared and are selected by no environment |
 
 Tier 1 variants:
 
-- **Observe mode.** With `mode: observe`, step 15 waits on the fake observer.
+- **Observe mode.** With `mode: observe`, step 16 waits on the fake observer.
   The observer first reports `observation-failed`: the teardown is uncertain
   with that reason, and `status` suggests fixing the observer or confirming.
-  `--confirm-removed` then completes it as in step 16.
+  `--confirm-removed` then completes it as in step 18.
 - **Crash after an effect.** The run is killed after `network`'s effect and
   before its checkpoint. The next run takes over the expired lease, marks
   `network` uncertain, converges, and lists it under `recovered`.

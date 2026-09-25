@@ -769,7 +769,8 @@ byte-identical output to the previous release.
 ### M3 — Orchestration core with a constrained command unit
 
 - [ ] Implement environments, YAML state files with published schemas,
-  `nyl state init`/`move`/`forget`, leases and run checkpoints, and one
+  `nyl state init`/`move`/`forget`/`delete` (including decommissioning declared
+  environments), leases and run checkpoints, and one
   transition commit per operation with a machine-readable summary, pushed
   atomically with the lease check.
 - [ ] Support SSH keys and HTTPS tokens, besides the SSH agent, for state
