@@ -113,24 +113,18 @@ All three scenarios run against one project, which also lives at
 dev, prod, and preview environments. Same files in both places, so the
 example can never drift from what is tested.
 
+The example uses a condensed layout: one file per environment, one for shared
+resources, and the native source files next to them.
+
 ```text
 examples/platform/
   nyl.toml
-  config/
-    repository.yaml          # GitRepository platform: this repository; deploy branches and state refs live in it
-    clusters/dev.yaml        # Cluster dev
-    clusters/prod.yaml       # Cluster prod
-    targets/dev.yaml         # DeploymentTarget dev  → branch deploy, prefix dev/
-    targets/prod.yaml        # DeploymentTarget prod → branch deploy, prefix prod/
-    environments/dev.yaml    # Environment dev:  selects dev: 'true', follows main
-    environments/prod.yaml   # Environment prod: selects prod: 'true', requireDigest approvals
-    environments/preview.yaml   # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
-  units/
-    network.yaml             # OpenTofu               labels: dev, prod
-    database.yaml            # OpenTofu               labels: dev, prod, preview
-    web-image.yaml           # OciImage               labels: dev, preview (prod reuses dev's image)
-    seed.yaml                # Command, not idempotent   labels: dev
-    kubernetes.yaml          # KubernetesPublication, target from values   labels: dev, prod, preview
+  nyl/
+    platform.yaml            # GitRepository platform; PromotionPath dev-to-prod; units network, database, web-image, seed, kubernetes
+    dev.yaml                 # Cluster dev, DeploymentTarget dev, Environment dev (follows its worktree)
+    prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source fromPromotion)
+    preview.yaml             # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
+    demo.yaml                # DeploymentTarget demo: static inputs, no orchestration
   infra/network/main.tf
   infra/database/main.tf     # uses ../modules/postgres
   infra/modules/postgres/
@@ -140,19 +134,32 @@ examples/platform/
   applications/web/release.yaml   # inputs: image (string), database (object)
   .github/workflows/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
-    reconcile.yaml           # push to main: reconcile dev, then prod behind an approval gate
+    reconcile.yaml           # push to main: reconcile dev; promote dev-to-prod and reconcile prod behind an approval gate
     preview.yaml             # pull request opened/updated: reconcile -e pr-<n> --template preview --param pr=<n>; closed: state delete --teardown
     previews-maintenance.yaml   # nightly: nyl reconcile --template preview
 ```
 
-Directories carry no meaning: discovery follows Git visibility, so the
-template sits under `environments/` next to the Environments it resembles, and
-a condensed layout with everything under one `nyl/` directory works the same.
+| Unit | dev | prod | preview |
+| --- | --- | --- | --- |
+| `network` | ✓ | ✓ | reads dev's |
+| `database` | ✓ | ✓ | ✓ (its own) |
+| `web-image` | ✓ | reuses dev's through promotion | ✓ (the pull request's) |
+| `seed` | ✓ | | |
+| `kubernetes` | ✓ | ✓ | ✓ |
+
+Directories and files carry no meaning: discovery follows Git visibility, and a
+file may hold any number of resources. The documentation suggests an expanded
+layout for larger projects, with one resource per file:
+
+```text
+config/repository.yaml   config/clusters/<name>.yaml   config/targets/<name>.yaml
+config/environments/<name>.yaml   config/promotion/<path>.yaml   units/<unit>.yaml
+```
 
 Key excerpts:
 
 ```yaml
-# config/environments/dev.yaml
+# dev.yaml
 apiVersion: gitops.nyl/v1
 kind: Environment
 metadata: {name: dev}
@@ -164,11 +171,51 @@ spec:
     backendDir: <temporary directory>/tofu
     approval: auto
 ---
-# config/environments/prod.yaml selects prod: 'true' and differs in values:
-#   target: prod, cidr: 10.1.0.0/16, approval: {mode: manual, bind: plan, requireDigest: true}
-#   Its source moves along its promotion path, an open design topic (DISCUSSION.md).
+# prod.yaml: prod runs definitions dev proved, and reuses dev's image
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: prod}
+spec:
+  source: {fromPromotion: {path: dev-to-prod}}
+  unitSelector: {matchLabels: {prod: 'true'}}      # no web-image
+  values:
+    target: prod
+    cidr: 10.1.0.0/16
+    approval: {mode: manual, bind: plan, requireDigest: true}
 ---
-# units/database.yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata: {name: prod}
+spec:
+  releaseInputs:
+    web/web:
+      image: {fromPromotion: {path: dev-to-prod, value: webImage}}
+      database: {fromUnit: {unit: database, output: connection}}
+---
+# platform.yaml
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: dev-to-prod}
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: healthy
+  values:
+    webImage: {select: {unit: web-image, artifact: image, pointer: /reference}}
+---
+# applications/web/group.yaml: names and namespaces per target, so previews never collide
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata: {name: web, labels: {app: web}}
+spec:
+  applicationNamespace: argocd
+  applicationNameTemplate: '{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}'   # late-bound syntax is an open topic
+  destinationNamespace: '{{ values.namespace | default("web") }}'
+  projectTemplate:
+    name: '{{ target.metadata.name }}-web'
+    destinationNamespaces: ['{{ values.namespace | default("web") }}']
+---
+# platform.yaml: database
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
 metadata: {name: database, labels: {dev: 'true', prod: 'true', preview: 'true'}}
@@ -181,7 +228,7 @@ spec:
     connection: {type: object}    # host, port, secretName; never the password
   approval: {{ values.approval | tojson }}
 ---
-# units/kubernetes.yaml: one unit for every environment
+# platform.yaml: kubernetes, one unit for every environment
 apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
 metadata: {name: kubernetes, labels: {dev: 'true', prod: 'true', preview: 'true'}}
@@ -190,14 +237,14 @@ spec:
   mode: publish                           # teardownWait defaults to manual
   {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% endif %}
 ---
-# config/targets/dev.yaml (excerpt)
+# dev.yaml: DeploymentTarget dev (excerpt)
 spec:
   releaseInputs:
     web/web:
       image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
       database: {fromUnit: {unit: database, output: connection}}
 ---
-# config/environments/preview.yaml
+# preview.yaml
 apiVersion: gitops.nyl/v1
 kind: EnvironmentTemplate
 metadata: {name: preview}
@@ -216,7 +263,7 @@ spec:
           shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}
         publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
-        values: {nameSuffix: '-{{ environment.name }}'}   # unique Argo CD names and namespace per instance
+        values: {namespace: '{{ environment.name }}-web'}   # its own namespace; names come from the target name
         releaseInputs:
           web/web:
             image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
@@ -249,8 +296,15 @@ spec:
   its name; the Release reads the secret by name.
 - The Cluster, ApplicationGroup, and catalog settings are teardown-ready:
   catalog `syncPolicy.automated` with `prune: true`, `Foreground` deletion,
-  and namespace `deletePolicy: Automatic`. The ApplicationGroup templates
-  Application, AppProject, and namespace names with `values.nameSuffix`.
+  and namespace `deletePolicy: Automatic`. The ApplicationGroup derives
+  Application and AppProject names from the target's name, and each preview
+  sets its own namespace, so no preview can collide with dev or delete its
+  namespace.
+- Target `demo` binds the Release's inputs with plain `value` bindings and
+  belongs to no environment. `render-tree --target demo` renders the same
+  Release without orchestration, while `render-tree --target dev` fails and
+  names `nyl build kubernetes -e dev`, because dev's bindings resolve only in
+  its environment.
 - `seed` is a Command that loads fixture data into a store of its own. It is
   not `idempotent`, has no teardown step, and has no dependencies or
   dependents: it shows that a teardown wait never holds back unrelated units,
@@ -301,7 +355,7 @@ pushes and deletion disabled; preview credentials can push `previews`,
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
 | 11 | Commit a change to the Release template only; reconcile → 0 | Only `kubernetes` executes, because its key covers the render's inputs |
-| 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `dve: 'true'` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
+| 12 | Branch `typo`; commit a selector typo in dev's Environment; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `dve: 'true'` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
 | 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and the `deploy` branch is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
 | 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
 | 15 | `nyl plan -e dev --teardown --all --output json` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with `database`'s destroy-plan digest |
@@ -365,8 +419,9 @@ Tier 1 variants:
 - **No keep ref.** With `keepSource: false`, step 7 fails and suggests
   `--source`; `nyl state delete -e pr-123 --teardown --source main` warns about
   the substituted source, records it, and succeeds.
-- **Name collision.** Without `nameSuffix`, `nyl validate` rejects the template
-  because two instances would generate the same Argo CD names.
+- **Name collision.** With an `applicationNameTemplate` that ignores the
+  target's name, `nyl validate` rejects the template because two instances
+  would generate the same Argo CD names.
 
 ## Scenario 3: preview expiry
 

@@ -7,19 +7,23 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ## Current
 
-### 1. Reference project details
+### 1. Syntax for late-bound field templates
 
-- Argo CD names and namespaces per preview instance: confirm that
-  `values.nameSuffix` reaches the ApplicationGroup's `applicationNameTemplate`,
-  project name, and namespace through today's templating, and show it.
-- Static target `dev` carries `fromUnit` bindings, which M2 rejects outside
-  orchestration, so `render-tree --target dev` fails without orchestration.
-  Decide whether that is acceptable, or whether M5's "the same Releases still
-  render with static inputs" needs a separate, orchestration-free target in the
-  project.
-- When `examples/platform/` is materialized (proposed: in M3, as schemas land),
-  and a condensed variant that colocates each environment's resources in one
-  file.
+A templated control resource is rendered as a whole before its fields are
+used, so a field that is itself a template rendered later with extra context
+competes with that first pass. Verified with `render-tree`:
+`applicationNameTemplate: '{{ target.metadata.name }}-{{ release.metadata.name }}'`
+fails, because `release` is undefined in the first pass; wrapping it in
+`{% raw %}…{% endraw %}` renders `production-api`. Today's validation hint
+suggests the failing form (a separate fix is queued as a task).
+
+Options: keep one syntax and document `{% raw %}`; give late-bound field
+templates their own delimiters that cannot collide with the structural pass,
+such as `${ release.metadata.name }` (MiniJinja supports custom delimiters),
+while still accepting a Jinja template that survives the first pass, for
+compatibility; or replace such fields with structured alternatives, such as a
+name prefix. Units will add more late-bound contexts, so the choice applies
+beyond ApplicationGroups.
 
 ## Next
 
