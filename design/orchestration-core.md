@@ -614,7 +614,10 @@ request would deploy.
   recorded source commit: after a Nyl upgrade that changes rendered output, a
   driver behavior-version change, or new evidence in shared infrastructure. It is maintenance, not
   activity: it never extends expiry, and it removes expired instances (see
-  [Expiry](#expiry)). It never renders an
+  [Expiry](#expiry)). An instance whose lease is held is skipped and reported
+  as `busy`, not as a failure, because another run is reconciling it; the
+  exit category reflects only the instances the fleet run processed, and a
+  busy expired instance is removed by a later run. It never renders an
   instance's units with a template from another commit, because that
   combination was never reviewed together; pulling the default branch into
   every pull request remains a pipeline choice.
@@ -1044,7 +1047,9 @@ check:
 | `nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
-   exists and has not expired, the run exits 2 and reports who holds it. Every
+   exists and has not expired, the run exits 2 and reports who holds it;
+   `--wait-lease <duration>` waits up to that long for the lease instead, for
+   jobs such as a preview's close job that must not give up. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
    `teardown`, `hold`, `resume`, `recover`, `verify`, `state init`,
    `state move`, `state delete`, `state forget`), so only one runs per
@@ -1076,6 +1081,23 @@ check:
 6. **Lost lease.** A runner whose lease update fails stops starting units,
    checkpoints the units still running to its own run ref, and exits 4. The
    next run imports those results as above.
+7. **Cancellation.** On SIGINT or SIGTERM, a run stops starting units and
+   forwards the signal to running tools, so tools such as OpenTofu stop
+   cleanly and release their own locks. It checkpoints finished units, gives
+   units that were still running an `uncertain` condition, pushes its run
+   ref, and releases the lease; it skips the final transition commit, and the
+   next run imports the run ref as after a crash. CI systems allow only
+   seconds between the signal and a forced kill, so this path does no other
+   work. Pipelines should not cancel runs that apply changes; a CI
+   concurrency group per environment serializes jobs without cancelling
+   them.
+8. **Breaking a lease.** When a holder died without releasing its lease, for
+   example after a forced kill, `nyl lease break -e <env> --reason <text>`
+   declares it gone. The next run takes over at once, as after expiry, and
+   units the holder was executing become `uncertain`. The command warns that
+   a holder that is in fact alive may still be causing effects; the fenced
+   final push keeps it from overwriting state either way. The break is
+   recorded in the next transition commit with who broke it and why.
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
 the units it is executing.
@@ -1511,6 +1533,7 @@ spec:
 | `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing the environment's state |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
+| `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
 | `promote` | See the roadmap's promotion section | PromotionRecord |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
@@ -1606,7 +1629,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
+`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 

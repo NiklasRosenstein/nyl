@@ -327,8 +327,19 @@ Tier 1 variants:
   unreviewed; with `requireDigest: true` on `database`, the same command skips
   it and exits 2.
 - **Crash after an effect.** The run is killed after `network`'s effect and
-  before its checkpoint. The next run takes over the expired lease, marks
+  before its checkpoint. After the clock passes the lease deadline, the next
+  run takes over the expired lease, marks
   `network` uncertain, converges, and lists it under `recovered`.
+- **Cancellation.** A SIGTERM during `database`'s apply stops the tool,
+  checkpoints finished units, marks `database` uncertain, and releases the
+  lease within the grace the harness allows; the next run starts at once
+  and converges `database`.
+- **Broken lease.** After a forced kill, `nyl lease break -e dev --reason
+  "runner lost"` lets the next run take over before the deadline.
+- **Busy instance.** While a pull request job holds `pr-124`'s lease, the
+  fleet job skips it as `busy` and exits by the other instances' results.
+- **Close job waiting.** `state delete -e pr-123 --teardown --wait-lease 10m`
+  waits for a running reconcile of `pr-123` to finish instead of exiting 2.
 - **Lost lease.** A run whose lease was taken over pushes nothing and exits 4;
   the new run imports its checkpoints.
 

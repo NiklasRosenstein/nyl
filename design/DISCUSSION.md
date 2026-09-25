@@ -7,23 +7,14 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ## Current
 
-### 1. Leases in real CI
+### 1. Cleaning up expired instances at `maxInstances`
 
-From the reference-scenario review:
-
-- A job cancelled by the CI system (for example `cancel-in-progress`) keeps
-  its lease until unit timeout plus grace, up to 70 minutes for OpenTofu, and
-  no command breaks a lease: every later push exits 2 until then.
-- A close job racing a running reconcile of the same instance exits 2 and can
-  leak the preview.
-- One busy instance fails the whole fleet job, `reconcile --template`.
-- At `maxInstances`, `state init --template` runs another pull request's full
-  teardown inside the new pull request's job, with that teardown's waits,
-  credentials, and failure modes.
-
-Candidate directions: release the lease on SIGTERM and checkpoint, a
-`nyl lease break --reason` escape hatch, fleet runs that skip busy instances
-and report them, and expiry removal only in scheduled jobs.
+At the instance limit, `state init --template` currently removes expired
+instances first, inside the new pull request's job, with their waits,
+destroys, and possible manual confirmations. Proposal: by default it refuses
+with exit 2 and names the removable instances, leaving removal to the
+scheduled fleet job; `--make-room` opts into removing them in the same job.
+Open: which of the two is the default.
 
 ## Next
 
