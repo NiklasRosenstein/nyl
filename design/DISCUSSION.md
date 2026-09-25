@@ -7,16 +7,30 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ## Current
 
-### 1. Preview pipeline commands and source commits
+### 1. Environments whose source moves along a promotion path
 
-- Every push needs `state init --template … --param …` and then `reconcile`;
-  the name `init` hides that the step also extends expiry.
-- `reconcile -e pr-124` from a checkout of `main` renders pr-124's units at
-  `main` and silently drops the pull request's changes.
+Settled so far: every environment declares its source (`source: {ref: …}`),
+templates derive it from parameters, and runs never take it from the checkout.
 
-Candidate directions: `reconcile -e <instance>` refuses a checkout that is not
-the instance's recorded branch head unless given `--source`, and one command
-that creates, extends, and reconciles an instance.
+Open: prod should not follow `main`. A drastic change to a unit's shape must
+reach prod only after dev proved it, so prod's source commit itself moves
+along its promotion path. Proposal:
+
+- `source: {promotion: dev-to-prod}`: prod's S is the source commit recorded
+  by the latest promotion on that path, which is the commit dev ran when it
+  produced the promoted evidence.
+- A PromotionPath then always carries the source commit, and its value
+  selectors keep deciding which results are reused rather than rebuilt, such
+  as dev's image digest instead of a new build at the promoted commit.
+- Consistency: the promoted source commit and the promoted values come from
+  the same dev state, as the roadmap already requires for values.
+
+This diverges from the roadmap's M6, which promotes values while every
+environment renders at the checkout's commit, so it needs the deliberate
+review AGENTS.md asks for and a ROADMAP update. Questions to settle: how the
+first prod run gets a source before any promotion, whether values without a
+selector are rendered from the promoted commit or rejected, and how a prod
+hotfix bypasses dev.
 
 ## Next
 

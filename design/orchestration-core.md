@@ -47,6 +47,7 @@ spec:
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
     path: ''                                # optional directory within the refs; default the root
+  source: {ref: main}                       # where runs take their source commit; see Source
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
 ```
@@ -78,6 +79,34 @@ spec:
 - `protectedRefs` lists the refs that pinned commits and run source commits
   must be reachable from; `allowUnprotectedSource` relaxes that for run source
   commits (see [Pinned commits](#pinned-commits)).
+
+### Source
+
+Every run of an environment renders its units at one source commit S, which
+the environment declares; the checkout a job happens to run in never decides
+it. The checkout supplies the Environment and EnvironmentTemplate
+declarations, and Nyl fetches S itself and renders from a worktree at S.
+
+- `source: {ref: <ref>}` follows a ref: each run uses its current tip. The
+  default is the source repository's default branch.
+- An EnvironmentTemplate templates the ref from its parameters, such as
+  `source: {ref: 'refs/pull/{{ params.pr }}/merge'}`, so whether previews
+  follow a pull request's merge commit or its head is the template's choice.
+- When the ref no longer exists, for example after a pull request was merged
+  and its branch deleted, runs use the environment's recorded source commit
+  instead, which the keep ref keeps fetchable. Teardown, maintenance, and the
+  fleet reconcile work this way; `status` shows that the instance's ref is
+  gone.
+- Environments whose source moves along a promotion path, rather than
+  following a ref, are an open design topic (see DISCUSSION.md).
+- `--source <rev>` overrides S for one single-environment `reconcile` or
+  `teardown`, for example to roll dev back to a known commit or to tear down
+  after a recorded commit was lost. It is never persisted, it must satisfy
+  the same reachability rules as any source commit, the transition commit
+  records it, and a fleet reconcile rejects it.
+- When the checkout's HEAD differs from S, Nyl says which commit it renders
+  and why, so a job run from another branch is never mistaken for a run of
+  that branch.
 
 ### Units
 
@@ -482,6 +511,7 @@ spec:
     desiredRef: nyl/previews
     observedRef: nyl/previews
     path: '{{ environment.name }}'       # all instances share one ref
+  source: {ref: 'refs/pull/{{ params.pr }}/merge'}   # each instance follows its pull request
   allowUnprotectedSource: true           # instances run from pull request branches
   keepSource: true                       # default: keep each instance's source commit fetchable
   deletionPolicy: Teardown               # forced for every unit kind that supports teardown
@@ -532,8 +562,8 @@ project; credentials do, and that is a property of the pipeline:
 Instances use the ordinary commands:
 
 ```bash
-nyl state init -e pr-123 --template preview --param pr=123   # create or update an instance
-nyl reconcile -e pr-123
+nyl reconcile -e pr-123 --template preview --param pr=123    # create or update, extend, and reconcile
+nyl state init -e pr-123 --template preview --param pr=123   # create or update without reconciling
 nyl get units -e pr-123 / nyl status -e pr-123
 nyl teardown -e pr-123 --all                                 # tear down every unit
 nyl state delete -e pr-123                                   # remove the instance's state
@@ -601,9 +631,10 @@ nyl get environments                                         # declared environm
 
 ### Template changes
 
-An instance renders its template and units at its own source commit S,
-typically the pull request's head, so a preview always shows what that pull
-request would deploy.
+An instance renders its template and units at its own source commit S, the
+tip of its declared source ref, typically the pull request's merge commit or
+head, so a preview always shows what that pull request would deploy, whichever
+job reconciles it.
 
 - A template change on the default branch reaches an instance when the pull
   request picks it up and CI reconciles the new head. Changed values, units,
@@ -628,8 +659,10 @@ Nyl has no daemon, so expiry works through ordinary CI runs, and a continuous
 runner (M7) could add timely enforcement later:
 
 - `state.yaml` records `expiresAt`. Only activity on one instance extends it:
-  `state init --template` and a successful `reconcile -e <instance>` move it to
-  now plus `ttl`, so an active pull request keeps its preview.
+  `state init --template` and every `reconcile -e <instance>` without
+  `--no-extend` move it to now plus `ttl` when they start, whether or not the
+  run succeeds, so an active pull request keeps its preview even while its
+  preview fails.
 - Expiry is the declared intent to clean up, so every reconcile that finds an
   instance expired removes it instead of reconciling it: `reconcile -e
   <instance>`, `reconcile -e <instance> --no-extend`, and `reconcile
@@ -651,9 +684,10 @@ runner (M7) could add timely enforcement later:
 - `--renew` and `--no-extend` conflict and are rejected together. Both are
   rejected for declared environments, which have no expiry, and with
   `--template`.
-- A pull request pipeline runs `state init --template` before reconciling,
-  which extends the expiry, so updating an active pull request never removes
-  its preview. `state delete --teardown` removes one instance explicitly,
+- A pull request pipeline runs `reconcile -e <instance> --template <name>
+  --param …` on every push. It creates the instance when it is missing,
+  updates its parameters when they changed, extends the expiry, and
+  reconciles, so updating an active pull request never removes its preview. `state delete --teardown` removes one instance explicitly,
   expired or not.
 - At `maxInstances`, `state init --template` refuses with exit 2 and names
   the expired instances that could be removed. Removing them is the scheduled
@@ -662,8 +696,8 @@ runner (M7) could add timely enforcement later:
   request's. `--make-room` opts in to removing expired instances first, the
   same way the fleet job does, and then creating the instance.
 
-A typical pipeline runs `state init --template` and `reconcile -e` when a pull
-request opens or updates, `state delete --teardown` when it closes, and
+A typical pipeline runs `reconcile -e <instance> --template <name> --param …`
+when a pull request opens or updates, `state delete --teardown` when it closes, and
 `reconcile --template` on a schedule, which both maintains live instances and
 removes expired ones.
 

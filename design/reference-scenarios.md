@@ -141,7 +141,7 @@ examples/platform/
   .github/workflows/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
     reconcile.yaml           # push to main: reconcile dev, then prod behind an approval gate
-    preview.yaml             # pull request opened/updated: state init --template + reconcile; closed: state delete --teardown
+    preview.yaml             # pull request opened/updated: reconcile -e pr-<n> --template preview --param pr=<n>; closed: state delete --teardown
     previews-maintenance.yaml   # nightly: nyl reconcile --template preview
 ```
 
@@ -202,6 +202,7 @@ kind: EnvironmentTemplate
 metadata: {name: preview}
 spec:
   parameters: [{name: pr, type: integer}]
+  source: {ref: 'pr-{{ params.pr }}'}   # GitHub projects typically use refs/pull/<n>/merge
   unitSelector: {matchLabels: {preview: 'true'}}
   values:
     backendDir: <temporary directory>/tofu
@@ -270,8 +271,8 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 
 | Ref | Written by | Read by |
 | --- | --- | --- |
-| `main` | People, through pull requests | Nyl: source commit of dev and prod runs; `protectedRefs` default |
-| `pr-<n>` | People | Nyl: source commit of preview instance runs (`allowUnprotectedSource`) |
+| `main` | People, through pull requests | Nyl: dev follows it as `source.ref`; `protectedRefs` default |
+| `pr-<n>` | People | Nyl: each preview instance follows its branch as `source.ref` (`allowUnprotectedSource`) |
 | `refs/nyl/keep/<instance>` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
 | `previews` | Nyl: each instance publishes `<instance>/` and its entries in `previews/_nyl/catalog/` | Argo CD: the shared `previews` catalog Application, applied once by an operator |
@@ -350,13 +351,13 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | Step | Action | Proves |
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
-| 2 | CI job at `pr-123`'s head: `nyl state init -e pr-123 --template preview --param pr=123` → 0 | The instance's `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, with `expiresAt` now plus 7 days |
-| 3 | Same job: `nyl reconcile -e pr-123` → 0 | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees under `pr-123/` and its Applications and AppProject in `previews/_nyl/catalog/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at the job's commit |
-| 4 | Branch `pr-124`; commit; CI job: `state init --template preview --param pr=124`, then `reconcile -e pr-124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
-| 5 | Commit another change to `pr-123`; CI job: `state init …` then `reconcile -e pr-123` → 0 | The expiry is extended; only the changed units execute |
+| 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, with the source ref `pr-123` and `expiresAt` now plus 7 days |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees under `pr-123/` and its Applications and AppProject in `previews/_nyl/catalog/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at `pr-123`'s tip |
+| 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
+| 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
 | 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
-| 8 | `nyl reconcile -e pr-124` → 0 | The other instance is untouched: nothing executes |
+| 8 | From the `main` checkout: `nyl reconcile -e pr-124` → 0 | The run renders `pr-124` at its own ref's tip, not at `main`, and says so; nothing executes |
 | 9 | `nyl get environments` | Lists `dev` and `pr-124` only |
 
 Tier 1 variants:
@@ -373,7 +374,7 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 
 | Step | Action | Proves |
 | --- | --- | --- |
-| 1 | Clock T+3d; CI job for a new `pr-123` commit: `state init …` and `reconcile -e pr-123` → 0 | Activity extends `pr-123` to T+10d; `pr-124` keeps T+7d |
+| 1 | Clock T+3d; CI job for a new `pr-123` commit: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | Activity extends `pr-123` to T+10d; `pr-124` keeps T+7d |
 | 2 | Clock T+8d; scheduled job: `nyl reconcile --template preview` → 0 | `pr-124` has expired and is removed, a `teardown --all` then `state delete` authorized by `allowTeardown`, with `kubernetes`'s delay wait; `pr-123` is reconciled as maintenance and its expiry stays T+10d |
 | 3 | `nyl get environments` | `pr-124` is gone |
 | 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second exits 2 | `maxInstances: 2` counts live instances; nothing is expired, so the message names no instance to remove |
