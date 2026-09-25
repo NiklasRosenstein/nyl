@@ -47,7 +47,7 @@ spec:
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
     path: ''                                # optional directory within the refs; default the root
-  source: {ref: main}                       # where runs take their source commit; see Source
+  source: {revision: main, commit: 3e7b…}   # optional; omitted: the entry worktree's commit (see Source)
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
 ```
@@ -82,31 +82,54 @@ spec:
 
 ### Source
 
-Every run of an environment renders its units at one source commit S, which
-the environment declares; the checkout a job happens to run in never decides
-it. The checkout supplies the Environment and EnvironmentTemplate
-declarations, and Nyl fetches S itself and renders from a worktree at S.
+Every run of an environment works in one worktree at one source commit S:
+discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
+and `carry` are all read there, and nothing else in the entry worktree is read
+again. The Environment's `source` field decides S:
 
-- `source: {ref: <ref>}` follows a ref: each run uses its current tip. The
-  default is the source repository's default branch.
-- An EnvironmentTemplate templates the ref from its parameters, such as
-  `source: {ref: 'refs/pull/{{ params.pr }}/merge'}`, so whether previews
-  follow a pull request's merge commit or its head is the template's choice.
-- When the ref no longer exists, for example after a pull request was merged
-  and its branch deleted, runs use the environment's recorded source commit
-  instead, which the keep ref keeps fetchable. Teardown, maintenance, and the
-  fleet reconcile work this way; `status` shows that the instance's ref is
-  gone.
-- Environments whose source moves along a promotion path, rather than
-  following a ref, are an open design topic (see DISCUSSION.md).
+```yaml
+spec:
+  source:                               # omitted: the commit of the worktree you run from
+    revision: release/prod              # follow a ref: each run uses its tip
+    commit: 3e7b9c…                     # optional lock, refreshed by `nyl update source-locks`
+    repositoryRef: {name: platform}     # optional; default: this repository
+  # or, instead of the fields above:
+  source:
+    fromPromotion: {path: dev-to-prod}  # the commit recorded by the latest promotion
+```
+
+| `source` | S for each run |
+| --- | --- |
+| omitted | The entry worktree's commit, typical for dev and previews |
+| `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
+| `revision` and `commit` | `commit`, a reviewed pin in source |
+| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in state (see the roadmap's promotion section) |
+
+- The three forms exclude each other. `commit` requires `revision`, as for
+  ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
+  or its own `revision`, and `nyl update source-locks` refreshes it with the
+  other locks, `--check` included.
+- Nyl reads four fields from the Environment in the entry worktree, because
+  they decide S or where state lives: `source`, `state`, `protectedRefs`, and
+  `allowUnprotectedSource`. Every other field is read at S; the copy of
+  `source` inside S is ignored.
+- State records S for every run (`desired/environment.yaml` and the
+  `Nyl-Source-Commit` trailer). Runs that are not entered from the
+  environment's own source use that record: the fleet reconcile, and a plain
+  `reconcile -e <instance>`. The pull request job's
+  `reconcile -e <instance> --template <name> --param …` moves an instance's
+  recorded commit to its entry worktree, so a job run from another checkout
+  never moves an instance.
+- An EnvironmentTemplate takes the same field and may template it from
+  `params`, for example `revision: 'refs/pull/{{ params.pr }}/merge'`.
 - `--source <rev>` overrides S for one single-environment `reconcile` or
-  `teardown`, for example to roll dev back to a known commit or to tear down
-  after a recorded commit was lost. It is never persisted, it must satisfy
-  the same reachability rules as any source commit, the transition commit
-  records it, and a fleet reconcile rejects it.
-- When the checkout's HEAD differs from S, Nyl says which commit it renders
-  and why, so a job run from another branch is never mistaken for a run of
-  that branch.
+  `teardown`, for example to tear down after a recorded commit was lost. It is
+  never persisted, it must satisfy the same reachability rules, the
+  transition commit records it, and a fleet reconcile rejects it.
+- A unit's own `source` field, such as an image build context or a Terraform
+  module in another repository with its own `revision` and `commit`, says
+  where the unit builds from. It defaults to S. The environment's source says
+  where units are defined; a unit's source says what they build.
 
 ### Units
 
@@ -511,7 +534,6 @@ spec:
     desiredRef: nyl/previews
     observedRef: nyl/previews
     path: '{{ environment.name }}'       # all instances share one ref
-  source: {ref: 'refs/pull/{{ params.pr }}/merge'}   # each instance follows its pull request
   allowUnprotectedSource: true           # instances run from pull request branches
   keepSource: true                       # default: keep each instance's source commit fetchable
   deletionPolicy: Teardown               # forced for every unit kind that supports teardown
@@ -631,10 +653,9 @@ nyl get environments                                         # declared environm
 
 ### Template changes
 
-An instance renders its template and units at its own source commit S, the
-tip of its declared source ref, typically the pull request's merge commit or
-head, so a preview always shows what that pull request would deploy, whichever
-job reconciles it.
+An instance renders its template and units at its own source commit S: the
+pull request job's worktree, recorded in state, so a preview always shows what
+that pull request would deploy, whichever job reconciles it.
 
 - A template change on the default branch reaches an instance when the pull
   request picks it up and CI reconciles the new head. Changed values, units,

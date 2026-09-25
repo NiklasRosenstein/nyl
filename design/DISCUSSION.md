@@ -7,53 +7,46 @@ carry the history. Topics are ordered by what the next ones depend on.
 
 ## Current
 
-### 1. Environments whose source moves along a promotion path
+### 1. Promotion of environment sources
 
-Settled so far:
+The environment `source` field is settled in the contract's Source section:
+omitted (entry worktree), `revision` with an optional `commit` lock, or
+`fromPromotion`; one worktree per run; state records S. The review that
+rejected reading placement and definitions from different commits is the
+reason for one worktree per run.
 
-- Every environment declares its source (`source: {ref: …}`), templates derive
-  it from parameters, and runs never take it from the checkout.
-- Prod declares `source: {promotion: dev-to-prod}`: it renders at the source
-  commit dev ran when it produced the promoted evidence. Its first run is a
-  promotion; before one exists, `reconcile -e prod` exits 2 and names
-  `nyl promote dev-to-prod`.
-- A PromotionPath always carries the source commit. Its value selectors carry
-  only results that must not be rebuilt, such as image digests; Terraform
-  source pins need no promotion, because prod runs `database` at the promoted
-  commit.
-- Prod avoids rebuilding by not selecting `web-image`; its target binds
-  `image` through `fromPromotion`. Selectors support only `matchLabels`, so
-  units carry one label per environment that selects them (`dev`, `prod`,
-  `preview`). Nyl warns when an environment selects a unit that nothing in
-  it consumes.
+Settled for promotion, to write into the roadmap's promotion section and M6
+after a deliberate review:
 
-- Both modes are valid configurations: a prod that selects `web-image`
-  rebuilds it from the promoted commit; a prod that does not binds dev's
-  proven digest through `fromPromotion`. Nothing prevents either.
-- The current source is authoritative except where a revision is needed to
-  build or produce something. Placement resources are read from the current
-  source: Environment, DeploymentTarget (including its `releaseInputs`),
-  Cluster, ArgoCDInstance, GitRepository. Definitions are read at the promoted
-  commit S: units, ApplicationGroups, Releases, AppProjectDefinitions, charts,
-  and everything units build from, such as Terraform modules, Docker contexts,
-  and Command files. Prod-only changes such as replicas or a database class
-  apply directly; changes to what the code does travel through dev.
-- Prod-only changes turn knobs the definitions at S already expose: a
-  Release input bound on prod's DeploymentTarget
-  (`releaseInputs: {web/web: {replicas: {value: 10}}}`), or an Environment
-  value a unit spec at S reads (`instance_class: '{{ values.dbClass }}'`).
-  Adding a knob is a definition change and travels through dev. A placement
-  file that binds something the definitions at S do not declare fails before
-  anything executes, naming the promoted commit.
-- All definitions of one run come from the same S, because a unit's
-  declaration and the source it builds from must match (a new variable in the
-  `database` unit must meet the module that declares it). `plan -e prod` shows
-  both commits.
-
-Next step: this diverges from the roadmap's M6, which promotes values while
-every environment renders at the checkout's commit, so it needs a deliberate
-review of the promotion contract and a ROADMAP update, then the contract
-changes (Source section, PromotionPath, reference project's prod).
+- `nyl promote` moves the pin of every promotable form: it writes the
+  `commit` lock for `revision` and `commit` (a pull request under
+  `changeGate: pullRequest`), opens a pull request merging S into `revision`
+  for `revision` alone, and records S in the PromotionRecord for
+  `fromPromotion`. An omitted source is not a promotion target.
+- The unit of promotion is one recorded dev state, whose transition commits
+  tie together the source commit, the desired documents, and the receipts
+  with their artifacts. The PromotionRecord records that state's desired and
+  observed commits, its source commit, and every value taken from it, so an
+  environment's promoted source and its `fromPromotion` bindings (such as
+  dev's image digest) always come from the same dev run.
+- `nyl promote` without flags takes the newest dev state that meets the
+  path's evidence level. `--revision <source commit>` resolves to the newest
+  dev state with that source whose promoted units had current receipts;
+  `--state-revision <dev desired commit>` names a state exactly. An older
+  state needs `--evidence published`, recorded as an override, because dev no
+  longer runs it.
+- Evidence for a promoted source: every unit the target environment also
+  selects has a current receipt in that dev state, and at `healthy` every
+  covered Application runs that state's publication. Mixed revisions block,
+  unlike value-only promotion today.
+- Prod may select `web-image` and rebuild it at S, or bind dev's digest
+  through `fromPromotion`. When it rebuilds, the PromotionRecord says the
+  result was rebuilt rather than claiming dev's evidence for it, image tags
+  include the environment (`nyl-<env>-<key>`), and the warning about unused
+  units fires only for units whose artifacts `fromPromotion` bindings replace.
+- Prod-only changes, such as replicas, reach prod with the next promotion of a
+  commit that contains them; hotfixes that cannot wait use a `revision` such
+  as `release/prod`.
 
 ## Next
 
