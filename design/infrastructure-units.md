@@ -18,8 +18,12 @@ metadata:
   name: web-image
   labels: {tier: platform}
 spec:
-  source: {path: services/web}       # the build context; may name a revision or repository
-  dockerfile: Dockerfile             # relative to source.path
+  context: {path: services/web}      # Git source shape; may name a revision or repository
+  contexts:                          # additional named build contexts (--build-context)
+    shared: {path: libs/shared}      # a directory: Git source shape
+    base: {image: {fromUnit: {unit: base-image, artifact: image, pointer: /reference}}}
+    node: {image: 'node@sha256:…'}   # an image, pinned by digest
+  dockerfile: Dockerfile             # relative to context.path
   target: runtime                    # optional build stage
   repository: registry.example.com/web
   platforms: [linux/amd64, linux/arm64]
@@ -41,8 +45,18 @@ spec:
 
 The driver runs `docker buildx build --push --metadata-file <file>` in a
 worktree at the effective source revision, with the platforms, target, build
-arguments, cache options, and tags from the spec, and `--builder` when
-`builder` is set. The image is always pushed: a digest reference is only useful
+arguments, cache options, and tags from the spec, `--build-context` for each
+entry of `contexts`, and `--builder` when `builder` is set.
+
+- **Build contexts:** `context` and every directory entry of `contexts` have
+  the core contract's Git source shape, so each may come from another
+  revision or repository with its own lock; each gets its own worktree. An
+  image entry is passed as `docker-image://<reference>`. The Dockerfile uses a
+  named context with `FROM <name>` or `COPY --from=<name>`, as buildx defines.
+- An image context that references another unit's `ContainerImage` makes that
+  unit a dependency, so an image built by one unit can be the base of
+  another. An image context given by tag rather than digest is a warning, for
+  the same reason as tag-referenced base images below. The image is always pushed: a digest reference is only useful
 to consumers when the registry holds it.
 
 - **Artifact:** the unit publishes a `ContainerImage` artifact named `image`
@@ -66,8 +80,9 @@ to consumers when the registry holds it.
 ### Execution key
 
 The key follows the core rule: the resolved spec without the common fields that
-do not affect what runs, plus the files in the build context (`source`) that the build can see
-(respecting `.dockerignore`) and the Dockerfile. `OciImage` declares `builder`
+do not affect what runs, plus the files every directory context (`context` and `contexts`) exposes to
+the build (respecting `.dockerignore`), the Dockerfile, and the references of
+image contexts. `OciImage` declares `builder`
 and `cache` as fields that change how an image is built but not what it
 contains, so they are excluded as well.
 

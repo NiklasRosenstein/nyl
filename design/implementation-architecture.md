@@ -85,8 +85,8 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - One implementation each for canonical JSON, digests, JSON Pointer resolution,
   reference resolution, and Git sources: one `GitSource` type
   (`repositoryRef`/`repository`, `revision`, `commit`, `path`) serves
-  ApplicationGroup sources, `fromGit` bindings, unit sources, and Environment
-  sources, with per-use validation, and one module resolves and locks it. Bindings, PromotionPath selectors, and
+  ApplicationGroup sources, `fromGit` bindings, unit sources and build
+  contexts, and Environment sources, with per-use validation, and one module resolves and locks it. Bindings, PromotionPath selectors, and
   `nyl get output`/`get artifact` call the same code, so they cannot disagree.
 
 ## Rules have owners and tests
