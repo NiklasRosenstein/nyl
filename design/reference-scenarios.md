@@ -206,6 +206,7 @@ spec:
   target:
     inline:
       clusterRef: {name: dev-cluster}
+      catalogApplication: {enabled: false}   # the shared previews Application syncs every instance's catalog
       applicationGroupSelector: {matchLabels: {app: web}}
       publication:
         repositoryRef: {name: deploy}
@@ -236,6 +237,11 @@ spec:
   when it commits it: the repository URLs and `values.backendDir` of dev and
   of the preview template, so
   OpenTofu state outlives each execution's worktree.
+- Previews use one shared parent Application over the `previews` branch,
+  syncing `*/_nyl/catalog/*`, which an operator applies once. The fixture
+  contains its manifest for documentation; tier 1's fake observer treats it as
+  present, so instances' Applications appear on publish and disappear as
+  teardown removes them.
 - Before the first reconcile, a setup step commits an unowned file,
   `dev/state/notes.txt`, into `deploy.git` under dev's prefix. Teardown must
   preserve it.

@@ -874,7 +874,6 @@ reasons to delay independent work.
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
-| Ownership of an inline target's catalog Application when no parent Application owns it | M5 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 
 ## Implementation reference points

@@ -353,7 +353,9 @@ confirmation travels through a signal ref instead of a second run:
   run ID, and the phase 1 commit it confirms. It reports where the
   confirmation went, such as `confirmation delivered to run 0b8f…
   (https://ci.example.com/runs/1234)`, and exits 0. When the lease holder is
-  doing anything else, it exits 2 as for any held lease.
+  doing anything else, it exits 2 as for any held lease. After pushing the
+  signal, it checks that the lease still belongs to that run; if the run
+  finished in the meantime, it deletes its signal and confirms directly.
 - A waiting run checks its signal ref about every 15 seconds. A confirmation
   for the unit and phase 1 commit it is waiting on ends the wait early: phase 2
   and the dependencies' teardown continue in the same run, and its transition
@@ -378,10 +380,26 @@ Teardown readiness is checked statically from the target's effective settings:
 | Deleting an Application deletes its workloads | catalog `applicationDeletionPolicy` is `Foreground` or `Background`, not `Orphan` | Blocking: workloads keep running without an Application |
 | Owned Namespaces do not stop deletion | namespace `deletePolicy` is `Automatic` or `Retain`; the default `Confirm` renders `Delete=confirm`, which holds the Application's finalizer until someone confirms | Blocking: the Application and its workloads stay until the deletion is confirmed in Argo CD |
 | Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain |
-| The catalog Application and AppProjects are removed | a parent Application owns the catalog Application, for example over a shared preview branch | Remnant: the catalog Application and AppProjects remain after phase 2 |
+| The catalog Application and AppProjects are removed | the target's catalog is owned by a parent (see Catalog ownership below) | Remnant: a self-managing catalog Application and its AppProjects remain after phase 2 |
 
 The three blocking requirements decide whether teardown can succeed; the
-remnant rows leave objects behind. Nyl reports unmet requirements where they
+remnant rows leave objects behind.
+
+**Catalog ownership.** Something must sync each target's `_nyl/catalog` into
+Argo CD. Nyl leaves the choice to the project:
+
+| Setup | Target setting | Created by | Removed by |
+| --- | --- | --- | --- |
+| Self-managing catalog per target (default) | `catalogApplication.enabled: true` | An operator applies the generated catalog Application once; it then manages itself | Nothing: after phase 2 the catalog Application and AppProjects remain |
+| One parent Application for many targets, such as every preview on a branch | `catalogApplication.enabled: false` | The parent, applied once, syncs `*/_nyl/catalog/*` from the branch, so each new target's catalog appears on its first publish | The parent prunes each target's objects as phase 1 and phase 2 remove them |
+| An ApplicationSet generating one catalog Application per target | `catalogApplication.enabled: false` | The ApplicationSet, when `<prefix>/_nyl/catalog` appears | The ApplicationSet, when phase 2 removes it |
+
+- With `enabled: false`, Nyl cannot see the parent's sync and prune settings.
+  The catalog rows of the readiness table become `external: not checked`,
+  which the preflight reports without blocking; `mode: observe` still checks
+  that the Applications actually disappear.
+- Nyl writes none of these parents. The documentation shows a parent
+  Application and an ApplicationSet for a preview branch. Nyl reports unmet requirements where they
 matter:
 
 - `nyl plan` and `nyl reconcile` warn for every `KubernetesPublication` whose
@@ -959,7 +977,7 @@ check:
 | --- | --- | --- |
 | `nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
 | `nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
-| `nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref |
+| `nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
    exists and has not expired, the run exits 2 and reports who holds it. Every
@@ -1611,6 +1629,5 @@ added in the meantime waits for that and then receives a new uid. When
 | Question | Needed by |
 | --- | --- |
 | Approver lookup for CI systems other than GitHub | M3 |
-| Creating and removing an inline target's catalog Application when no parent Application owns it | M5 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
