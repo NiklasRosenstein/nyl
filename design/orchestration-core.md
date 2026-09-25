@@ -297,10 +297,11 @@ in two phases, both through Git:
 
 1. **Remove the workload Applications.** The unit publishes a tree whose
    `_nyl/catalog` still contains the catalog Application and the generated
-   AppProjects but no workload Applications; the workload trees stay. The
-   catalog is never empty, so Argo CD's empty-tree guard and the catalog's own
-   self-prune policy never come into play, and the AppProjects outlive the
-   Applications that use them. This commit is the teardown's `published`
+   AppProjects but no workload Applications; the workload trees stay. In a
+   shared catalog, the target's subdirectory keeps its AppProjects and the
+   catalog manifest is untouched. The catalog is never empty, so Argo CD's
+   empty-tree guard and the catalog's own self-prune policy never come into
+   play, and the AppProjects outlive the Applications that use them. This commit is the teardown's `published`
    evidence. Argo CD's catalog sync prunes the workload Applications, and
    their finalizers delete the workloads.
 2. **Remove the rest.** Once phase 1 counts as complete under `teardownWait`,
@@ -391,16 +392,35 @@ Argo CD. Nyl leaves the choice to the project:
 | Setup | Target setting | Created by | Removed by |
 | --- | --- | --- | --- |
 | Self-managing catalog per target (default) | `catalogApplication.enabled: true` | An operator applies the generated catalog Application once; it then manages itself | Nothing: after phase 2 the catalog Application and AppProjects remain |
-| One parent Application for many targets, such as every preview on a branch | `catalogApplication.enabled: false` | The parent, applied once, syncs `*/_nyl/catalog/*` from the branch, so each new target's catalog appears on its first publish | The parent prunes each target's objects as phase 1 and phase 2 remove them |
+| One self-managing catalog shared by many targets, such as every preview on a branch | `catalogApplication.shared: {pathPrefix, name}` | An operator applies the shared catalog Application once; each target's objects appear in it on the target's first publish | The shared catalog prunes each target's objects as phase 1 and phase 2 remove them; the catalog itself stays until the shared catalog is decommissioned |
+| One parent Application the project writes itself | `catalogApplication.enabled: false` | The parent, applied once, syncs `*/_nyl/catalog/*` from the branch | The parent prunes each target's objects as phase 1 and phase 2 remove them |
 | An ApplicationSet generating one catalog Application per target | `catalogApplication.enabled: false` | The ApplicationSet, when `<prefix>/_nyl/catalog` appears | The ApplicationSet, when phase 2 removes it |
 
-- With `enabled: false`, Nyl cannot see the parent's sync and prune settings.
-  The catalog rows of the readiness table become `external: not checked`,
-  which the preflight reports without blocking; `mode: observe` still checks
-  that the Applications actually disappear.
-- Nyl writes none of these parents. The documentation shows a parent
-  Application and an ApplicationSet for a preview branch. Nyl reports unmet requirements where they
-matter:
+A shared catalog is the recommended setup for previews:
+
+- Its manifest lives at `<shared prefix>/_nyl/catalog/catalog.yaml` and
+  sources `<shared prefix>/_nyl/catalog` recursively. Each target publishes
+  its workload Applications and AppProjects into
+  `<shared prefix>/_nyl/catalog/<target>/`, next to its workload trees under
+  its own prefix. Targets sharing a catalog must publish to the same
+  repository and revision, and their names must be unique within it.
+- Ownership is split along files. A target's ownership index covers its
+  prefix and its catalog subdirectory. The catalog manifest carries the owner
+  `catalog:<name>`: its bytes are determined by the shared block and the
+  ArgoCDInstance defaults alone, so every target renders it identically, and
+  any target publishes it when it is absent or differs, which happens only
+  after a Nyl upgrade or a settings change.
+- Nothing is reconciled from state: Git holds the other targets'
+  subdirectories, and a publish removes only files in the publishing target's
+  index. Concurrent publishes from two targets touch disjoint files and
+  serialize on the branch like any two publications.
+- Nyl renders the shared catalog, so the readiness table checks its settings.
+  With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
+  the catalog rows become `external: not checked`, which the preflight reports
+  without blocking, and `mode: observe` still checks that the Applications
+  actually disappear.
+
+Nyl reports unmet requirements where they matter:
 
 - `nyl plan` and `nyl reconcile` warn for every `KubernetesPublication` whose
   `deletionPolicy` is `Teardown`, including every unit of a template instance,
@@ -462,6 +482,32 @@ commit lists what was left, such as the image reference. Removing unused
 images is the registry's retention policy's job. The template knows nothing
 about Kubernetes; a preview's cluster and publication come from
 `KubernetesPublication` units with inline targets.
+
+### Trust and credentials
+
+An instance renders its template and its units at its own source commit, so a
+pull request controls everything about its preview, including the template.
+Nyl does not enforce a trust boundary between pull requests and the rest of the
+project; credentials do, and that is a property of the pipeline:
+
+- Preview jobs receive credentials scoped to preview resources: push access to
+  the preview state and deploy refs, a registry path, and a cloud role limited
+  to the preview backend prefix. The scheduled fleet reconcile runs with the
+  same preview credentials, never broader ones.
+- Pull requests from forks run preview jobs only after a maintainer approves
+  the workflow run, as CI systems already provide.
+- Teams that want template changes reviewed before they take effect protect
+  the template files with code-owner review; Nyl still reads the template at
+  the instance's source commit.
+- State may live in one ref for every environment through `state.path`, in
+  one ref per template, or in one ref per instance. Branch protection follows
+  the layout: the more state a ref holds, the more a preview credential can
+  reach.
+- Secrets never pass between units as values. A unit that creates a secret,
+  such as a database password, stores it in a secret store and outputs only
+  its name or reference; the consuming Release reads it from there, for
+  example through an ExternalSecret. `sensitive` outputs exist so a tool's
+  secret output can be validated without ever being recorded.
 
 ### Instances
 

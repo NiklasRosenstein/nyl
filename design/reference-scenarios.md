@@ -206,7 +206,8 @@ spec:
   target:
     inline:
       clusterRef: {name: dev-cluster}
-      catalogApplication: {enabled: false}   # the shared previews Application syncs every instance's catalog
+      catalogApplication:
+        shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
       applicationGroupSelector: {matchLabels: {app: web}}
       publication:
         repositoryRef: {name: deploy}
@@ -237,11 +238,13 @@ spec:
   when it commits it: the repository URLs and `values.backendDir` of dev and
   of the preview template, so
   OpenTofu state outlives each execution's worktree.
-- Previews use one shared parent Application over the `previews` branch,
-  syncing `*/_nyl/catalog/*`, which an operator applies once. The fixture
-  contains its manifest for documentation; tier 1's fake observer treats it as
-  present, so instances' Applications appear on publish and disappear as
-  teardown removes them.
+- Previews share one self-managing catalog at `previews/_nyl/catalog` on the
+  `previews` branch; each instance contributes
+  `previews/_nyl/catalog/<instance>/`. Tier 1's fake observer treats the
+  catalog Application as applied, so instances' Applications appear on publish
+  and disappear as teardown removes them.
+- `preview-db` outputs `connection` with a host and the name of a secret it
+  stored, never the password; the Release reads the secret by name.
 - Before the first reconcile, a setup step commits an unowned file,
   `dev/state/notes.txt`, into `deploy.git` under dev's prefix. Teardown must
   preserve it.
@@ -301,7 +304,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job at `pr-123`'s head: `nyl state init -e pr-123 --template preview --param pr=123` → 0 | The instance's `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, with `expiresAt` now plus 7 days |
-| 3 | Same job: `nyl reconcile -e pr-123` → 0 | `web-image` and `preview-db` run (the latter reading dev's `vpcId`); `preview-site` publishes to `deploy.git` branch `previews` under `pr-123/` as target `pr-123-preview-site`; keep ref `refs/nyl/keep/pr-123` points at the job's commit |
+| 3 | Same job: `nyl reconcile -e pr-123` → 0 | `web-image` and `preview-db` run (the latter reading dev's `vpcId`); `preview-site` publishes to `deploy.git` branch `previews`: workload trees under `pr-123/` and its Applications under `previews/_nyl/catalog/pr-123-preview-site/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at the job's commit |
 | 4 | Branch `pr-124`; commit; CI job: `state init --template preview --param pr=124`, then `reconcile -e pr-124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: `state init …` then `reconcile -e pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
