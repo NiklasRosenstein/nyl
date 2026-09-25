@@ -105,6 +105,22 @@ spec:
 - The envelope (`apiVersion`, `kind`, `metadata.name`, `metadata.labels`) is
   literal, so selection happens before rendering. `spec` is a Nyl template
   rendered once per selecting Environment.
+- Units follow the rules of the other templatable control resources. A file
+  is split into YAML documents before anything renders, each document is one
+  resource, and a template never spans documents or generates several units:
+  composition happens through selection and values. Below the envelope, a
+  document may use structural templating, including text that is not valid
+  YAML before rendering, so an environment's resources can be colocated in one
+  file.
+- A unit document that renders to nothing counts as `enabled: false`, the
+  same as an ApplicationGroup that renders to nothing. `plan` reports it as
+  leaving because it rendered empty, since discovery knows it from its
+  envelope.
+- `metadata.name` stays literal. It is the unit's identity for references,
+  receipts, leases, and deletion, and a templated name would turn a value
+  change into a deletion and a new incarnation. Unit names are already scoped
+  per environment, and names that must differ on the Kubernetes side have
+  their own templated fields.
 - Every unit kind shares the common fields `enabled` (evaluated after
   rendering; `false` leaves the ownership set), `outputs`, `dependsOn`,
   `approval` (see [Approval](#approval)), `deletionPolicy` (`Teardown` or
