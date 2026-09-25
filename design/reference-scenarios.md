@@ -47,17 +47,36 @@ Everything lives in one per-test temporary directory, as the existing
 The same scenario files run in two tiers:
 
 - **Tier 1, always in CI.** The scenario harness runs orchestration in-process
-  with the real Git `StateStore` on the local bare repositories, the real
-  `KubernetesPublication` driver publishing to the `deploy` and `previews` branches, and fake
-  `OciImage` and `OpenTofu` drivers. The fake image driver returns a digest
-  derived from the execution key; the fake OpenTofu driver keeps its resources
-  and outputs in a JSON file per backend key, so teardown and re-execution are
-  observable. A scripted fake Argo CD observer reports, per step, that
-  Applications exist, are gone, or cannot be read.
-- **Tier 2, gated on tools.** The same steps run the real `nyl` binary as
+  with the real Git `StateStore` on the local bare repositories and a scripted
+  fake Argo CD observer that reports, per step, that Applications exist, are
+  gone, or cannot be read. Drivers are the real ones where they exist and fakes
+  otherwise, see [Fake kinds](#fake-kinds).
+- **Tier 2, the real tools.** The same steps run the real `nyl` binary as
   separate processes, with the real `tofu` and `docker buildx` against the local
-  registry. Tests skip with a clear message when `tofu`, `docker`, or the
-  registry is unavailable, like the other tool-gated tests.
+  registry. Tier 2 scenarios compile only with the `tier2` Cargo feature, and
+  with it a missing `tofu`, `docker buildx`, or registry fails the test instead
+  of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
+  tools installed (OpenTofu through mise, Docker with buildx, and `registry:2`
+  as a service container) runs `cargo test --features tier2` and is required
+  for merging from M4 on. Tests never read environment variables to decide
+  whether to run.
+
+### Fake kinds
+
+Test-only kinds in `units.test.nyl/v1` stand in for built-in kinds that do not
+exist yet in a milestone, so each milestone runs the whole platform scenario.
+Each implements exactly the driver trait and capabilities of the kind it stands
+in for:
+
+| Fake kind | Stands in for | Behaves like |
+| --- | --- | --- |
+| `FakeImage` | `OciImage` | Returns a digest derived from the execution key; publishes a `ContainerImage` artifact; declares `build` |
+| `FakeInfra` | `OpenTofu` | Keeps resources and outputs in a JSON file per backend key; reports plan and destroy digests for `bind: plan`; tears down |
+| `FakePublication` | `KubernetesPublication` | Writes a tree with an ownership index to the deploy branch and runs both teardown phases against the fake observer |
+
+The scenario files name the real kinds; the harness maps them to fakes for the
+milestones that need it. Tier 1 keeps the fakes for images and OpenTofu even
+after the real drivers exist, so it never needs the tools.
 
 Observe mode against a real Argo CD needs a cluster and stays a manual check;
 tier 1's fake observer covers its decisions.
@@ -452,9 +471,9 @@ Tier 1 variants:
 
 | Milestone | Runs |
 | --- | --- |
-| M3 | Scenario 1 with `Command` units standing in for every kind, tier 1: waves, approval, repeat no-op, selector typo, teardown order, crash, and lease variants |
-| M4 | Scenario 1 steps 1–10 with the real `OciImage` and `OpenTofu` drivers in tier 2 |
-| M5 | All three scenarios in both tiers |
+| M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, crash, cancellation, and lease variants |
+| M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
+| M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
 | M6 | A fourth scenario promotes dev's source commit and image digest to prod, including a rollback, and a value-only path |
 
 A scenario's steps change together with the contract rules they prove, as the

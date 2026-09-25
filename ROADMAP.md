@@ -856,9 +856,9 @@ byte-identical output to the previous release.
   effect succeeds but receipt publication fails.
 - [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
-- [ ] Add the `test-clock` Cargo feature and the two-tier harness for the
-  reference scenarios: in-process with fake tool drivers, and through the real
-  binary where the tools are installed.
+- [ ] Add the `test-clock` Cargo feature, the test-only fake kinds, and the
+  two-tier harness for the reference scenarios: in-process with fakes, and
+  through the real binary under the `tier2` Cargo feature.
 
 **Exit criterion:** two dependent command units reconcile locally and in CI with
 identical results; repeat execution is a no-op; interruption has a demonstrated
@@ -881,7 +881,8 @@ recovery path; the M3 part of the
 
 **Exit criterion:** a network configuration's outputs feed a dependent
 configuration; an image build records a digest; unchanged inputs plan no change;
-the M4 part of the reference scenarios passes with the real tools.
+the M4 part of the reference scenarios passes with the real tools in the
+required `tier2` CI job.
 
 ### M5 — Images and Terraform outputs into Kubernetes releases
 

@@ -114,7 +114,9 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - A driver conformance suite runs against every driver and, later, every plugin
   adapter: `Supported` handling, secret masking, deterministic execution-key
   inputs, and the declared recovery policy. Tests needing real Terraform,
-  OpenTofu, or Docker are separate and gated on the tools being present.
+  OpenTofu, or Docker compile only with the `tier2` Cargo feature and fail
+  when a tool is missing; a required CI job runs them with the tools
+  installed. Test-only fake kinds stand in for built-in kinds in scenarios.
 - Git behavior is tested against local bare repositories in per-test temporary
   directories, parallel-safe as AGENTS.md requires.
 
