@@ -38,6 +38,13 @@ Settled so far:
   and everything units build from, such as Terraform modules, Docker contexts,
   and Command files. Prod-only changes such as replicas or a database class
   apply directly; changes to what the code does travel through dev.
+- Prod-only changes turn knobs the definitions at S already expose: a
+  Release input bound on prod's DeploymentTarget
+  (`releaseInputs: {web/web: {replicas: {value: 10}}}`), or an Environment
+  value a unit spec at S reads (`instance_class: '{{ values.dbClass }}'`).
+  Adding a knob is a definition change and travels through dev. A placement
+  file that binds something the definitions at S do not declare fails before
+  anything executes, naming the promoted commit.
 - All definitions of one run come from the same S, because a unit's
   declaration and the source it builds from must match (a new variable in the
   `database` unit must meet the module that declares it). `plan -e prod` shows
