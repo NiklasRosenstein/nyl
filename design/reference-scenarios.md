@@ -272,6 +272,15 @@ Tier 1 variants:
   The observer first reports `observation-failed`: the teardown is uncertain
   with that reason, and `status` suggests fixing the observer or confirming.
   `--confirm-removed` then completes it as in step 18.
+- **Confirmation from a workstation.** While scenario 2's close job
+  (step 7) waits out `preview-site`'s delay, a second invocation runs `nyl teardown
+  -e pr-123 --unit preview-site --confirm-removed`. It delivers a signal to the
+  waiting run and exits 0; the run ends its wait early and records the
+  confirmation. A signal naming another phase 1 commit is rejected.
+- **Blanket approval.** `nyl state delete -e dev --teardown --approve-all`
+  destroys `database` without a digest and records the approval as
+  unreviewed; with `requireDigest: true` on `database`, the same command skips
+  it and exits 2.
 - **Crash after an effect.** The run is killed after `network`'s effect and
   before its checkpoint. The next run takes over the expired lease, marks
   `network` uncertain, converges, and lists it under `recovered`.

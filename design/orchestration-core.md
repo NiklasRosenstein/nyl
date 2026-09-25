@@ -341,6 +341,35 @@ published and the wait is pending or uncertain. Both are needed because a
 `status` suggests both for an uncertain wait: fix the observer configuration
 and retry, or confirm after checking by hand.
 
+A confirmation can also end a wait that a run is still sitting in, such as a
+CI job's `state delete --teardown` waiting out a `delay`, or an `observe` wait
+whose observer lags. That run holds the environment's lease, so the
+confirmation travels through a signal ref instead of a second run:
+
+- `--confirm-removed` looks at the lease first. With no lease held, it
+  confirms directly as above. When the lease holder is waiting on that unit's
+  teardown, it pushes a `Signal` to the run's signal ref,
+  `nyl/<env>/signals/<run-id>`, naming the operator, the reason, the time, the
+  run ID, and the phase 1 commit it confirms. It reports where the
+  confirmation went, such as `confirmation delivered to run 0b8f…
+  (https://ci.example.com/runs/1234)`, and exits 0. When the lease holder is
+  doing anything else, it exits 2 as for any held lease.
+- A waiting run checks its signal ref about every 15 seconds. A confirmation
+  for the unit and phase 1 commit it is waiting on ends the wait early: phase 2
+  and the dependencies' teardown continue in the same run, and its transition
+  commit records who confirmed, from where, and that removal was confirmed
+  rather than waited out or observed.
+- A confirmation is bound to its run ID and phase 1 commit, so a leftover
+  signal can never end another teardown's wait. A confirmation for a unit the
+  run is not waiting on is rejected when it is sent.
+- Without a confirmation, the wait ends as its strategy says: a `delay` runs
+  out and is recorded as not observed.
+- When the waiting run's stdin is a terminal, it shows the remaining time and
+  accepts Enter as a confirmation from the person running it, recorded the
+  same way.
+- A `manual` wait never keeps a run waiting, because the run exits 2 at once;
+  a later `--confirm-removed` applies directly.
+
 Teardown readiness is checked statically from the target's effective settings:
 
 | Requirement | Setting | If unmet |
@@ -621,7 +650,7 @@ only on the observed ref; `state.yaml` exists on both.
 
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
-`ObservedUnit`, `Observation`, `Lease`, and `Run`; artifacts use their own
+`ObservedUnit`, `Observation`, `Lease`, `Run`, and `Signal`; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form, so formatting never affects
@@ -873,6 +902,22 @@ spec:
   driver compares it with the plan it is about to apply. A mismatch returns
   `Outcome::AwaitingApproval` with the new digest: no effects, the unit waits,
   and the run exits 2.
+- `--approve <unit>` without a digest also approves a `bind: plan` unit: it
+  authorizes whatever plan that run computes. The receipt and the transition
+  commit record the approval as unreviewed (`digest: null, reviewed: false`),
+  so the audit trail shows that nobody saw the exact changes.
+- `--approve-all` approves every manual unit the invocation would otherwise
+  stop at, recorded as unreviewed in the same way, for example
+  `nyl state delete -e dev --teardown --approve-all --reason "decommission
+  dev"`. Explicit digests combine with it: `--approve-all --approve
+  database=sha256:…` pins that unit to a reviewed plan.
+- `approval: {mode: manual, bind: plan, requireDigest: true}` refuses
+  approvals without a digest, for units such as a production database. Both
+  `--approve <unit>` without a digest and `--approve-all` skip such a unit and
+  name it, and the run exits 2 until its digest is given.
+- `--confirm-removed` is not an approval, and `--approve-all` does not imply
+  it: approving a plan and asserting that workloads are gone are different
+  claims.
 
 Recording. Each approval is recorded in the receipt and in the transition
 commit's summary: who approved (`by`), where (`source`), and the digest.
@@ -914,6 +959,7 @@ check:
 | --- | --- | --- |
 | `nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
 | `nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
+| `nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
    exists and has not expired, the run exits 2 and reports who holds it. Every
@@ -1477,7 +1523,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
   reconciled.
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
-`--approve <unit>[=<digest>]`, `--approved-by`, `--approval-source`,
+`--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
 `--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
