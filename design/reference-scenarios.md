@@ -32,12 +32,10 @@ Everything lives in one per-test temporary directory, as the existing
 
 | Real world | Stand-in |
 | --- | --- |
-| Source repository | Bare `source.git` plus a working clone |
+| The project's repository | One bare `project.git` holding `main`, pull request branches, the deploy branches, and the state refs, plus a working clone |
 | Pull request | Branch `pr-<n>`; an update is a commit on it |
 | Merge | Squash commit on `main`, then deleting the branch |
-| CI job | One `nyl` invocation in a fresh clone of `source.git` at the job's commit |
-| State repository | Bare `state.git`, named by a GitRepository with `file://` URLs |
-| Deploy repository | Bare `deploy.git`, likewise |
+| CI job | One `nyl` invocation in a fresh clone of `project.git` at the job's commit |
 | Container registry | Tier 1: fake. Tier 2: a `registry:2` container on an ephemeral port |
 | Terraform backend | OpenTofu's `local` backend with a path inside the temporary directory |
 | Cloud resources | Only the built-in `terraform_data` resource and outputs, so no provider is downloaded |
@@ -50,7 +48,7 @@ The same scenario files run in two tiers:
 
 - **Tier 1, always in CI.** The scenario harness runs orchestration in-process
   with the real Git `StateStore` on the local bare repositories, the real
-  `KubernetesPublication` driver publishing to `deploy.git`, and fake
+  `KubernetesPublication` driver publishing to the `deploy` and `previews` branches, and fake
   `OciImage` and `OpenTofu` drivers. The fake image driver returns a digest
   derived from the execution key; the fake OpenTofu driver keeps its resources
   and outputs in a JSON file per backend key, so teardown and re-execution are
@@ -95,7 +93,7 @@ steps:
     expect:
       executed: [web-image, kubernetes]
       current: [network, database]
-      deploy: {branch: main, contains: ['dev/web/**'], unchanged: ['dev/_nyl/catalog/**']}
+      deploy: {branch: deploy, contains: ['dev/web/**'], unchanged: ['dev/_nyl/catalog/**']}
   - clock: {advance: 8d}
 ```
 
@@ -103,38 +101,53 @@ steps:
   and `nyl`.
 - Expectations cover only user-visible results: the exit code, per-unit results
   from the transition commit summary, `nyl get … -o json` documents, files and
-  commits in `deploy.git` and `state.git`, and in tier 2 the registry's
+  commits on the deploy branches and the state refs, and in tier 2 the registry's
   manifests and `tofu output`.
 - Both tiers read the same file. A step that only one tier can run, such as a
   scripted observer response, is marked `tier: 1`.
 
-## Shared project
+## Reference project
 
-All three scenarios use one project:
+All three scenarios run against one project, which also lives at
+`examples/platform/` as the documented starting point for a project with
+dev, prod, and preview environments. Same files in both places, so the
+example can never drift from what is tested.
 
 ```text
-nyl.toml
-config/
-  repositories.yaml        # GitRepository source, state, deploy
-  cluster.yaml             # Cluster dev-cluster
-  targets/dev.yaml         # DeploymentTarget dev with releaseInputs for web/web
-  environments/dev.yaml    # Environment dev
-  templates/preview.yaml   # EnvironmentTemplate preview
-units/
-  network.yaml             # OpenTofu                labels: tier: platform
-  database.yaml            # OpenTofu, manual approval  tier: platform
-  web-image.yaml           # OciImage                tier: platform, preview: 'true'
-  seed.yaml                # Command, not idempotent, no dependencies   tier: platform
-  kubernetes.yaml          # KubernetesPublication, static target dev   tier: platform
-  preview-db.yaml          # OpenTofu, per instance     preview: 'true'
-  preview-site.yaml        # KubernetesPublication, inline target       preview: 'true'
-infra/network/main.tf
-infra/database/main.tf
-services/web/Dockerfile    # FROM scratch, COPY index.html: builds without pulling
-services/web/index.html
-applications/web/group.yaml
-applications/web/release.yaml   # inputs: image (string), database (object)
+examples/platform/
+  nyl.toml
+  config/
+    repository.yaml          # GitRepository platform: this repository; deploy branches and state refs live in it
+    clusters/dev.yaml        # Cluster dev
+    clusters/prod.yaml       # Cluster prod
+    targets/dev.yaml         # DeploymentTarget dev  → branch deploy, prefix dev/
+    targets/prod.yaml        # DeploymentTarget prod → branch deploy, prefix prod/
+    environments/dev.yaml    # Environment dev:  tier: platform
+    environments/prod.yaml   # Environment prod: tier: platform, requireDigest approvals
+    environments/preview.yaml   # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
+  units/
+    network.yaml             # OpenTofu               tier: platform
+    database.yaml            # OpenTofu               tier: platform, preview: 'true'
+    web-image.yaml           # OciImage               tier: platform, preview: 'true'
+    seed.yaml                # Command, not idempotent   tier: platform
+    kubernetes.yaml          # KubernetesPublication, target from values   tier: platform, preview: 'true'
+  infra/network/main.tf
+  infra/database/main.tf     # uses ../modules/postgres
+  infra/modules/postgres/
+  services/web/Dockerfile    # FROM scratch, COPY index.html: builds without pulling
+  services/web/index.html
+  applications/web/group.yaml
+  applications/web/release.yaml   # inputs: image (string), database (object)
+  .github/workflows/
+    plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
+    reconcile.yaml           # push to main: reconcile dev, then prod behind an approval gate
+    preview.yaml             # pull request opened/updated: state init --template + reconcile; closed: state delete --teardown
+    previews-maintenance.yaml   # nightly: nyl reconcile --template preview
 ```
+
+Directories carry no meaning: discovery follows Git visibility, so the
+template sits under `environments/` next to the Environments it resembles, and
+a condensed layout with everything under one `nyl/` directory works the same.
 
 Key excerpts:
 
@@ -145,109 +158,132 @@ kind: Environment
 metadata: {name: dev}
 spec:
   unitSelector: {matchLabels: {tier: platform}}
-  values: {cidr: 10.0.0.0/16, backendDir: <temporary directory>/tofu}
-  state:
-    repositoryRef: {name: state}
+  values:
+    target: dev
+    cidr: 10.0.0.0/16
+    backendDir: <temporary directory>/tofu
+    approval: auto
+---
+# config/environments/prod.yaml differs only in values:
+#   target: prod, cidr: 10.1.0.0/16, approval: {mode: manual, bind: plan, requireDigest: true}
 ---
 # units/database.yaml
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
-metadata: {name: database, labels: {tier: platform}}
+metadata: {name: database, labels: {tier: platform, preview: 'true'}}
 spec:
   source: {path: infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+    vpc_id: {fromUnit: {unit: network, output: vpcId}}   # previews: from environment dev, see below
   outputs:
-    host: {type: string}
-  approval: {mode: manual, bind: plan}
+    connection: {type: object}    # host, port, secretName; never the password
+  approval: {{ values.approval | tojson }}
 ---
-# units/kubernetes.yaml
+# units/kubernetes.yaml: one unit for every environment
 apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
-metadata: {name: kubernetes, labels: {tier: platform}}
+metadata: {name: kubernetes, labels: {tier: platform, preview: 'true'}}
 spec:
-  target: dev
-  mode: publish            # teardownWait defaults to manual
+  target: {{ values.target | tojson }}    # dev, prod, or the preview template's inline target
+  mode: publish                           # teardownWait defaults to manual
+  {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% endif %}
 ---
 # config/targets/dev.yaml (excerpt)
 spec:
   releaseInputs:
     web/web:
       image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      database:
-        value: {port: 5432}
+      database: {fromUnit: {unit: database, output: connection}}
 ---
-# config/templates/preview.yaml
+# config/environments/preview.yaml
 apiVersion: gitops.nyl/v1
 kind: EnvironmentTemplate
 metadata: {name: preview}
 spec:
   parameters: [{name: pr, type: integer}]
   unitSelector: {matchLabels: {preview: 'true'}}
-  state:
-    repositoryRef: {name: state}
-    desiredRef: nyl/previews
-    observedRef: nyl/previews
-    path: '{{ environment.name }}'
+  values:
+    backendDir: <temporary directory>/tofu
+    approval: auto
+    networkFrom: dev                      # database reads dev's vpcId
+    teardownWait: {strategy: delay, duration: 2m}   # unattended removal
+    target:
+      inline:
+        clusterRef: {name: dev}
+        catalogApplication:
+          shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
+        applicationGroupSelector: {matchLabels: {app: web}}
+        publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
+        values: {nameSuffix: '-{{ environment.name }}'}   # unique Argo CD names and namespace per instance
+        releaseInputs:
+          web/web:
+            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            database: {fromUnit: {unit: database, output: connection}}
+  state: {path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
   deletionPolicy: Teardown
   allowTeardown: true
   ttl: 7d
   maxInstances: 2
----
-# units/preview-site.yaml
-apiVersion: units.gitops.nyl/v1
-kind: KubernetesPublication
-metadata: {name: preview-site, labels: {preview: 'true'}}
-spec:
-  mode: publish
-  teardownWait: {strategy: delay, duration: 2m}   # unattended removal
-  target:
-    inline:
-      clusterRef: {name: dev-cluster}
-      catalogApplication:
-        shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
-      applicationGroupSelector: {matchLabels: {app: web}}
-      publication:
-        repositoryRef: {name: deploy}
-        revision: previews
-        pathPrefix: '{{ environment.name }}'
-      values: {nameSuffix: '-{{ environment.name }}'}   # unique Argo CD names per instance
-      releaseInputs:
-        web/web:
-          image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-          database: {fromUnit: {unit: preview-db, output: connection}}
 ```
 
-- `infra/network/main.tf` stores `var.cidr` in a `terraform_data` resource and
-  outputs `vpcId` derived from it; `infra/database/main.tf` does the same with
-  `vpc_id` and outputs `host`. A comment-only change leaves every output
-  unchanged.
-- `preview-db` reads dev's network with a cross-environment reference,
-  `{fromUnit: {environment: dev, unit: network, output: vpcId}}`, and uses a
-  backend path per instance.
+- One repository holds everything: the source on `main`, the rendered
+  manifests on the `deploy` and `previews` branches, and the state refs.
+  `config/repository.yaml` names the repository's own URL, which is also what
+  Nyl uses without any GitRepository. Splitting the deploy branches or the
+  state into other repositories changes only that file; teams do it to give
+  Argo CD or preview jobs narrower credentials, or to keep publication commits
+  out of the source repository's history.
+- Every preview gets its own database, because preview images commonly run
+  migrations on startup, which must not touch dev's data. `database` carries
+  both labels and keys its backend by environment name, so previews need no
+  separate unit. Its `vpc_id` variable reads
+  `{fromUnit: {environment: '{{ values.networkFrom }}', unit: network, …}}`
+  when `networkFrom` is set, so previews use dev's network without running
+  `network` themselves.
+- `network` and `database` store their inputs in `terraform_data` resources and
+  derive their outputs from them, so a comment-only change leaves every output
+  unchanged. `database` stores the password in a secret store and outputs only
+  its name; the Release reads the secret by name.
 - The Cluster, ApplicationGroup, and catalog settings are teardown-ready:
   catalog `syncPolicy.automated` with `prune: true`, `Foreground` deletion,
-  and namespace `deletePolicy: Automatic`.
+  and namespace `deletePolicy: Automatic`. The ApplicationGroup templates
+  Application, AppProject, and namespace names with `values.nameSuffix`.
 - `seed` is a Command that loads fixture data into a store of its own. It is
   not `idempotent`, has no teardown step, and has no dependencies or
   dependents: it shows that a teardown wait never holds back unrelated units,
   and what dropping a unit's state costs.
 - The harness writes the temporary directory's absolute paths into the fixture
-  when it commits it: the repository URLs and `values.backendDir` of dev and
-  of the preview template, so
-  OpenTofu state outlives each execution's worktree.
-- Previews share one self-managing catalog at `previews/_nyl/catalog` on the
-  `previews` branch; each instance contributes
-  `previews/_nyl/catalog/<instance>/`. Tier 1's fake observer treats the
-  catalog Application as applied, so instances' Applications appear on publish
-  and disappear as teardown removes them.
-- `preview-db` outputs `connection` with a host and the name of a secret it
-  stored, never the password; the Release reads the secret by name.
+  when it commits it: the repository URL and `values.backendDir`, so OpenTofu
+  state outlives each execution's worktree.
+- Tier 1's fake observer treats the shared preview catalog as applied, so
+  instances' Applications appear on publish and disappear as teardown removes
+  them.
 - Before the first reconcile, a setup step commits an unowned file,
-  `dev/state/notes.txt`, into `deploy.git` under dev's prefix. Teardown must
-  preserve it.
+  `dev/state/notes.txt`, on the `deploy` branch under dev's prefix. Teardown
+  must preserve it.
+
+### Refs
+
+Everything Nyl reads or writes in the reference project, and who else uses it:
+
+| Ref | Written by | Read by |
+| --- | --- | --- |
+| `main` | People, through pull requests | Nyl: source commit of dev and prod runs; `protectedRefs` default |
+| `pr-<n>` | People | Nyl: source commit of preview instance runs (`allowUnprotectedSource`) |
+| `refs/nyl/keep/<instance>` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
+| `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
+| `previews` | Nyl: each instance publishes `<instance>/` and its entries in `previews/_nyl/catalog/` | Argo CD: the shared `previews` catalog Application, applied once by an operator |
+| `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
+| `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
+| `nyl/<env>/lease`, `nyl/<env>/runs/<run-id>`, `nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
+| `refs/nyl/local/<env>/*` | Nyl `--local` runs, in the developer's clone only | Nyl |
+
+Branch protection: `main` requires review; `deploy`, `previews`, and the state
+refs accept pushes from the CI identity and the operator group only, with force
+pushes and deletion disabled; preview credentials can push `previews`,
+`nyl/previews`, and keep refs, and nothing else.
 
 ## Scenario 1: platform environment
 
@@ -255,17 +291,17 @@ spec:
 | --- | --- | --- |
 | 1 | `nyl validate` → 0 | The project is valid, including that the preview template's inline target generates different Argo CD names per instance |
 | 2 | `nyl reconcile -e dev` → 1 | No state is created implicitly; the error names `state init` |
-| 3 | `nyl state init -e dev` → 0 | `state.yaml` exists on dev's refs in `state.git` |
+| 3 | `nyl state init -e dev` → 0 | `state.yaml` exists on dev's state refs in `project.git` |
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
 | 5 | `nyl reconcile -e dev` → 2 | Wave 1 runs `network`, `web-image`, `seed`; `database` waits for approval (`bind: plan`); `kubernetes` is blocked on it. One desired and one observed commit |
 | 6 | `nyl plan -e dev --unit database --output json` → 0, then `nyl reconcile -e dev --approve database=<digest>` → 0 | The approved digest is applied; `kubernetes` runs in a later wave of the same run and publishes `dev/` with the image's digest reference and the database host; the approval is in the receipt |
 | 7 | `nyl get output database/host -e dev`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
-| 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no commit to `state.git` or `deploy.git` |
+| 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
 | 11 | Commit a change to the Release template only; reconcile → 0 | Only `kubernetes` executes, because its key covers the render's inputs |
 | 12 | Branch `typo`; commit a selector typo in `environments/dev.yaml`; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `tier: platfrom` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
-| 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and `deploy.git` is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
+| 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and the `deploy` branch is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
 | 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
 | 15 | `nyl plan -e dev --teardown --all --output json` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with `database`'s destroy-plan digest |
 | 16 | `nyl state delete -e dev --teardown --approve database=<digest>` → 2 | `seed`, which has no teardown step and no dependency path to `kubernetes`, is released and held at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
@@ -282,8 +318,8 @@ Tier 1 variants:
   with that reason, and `status` suggests fixing the observer or confirming.
   `--confirm-removed` then completes it as in step 18.
 - **Confirmation from a workstation.** While scenario 2's close job
-  (step 7) waits out `preview-site`'s delay, a second invocation runs `nyl teardown
-  -e pr-123 --unit preview-site --confirm-removed`. It delivers a signal to the
+  (step 7) waits out `kubernetes`'s delay, a second invocation runs `nyl teardown
+  -e pr-123 --unit kubernetes --confirm-removed`. It delivers a signal to the
   waiting run and exits 0; the run ends its wait early and records the
   confirmation. A signal naming another phase 1 commit is rejected.
 - **Blanket approval.** `nyl state delete -e dev --teardown --approve-all`
@@ -304,11 +340,11 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job at `pr-123`'s head: `nyl state init -e pr-123 --template preview --param pr=123` → 0 | The instance's `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, with `expiresAt` now plus 7 days |
-| 3 | Same job: `nyl reconcile -e pr-123` → 0 | `web-image` and `preview-db` run (the latter reading dev's `vpcId`); `preview-site` publishes to `deploy.git` branch `previews`: workload trees under `pr-123/` and its Applications under `previews/_nyl/catalog/pr-123-preview-site/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at the job's commit |
+| 3 | Same job: `nyl reconcile -e pr-123` → 0 | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees under `pr-123/` and its Applications and AppProject in `previews/_nyl/catalog/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at the job's commit |
 | 4 | Branch `pr-124`; commit; CI job: `state init --template preview --param pr=124`, then `reconcile -e pr-124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: `state init …` then `reconcile -e pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |
-| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `preview-site` publishes phase 1, waits its 2 minutes on the clock, and removes its files; then `preview-db` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
+| 7 | Close job at `main`: `nyl state delete -e pr-123 --teardown` → 0 | Source is fetched through the keep ref; `kubernetes` publishes phase 1, waits its 2 minutes on the clock, and removes its files, including its entries in the shared catalog; then `database` is destroyed and `web-image` dropped; the `pr-123/` state directory and the keep ref are removed |
 | 8 | `nyl reconcile -e pr-124` → 0 | The other instance is untouched: nothing executes |
 | 9 | `nyl get environments` | Lists `dev` and `pr-124` only |
 
@@ -327,7 +363,7 @@ Starts after scenario 2's step 4, with `pr-123` and `pr-124` live at time T.
 | Step | Action | Proves |
 | --- | --- | --- |
 | 1 | Clock T+3d; CI job for a new `pr-123` commit: `state init …` and `reconcile -e pr-123` → 0 | Activity extends `pr-123` to T+10d; `pr-124` keeps T+7d |
-| 2 | Clock T+8d; scheduled job: `nyl reconcile --template preview` → 0 | `pr-124` has expired and is removed, a `teardown --all` then `state delete` authorized by `allowTeardown`, with `preview-site`'s delay wait; `pr-123` is reconciled as maintenance and its expiry stays T+10d |
+| 2 | Clock T+8d; scheduled job: `nyl reconcile --template preview` → 0 | `pr-124` has expired and is removed, a `teardown --all` then `state delete` authorized by `allowTeardown`, with `kubernetes`'s delay wait; `pr-123` is reconciled as maintenance and its expiry stays T+10d |
 | 3 | `nyl get environments` | `pr-124` is gone |
 | 4 | Clock T+9d; `nyl state init -e pr-125 --template preview --param pr=125`, then `pr-126` → the second refuses | `maxInstances: 2` counts live instances; nothing is expired to make room |
 | 5 | Clock T+11d; `nyl state init -e pr-126 --template preview --param pr=126` → 0 | At the limit, the expired `pr-123` is removed first, then `pr-126` is created |
@@ -340,7 +376,7 @@ Tier 1 variants:
   `state init --template` warns, and step 2 reports `pr-124` as pending
   teardown with the reason and exits 2, until a run passes
   `--allow-incomplete`.
-- **Manual wait.** With `preview-site` on the `manual` default, `state init
+- **Manual wait.** With `kubernetes` on the `manual` default, `state init
   --template` warns that instances cannot expire unattended, and step 2 stops
   after phase 1 with exit 2.
 

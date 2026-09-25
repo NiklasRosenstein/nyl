@@ -298,8 +298,8 @@ in two phases, both through Git:
 1. **Remove the workload Applications.** The unit publishes a tree whose
    `_nyl/catalog` still contains the catalog Application and the generated
    AppProjects but no workload Applications; the workload trees stay. In a
-   shared catalog, the target's subdirectory keeps its AppProjects and the
-   catalog manifest is untouched. The catalog is never empty, so Argo CD's
+   shared catalog, the target's AppProjects stay and the catalog manifest is
+   untouched. The catalog is never empty, so Argo CD's
    empty-tree guard and the catalog's own self-prune policy never come into
    play, and the AppProjects outlive the Applications that use them. This commit is the teardown's `published`
    evidence. Argo CD's catalog sync prunes the workload Applications, and
@@ -398,21 +398,23 @@ Argo CD. Nyl leaves the choice to the project:
 
 A shared catalog is the recommended setup for previews:
 
-- Its manifest lives at `<shared prefix>/_nyl/catalog/catalog.yaml` and
-  sources `<shared prefix>/_nyl/catalog` recursively. Each target publishes
-  its workload Applications and AppProjects into
-  `<shared prefix>/_nyl/catalog/<target>/`, next to its workload trees under
-  its own prefix. Targets sharing a catalog must publish to the same
-  repository and revision, and their names must be unique within it.
+- Its manifest lives at
+  `<shared prefix>/_nyl/catalog/applications/<argocd namespace>/<name>.yaml`
+  and sources `<shared prefix>/_nyl/catalog` recursively. Each target
+  publishes its workload Applications and AppProjects into the same
+  `applications/` and `projects/` directories as a per-target catalog does,
+  next to its workload trees under its own prefix; the layout is unchanged
+  because Application and AppProject names are already unique within the
+  Argo CD namespace. Targets sharing a catalog must publish to the same
+  repository and revision.
 - Ownership is split along files. A target's ownership index covers its
-  prefix and its catalog subdirectory. The catalog manifest carries the owner
-  `catalog:<name>`: its bytes are determined by the shared block and the
+  prefix and the catalog files it rendered. The catalog manifest carries the
+  owner `catalog:<name>`: its bytes are determined by the shared block and the
   ArgoCDInstance defaults alone, so every target renders it identically, and
   any target publishes it when it is absent or differs, which happens only
   after a Nyl upgrade or a settings change.
-- Nothing is reconciled from state: Git holds the other targets'
-  subdirectories, and a publish removes only files in the publishing target's
-  index. Concurrent publishes from two targets touch disjoint files and
+- Nothing is reconciled from state: Git holds the other targets' files, and
+  a publish removes only files in the publishing target's index. Concurrent publishes from two targets touch disjoint files and
   serialize on the branch like any two publications.
 - Nyl renders the shared catalog, so the readiness table checks its settings.
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
