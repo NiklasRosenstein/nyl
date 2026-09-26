@@ -1049,6 +1049,7 @@ reasons to delay independent work.
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
+| Ref layout for orchestration state: which Nyl refs live under `refs/nyl/…` instead of branches (leases, runs, signals, keep refs), and when desired and observed state must be branches, such as for promotion pull requests | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
