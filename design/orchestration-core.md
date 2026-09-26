@@ -161,7 +161,8 @@ spec:
     repositoryRef: {name: platform}     # optional; default: this repository
   # or, instead of the fields above:
   source:
-    fromPromotion: {path: dev-to-prod}  # the commit recorded by the latest promotion
+    fromPromotion: {path: dev-to-prod}  # the commit recorded by the latest promotion;
+                                        # `paths: [dev-to-prod, hotfix-to-prod]` for several
 ```
 
 | `source` | S for each run |
@@ -169,7 +170,7 @@ spec:
 | omitted | The entry worktree's commit, typical for dev and previews |
 | `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
 | `revision` and `commit` | `commit`, a reviewed pin in source that `nyl update source-locks` moves; never a promotion target |
-| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
+| `fromPromotion` | The source commit in the newest PromotionRecord on that path, or on any of `paths`, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
 
 - The three forms exclude each other. `commit` requires `revision`, as for
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
@@ -334,7 +335,7 @@ spec:
 | --- | --- | --- |
 | `fromUnit: {unit, output, pointer, evidence}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
 | `fromUnit: {unit, artifact, kind, pointer, evidence}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
-| `fromPromotion: {path, value}` | A value in a PromotionRecord in this environment's desired state | The record must exist; broken selectors are errors |
+| `fromPromotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see the roadmap's section on several paths into one environment) | The record must exist; broken selectors are errors |
 | `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
 
 #### Cross-environment references

@@ -381,7 +381,8 @@ spec:
       select: {unit: database, input: /source}
 ```
 
-Target consumers name the path and value, never the source unit:
+Target consumers name the value and, optionally, the path, never the source unit
+(see "Several paths into one environment" below for the path-less form):
 
 ```yaml
 # staging DeploymentTarget
@@ -504,7 +505,8 @@ spec:
   - Rolling back is promoting an older state:
     `nyl promote dev-to-prod --revision S1 --reason "…"`. The target's own
     units then run at the older source commit, and their plans and approvals
-    show what that changes.
+    show what that changes. The supersede check below compares only against
+    other paths, so a rollback on the same path never needs `--supersede`.
 - Before recording, `nyl promote` checks that every promoted artifact still
   exists, for images with `docker buildx imagetools inspect`, and refuses if
   one is gone. A path's `verifyArtifacts: false` or the invocation's
@@ -540,11 +542,13 @@ spec:
       path: dev-to-prod
       record: source
       promoted:                        # written by nyl promote, never by hand
+        path: dev-to-prod              # the path that supplied it, when `paths` lists several
         sourceCommit: 3e7b9c…
         from: {environment: dev, run: 0b8f6c1e-…, desiredCommit: 77aa…, observedCommit: 41f0…}
         values: {webImage: registry.example.com/web@sha256:4f0c…}
         evidence: {level: healthy, observed: recorded, at: 2026-09-25T16:40:00Z}
         artifactsVerified: true
+        superseded: []                 # commits replaced with --supersede, with reasons
   ```
 
   The source commit and its values are then one reviewed change that is
@@ -567,11 +571,109 @@ spec:
   publication recorded, under the same rules.
 - Prod-only changes, such as a replica count, reach prod with the next
   promotion of a commit that contains them. Hotfixes that cannot wait for dev
-  use a `revision` such as a `release/prod` branch.
+  take a path of their own (see "Hotfixes" below).
 - A path that promotes a source may narrow the health it requires to named
   ApplicationGroups, `coverage: {applicationGroups: [web]}`: only those
   groups' Applications must reach the level. It never narrows what moves; the
   promoted commit still carries every group's definitions.
+
+**Several paths into one environment.** An environment may be the target of several paths. `source.fromPromotion`
+takes `path` for one path or `paths` for several; the source commit comes from
+the newest PromotionRecord on those paths, and desired state records which
+path supplied it.
+
+A `fromPromotion` binding names a `value` and, optionally, a `path`:
+
+- Without `path`, it reads the newest record into this environment that
+  carries the value. In an environment whose source is promoted, only records
+  on its source paths count, so the source commit and the values proven with
+  it always move together.
+- With `path`, it reads only that path, for values with a lineage of their
+  own, such as a vendor image promoted independently of the source.
+- Validation rejects a binding that no path into the environment can supply,
+  naming the value and the paths it checked; every path in `paths` must define
+  the values that path-less bindings read. `nyl get promotions -e <env>` shows
+  the supplying path and record for every binding, and `plan` reports when
+  that path changes.
+
+Newest wins at resolution, which only reads records. What a path may record is
+decided when `nyl promote` writes, by the supersede check:
+
+- **Rule.** Before writing a value on path P, `nyl promote` requires the
+  value's source commit to contain the source commit of every record for that
+  value that another path wrote since P last promoted it. A commit contains
+  another when that commit is its ancestor, or when a commit with the same
+  changes (`git patch-id`, as `git cherry` uses) is, so clean cherry-picks and
+  single-commit squash merges pass.
+- **Source commit of a value.** A promoted source commit, such as an
+  environment's source or a unit's `webSource`, is its own. An artifact or
+  output has the source commits that its producing receipt's desired unit
+  resolved, such as an OciImage's Git contexts, so an image built before a
+  hotfix cannot replace the hotfixed image even on a path that promotes only
+  digests. Commits are compared within their own repository. A value without a
+  known source commit, such as an image from outside Nyl or a command output,
+  is listed as unchecked by `nyl promote` and `plan`. A subset promotion checks
+  only the values it writes.
+- **Refusal.** A refused promotion writes nothing and exits 2 with
+  `NYL-PROMOTE-SUPERSEDES`, because nothing failed: the promote job succeeds
+  once the missing commits are merged. The message lists the missing commits
+  per repository and a range to copy: "`S5` is missing 2 commits from
+  `hotfix-to-prod`: `S1..c3d4` (a1b2 fix pool size, c3d4 bump timeout); merge
+  them or pass `--supersede S1..c3d4=<reason>`".
+- **Override.** `--supersede <commit or range>[=<reason>]` accepts that the
+  promotion replaces those commits, because the change was made differently
+  or is dropped on purpose. It is repeatable; an entry without its own reason
+  takes `--reason`, and an entry with neither is rejected. Ranges are Git
+  ranges resolved at promotion; commits in them that are not missing are
+  ignored, and a missing commit no entry covers keeps the promotion refused.
+  When the refusal involves several repositories, an entry is qualified with
+  the repository, `--supersede web:S1..c3d4=<reason>`, by GitRepository name
+  or, for an inline repository, the name the refusal prints; an unqualified
+  full commit ID is accepted when it exists in only one of them.
+- **Record.** The PromotionRecord lists every superseded commit with its
+  repository URL, its reason, and who gave it, never the range, and a pull
+  request under `changeGate: pullRequest` shows them. A later promotion on P
+  is no longer checked against them, because P has now promoted after them.
+
+**Hotfixes.** A promoted environment runs only what its source proved, so a fix that cannot
+wait for dev's unreleased work takes a path of its own:
+
+```yaml
+# prod
+spec:
+  source:
+    fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: prod-hotfix}
+spec:
+  source: {revision: release/prod}     # cut from prod's current source commit
+  unitSelector: {matchLabels: {prod: 'true'}}
+---
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: hotfix-to-prod}
+spec:
+  from: {environment: prod-hotfix}
+  to: {environment: prod}
+  evidence: healthy
+  values:
+    webImage: {select: {unit: web-image, artifact: image, pointer: /reference}}
+```
+
+- `prod-hotfix` builds and runs the fix, typically on a small target of its
+  own, and can stay idle between hotfixes. `hotfix-to-prod` promotes it with
+  the same evidence, approvals, and `requireDigest` as the regular path.
+  Bindings do not change when the path is added, because path-less bindings
+  follow whichever record supplied the source.
+- The next `dev-to-prod` promotion is refused until `main` contains the fix,
+  typically by merging `release/prod` into `main`, or until `--supersede`
+  names it. The rule is symmetric: a hotfix branch cut before a later dev
+  promotion is refused too, and is cut again from what prod runs.
+- A promotion of a commit that no environment ran is deliberately not
+  offered: the hotfix environment gives the fix the same evidence as any other
+  change.
 
 **Splitting environments by release cadence.** A source promotion moves
 everything in one environment together, and health is aggregated per
@@ -651,7 +753,7 @@ review. The two routes coexist:
 
 | | Locked `fromGit` (M2) | PromotionPath (M6) |
 | --- | --- | --- |
-| Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a path and value |
+| Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a value, optionally its path |
 | Promote with | `nyl update source-locks --target …`, then a pull request | `nyl promote <path>` |
 | Health gate | `--require healthy` on the lock update | `evidence: healthy` on the path |
 | Record | The lock in source, with an `observed` block under `--require healthy` | A PromotionRecord in target desired state |
@@ -1052,6 +1154,9 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
   dev state, with `record: state` and `record: source`, the whole-source
   evidence rule, recorded evidence for older states, artifact verification,
   and rollback through `--revision`.
+- [ ] Support several paths into one environment: `source.fromPromotion.paths`,
+  path-less bindings, the per-value supersede check with `--supersede`, and
+  the hotfix pattern with a fifth reference scenario.
 - [ ] Add `nyl get states`, `nyl get promotion-candidates`, and
   `nyl promote --dry-run`.
 - [ ] Promote values only, such as an image digest and a Terraform source
@@ -1066,7 +1171,8 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
 
 **Exit criterion:** prod runs exactly the source commit and image digest dev
 proved, with auditable lineage; stale, missing, or mixed source evidence blocks
-promotion; a value-only path still promotes values from what each consuming
+promotion; a hotfix reaches prod through its own path, and a dev promotion
+without the fix is refused until the fix is merged or superseded; a value-only path still promotes values from what each consuming
 Application runs.
 
 ### M7 — Continuous operation and scope decision
@@ -1093,7 +1199,6 @@ reasons to delay independent work.
 | Approver lookup for CI systems other than GitHub | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
-| Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
 | Recorded evidence from people and tests: a `nyl confirm healthy`-style command for when observation is not configured or possible, and negative or positive results (a failed manual test, an automated test run) recorded against a deployment, so its evidence can move from healthy to unhealthy and gate promotion | M6 |
 
 ## Implementation reference points

@@ -209,7 +209,7 @@ spec:
   argocdRef: {name: prod}
   releaseInputs:
     web/web:
-      image: {fromPromotion: {path: dev-to-prod, value: webImage}}
+      image: {fromPromotion: {value: webImage}}   # from the record that supplied prod's source
       database: {fromUnit: {unit: database, output: connection}}
 ---
 # platform.yaml: one Argo CD instance per cluster with teardown-ready catalog
@@ -505,7 +505,7 @@ Tier 1 variants:
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
-| M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path |
+| M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path; a fifth adds `prod-hotfix` and `hotfix-to-prod`, promotes a fix from `release/prod`, has the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, and covers `--supersede` with a range |
 
 The reference project grows with the milestones. A milestone's fixture omits
 resources whose kinds it does not have yet: M3 and M4 run scenario 1 without
