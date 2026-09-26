@@ -960,6 +960,10 @@ reasons to delay independent work.
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod | M6 |
+| Environment sources pinned with `revision` and `commit`: whether `source-locks` may move them, and where `nyl promote` writes the pin and its values so both land together | M6 |
+| Whether a `revision`-only environment can be a promotion target, given squash merges and pending promotion pull requests | M6 |
+| Shared catalogs: how targets contribute catalog files without writing outside their prefix, and who owns the shared manifest across Nyl versions | M5 |
+| Coverage for promoted sources: which Applications must be healthy when a path promotes the source but few or no values | M6 |
 
 ## Implementation reference points
 
