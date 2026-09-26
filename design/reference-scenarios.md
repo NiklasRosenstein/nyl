@@ -188,7 +188,7 @@ spec:
     target: dev
     cidr: 10.0.0.0/16
     backendDir: <temporary directory>/tofu
-    approval: {mode: manual, bind: plan}
+    approval: auto                        # dev applies without gates; prod requires reviewed plans
 ---
 # prod.yaml: prod runs definitions dev proved, and reuses dev's image
 apiVersion: gitops.nyl/v1
@@ -392,8 +392,8 @@ preview instances (`nyl/pr-*/…`), and nothing else.
 | 2 | `nyl reconcile -e dev` → 1 | No state is created implicitly; the error names `state init` |
 | 3 | `nyl state init -e dev` → 0 | `state.yaml` exists on dev's state refs in `project.git` |
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
-| 5 | `nyl reconcile -e dev` → 2 | Wave 1 runs `network`, `web-image`, `seed`; `database` waits for approval (`bind: plan`); `kubernetes` is blocked on it. One desired and one observed commit |
-| 6 | `nyl plan -e dev --unit database --output json` → 0, then `nyl reconcile -e dev --approve database=<digest>` → 0 | The approved digest is applied; `kubernetes` runs in a later wave of the same run and publishes `dev/` with the image's digest reference and the database host; the approval is in the receipt |
+| 5 | `nyl reconcile -e dev` → 0 | Wave 1 runs `network`, `web-image`, `seed`; wave 2 runs `database` with `network`'s `vpcId`; wave 3 runs `kubernetes`, which publishes `dev/` with the image's digest reference and the database connection. One desired and one observed commit |
+| 6 | `nyl status -e dev` → 0 | Every unit is current; the status names the publication commit and the image reference |
 | 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference` | Value forms resolve like `fromUnit` |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
@@ -402,11 +402,11 @@ preview instances (`nyl/pr-*/…`), and nothing else.
 | 12 | Branch `typo`; commit a selector typo in dev's Environment; pull request job: `nyl plan -e dev` → 0, and with `--fail-on-leaving` → 1 | The plan's first section lists all five units as leaving, deselected because `dve: 'true'` matches nothing: `network`, `database`, `kubernetes` would need `--allow-teardown`; `web-image` and `seed` would be dropped and re-created as new incarnations if they return |
 | 13 | Merge it anyway; reconcile → 2 | `network`, `database`, and `kubernetes` are `pending-teardown`; nothing is destroyed and the `deploy` branch is unchanged, because `kubernetes` still owns target `dev` while it is deleting; `web-image` and `seed` are dropped from state |
 | 14 | Revert the typo; reconcile → 0 | The pending units return with their uids and receipts and do not run; `web-image` and `seed` run again as new incarnations, the cost the plan warned about; `kubernetes` republishes only if the rebuilt image's digest differs |
-| 15 | `nyl plan -e dev --teardown --all --output json` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with `database`'s destroy-plan digest |
-| 16 | `nyl state delete -e dev --teardown --approve database=<digest>` → 2 | `seed`, which has no teardown step and no dependency path to `kubernetes`, is released and held at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
+| 15 | `nyl plan -e dev --teardown --all` → 0 | Before anything is requested, the preview lists what decommissioning would remove, with each OpenTofu unit's destroy plan |
+| 16 | `nyl state delete -e dev --teardown` → 2 | `seed`, which has no teardown step and no dependency path to `kubernetes`, is released and held at once; `kubernetes` publishes phase 1 (catalog without workload Applications) and waits (`manual`); `database`, `network`, and `web-image` wait for it |
 | 17 | A CI push meanwhile: `nyl reconcile -e dev` → 2 | Nothing is recreated: every unit is held or tearing down, so the image is not rebuilt and `seed` does not run again |
 | 18 | `nyl teardown -e dev --unit kubernetes --confirm-removed --reason "checked in Argo CD"` → 0 | Phase 2 removes only index-owned files; `dev/state/notes.txt` survives; the commit records the operator's confirmation |
-| 19 | `nyl state delete -e dev --teardown --approve database=<digest from step 15>` → 0 | The command resumes: `database` is destroyed with the previewed destroy plan, then `network`; `web-image`'s image is left in the registry; dev's state is removed |
+| 19 | `nyl state delete -e dev --teardown` → 0 | The command resumes: `database` is destroyed, then `network`; `web-image`'s image is left in the registry; dev's state is removed |
 | 20 | `nyl reconcile -e dev` → 1 | A pipeline still running dev fails visibly; the message names removing the Environment or `state init --fresh` |
 | 21 | Commit removing dev's Environment; `nyl validate` → 1 | Validation names what still needs dev: PromotionPath `dev-to-prod` and the preview template's reference to dev's `network`. Decommissioning an environment others depend on means rewiring them first |
 
@@ -421,10 +421,15 @@ Tier 1 variants:
   -e pr-123 --unit kubernetes --confirm-removed`. It delivers a signal to the
   waiting run and exits 0; the run ends its wait early and records the
   confirmation. A signal naming another phase 1 commit is rejected.
-- **Blanket approval.** `nyl state delete -e dev --teardown --approve-all`
-  destroys `database` without a digest and records the approval as
-  unreviewed; with `requireDigest: true` on `database`, the same command skips
-  it and exits 2.
+- **Manual approvals.** The realistic project gates only prod, which needs
+  M6. To exercise approvals from M3 on, this variant sets dev's `approval`
+  value to `{mode: manual, bind: plan}`: step 5 exits 2 with `database`
+  awaiting approval and `kubernetes` blocked on it; `nyl plan -e dev --unit
+  database --output json` prints the digest, and `--approve database=<digest>`
+  applies it and runs `kubernetes` in a later wave; step 16 needs the destroy
+  digest from `plan --teardown`; `--approve-all` approves without a digest and
+  is recorded as unreviewed, and with `requireDigest: true` it skips
+  `database` and exits 2.
 - **Crash after an effect.** The run is killed after `network`'s effect and
   before its checkpoint. After the clock passes the lease deadline, the next
   run takes over the expired lease, marks
@@ -499,7 +504,7 @@ Tier 1 variants:
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, crash, cancellation, and lease variants |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication` |
-| M6 | A fourth scenario promotes dev's source commit and image digest to prod, including a rollback, and a value-only path |
+| M6 | A fourth scenario promotes dev's source commit and image digest to prod, including prod's reviewed-plan approvals with `requireDigest`, a rollback, and a value-only path |
 
 The reference project grows with the milestones. A milestone's fixture omits
 resources whose kinds it does not have yet: M3 and M4 run scenario 1 without
