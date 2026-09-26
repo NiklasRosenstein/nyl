@@ -205,7 +205,12 @@ Each binding sets exactly one of these fields:
   document, never by matching the commit text alone.
 - `--require healthy` follows the per-value promotion rule in the roadmap's
   health evidence section, so locks of one group may move to different
-  commits. Each lock is one value:
+  commits. It reads the source target's recorded observation, written by
+  `nyl verify --target <source>` into
+  `<prefix>/_nyl/observations/health.yaml` on the source's publication branch
+  (see the roadmap's health evidence section), so it needs no cluster
+  credentials; `--observe` observes Argo CD directly instead. Each lock is one
+  value:
   - The file it reads must lie inside one source target's prefix on that
     branch. A lock that reads a file outside every target prefix is an error
     that suggests dropping `--require healthy` for it.
@@ -246,9 +251,10 @@ Each binding sets exactly one of these fields:
     branch head. Plain `--check` does not compare it with the head; it verifies
     only that the observed publication commit equals `commit`, and needs no
     cluster access.
-  - `--check --require healthy` takes a fresh observation, which needs Argo CD
-    credentials, and reports a lock as stale when a newer publication is
-    running and healthy, or when a lock without `observed` would move.
+  - `--check --require healthy` reads the newest recorded observation, or
+    observes directly with `--observe`, and reports a lock as stale when a
+    newer publication is running and healthy, or when a lock without
+    `observed` would move.
 
 `fromPublication`:
 

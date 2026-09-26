@@ -597,10 +597,10 @@ spec:
   locked `fromGit` blob, or the binding at the recorded source commit. It then
   verifies the value against the recorded `@input` digest. A publication made
   from a dirty source worktree is not a promotion source.
-- A non-orchestrated target has no state to record observations in, so a
-  target source at `accepted` or `healthy` needs `nyl promote --observe`, the
-  one explicit opt-in to observing during promotion, with credentials for the
-  Argo CD cluster; otherwise it promotes at `published`.
+- A non-orchestrated target records its observations on its own publication
+  branch (see health evidence), so a target source reaches `accepted` or
+  `healthy` from recorded evidence like an environment source. `--observe`
+  observes Argo CD directly instead, with credentials for its cluster.
 - The PromotionRecord adds, per value, the source target, publication
   repository, branch, and commit, and the input digest to its lineage, plus the
   observation that proved the set.
@@ -630,7 +630,25 @@ Cluster.
 
 - **Observer.** Nyl reads the target's generated Applications from the Argo CD
   control-plane Cluster through its local context. Health checks need
-  credentials for that Cluster, which publication does not.
+  credentials for that Cluster, which publication does not, so observations
+  are recorded where those credentials exist, typically in CI, and decisions
+  read the recorded evidence.
+- **Where observations are recorded.** An orchestrated environment's
+  publication units record into its observed state. A target without an
+  environment records into its own publication branch:
+  `nyl verify --target <name>` writes `<prefix>/_nyl/observations/health.yaml`
+  with each Application's running revision, matched publication, and health.
+  - It commits only when that content changes or the previous observation is
+    older than a refresh interval, which keeps `maxObservationAge` satisfiable
+    without a commit per run.
+  - `_nyl/observations/` is a reserved path: never rendered, never removed by a
+    publish, and neither owned nor unowned for reconciliation; a teardown of
+    the target removes it. No Argo CD Application sources it, and verify and
+    publish commits touch disjoint files, so the branch's retry rule covers
+    concurrent writes.
+  - The branch history keeps older observations, so an older publication can
+    be promoted or locked from recorded evidence.
+  - This adds no refs: observations live with the tree they describe.
 - **Running revision.** Argo CD's Synced/OutOfSync status compares against the
   branch head, so an Application still running an older commit reports
   OutOfSync as soon as a newer publication changes its files. Nyl ignores it.
@@ -673,8 +691,9 @@ Cluster.
   blocks on mixed revisions.
 - **Decision evidence is always recorded.** The observation behind every
   promotion (time, Application, running revision, health) is stored in the
-  PromotionRecord, additionally in observed state for environment sources, and
-  in the lock's `observed` block for the lock route.
+  PromotionRecord, and in the lock's `observed` block for the lock route;
+  observations themselves are recorded in observed state or on the target's
+  publication branch.
 - **Observation history.** One observation proves what runs now. Promoting a
   commit that no longer runs, requiring a minimum healthy duration, and
   guarding against Applications that flap between healthy and unhealthy need
