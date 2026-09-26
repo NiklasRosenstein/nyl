@@ -975,8 +975,9 @@ byte-identical output to the previous release.
   pushes and `publish-tree`.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
-  units with `fromUnit` references, including `--local` runs with and without
-  remote state.
+  units with `fromUnit` references, including `--local` runs next to remote
+  state on the clone's own state branches, state without a remote, and
+  `state move --from local` when a remote is added.
 - [ ] Implement cross-environment references and multi-environment runs by
   repeated `-e`, a label selector, or an EnvironmentGroup with shared
   defaults, ordered by those references, each environment with its own lease

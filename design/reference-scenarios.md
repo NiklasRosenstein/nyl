@@ -375,7 +375,7 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
 | `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
 | `refs/nyl/<env>/lease`, `refs/nyl/<env>/runs/<run-id>`, `refs/nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
-| `refs/nyl/<env>/local/*` | Nyl `--local` runs, in the developer's clone only | Nyl |
+| Local branches `nyl/<env>/desired`, `nyl/<env>/observed` | Nyl: fast-forwarded to the remote on every fetch; `--local` runs commit to them, never pushed | Nyl `--local`, people inspecting state |
 
 Branch protection: `main` requires review; `deploy`, `previews`, and the state
 branches accept pushes from the CI identity and the operator group only, with

@@ -68,7 +68,9 @@ spec:
 - `state` follows the shape of DeploymentTarget `publication`: a GitRepository
   reference (`repositoryRef`) or inline `repository`, reading through its
   `repoURL` and writing through its `publishURL`. Without either, state uses
-  the source checkout's `origin` remote; CI should name a GitRepository.
+  the source checkout's `origin` remote, and without an `origin`, the local
+  repository itself (see [Local runs](#local-runs)); CI should name a
+  GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
   either way (see [State layout](#state-layout)). A short name is a branch,
   the default, because state is the reviewable record: it can be protected,
@@ -1538,25 +1540,40 @@ transition commits to the remote state exactly like a CI job; its source
 commit must be pushed and reachable per [Pinned commits](#pinned-commits). CI
 later continues from the state those runs recorded.
 
-`--local` runs orchestration against local-only state, for environments
-without a remote and for scratch experiments:
+Nyl keeps the clone's own branches of the state refs, `nyl/<env>/desired` and
+`nyl/<env>/observed` by default, as the local known version of the state:
 
-- `nyl state init -e <env> --local` starts local state from scratch at local
-  refs `refs/nyl/<env>/local/desired` and `refs/nyl/<env>/local/observed`,
-  which are never pushed and ignore `coordinationRefPrefix`,
-  for an environment with no remote state.
-- Otherwise the first local run for an environment copies the remote state refs
-  to those local refs; later local runs continue from them. `--local --reset`
-  copies again.
-- Local runs write transition commits and run checkpoints only to local refs,
-  with a `Nyl-Local: true` trailer, and never push state.
-  `nyl status -e <env> --local` shows the local view.
+- Every command that fetches an environment's remote state fast-forwards those
+  local branches, creating them if needed. It never rewrites a local branch
+  that has diverged, and it sets no upstream, so a bare `git push` does not
+  publish them. `git log nyl/<env>/desired` works in any clone that ran Nyl.
+- **No remote.** When the state repository resolves to the local repository,
+  because nothing is configured and the checkout has no `origin`, the local
+  branches are the state. Runs are ordinary runs with a local lease;
+  `nyl state init -e <env>` creates the state there.
+- **Adding a remote.** Once the state repository resolves to a remote, a run
+  finds no `state.yaml` there, refuses, and names `nyl state move -e <env>
+  --from local`. The move pushes the branches' history to the remote, writes
+  the move event there as the new tip, with `state.yaml` naming the remote,
+  and fast-forwards the local branches to it. Old and new location share one
+  history, so a run with the old configuration reads the new location from
+  `state.yaml` and refuses; no marker is needed at the old location.
+
+`--local` runs orchestration next to remote state without publishing it, for
+experiments from a workstation:
+
+- A local run continues from the local branches and writes its transition
+  commits to them with a `Nyl-Local: true` trailer, never pushing state. While
+  the remote does not move, the local branches are the remote state plus the
+  local runs; once it moves, they have diverged, Nyl stops fast-forwarding
+  them, and `nyl status -e <env>` reports it, such as "local state has 2
+  local transitions and is 3 behind the remote". `nyl status` and `nyl get`
+  with `--local` show the local view.
 - A local run takes the remote lease (`refs/nyl/<env>/lease`), because the lease is
   coordination, not state: a local run and a CI run of the same environment
   never execute at the same time. This needs push access to the lease ref.
 - `--local-lease` explicitly opts into a local lease instead, for working
-  without that access, and accepts that CI may run at the same time. Local
-  state without a remote always uses a local lease.
+  without that access, and accepts that CI may run at the same time.
 - Effects are real, and local state is never pushed, so remote runs do not
   notice them: a unit whose remote receipt is current is not executed again,
   and the remote state keeps describing what ran before. A local run next to
@@ -1564,6 +1581,19 @@ without a remote and for scratch experiments:
   command that records it again, such as `nyl reconcile -e <env> --unit
   <u>` after the change is committed. Units whose recovery policy is not
   `converge` run locally only when named with `--approve`.
+- `nyl state reset -e <env> --local` drops the local transitions and follows
+  the remote again, once the remote has recorded the change or the local
+  effects were undone. It lists the units whose local receipts the remote
+  does not reflect, because forgetting them can leave resources behind, and
+  proceeds only with `--discard <unit>…` or `--discard-all`.
+- A run against remote state refuses when the tip of a remote state ref is a
+  `Nyl-Local` commit, which only a manual push of local branches produces;
+  Nyl itself commits only on tips that pass this check. The refusal names the
+  last commit without the trailer. `nyl state restore -e <env> --to <commit>`
+  writes a forward commit restoring that commit's content, so protected
+  branches need no force push, and records the local transitions as rejected.
+  Pushed local transitions are never accepted, because their source commits
+  may be unpushed or dirty and were never checked for reachability.
 
 ### Pinned commits
 
@@ -1781,6 +1811,8 @@ spec:
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
 | `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing its directory from a shared ref, or deletion of its own refs |
 | `state move` | Relocate state from another location and retire the old one | Moved history, plus a `state-moved` commit at the old location |
+| `state reset` | With `--local`, drop local transitions and follow the remote state again (see [Local runs](#local-runs)) | The clone's local state branches only |
+| `state restore` | Restore remote state to an earlier commit's content after local transitions were pushed by hand | One desired and one observed commit |
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
 | `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
@@ -1912,7 +1944,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
   prints the latest receipt's value with a warning instead.
 - `--state-revision <commit>` reads state as of an earlier state commit, the
   same name `nyl promote` uses for a state commit; `--local`
-  reads a local run's state. Output formats: `table` (default), `wide`,
+  reads the clone's local state branches, including local runs. Output formats: `table` (default), `wide`,
   `yaml`, `json`, `name`.
 - `get` only reads: it needs read access to the state repository and never
   takes the lease. Document and table forms exit 0 whenever they can read the
