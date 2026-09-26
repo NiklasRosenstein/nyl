@@ -75,9 +75,11 @@ spec:
   either way (see [State layout](#state-layout)). A short name is a branch,
   the default, because state is the reviewable record: it can be protected,
   its history is visible in the forge, and a promotion pull request needs a
-  branch as its base. A full `refs/…` name keeps state out of the branch list;
-  validation rejects it when a PromotionPath into the environment uses
-  `changeGate: pullRequest`.
+  branch as its base. A full `refs/…` name keeps state out of the branch list
+  at the cost of that protection: forges cannot protect such refs, so anyone
+  with push access can rewrite or delete the state. Validation warns about it
+  with `NYL-STATE-UNPROTECTED`, and rejects it when a PromotionPath into the
+  environment uses `changeGate: pullRequest`.
 - `coordinationRefPrefix` places the refs Nyl creates and deletes on every
   run, `<prefix><env>/lease`, `<prefix><env>/runs/<run-id>`, and
   `<prefix><env>/signals/<run-id>` (see [Runs and leases](#runs-and-leases)),
@@ -138,8 +140,13 @@ spec:
   environment's own.
 - The defaults belong to the Environment's configuration, not to the
   invocation: they apply whether an environment is reconciled through its
-  group, with `-e`, or by a selector, so the same source commit always renders
-  the same units and execution keys.
+  group, with `-e`, or by a selector.
+- Groups are read like the Environment itself (see [Source](#source)): the
+  defaults for `state`, `protectedRefs`, and `allowUnprotectedSource` come
+  from the entry worktree, together with any GitRepository they name, because
+  they are needed before the source commit S is known; `values` come from S.
+  Execution keys depend only on what is read at S, so the same source commit
+  always renders the same units and execution keys.
 - Groups that only select may overlap. An Environment selected by more than one
   group that carries shared fields is a validation error naming the groups,
   because the order of their defaults would be arbitrary.
@@ -181,8 +188,9 @@ spec:
   other locks, `--check` included.
 - Nyl reads four fields from the Environment in the entry worktree, because
   they decide S or where state lives: `source`, `state`, `protectedRefs`, and
-  `allowUnprotectedSource`. Every other field is read at S; the copy of
-  `source` inside S is ignored.
+  `allowUnprotectedSource`, together with the EnvironmentGroup defaults for
+  them and the GitRepository resources they name. Every other field is read at
+  S; the copy of `source` inside S is ignored.
 - State records S for every run (`desired/environment.yaml` and the
   `Nyl-Source-Commit` trailer). Runs that are not entered from the
   environment's own source use that record: the fleet reconcile, and a plain
@@ -604,7 +612,11 @@ previews branch
   layout, index, and reconciliation. `shared` implies
   `catalogApplication.enabled: false` for the target, so its prefix contains
   no catalog Application, only its Applications and AppProjects. Targets
-  sharing a catalog must publish to the same repository and revision.
+  sharing a catalog must publish to the same repository and revision, and
+  that revision holds nothing else: validation rejects a target that does not
+  share the catalog, or shares another one, on a repository revision that
+  carries a shared catalog, because the catalog's include pattern would sync
+  its catalog directory too and give its Applications two owners.
 - The shared catalog Application sources the branch root recursively with
   `directory.include: '{_nyl/shared/<name>/*.yaml,*/_nyl/catalog/*}'`, so it
   syncs its own manifest and every target's catalog directory, and nothing
@@ -1312,31 +1324,40 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 | Ref | Content | Lifetime |
 | --- | --- | --- |
 | `refs/nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
-| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
+| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record, carrying the same deadline and units executing as the lease, and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
 | `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
-   exists and has not expired, the run exits 2 and reports who holds it;
+   exists and has not expired, or if a run ref's `Run` record has a deadline
+   that has not passed, the run exits 2 and reports who holds it; a live run
+   ref counts as a held lease, so a deleted lease ref alone never lets a
+   second run execute units the first is still executing;
    `--wait-lease <duration>` waits up to that long for the lease instead, for
    jobs such as a preview's close job that must not give up. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
    `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `state init`,
    `state move`, `state delete`, `state forget`), so only one runs per
    environment at a time.
-2. **Deadline.** The deadline is the latest finish time of the units executing,
-   by their `timeout`, plus a grace period that also absorbs clock skew. The
-   runner updates the lease when it starts a unit and when it enters a
-   teardown wait, whose deadline is the wait's end plus the grace period;
-   there are no heartbeats.
+2. **Deadline.** Every phase sets the deadline before it starts, plus a grace
+   period that also absorbs clock skew, and no phase runs without one:
+   resolution, including target renders and `fingerprint` scripts, by
+   `resolutionTimeout` (`nyl.toml`, default 30 minutes); unit execution by the
+   latest finish time of the units executing, by their `timeout`; `verify` by
+   the timeouts of the units it verifies; a teardown wait by the wait's end.
+   The runner updates the lease and the `Run` record together at each phase
+   and unit start; there are no heartbeats.
 3. **Checkpoints.** Each finished unit is checkpointed on the run ref before
    the next wave, together with the desired document it executed and its uid,
    including documents the run created. A crash loses no evidence.
 4. **Takeover.** A run that finds an expired lease replaces it with
    compare-and-swap. After resolving, it imports every leftover run ref. A
    checkpointed result becomes a receipt when the new resolution of that unit
-   has the same execution key; for a unit the dead run created, the new run
-   adopts the checkpointed desired document and uid instead of generating a
-   new one. Other results are reported as superseded; their effects are real,
+   has the same execution key. The new run adopts the checkpointed desired
+   document and uid of every unit the dead run created and started, with or
+   without a checkpoint, instead of generating new ones, whether or not the
+   new resolution still selects it: a unit no longer selected then leaves the
+   ownership set like any other and, by default, becomes `pending-teardown`,
+   so resources a crashed run created are never left without state. Other results are reported as superseded; their effects are real,
    so a superseded result of a unit whose recovery policy is not `converge`
    gives it an `uncertain` condition rather than letting it run again. Units
    the dead run was executing without a checkpoint get an `uncertain`
@@ -1345,7 +1366,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    already marked `uncertain`, because a runner that lost its lease finished
    the unit late, never clears the condition by itself: later runs import it
    as evidence, and `nyl recover` shows it, with its receipt or failure, next
-   to the condition for the operator to decide on.
+   to the condition; `nyl recover --accept <run>` adopts it (see
+   [Recovery](#recovery)).
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
    expects the run's own lease commit, so either both land or neither does.
@@ -1379,11 +1401,14 @@ the units it is executing.
 
 The lease coordinates runs; it does not authorize them. Forges such as GitHub
 cannot protect refs outside branches and tags, so anyone with push access can
-delete a lease or run ref. Nothing depends on that being impossible: every
-state change reaches the protected state refs only through the fenced push,
-so a deleted lease makes the holder lose its lease and exit 4, and a deleted
-run ref loses only the checkpoints of a run that has not committed, whose
-units become `uncertain` for the next run, as after a crash.
+delete a lease or run ref. State stays safe either way: every state change
+reaches the protected state refs only through the fenced push, so a holder
+whose lease was deleted exits 4 at its next lease update or final push. A
+deleted lease alone does not start a second execution, because the holder's
+run ref still blocks new leases until its deadline passes. Deleting both refs
+while a run executes is deliberate misuse of push access, like running the
+tools directly: the next run may then execute units the first is still
+executing, and the first run's results are reported as superseded.
 
 ### Recovery
 
@@ -1402,7 +1427,12 @@ reason, such as "verified nothing was applied", in its transition commit. It
 does not execute by itself: the unit becomes ready and runs in the next
 `reconcile`, so an operator can decide locally while CI executes. Accepting an
 uncertain execution as applied requires outputs, so it is possible only through
-`inspect`.
+`inspect`, or through a checkpoint that recorded the execution's result:
+`nyl recover -e <env> --unit <u> --accept <run> --reason <text>` adopts the
+receipt, outputs, and artifacts that run checkpointed, typically after a
+runner that lost its lease finished late. It is allowed only when the
+checkpoint's execution key equals the unit's current desired document, and
+records the operator and reason in its transition commit.
 
 A retryable failure is retried by the next `reconcile`; a non-retryable one
 waits for `recover --retry`.
@@ -1458,13 +1488,21 @@ lifecycle:
   selector typo, destroys nothing, and fixing it returns the unit to `active`
   with its uid and receipt. When teardown succeeds, the run removes both
   files.
+- **Retained dependents.** A `retained` tombstone keeps running resources that
+  may still use its producers. Tearing down a unit that a tombstone's receipt
+  cites in its provenance refuses unless the invocation passes
+  `--allow-dependents`, as for units other environments reference; `plan`
+  lists such tombstones with the teardown, and the transition commit records
+  the override.
 - **Retain, declared.** A unit that declares `deletionPolicy: Retain` keeps
   its resources when it leaves the ownership set. The run replaces its desired
   and observed files with a `retained` tombstone: the last desired document,
   uid, and receipt, under `lifecycle.state: retained`. A unit that returns with
   the same name and kind adopts the tombstone: with an unchanged execution key
-  it is current at once, otherwise it runs as an ordinary change of the same
-  incarnation, so restoring an accidentally omitted unit never re-runs it.
+  and every producer its receipt cites still at the cited incarnation and
+  receipt, it is current at once; otherwise it is resolved and runs as an
+  ordinary change of the same incarnation. Restoring an accidentally omitted
+  unit therefore never re-runs it while its inputs still exist.
   `nyl status` lists tombstones, and the transition commit's summary lists
   every newly retained unit.
 - **Retain, by kind.** A unit whose kind cannot tear down and that does not
@@ -1585,9 +1623,11 @@ initialization, move, or fresh start, each as its own event.
     converge against their existing backends, images are rebuilt, and
     non-idempotent commands run again. The command prints what that means and
     records a `state-initialized` event marked fresh.
-  - A move within one repository changes only the refs, for example from
-    branches to custom refs: `nyl state move -e <env> --desired-ref
-    refs/nyl/<env>/desired --observed-ref refs/nyl/<env>/observed`.
+  - A move within one repository changes only the refs, for example to
+    rename them: `nyl state move -e <env> --desired-ref state/<env>/desired
+    --observed-ref state/<env>/observed`. Moving state to full `refs/…` names
+    works the same way and gives up branch protection, with the
+    `NYL-STATE-UNPROTECTED` warning.
   - `state.yaml` also records the coordination prefix. A run takes the lease at
     the configured prefix and, holding it, refuses when `state.yaml` records
     another. `nyl state move -e <env> --coordination-refs <prefix>` changes it:
@@ -1706,6 +1746,7 @@ revisions, and locked `fromGit` bindings.
 | --- | --- | --- |
 | Concurrency per wave | 4 | `nyl.toml`, `--concurrency` |
 | Lease grace period | 10 minutes | `nyl.toml` |
+| `resolutionTimeout` | 30 minutes | `nyl.toml` |
 | `timeout` | Command 30m, Terraform/OpenTofu 60m, OciImage 60m, KubernetesPublication 10m | unit `timeout` |
 
 ## Drivers
@@ -1876,7 +1917,7 @@ spec:
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
 | `verify` | Run driver verification against current receipts | One observed commit with the latest observations and driver attestations |
 | `attest` | Record an external attestation for a unit's current receipt or the environment's current state (see [Attestations](#attestations)) | One observed commit |
-| `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
+| `recover` | Clear an uncertain condition or non-retryable failure for re-execution, or with `--accept <run>` adopt a checkpointed result | One observed commit |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
 | `resume` | Lift a hold | One desired commit |
@@ -2111,10 +2152,14 @@ extended the expiry first.
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
 `cache` has the default `Teardown` policy, `worker` declares `Retain`. The next
 run marks both `deleting`, replaces `worker`'s files with a `retained`
-tombstone, and reports `cache` as `pending-teardown`, exiting 2. A run with
-`--allow-teardown` tears `cache` down and removes its files. A new `cache`
-added in the meantime waits for that and then receives a new uid. When
-`worker` is restored unchanged, it adopts its tombstone and does not run.
+tombstone, and reports `cache` as `pending-teardown`, exiting 2, with `plan`
+naming `worker`'s tombstone as still citing `cache`. Restoring both before any
+teardown returns them unchanged: `cache` to `active` with its receipt, and
+`worker` adopts its tombstone and does not run. Tearing `cache` down instead
+needs `--allow-teardown --allow-dependents`; a new `cache` added in the
+meantime waits for that and then receives a new uid, and a `worker` restored
+afterwards adopts its tombstone but runs again, because the `cache` its
+receipt cites is gone.
 
 ## Remaining questions
 

@@ -422,6 +422,15 @@ Tier 1 variants:
   -e pr-123 --unit kubernetes --confirm-removed`. It delivers a signal to the
   waiting run and exits 0; the run ends its wait early and records the
   confirmation. A signal naming another phase 1 commit is rejected.
+- **Deleted lease ref.** While step 5 executes `database`, the test deletes
+  `refs/nyl/dev/lease`. A second `nyl reconcile -e dev` exits 2, because the
+  first run's run ref still has an unexpired deadline; the first run then
+  exits 4 at its next lease update and its results are imported by the next
+  run.
+- **Late checkpoint.** The runner executing `seed` loses its lease; the next
+  run marks `seed` `uncertain`; the first runner then checkpoints success.
+  `nyl recover -e dev --unit seed --accept <run> --reason …` adopts that
+  receipt without running `seed` again.
 - **Manual approvals.** The realistic project gates only prod, which needs
   M6. To exercise approvals from M3 on, this variant sets dev's `approval`
   value to `{mode: manual, bind: plan}`: step 5 exits 2 with `database`

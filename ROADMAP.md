@@ -444,18 +444,22 @@ spec:
   records them from people and external systems. A path may set
   `maxAttestationAge`, such as `1h`, beyond which a recorded attestation no
   longer counts. The attestations used are stored in the PromotionRecord.
-- All values of one promotion come from one consistent source state. At
-  `published`, that is a single source revision: the newest at which every
-  selected unit has a matching receipt or, for a target source, the newest
-  publication commit; `--state-revision <desired commit>` selects an exact one,
-  and `--revision <source commit>` the newest with that source commit. At
-  `attested` the state is what the source ran when it was attested. For a path that promotes only values, each value comes from
-  the revision its own consuming Application or unit runs, so values proven
-  together in the source are promoted together even when manual syncs left
-  Applications at different revisions; a path that promotes the target's
-  source follows the stricter rule below. Promoting an older state than the
-  evidence level would select requires `--evidence published`, recorded as an
-  override, for example to roll back.
+- Which states the values come from depends on the path:
+  - A path that promotes the target's source takes the source commit and every
+    value from one source state (see "Promoting an environment's source"). At
+    `published`, that is the newest state at which every selected unit has a
+    matching receipt or, for a target source, the newest publication commit;
+    at `attested`, the state the source ran when it was attested. Mixed
+    revisions block.
+  - A path that promotes only values takes each value from the state its own
+    consuming Application or unit runs, which may differ between values when
+    manual syncs left Applications at different revisions. Each value is then
+    one its consumer really ran; the PromotionRecord lists each value's state.
+  - `--state-revision <desired commit>` selects an exact state and
+    `--revision <source commit>` the newest with that source commit, for all
+    values of the promotion. Promoting an older state than the evidence level
+    would select requires `--evidence published`, recorded as an override,
+    for example to roll back.
 - `nyl promote dev-to-staging [--value …]` writes a
   PromotionRecord into the target environment's desired state: per value, its
   selector, the source unit's identity and incarnation, the source revision it
@@ -562,6 +566,7 @@ spec:
       path: dev-to-prod
       record: source
       promoted:                        # written by nyl promote, never by hand
+        sequence: 7                    # increases with every promotion into this environment
         path: dev-to-prod              # the path that supplied it, when `paths` lists several
         sourceCommit: 3e7b9c…
         from: {environment: dev, run: 0b8f6c1e-…, desiredCommit: 77aa…, observedCommit: 41f0…}
@@ -571,11 +576,17 @@ spec:
         superseded: []                 # commits replaced with --supersede, with reasons
   ```
 
-  The source commit and its values are then one reviewed change that is
-  reverted as one. The block is part of `source`, so it is read from the
+  The source commit and its values are then one reviewed change. The block is part of `source`, so it is read from the
   entry worktree like the rest of that field, and validation rejects a block
   that does not match the source state it names. `source-locks` never touches
   it.
+  - The block carries `sequence`, which `nyl promote` increments with every
+    promotion into the environment, and state records the highest sequence a
+    run applied. A run refuses a block with a lower sequence, such as one from
+    a re-run of an old CI job, and names `nyl promote --revision` as the way
+    to roll back, so an old checkout never rolls prod back unreviewed.
+    Reverting the promotion commit in source is refused the same way; the
+    rollback is a new promotion with a higher sequence.
 - Either way, the source commit and the values sit in one record, so they
   cannot diverge. An environment that follows its entry worktree, or a
   revision, is not a promotion target for its source.
@@ -1250,8 +1261,8 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
 - [ ] Add `nyl get states`, `nyl get promotion-candidates`, and
   `nyl promote --dry-run`.
 - [ ] Promote values only, such as an image digest and a Terraform source
-  commit, across differently named units and inputs, from one consistent
-  source state.
+  commit, across differently named units and inputs, each from the state its
+  consumer runs.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
 - [ ] Implement attestations: driver-declared names, `spec.attestations` on
@@ -1267,8 +1278,8 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
 **Exit criterion:** prod runs exactly the source commit and image digest dev
 proved, with auditable lineage; stale, missing, or mixed source evidence blocks
 promotion; a hotfix reaches prod through its own path, and a dev promotion
-without the fix is refused until the fix is merged or superseded; a value-only path still promotes values from what each consuming
-Application runs.
+without the fix is refused until the fix is merged or superseded; a
+value-only path promotes each value from what its consuming Application runs.
 
 ### M7 — Continuous operation and scope decision
 
