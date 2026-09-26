@@ -410,9 +410,13 @@ spec:
   writes no receipt and is not an evidence level.
 - One rule selects values: promote, per value, the newest source revision whose
   evidence proves the required level. At `accepted` and `healthy`, that is the
-  revision each value's consumer runs now, so `promote` first takes a fresh
-  observation of the covered Applications. The observation is always stored in
-  the PromotionRecord; environment sources also record it in observed state.
+  revision each value's consumer ran in the newest recorded observation.
+- `nyl promote` never observes Argo CD itself: it reads only evidence recorded
+  beforehand, so it runs from a workstation without cluster credentials.
+  Observations are recorded by `nyl verify -e <env>` or a publication unit's
+  observe mode, typically in CI where Argo CD access exists. A path may set
+  `maxObservationAge`, such as `1h`, beyond which a recorded observation no
+  longer counts. The observation used is stored in the PromotionRecord.
 - All values of one promotion come from one consistent source state. At
   `published`, that is a single source revision: the newest at which every
   selected unit has a matching receipt or, for a target source, the newest
@@ -485,8 +489,7 @@ spec:
   - Without flags, at `published`, the newest state in which every unit the
     target also selects has a current receipt.
   - Without flags, at `accepted` or `healthy`, the state whose publication the
-    covered Applications run now, from a fresh observation; mixed revisions
-    block.
+    newest recorded observation shows running; mixed revisions block.
   - `--revision <source commit>` takes the newest qualifying state with that
     source commit, and `--state-revision <desired commit>` takes exactly one.
     An explicitly chosen state satisfies `accepted` or `healthy` through a
@@ -509,11 +512,17 @@ spec:
   against the path, showing the level each reaches or why not, the values it
   would carry, and which one the target runs now; `nyl promote … --dry-run`
   shows the chosen state and the exact change without writing anything.
-- Evidence covers the whole source, not only the selected values: in that dev
+- Evidence covers the whole source, not only the selected values: in that
   state, every unit the target environment also selects has a current
-  receipt, and at `accepted` or `healthy` every covered Application runs that
-  state's publication. Mixed revisions block, because one source commit must
-  fit every value.
+  receipt, and at `accepted` or `healthy` every such publication unit reaches
+  the level for that state's publication. A publication unit's level
+  aggregates all Applications it generates, as recorded in its observation:
+  `accepted` when all of them run that publication, `healthy` when all are
+  also Healthy. Mixed revisions block, because one source commit must fit
+  every value. A path may exclude named Applications it knowingly accepts as
+  unhealthy; they leave the aggregate for that path and are listed in the
+  PromotionRecord. Without any recorded observation, a publication unit
+  reaches only `published`.
 - `record` decides where the PromotionRecord lives. With `record: state`, the
   default, it is written into the target's desired state, as a pull request
   against the desired ref under `changeGate: pullRequest`. With
@@ -588,8 +597,10 @@ spec:
   locked `fromGit` blob, or the binding at the recorded source commit. It then
   verifies the value against the recorded `@input` digest. A publication made
   from a dirty source worktree is not a promotion source.
-- A non-orchestrated target records no observations of its own, so `accepted`
-  and `healthy` come from the fresh observation taken when promoting.
+- A non-orchestrated target has no state to record observations in, so a
+  target source at `accepted` or `healthy` needs `nyl promote --observe`, the
+  one explicit opt-in to observing during promotion, with credentials for the
+  Argo CD cluster; otherwise it promotes at `published`.
 - The PromotionRecord adds, per value, the source target, publication
   repository, branch, and commit, and the input digest to its lineage, plus the
   observation that proved the set.
@@ -644,10 +655,17 @@ Cluster.
   different Applications run, every value names the same commit, so the audit
   trail stays a single commit; otherwise each value names the commit that last
   changed its own Application.
-- **Coverage.** By default, the Applications whose Releases produced the
-  promoted values must be accepted or healthy. A PromotionPath may add
-  Applications that must be healthy at whatever publication they run, without
-  contributing values.
+- **Coverage.** For a path that promotes only values, the Applications whose
+  Releases produced the promoted values must be accepted or healthy, and a
+  PromotionPath may add Applications that must be healthy at whatever
+  publication they run, without contributing values. For a path that promotes
+  the target's source, coverage is every Application of every publication unit
+  the target also selects, aggregated per unit as described above.
+- **Where Application data lives.** Only a `KubernetesPublication` unit knows
+  Applications, because it generated them. Its observation records every
+  Application's running revision and health, together with the unit's
+  aggregate level for the matched publication; promotion decisions use the
+  aggregate, and the per-Application list explains why a unit fell short.
 - **Manual syncs.** For a path that promotes only values, Applications synced
   to different publications do not block promotion. Promotion blocks only when
   a covered Application runs a revision that matches no source publication, or
@@ -1016,7 +1034,6 @@ reasons to delay independent work.
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
 | Recorded evidence from people and tests: a `nyl confirm healthy`-style command for when observation is not configured or possible, and negative or positive results (a failed manual test, an automated test run) recorded against a deployment, so its evidence can move from healthy to unhealthy and gate promotion | M6 |
-| Coverage for promoted sources: which Applications must be healthy when a path promotes the source but few or no values | M6 |
 
 ## Implementation reference points
 
