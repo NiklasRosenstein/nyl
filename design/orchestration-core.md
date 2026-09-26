@@ -1273,7 +1273,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    gives it an `uncertain` condition rather than letting it run again. Units
    the dead run was executing without a checkpoint get an `uncertain`
    condition. All of this lands in the new run's transition commit, under
-   `imported` and `recovered`.
+   `imported` and `recovered`. A checkpoint that arrives after its unit was
+   already marked `uncertain`, because a runner that lost its lease finished
+   the unit late, never clears the condition by itself: later runs import it
+   as evidence, and `nyl recover` shows it, with its receipt or failure, next
+   to the condition for the operator to decide on.
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
    expects the run's own lease commit, so either both land or neither does.
