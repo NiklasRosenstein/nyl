@@ -1014,8 +1014,8 @@ reasons to delay independent work.
 | Approver lookup for CI systems other than GitHub | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
-| Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod | M6 |
-| Whether a `revision`-only environment can be a promotion target, given squash merges and pending promotion pull requests | M6 |
+| Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
+| Recorded evidence from people and tests: a `nyl confirm healthy`-style command for when observation is not configured or possible, and negative or positive results (a failed manual test, an automated test run) recorded against a deployment, so its evidence can move from healthy to unhealthy and gate promotion | M6 |
 | Shared catalogs: how targets contribute catalog files without writing outside their prefix, and who owns the shared manifest across Nyl versions | M5 |
 | Coverage for promoted sources: which Applications must be healthy when a path promotes the source but few or no values | M6 |
 
