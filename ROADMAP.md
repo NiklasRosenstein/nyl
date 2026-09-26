@@ -1171,7 +1171,9 @@ byte-identical output to the previous release.
   defaults, ordered by those references, each environment with its own lease
   and transition commit.
 - [ ] Implement approvals bound to the desired document, with recorded approval
-  sources, and the common `env` credential admission.
+  sources and identity (`verified`, `asserted`, `local`), the GitHub approver
+  lookup and the `[approval] lookup` hook, and the common `env` credential
+  admission.
 - [ ] Implement pinned source worktrees, reachability checks against protected
   refs, and content-based execution keys.
 - [ ] Prove stale-evidence blocking, competing runners, and recovery after an
@@ -1289,7 +1291,7 @@ reasons to delay independent work.
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
-| Approver lookup for CI systems other than GitHub | M3 |
+| Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 

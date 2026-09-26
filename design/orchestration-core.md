@@ -1042,7 +1042,7 @@ receipt:
   startedAt: 2026-09-24T10:00:00Z
   finishedAt: 2026-09-24T10:07:12Z
   versions: {nyl: 0.7.0, tofu: 1.9.5}
-  approval: {by: alice, source: github-environment production https://github.com/acme/infra/actions/runs/1234, digest: sha256:9f2c…}
+  approval: {by: [alice], identity: verified, source: github-environment production https://github.com/acme/infra/actions/runs/1234, digest: sha256:9f2c…}
   provenance:
     /variables/vpc_id: {unit: network, uid: 8c1f…, executionKey: sha256:…, observedCommit: 41f0…}
   outputs: {host: db.dev.internal, port: 5432}   # declared, non-sensitive only
@@ -1119,7 +1119,7 @@ nyl: reconcile dev (2 executed, 1 failed, 1 blocked)
 
 units:
   network:    {result: current}
-  database:   {result: executed, executionKey: sha256:…, approval: {by: alice, source: …, digest: sha256:9f2c…}}
+  database:   {result: executed, executionKey: sha256:…, approval: {by: [alice], identity: verified, source: …, digest: sha256:9f2c…}}
   web-image:  {result: failed, category: tool-error, retryable: true}
   kubernetes: {result: blocked, reason: web-image has no current receipt}
 recovered: []
@@ -1250,18 +1250,42 @@ spec:
   claims.
 
 Recording. Each approval is recorded in the receipt and in the transition
-commit's summary: who approved (`by`), where (`source`), and the digest.
+commit's summary: who approved (`by`, a list, because a gate may require
+several reviewers), where (`source`), the digest, and how Nyl knows the
+identity (`identity`). The identity is an audit record, not authorization: the
+CI system decides who may run a job that passes `--approve`, and Nyl records
+honestly how it learned who did.
+
+| `identity` | Meaning |
+| --- | --- |
+| `verified` | Read from the CI system: a built-in lookup or the project's lookup hook |
+| `asserted` | Passed by the invocation with `--approved-by` |
+| `local` | The Git user of a workstation run |
 
 - `--approved-by` and `--approval-source` set the identity and source
-  explicitly. Without them, a local run records the Git user, and a CI run
-  records the CI run URL.
+  explicitly and are recorded as `asserted`; they remain available with every
+  CI system. Without them, a CI run uses a lookup when one applies and
+  otherwise records the CI run URL as the source with no approver, and a
+  local run records the Git user.
+- A lookup hook covers CI systems without a built-in lookup: `[approval]
+  lookup = ["./ci/approvers.sh"]` in `nyl.toml` names a command that Nyl runs
+  with the run context (environment, units, digests) in environment variables
+  and that prints `{"by": [...], "source": "...", "url": "..."}`. Nyl records
+  the result as `verified`, naming the hook. The hook is optional, and it is
+  trusted as much as the project's CI configuration, where the approval gate
+  itself is defined. A failing or invalid hook fails the invocation before any
+  effect, exit 1.
+- `nyl attest` records attesters through the same mechanism.
 - Approvals can be automated with a CI approval gate. With GitHub environment
   protection rules, a `plan` job runs `nyl plan --output json` and passes the
   digest as a job output; an apply job with `environment: production` runs
   `nyl reconcile --approve database=<digest>` only after GitHub's reviewers
   approve. When a GitHub token with read access to Actions is available, Nyl
   reads the run's approvers from GitHub's run-approvals API and records them as
-  the approval's `by`.
+  the approval's `by`, `verified`. GitHub is the only built-in lookup in M3; a
+  GitLab lookup through protected-environment deployment approvals is planned
+  for later, and until then GitLab and other CI systems use the hook or
+  `--approved-by`.
 
 ```yaml
 # .github/workflows/production.yaml (excerpt)
@@ -2096,6 +2120,6 @@ added in the meantime waits for that and then receives a new uid. When
 
 | Question | Needed by |
 | --- | --- |
-| Approver lookup for CI systems other than GitHub | M3 |
+| Built-in approver lookups beyond GitHub, starting with GitLab | After M3 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
