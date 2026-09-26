@@ -302,7 +302,7 @@ spec:
         clusterRef: {name: dev}
         argocdRef: {name: dev}
         catalogApplication:
-          shared: {pathPrefix: previews, name: previews}   # one self-managing catalog for every instance
+          shared: {name: previews}   # one self-managing catalog for every instance
         applicationGroupSelector: {matchLabels: {app: web}}
         publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
         values: {namespace: '{{ environment.name }}-web'}   # its own namespace; names come from the target name
@@ -455,7 +455,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, recording `pr-123`'s commit as its source and `expiresAt` now plus 7 days |
-| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees under `pr-123/` and its Applications and AppProject in `previews/_nyl/catalog/`, writing the shared catalog manifest because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at `pr-123`'s tip |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at `pr-123`'s tip |
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |

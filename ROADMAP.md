@@ -1016,7 +1016,6 @@ reasons to delay independent work.
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
 | Recorded evidence from people and tests: a `nyl confirm healthy`-style command for when observation is not configured or possible, and negative or positive results (a failed manual test, an automated test run) recorded against a deployment, so its evidence can move from healthy to unhealthy and gate promotion | M6 |
-| Shared catalogs: how targets contribute catalog files without writing outside their prefix, and who owns the shared manifest across Nyl versions | M5 |
 | Coverage for promoted sources: which Applications must be healthy when a path promotes the source but few or no values | M6 |
 
 ## Implementation reference points

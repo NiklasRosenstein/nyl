@@ -398,8 +398,8 @@ in two phases, both through Git:
 1. **Remove the workload Applications.** The unit publishes a tree whose
    `_nyl/catalog` still contains the catalog Application and the generated
    AppProjects but no workload Applications; the workload trees stay. In a
-   shared catalog, the target's AppProjects stay and the catalog manifest is
-   untouched. The catalog is never empty, so Argo CD's
+   shared catalog, the target's catalog directory keeps its AppProjects and
+   the shared manifest is untouched. The catalog is never empty, so Argo CD's
    empty-tree guard and the catalog's own self-prune policy never come into
    play, and the AppProjects outlive the Applications that use them. This commit is the teardown's `published`
    evidence. Argo CD's catalog sync prunes the workload Applications, and
@@ -492,30 +492,46 @@ Argo CD. Nyl leaves the choice to the project:
 | Setup | Target setting | Created by | Removed by |
 | --- | --- | --- | --- |
 | Self-managing catalog per target (default) | `catalogApplication.enabled: true` | An operator applies the generated catalog Application once; it then manages itself | Nothing: after phase 2 the catalog Application and AppProjects remain |
-| One self-managing catalog shared by many targets, such as every preview on a branch | `catalogApplication.shared: {pathPrefix, name}` | An operator applies the shared catalog Application once; each target's objects appear in it on the target's first publish | The shared catalog prunes each target's objects as phase 1 and phase 2 remove them; the catalog itself stays until the shared catalog is decommissioned |
+| One self-managing catalog shared by many targets, such as every preview on a branch | `catalogApplication.shared: {name}` | An operator applies the shared catalog Application once; it then manages itself, and each target's objects appear in it on the target's first publish | The shared catalog prunes each target's objects as phase 1 and phase 2 remove them; the catalog itself stays until the shared catalog is decommissioned |
 | One parent Application the project writes itself | `catalogApplication.enabled: false` | The parent, applied once, syncs `*/_nyl/catalog/*` from the branch | The parent prunes each target's objects as phase 1 and phase 2 remove them |
 | An ApplicationSet generating one catalog Application per target | `catalogApplication.enabled: false` | The ApplicationSet, when `<prefix>/_nyl/catalog` appears | The ApplicationSet, when phase 2 removes it |
 
-A shared catalog is the recommended setup for previews:
+A shared catalog is the recommended setup for previews: one Argo CD
+Application manages every instance, instead of one catalog Application per
+instance.
 
-- Its manifest lives at
-  `<shared prefix>/_nyl/catalog/applications/<argocd namespace>/<name>.yaml`
-  and sources `<shared prefix>/_nyl/catalog` recursively. Each target
-  publishes its workload Applications and AppProjects into the same
-  `applications/` and `projects/` directories as a per-target catalog does,
-  next to its workload trees under its own prefix; the layout is unchanged
-  because Application and AppProject names are already unique within the
-  Argo CD namespace. Targets sharing a catalog must publish to the same
-  repository and revision.
-- Ownership is split along files. A target's ownership index covers its
-  prefix and the catalog files it rendered. The catalog manifest carries the
-  owner `catalog:<name>`: its bytes are determined by the shared block and the
-  ArgoCDInstance defaults alone, so every target renders it identically, and
-  any target publishes it when it is absent or differs, which happens only
-  after a Nyl upgrade or a settings change.
+```text
+previews branch
+  _nyl/shared/previews/catalog.yaml     # the shared catalog Application, managing itself
+  _nyl/shared/previews/_nyl/index.json  # its ownership index, owner catalog:previews
+  pr-123/_nyl/catalog/…                 # pr-123's Applications and AppProjects, as for any target
+  pr-123/web/…                          # pr-123's workload trees
+```
+
+- Each target stays an ordinary target in its own prefix, with today's catalog
+  layout, index, and reconciliation. `shared` implies
+  `catalogApplication.enabled: false` for the target, so its prefix contains
+  no catalog Application, only its Applications and AppProjects. Targets
+  sharing a catalog must publish to the same repository and revision.
+- The shared catalog Application sources the branch root recursively with
+  `directory.include: '{_nyl/shared/<name>/*.yaml,*/_nyl/catalog/*}'`, so it
+  syncs its own manifest and every target's catalog directory, and nothing
+  else. Argo CD matches `include` against each file's path relative to the
+  source path with gobwas globs compiled without separators, so `*` also
+  matches across `/`; this holds for Argo CD 2.8 through current releases.
+- The shared manifest lives under the reserved prefix `_nyl/shared/<name>/`
+  with its own ownership index, owner `catalog:<name>`, so no target ever
+  writes outside its own prefix. Nyl renders it from the `shared` block and
+  the ArgoCDInstance's catalog defaults.
+- The manifest has one writer in normal operation: the scheduled fleet
+  reconcile of the template, which runs at the default branch's commit and
+  Nyl version, republishes it when it differs. A target's publish creates it
+  only when it does not exist yet, and otherwise warns when its own rendering
+  would differ, so pull requests running different Nyl versions never
+  overwrite each other. `nyl build` on the template renders it on demand, and
+  `--push` publishes it.
 - Nothing is reconciled from state: Git holds the other targets' files, and
-  a publish removes only files in the publishing target's index. Concurrent publishes from two targets touch disjoint files and
-  serialize on the branch like any two publications.
+  a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings.
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
   the catalog rows become `external: not checked`, which the preflight reports
