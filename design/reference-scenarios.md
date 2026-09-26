@@ -229,7 +229,7 @@ metadata: {name: dev-to-prod}
 spec:
   from: {environment: dev}
   to: {environment: prod}
-  evidence: healthy
+  evidence: attested
   values:
     webImage: {select: {unit: web-image, artifact: image, pointer: /reference}}
 ---

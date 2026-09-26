@@ -96,6 +96,9 @@ spec:
   still run in parallel; their pushes serialize on the ref and, touching
   disjoint paths, rebase under the transition commit conflict rule. Branch
   protection and retention are then shared.
+- `attestations` declares environment-wide attestations, such as `[qa]` for
+  manual QA of the whole environment, which `nyl attest` without `--unit`
+  records for the environment's current state (see [Attestations](#attestations)).
 - `protectedRefs` lists the refs that pinned commits and run source commits
   must be reachable from; `allowUnprotectedSource` relaxes that for run source
   commits (see [Pinned commits](#pinned-commits)).
@@ -277,16 +280,16 @@ spec:
   current receipt first, for ordering without a data reference. References add
   dependencies implicitly.
 - A `dependsOn` entry or a `fromUnit` reference may require stronger evidence
-  from its producer with `evidence: published | accepted | healthy` (default
-  `published`, which is a current receipt). `accepted` and `healthy` use the
-  levels defined in the roadmap's health evidence section, so they apply only
-  to producers that record them, such as a `KubernetesPublication` in
-  `mode: observe`; requiring them from any other producer is a resolution
-  error. A consumer whose producer lacks the evidence is `blocked` on it:
+  from its producer with `evidence: published | attested` (default
+  `published`, which is a current receipt) and `attestations`, which names the
+  producer's attestations to require instead of all it declares (see
+  [Attestations](#attestations)). Naming an attestation the producer does not
+  declare is a resolution error. A consumer whose producer lacks the evidence
+  is `blocked` on it:
 
   ```yaml
   dependsOn:
-    - {unit: kubernetes, evidence: healthy}   # smoke tests run against healthy workloads
+    - {unit: kubernetes, attestations: [healthy]}   # smoke tests run against healthy workloads
   ```
 - Every kind that reads files names them in fields with the one Git source
   shape used everywhere, `source` for most kinds and `context`/`contexts` for
@@ -474,9 +477,11 @@ spec:
   execution fails as a non-retryable ownership violation, as reconciliation
   does today.
 - It publishes a `PublishedTree` artifact named `tree` with the published
-  commit and ownership-index digest (`published`). `mode: observe` additionally records Argo CD acceptance and
-  health observations (M5), per the roadmap's health evidence section. Direct
-  application through Nyl is not a mode in the initial scope.
+  commit and ownership-index digest (`published`). `mode: observe` additionally
+  records Argo CD observations and attests `accepted` and `healthy` (M5), per
+  the roadmap's health evidence section. Direct application through Nyl, which
+  would attest `healthy` from rollout status during `reconcile`, is not a mode
+  in the initial scope.
 
 **Teardown.** A publication unit supports teardown when its target is
 configured so that removing the manifests removes the workloads. It proceeds
@@ -930,6 +935,8 @@ observed/
   units/<unit>.yaml                          # ObservedUnit: latest receipt and condition
   units/<unit>/artifacts/<name>.yaml         # artifacts of the latest receipt
   units/<unit>/observations/<type>.yaml      # latest observation per type (drift, health)
+  units/<unit>/attestations/<name>.yaml      # latest attestation per name for the current receipt
+  attestations/<name>.yaml                   # environment-wide attestations for the current state
 ```
 
 With separate refs, `desired/` exists only on the desired ref and `observed/`
@@ -937,7 +944,7 @@ only on the observed ref; `state.yaml` exists on both.
 
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
-`ObservedUnit`, `Observation`, `Lease`, `Run`, and `Signal`; artifacts use their own
+`ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form, so formatting never affects
@@ -1053,6 +1060,40 @@ condition: null
 - `condition` records the latest failure or uncertainty and stays until the
   unit next succeeds or an operator runs `recover`. A condition does not remove
   the last receipt.
+
+### Attestations
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: Attestation
+name: healthy
+unit: {environment: dev, name: kubernetes, uid: 91c3…}   # absent for environment-wide attestations
+executionKey: sha256:…                # the receipt attested; environment-wide: the desired commit of the state
+result: pass                          # pass | fail
+at: 2026-09-25T16:40:00Z
+source: {driver: verify}              # or {driver: reconcile}, or {external: {by: alice, source: …, url: …}}
+reason: null
+details: {}                           # driver-specific, such as each Application's running publication
+```
+
+- Drivers report the attestations a unit declares from its resolved spec,
+  besides `spec.attestations` entries with `from: external`; an Environment's
+  `spec.attestations` declares environment-wide ones. The declared set is part
+  of the desired unit, so a receipt knows what it can be attested for.
+- A driver attests during `reconcile`, as part of its outcome, or during
+  `verify`, next to its drift observation. `nyl attest` records external
+  attestations under the lease, like every state-writing operation, and
+  `--wait-lease` lets a CI job wait for a running reconcile; a refused name
+  exits 1.
+- An attestation is valid only for the receipt or state it names. Declared
+  attestations of a new receipt are pending until attested; the newest per
+  name and receipt wins. Git history keeps earlier ones, so an older state
+  keeps the attestations it had.
+- `evidence: attested` requires every declared attestation of the producer to
+  pass; `attestations: [<name>, …]` requires the named ones instead. A failing
+  attestation fails that requirement until a newer one passes. Promotion
+  applies the same rules per unit and for the environment, as the roadmap's
+  promotion section describes.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -1255,7 +1296,7 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    `--wait-lease <duration>` waits up to that long for the lease instead, for
    jobs such as a preview's close job that must not give up. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
-   `teardown`, `hold`, `resume`, `recover`, `verify`, `state init`,
+   `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `state init`,
    `state move`, `state delete`, `state forget`), so only one runs per
    environment at a time.
 2. **Deadline.** The deadline is the latest finish time of the units executing,
@@ -1655,10 +1696,11 @@ trait Driver {
     fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe, build
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
+    fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
 
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
-    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Drift>>;
+    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Verification>>; // drift and attestations
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
 }
@@ -1669,7 +1711,7 @@ enum Supported<T> {
 }
 
 enum Outcome {
-    Succeeded { outputs: Outputs, artifacts: Vec<Artifact> }, // typed artifact documents
+    Succeeded { outputs: Outputs, artifacts: Vec<Artifact>, attestations: Vec<AttestationResult> },
     AwaitingApproval { digest: ChangeDigest },               // plan changed since approval; no effects
     Failed { category: FailureCategory, retryable: bool },
     Uncertain,
@@ -1791,6 +1833,10 @@ spec:
   `idempotent: true`.
 - `verify` exits 0 for clean, 2 for drift, and anything else for an error. It
   records a drift observation, never a receipt.
+- A command unit may declare attestations it produces itself, such as
+  `attestations: [{name: healthy}]` for a smoke test. The command, or its
+  `verify`, writes their results to `NYL_ATTESTATIONS` as one JSON object of
+  `pass` or `fail` per name; a declared name it leaves out stays pending.
 - There is no sandbox beyond the working directory and the environment; the
   command runs with the runner's permissions. Isolation such as containers is
   an M7 decision.
@@ -1804,7 +1850,8 @@ spec:
 | `plan` | Resolve and run driver planning for ready units and for `deleting` units with teardown intent (destroy plans); report units leaving the ownership set, blocked units, and incomplete plans; `--teardown` previews a requested teardown (see [Planning](#planning)) | Nothing |
 | `reconcile` | Resolve, then execute waves until nothing is ready | One transition commit per state ref |
 | `status` | Report each unit's state from one snapshot of both refs | Nothing |
-| `verify` | Run driver verification against current receipts | One observed commit with the latest observations |
+| `verify` | Run driver verification against current receipts | One observed commit with the latest observations and driver attestations |
+| `attest` | Record an external attestation for a unit's current receipt or the environment's current state (see [Attestations](#attestations)) | One observed commit |
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution | One observed commit |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
