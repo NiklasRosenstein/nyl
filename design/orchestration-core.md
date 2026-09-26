@@ -16,7 +16,7 @@ units never touches orchestration state.
 
 | Resources | API group |
 | --- | --- |
-| Environment, EnvironmentTemplate, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
+| Environment, EnvironmentGroup, EnvironmentTemplate, PromotionPath (and the existing GitRepository) | `gitops.nyl/v1` |
 | Built-in unit kinds: `Command`, `Terraform`, `OpenTofu`, `OciImage`, `KubernetesPublication` | `units.gitops.nyl/v1` |
 | Artifact kinds: `ContainerImage`, `PublishedTree` | `artifacts.gitops.nyl/v1` (see [Artifacts](#artifacts)) |
 | Plugin unit and artifact kinds | The plugin's own groups, such as `units.acme.example/v1` (see [Plugin drivers](#plugin-drivers)) |
@@ -25,7 +25,7 @@ Every resource in a unit group is a unit; the group identifies the family and
 the kind selects the driver, as `components.k8s.nyl/v1` does for component
 invocations. Discovery follows Git visibility across the project, like the
 rendered GitOps resources. `nyl create` and `nyl delete` gain `environment`,
-`unit`, and `promotion-path` resources; `nyl get` covers those declarations
+`environment-group`, `unit`, and `promotion-path` resources; `nyl get` covers those declarations
 and, with `-e`, an environment's units, outputs, artifacts, and promotions
 (see [Inspection](#inspection)).
 
@@ -79,6 +79,50 @@ spec:
 - `protectedRefs` lists the refs that pinned commits and run source commits
   must be reachable from; `allowUnprotectedSource` relaxes that for run source
   commits (see [Pinned commits](#pinned-commits)).
+
+### Environment groups
+
+Environments that belong together, such as the infrastructure and services
+environments of one stage or every environment on one cluster, can be named as
+an EnvironmentGroup. A group selects Environments by their literal
+`metadata.labels`, the same labels a `-l` selector matches, and can carry
+configuration they share:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: EnvironmentGroup
+metadata:
+  name: production
+spec:
+  environmentSelector:
+    matchLabels: {stage: production}
+  values:                                   # defaults beneath each Environment's values
+    cluster: prod-1
+  state:
+    repositoryRef: {name: platform-state}   # default state repository
+  protectedRefs: [main]                     # default for the members
+  allowUnprotectedSource: false
+```
+
+- Like an Environment, a group is static at discovery, and it selects declared
+  Environments only. Template instances are reconciled as a fleet with
+  `--template` (see [Template changes](#template-changes)).
+- Shared fields are defaults. `values` merge recursively beneath the
+  Environment's `values`, where the Environment wins, as target values win over
+  Cluster values; `state.repositoryRef`, `state.repository`, `protectedRefs`,
+  and `allowUnprotectedSource` apply where the Environment leaves them unset.
+  A group sets no refs, paths, sources, or unit selectors, which stay each
+  environment's own.
+- The defaults belong to the Environment's configuration, not to the
+  invocation: they apply whether an environment is reconciled through its
+  group, with `-e`, or by a selector, so the same source commit always renders
+  the same units and execution keys.
+- Groups that only select may overlap. An Environment selected by more than one
+  group that carries shared fields is a validation error naming the groups,
+  because the order of their defaults would be arbitrary.
+- An empty selector is rejected; a group lists its members explicitly by
+  labels. `nyl get environments -g <group>` shows the members and where each
+  effective shared field came from.
 
 ### Source
 
@@ -1705,6 +1749,52 @@ spec:
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so lifting a hold is `resume` and
 tearing down is `teardown`.
+
+### Multi-environment runs
+
+`plan`, `reconcile`, `status`, and `verify` accept several environments in one
+invocation, in any one of three forms:
+
+| Form | Selects |
+| --- | --- |
+| `-e a -e b` | The named environments |
+| `-l stage=production` | Declared Environments whose labels match the selector |
+| `-g production` | The members of an EnvironmentGroup |
+
+- A multi-environment run is a sequence of ordinary single-environment runs,
+  one per environment, in one invocation. Each takes its own lease, resolves
+  its own source, and writes its own transition commit; nothing is committed
+  across environments atomically, and running the environments one by one
+  reaches the same state.
+- Environments run in dependency order: producers before the environments that
+  reference them (see [Cross-environment references](#cross-environment-references)),
+  ties by name. A consumer reads its producers' state after their runs, so one
+  invocation can converge a chain that separate calls would converge over
+  several runs. References to environments outside the selection are read as
+  they are.
+- Every environment runs, whatever happened to the ones before it. A consumer
+  of a producer that failed or is waiting has references that block, exit 2,
+  while its independent units still reconcile.
+- An environment whose lease is held blocks for `--wait-lease` like a
+  single-environment run and is otherwise reported as `busy` and exit 2,
+  because the invocation asked for it explicitly; unlike the preview fleet, it
+  is not left out of the exit category.
+- `plan` plans each environment against current state. A consumer's plan sees
+  its producers' current receipts, not what their plans would produce, so a
+  unit that reads an output the producer's plan changes is shown as waiting
+  for that producer, naming the producer unit and its planned change.
+- Unit-scoped options qualify units with their environment: `--unit <env>/<u>`
+  and `--approve <env>/<unit>=<digest>`; an unqualified unit name is rejected.
+  `--approve-all`, `--allow-teardown`, and `--allow-dependents` apply to every
+  selected environment. `--source`, `--template`, and `--param` stay
+  single-environment options.
+- `teardown`, `hold`, `resume`, `recover`, `promote`, `lease break`, and the
+  `state` commands take exactly one environment, because each is a deliberate
+  act on one environment's state.
+- The typed report has one section per environment in run order, and the exit
+  category is the most severe across them under the usual precedence (see
+  [Inspection](#inspection)). `--output json` lists the environments with
+  their own categories.
 
 ### Planning
 

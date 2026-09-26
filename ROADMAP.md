@@ -124,6 +124,7 @@ itself is an M7 decision, not part of the initial scope.
 | --- | --- |
 | Project | Authoring and configuration boundary |
 | Environment | Orchestration namespace: its units, state refs, and promotion policy |
+| EnvironmentGroup | Label-selected set of Environments reconciled together, with shared defaults |
 | Unit | Independently identified lifecycle boundary within one environment |
 | DeploymentTarget | Kubernetes rendering and publication configuration, unchanged |
 | PromotionPath | Declared mapping of selected values from a source environment to a target environment |
@@ -135,7 +136,7 @@ DeploymentTarget keeps its Kubernetes meaning; non-Kubernetes units never
 supply cluster or Argo CD configuration.
 
 Orchestration is still GitOps, so its resources join the existing groups.
-Environment and PromotionPath use `gitops.nyl/v1`, next to the shared
+Environment, EnvironmentGroup, and PromotionPath use `gitops.nyl/v1`, next to the shared
 GitRepository, which also names environment state repositories. Built-in unit
 kinds (`Command`, `Terraform`, `OpenTofu`, `OciImage`, `KubernetesPublication`) use
 `units.gitops.nyl/v1`, where every kind is a unit and the kind selects the
@@ -590,6 +591,12 @@ cluster, a deploy branch, and a state ref:
   branch and reuses no digests from another environment, because the merged
   branch can differ from anything the earlier environment ran.
 
+Environments split this way are still reconciled together when that is
+convenient: `nyl reconcile` accepts repeated `-e`, a label selector with
+`-l`, or an EnvironmentGroup with `-g`, and runs producers before consumers,
+each with its own lease and transition commit. A group can also carry defaults
+its members share, such as common values and the state repository.
+
 **Promotion sources.** `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from `value`,
 `fromGit`, or `fromPublication` bindings (including `carry`) feed an
@@ -965,6 +972,10 @@ byte-identical output to the previous release.
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
   units with `fromUnit` references, including `--local` runs with and without
   remote state.
+- [ ] Implement cross-environment references and multi-environment runs by
+  repeated `-e`, a label selector, or an EnvironmentGroup with shared
+  defaults, ordered by those references, each environment with its own lease
+  and transition commit.
 - [ ] Implement approvals bound to the desired document, with recorded approval
   sources, and the common `env` credential admission.
 - [ ] Implement pinned source worktrees, reachability checks against protected
@@ -1074,7 +1085,6 @@ reasons to delay independent work.
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
-| Reconciling related environments together: ordered multi-environment runs (`nyl reconcile -e a -e b` or a label selector, ordered by cross-environment references, each with its own lease and transition commit), or an `EnvironmentGroup` resource that names such a set; leaning to the former first | M3 |
 | Ref layout for orchestration state: which Nyl refs live under `refs/nyl/…` instead of branches (leases, runs, signals, keep refs), and when desired and observed state must be branches, such as for promotion pull requests | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
