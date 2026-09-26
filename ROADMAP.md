@@ -564,6 +564,31 @@ spec:
 - Prod-only changes, such as a replica count, reach prod with the next
   promotion of a commit that contains them. Hotfixes that cannot wait for dev
   use a `revision` such as a `release/prod` branch.
+- A path that promotes a source may narrow the health it requires to named
+  ApplicationGroups, `coverage: {applicationGroups: [web]}`: only those
+  groups' Applications must reach the level. It never narrows what moves; the
+  promoted commit still carries every group's definitions.
+
+**Splitting environments by release cadence.** A source promotion moves
+everything in one environment together, and health is aggregated per
+publication unit, which is one target. Parts that should move and gate
+independently therefore belong in separate environments, which may share a
+cluster, a deploy branch, and a state ref:
+
+- A cluster's platform components (ingress, autoscaling, observability, Argo CD
+  itself) in a `production-infra` environment with its own target, prefix,
+  and ApplicationGroups, promoted from `staging-infra`; the services built from
+  source in `production-services`, promoted from `staging-services` with their
+  image digests. Each gates on its own target's health, and services read the
+  infrastructure environment's outputs through cross-environment references.
+- The same shape without anything built from source: third-party charts on a
+  dev and a prod cluster, split into `core` and `apps` environments so a chart
+  upgrade proven in dev can reach prod without waiting for unrelated changes.
+- A production environment that follows a release branch instead of a
+  promotion, such as a `main` that receives merges from `develop` and hotfixes
+  of its own, is a `revision` environment: it builds its images from that
+  branch and reuses no digests from another environment, because the merged
+  branch can differ from anything the earlier environment ran.
 
 **Promotion sources.** `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from `value`,
@@ -1049,6 +1074,7 @@ reasons to delay independent work.
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
+| Reconciling related environments together: ordered multi-environment runs (`nyl reconcile -e a -e b` or a label selector, ordered by cross-environment references, each with its own lease and transition commit), or an `EnvironmentGroup` resource that names such a set; leaning to the former first | M3 |
 | Ref layout for orchestration state: which Nyl refs live under `refs/nyl/…` instead of branches (leases, runs, signals, keep refs), and when desired and observed state must be branches, such as for promotion pull requests | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |

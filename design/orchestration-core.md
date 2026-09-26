@@ -271,7 +271,29 @@ spec:
 | `fromUnit: {unit, output, pointer, evidence}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
 | `fromUnit: {unit, artifact, kind, pointer, evidence}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
 | `fromPromotion: {path, value}` | A value in a PromotionRecord in this environment's desired state | The record must exist; broken selectors are errors |
-| `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in a declared environment, read from a template instance only (see [Environment templates](#environment-templates-and-previews)) | As `fromUnit`, against the other environment's current receipt |
+| `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
+
+#### Cross-environment references
+
+Any environment may read units of a declared environment, for example when
+services in one environment consume the cluster facts that an infrastructure
+environment on the same cluster produces, or when previews use dev's network.
+
+- The producer must be a declared environment; template instances are
+  consumers only, because they are too short-lived to depend on.
+- The graph of environments that reference each other must be acyclic;
+  validation rejects a cycle and names it.
+- A reference is read-only and blocks like any reference, exit 2, while the
+  producer's receipt is not current. Separate `nyl reconcile` calls therefore
+  converge in any order: a consumer run before its producer waits, and the
+  next run after the producer resolves.
+- A unit that other environments reference is protected like a referenced unit
+  in its own environment. `plan` lists the environments and instances that
+  reference it, and a teardown, replacement, or omission of it, including
+  `state delete --teardown` of its environment, refuses while they reference
+  it unless the invocation passes `--allow-dependents`, which the transition
+  commit records. Nyl finds dependents by reading the declared environments'
+  desired state and listing the templates' state locations.
 
 - References are structured objects, never template lookups, so every
   dependency edge is visible in the rendered spec. Templating may compute a
@@ -699,16 +721,9 @@ nyl get environments                                         # declared environm
   removing an instance.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
-  `fromUnit: {environment: dev, unit: network, output: vpcId}`. It is
-  read-only, allowed only from template instances to declared environments,
-  and blocks like any reference when the producer's receipt is not current.
-- A declared environment's unit that live instances reference is protected
-  like a referenced unit in its own environment. `plan` lists the instances
-  that reference it, and a teardown, replacement, or omission of it, including
-  `state delete --teardown` of its environment, refuses while instances
-  reference it unless the invocation passes `--allow-dependents`, which the
-  transition commit records. Nyl finds these instances by listing the
-  templates' state locations, as below.
+  `fromUnit: {environment: dev, unit: network, output: vpcId}`, under the
+  rules of [Cross-environment references](#cross-environment-references),
+  including the protection of the units they read.
 - Instances cannot be a PromotionPath source; previews build and test, and
   promotion starts from declared environments.
 
