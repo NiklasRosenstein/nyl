@@ -369,20 +369,21 @@ Everything Nyl reads or writes in the reference project, and who else uses it:
 | --- | --- | --- |
 | `main` | People, through pull requests | Nyl: dev runs from its worktree; `protectedRefs` default |
 | `pr-<n>` | People | Nyl: each preview instance runs from its pull request job's worktree, recorded in state (`allowUnprotectedSource`) |
-| `refs/nyl/keep/<instance>` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
+| `refs/nyl/<instance>/keep` | Nyl, on every instance reconcile; removed by `state delete` | Nyl: teardown after the branch is gone |
 | `deploy` | Nyl: `kubernetes` publishes `dev/` and `prod/` | Argo CD: the `dev` and `prod` catalog Applications, applied once by an operator |
 | `previews` | Nyl: each instance publishes `<instance>/`, catalog directory included; the fleet reconcile publishes the shared catalog under `_nyl/shared/previews/` | Argo CD: the shared `previews` catalog Application, applied once by an operator and managing itself |
 | `nyl/dev/desired`, `nyl/dev/observed`, same for `prod` | Nyl: one transition commit per operation | Nyl; people reviewing history; promotion pull requests target the desired ref (M6) |
 | `nyl/previews` | Nyl: every instance's state under its `state.path` | Nyl |
-| `nyl/<env>/lease`, `nyl/<env>/runs/<run-id>`, `nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
-| `refs/nyl/local/<env>/*` | Nyl `--local` runs, in the developer's clone only | Nyl |
+| `refs/nyl/<env>/lease`, `refs/nyl/<env>/runs/<run-id>`, `refs/nyl/<env>/signals/<run-id>` | Nyl, for the duration of a run | Nyl: `status`, takeover, confirmations |
+| `refs/nyl/<env>/local/*` | Nyl `--local` runs, in the developer's clone only | Nyl |
 
 Branch protection: `main` requires review; `deploy`, `previews`, and the state
-refs accept pushes from the CI identity and the operator group only, with force
-pushes and deletion disabled, except that Nyl creates and deletes the lease,
-run, and signal refs of each environment. Preview credentials can push
-`previews`, `nyl/previews`, keep refs, and the lease, run, and signal refs of
-preview instances (`nyl/pr-*/…`), and nothing else.
+branches accept pushes from the CI identity and the operator group only, with
+force pushes and deletion disabled. Preview credentials can push `previews`
+and `nyl/previews` among the protected branches. The refs under `refs/nyl/`
+are not branches, so the forge cannot protect them; they coordinate runs and
+authorize nothing, because every state change reaches a protected branch
+through the fenced push.
 
 ## Scenario 1: platform environment
 
@@ -455,7 +456,7 @@ Starts after scenario 1's step 6, so dev's `network` has a current receipt.
 | --- | --- | --- |
 | 1 | Branch `pr-123` from `main`; commit a change to `index.html` | A pull request is a branch |
 | 2 | CI job: `nyl reconcile -e pr-123 --template preview --param pr=123` → 0 | The instance is created: its `state.yaml` exists under `pr-123/` in the shared ref `nyl/previews`, recording `pr-123`'s commit as its source and `expiresAt` now plus 7 days |
-| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; keep ref `refs/nyl/keep/pr-123` points at `pr-123`'s tip |
+| 3 | The same run continues | `web-image` and `database` run (the latter reading dev's `vpcId`); `kubernetes` publishes to the `previews` branch: workload trees and its Applications and AppProject under `pr-123/`, without a catalog Application of its own, and creates the shared catalog manifest under `_nyl/shared/previews/` because it is the first instance; keep ref `refs/nyl/pr-123/keep` points at `pr-123`'s tip |
 | 4 | Branch `pr-124`; commit; CI job: `nyl reconcile -e pr-124 --template preview --param pr=124` → 0 | Two instances share one state ref and one deploy branch without conflicts; their Argo CD names differ |
 | 5 | Commit another change to `pr-123`; CI job: the same command for `pr-123` → 0 | The expiry is extended; only the changed units execute |
 | 6 | Squash-merge `pr-123` into `main` and delete the branch | The instance's recorded source commit is no longer on any branch |

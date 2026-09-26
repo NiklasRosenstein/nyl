@@ -47,6 +47,7 @@ spec:
     desiredRef: nyl/production/desired      # default nyl/<environment>/desired
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
     path: ''                                # optional directory within the refs; default the root
+    coordinationRefPrefix: refs/nyl/        # where leases, runs, signals, and keep refs live
   source: {revision: main, commit: 3e7b…}   # optional; omitted: the entry worktree's commit (see Source)
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
@@ -69,7 +70,24 @@ spec:
   `repoURL` and writing through its `publishURL`. Without either, state uses
   the source checkout's `origin` remote; CI should name a GitRepository.
 - `desiredRef` and `observedRef` may name the same ref; the layout is identical
-  either way (see [State layout](#state-layout)).
+  either way (see [State layout](#state-layout)). A short name is a branch,
+  the default, because state is the reviewable record: it can be protected,
+  its history is visible in the forge, and a promotion pull request needs a
+  branch as its base. A full `refs/…` name keeps state out of the branch list;
+  validation rejects it when a PromotionPath into the environment uses
+  `changeGate: pullRequest`.
+- `coordinationRefPrefix` places the refs Nyl creates and deletes on every
+  run, `<prefix><env>/lease`, `<prefix><env>/runs/<run-id>`, and
+  `<prefix><env>/signals/<run-id>` (see [Runs and leases](#runs-and-leases)),
+  and a template instance's keep ref, `<prefix><env>/keep`. The default custom
+  namespace keeps them out of the branch list and out of push-triggered CI;
+  a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
+  refs. Changing it goes through `nyl state move` (see
+  [Initialization and moves](#initialization-and-moves)).
+- Validation checks every configured state ref, and the coordination refs each
+  environment implies, for names that Git cannot hold together, such as a
+  shared state branch `nyl/previews` and an environment named `previews` whose
+  desired ref would be `nyl/previews/desired`, and names both sides.
 - `path` places the environment's state in a directory of those refs, so several
   environments can share one ref, each with its own `state.yaml`, `desired/`,
   and `observed/`. Leases stay per environment, so environments sharing a ref
@@ -516,7 +534,7 @@ confirmation travels through a signal ref instead of a second run:
 - `--confirm-removed` looks at the lease first. With no lease held, it
   confirms directly as above. When the lease holder is waiting on that unit's
   teardown, it pushes a `Signal` to the run's signal ref,
-  `nyl/<env>/signals/<run-id>`, naming the operator, the reason, the time, the
+  `refs/nyl/<env>/signals/<run-id>`, naming the operator, the reason, the time, the
   run ID, and the phase 1 commit it confirms. It reports where the
   confirmation went, such as `confirmation delivered to run 0b8f…
   (https://ci.example.com/runs/1234)`, and exits 0. When the lease holder is
@@ -748,11 +766,10 @@ nyl get environments                                         # declared environm
   template's ref pattern.
 - With `keepSource` (the default), Nyl keeps each instance's latest source
   commit fetchable with a keep ref in the source repository,
-  `refs/nyl/keep/<instance>`, moved by every reconcile and removed by
-  `state delete`. Teardown after the pull request branch is deleted or
-  squash-merged therefore still finds its source. It needs push access to that
-  ref pattern; hosts that reject custom refs can use
-  `refs/heads/nyl/keep/<instance>`. `keepSource: false` turns it off, and the
+  `refs/nyl/<instance>/keep` under the default `coordinationRefPrefix`, moved
+  by every reconcile and removed by `state delete`. Teardown after the pull
+  request branch is deleted or squash-merged therefore still finds its source.
+  It needs push access to that ref pattern. `keepSource: false` turns it off, and the
   pipeline should then remove instances before their branches disappear.
 - When an instance's recorded source commit cannot be fetched, teardown fails
   with a message suggesting `--source <revision>`. `nyl teardown --all` and
@@ -1222,13 +1239,13 @@ jobs:
 
 Coordination and progress live outside the desired and observed refs, in the
 same state repository, so one atomic push can cover a transition and its lease
-check:
+check. They sit under `coordinationRefPrefix`, shown here with its default:
 
 | Ref | Content | Lifetime |
 | --- | --- | --- |
-| `nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
-| `nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
-| `nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
+| `refs/nyl/<env>/lease` | One `Lease`: run ID, runner, operation, deadline, units executing | Created at run start, deleted at run end |
+| `refs/nyl/<env>/runs/<run-id>` | The run's `Run` record and a checkpoint commit per finished unit: its receipt or failure, and its artifacts | Deleted after its results reach a transition commit |
+| `refs/nyl/<env>/signals/<run-id>` | `Signal` records other invocations send to a running run, such as teardown confirmations (see [Teardown](#kubernetes-publication-unit)) | Deleted with the run ref: by the run after its transition commit lands, or by the run that imports it after a takeover |
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
    exists and has not expired, the run exits 2 and reports who holds it;
@@ -1287,6 +1304,14 @@ check:
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
 the units it is executing.
+
+The lease coordinates runs; it does not authorize them. Forges such as GitHub
+cannot protect refs outside branches and tags, so anyone with push access can
+delete a lease or run ref. Nothing depends on that being impossible: every
+state change reaches the protected state refs only through the fenced push,
+so a deleted lease makes the holder lose its lease and exit 4, and a deleted
+run ref loses only the checkpoints of a run that has not committed, whose
+units become `uncertain` for the next run, as after a crash.
 
 ### Recovery
 
@@ -1488,6 +1513,16 @@ initialization, move, or fresh start, each as its own event.
     converge against their existing backends, images are rebuilt, and
     non-idempotent commands run again. The command prints what that means and
     records a `state-initialized` event marked fresh.
+  - A move within one repository changes only the refs, for example from
+    branches to custom refs: `nyl state move -e <env> --desired-ref
+    refs/nyl/<env>/desired --observed-ref refs/nyl/<env>/observed`.
+  - `state.yaml` also records the coordination prefix. A run takes the lease at
+    the configured prefix and, holding it, refuses when `state.yaml` records
+    another. `nyl state move -e <env> --coordination-refs <prefix>` changes it:
+    it holds the lease at both prefixes, fails while a run ref exists at the
+    old one, and records the new prefix in a transition commit. A run from an
+    older source commit then takes the old lease, reads the new prefix, and
+    refuses, so no two runners can hold leases at different prefixes.
 - A location whose `state.yaml` names a different environment is an error, so
   two environments can never share state by accident.
 
@@ -1503,7 +1538,8 @@ later continues from the state those runs recorded.
 without a remote and for scratch experiments:
 
 - `nyl state init -e <env> --local` starts local state from scratch at local
-  refs `refs/nyl/local/<env>/desired` and `refs/nyl/local/<env>/observed`,
+  refs `refs/nyl/<env>/local/desired` and `refs/nyl/<env>/local/observed`,
+  which are never pushed and ignore `coordinationRefPrefix`,
   for an environment with no remote state.
 - Otherwise the first local run for an environment copies the remote state refs
   to those local refs; later local runs continue from them. `--local --reset`
@@ -1511,7 +1547,7 @@ without a remote and for scratch experiments:
 - Local runs write transition commits and run checkpoints only to local refs,
   with a `Nyl-Local: true` trailer, and never push state.
   `nyl status -e <env> --local` shows the local view.
-- A local run takes the remote lease (`nyl/<env>/lease`), because the lease is
+- A local run takes the remote lease (`refs/nyl/<env>/lease`), because the lease is
   coordination, not state: a local run and a CI run of the same environment
   never execute at the same time. This needs push access to the lease ref.
 - `--local-lease` explicitly opts into a local lease instead, for working

@@ -92,6 +92,9 @@ exact values proven in one environment to the next.
 - Promotion of native tool state; each environment keeps its own Terraform
   backend and lock.
 - A web dashboard, hosted service, or highly available controller fleet.
+  A later candidate is a Git-speaking service in front of the state
+  repository that gates writes to the `refs/nyl/` coordination refs, which
+  forges cannot protect, and offers a forge-like view of orchestration state.
 - Broad driver coverage or a plugin marketplace.
 
 A command invoked locally or in CI is the initial execution model. Events such
@@ -749,7 +752,7 @@ Cluster.
 | Terraform resource state | Terraform/OpenTofu backend |
 | Credentials and private keys | Secret store or execution environment |
 | Render cache | Disposable local storage |
-| Execution coordination | A per-environment lease ref and disposable per-run checkpoint refs, outside the desired and observed refs |
+| Execution coordination | A per-environment lease ref and disposable per-run checkpoint and signal refs, outside the desired and observed refs: custom `refs/nyl/<env>/…` refs by default, or a branch prefix; desired and observed state are branches by default |
 
 Each Environment names a state repository (the source repository by default)
 and a desired and an observed ref. They may be the same ref; the layout uses
@@ -963,7 +966,9 @@ byte-identical output to the previous release.
 
 - [ ] Implement environments, YAML state files with published schemas,
   `nyl state init`/`move`/`forget`/`delete` (including decommissioning declared
-  environments), leases and run checkpoints, and one
+  environments and moves between branches and custom refs), leases and run
+  checkpoints under a configurable coordination ref prefix, validated against
+  GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one
   transition commit per operation with a machine-readable summary, pushed
   atomically with the lease check.
 - [ ] Support SSH keys and HTTPS tokens, besides the SSH agent, for state
@@ -1085,7 +1090,6 @@ reasons to delay independent work.
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Approver lookup for CI systems other than GitHub | M3 |
-| Ref layout for orchestration state: which Nyl refs live under `refs/nyl/…` instead of branches (leases, runs, signals, keep refs), and when desired and observed state must be branches, such as for promotion pull requests | M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod; a revision-following environment is not a promotion target, so hotfixes need their own path | M6 |
