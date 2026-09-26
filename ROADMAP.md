@@ -445,16 +445,20 @@ spec:
   promoted source commit and variables against staging's own backend.
 
 **Promoting an environment's source.** An environment whose `source` is
-`fromPromotion`, or a `revision` with a `commit` lock, runs its definitions
-at a source commit that dev proved, so a change to what the code does reaches
-it only through promotion. Values then carry only results that must not be
-rebuilt, such as image digests.
+`fromPromotion` runs its definitions at a source commit its promotion path's
+source proved, so a change to what the code does reaches it only through
+promotion. Values then carry only results that must not be rebuilt, such as
+image digests. A `revision` with a `commit` lock is an ordinary lock that
+`nyl update source-locks` moves; it is never a promotion target and cannot
+bind `fromPromotion`.
 
 ```yaml
 # config/environments/prod.yaml
 spec:
   source:
-    fromPromotion: {path: dev-to-prod}
+    fromPromotion:
+      path: dev-to-prod
+      record: state             # default; or `source`, see below
 ---
 apiVersion: gitops.nyl/v1
 kind: PromotionPath
@@ -468,27 +472,76 @@ spec:
       select: {unit: web-image, artifact: image, pointer: /reference}
 ```
 
-- The unit of promotion is one recorded dev state: a transition commit pair
-  that ties together dev's source commit, desired documents, and receipts
-  with their artifacts. The PromotionRecord records that state's desired and
-  observed commits, its source commit, and every value, so the promoted
-  source and the promoted values always come from the same dev run.
+- The unit of promotion is one recorded state of the path's source: a
+  transition commit pair, pushed together with one `Nyl-Run-Id`, that ties
+  together the source commit, the desired documents, and the receipts with
+  their artifacts. The PromotionRecord records that state (`from`: the source
+  environment, run, and desired and observed commits, or a target source's
+  publication commit), its source commit, and every value read from it, so
+  the promoted source and the promoted values always come from the same run.
+  Chains compose: a QA environment promoted from dev is itself a source whose
+  states a `qa-to-prod` path promotes.
+- Choosing the state:
+  - Without flags, at `published`, the newest state in which every unit the
+    target also selects has a current receipt.
+  - Without flags, at `accepted` or `healthy`, the state whose publication the
+    covered Applications run now, from a fresh observation; mixed revisions
+    block.
+  - `--revision <source commit>` takes the newest qualifying state with that
+    source commit, and `--state-revision <desired commit>` takes exactly one.
+    An explicitly chosen state satisfies `accepted` or `healthy` through a
+    recorded observation of its own publication, such as one written by the
+    publication unit's observe mode; the record marks the evidence as
+    recorded, with its time. Only a state with no such observation needs
+    `--evidence published`, recorded as an override.
+  - Rolling back is promoting an older state:
+    `nyl promote dev-to-prod --revision S1 --reason "…"`. The target's own
+    units then run at the older source commit, and their plans and approvals
+    show what that changes.
+- Before recording, `nyl promote` checks that every promoted artifact still
+  exists, for images with `docker buildx imagetools inspect`, and refuses if
+  one is gone. A path's `verifyArtifacts: false` or the invocation's
+  `--no-verify-artifacts` skips the check, for runners without registry
+  access; the record then says `artifactsVerified: false`.
+- Inspection: `nyl get states -e <env>` lists an environment's recorded states
+  with source commit, results, publication, and recorded health;
+  `nyl get promotion-candidates <path>` evaluates the path's source states
+  against the path, showing the level each reaches or why not, the values it
+  would carry, and which one the target runs now; `nyl promote … --dry-run`
+  shows the chosen state and the exact change without writing anything.
 - Evidence covers the whole source, not only the selected values: in that dev
   state, every unit the target environment also selects has a current
   receipt, and at `accepted` or `healthy` every covered Application runs that
   state's publication. Mixed revisions block, because one source commit must
   fit every value.
-- `nyl promote` moves the target's pin in the form it has: it records the
-  source commit in the PromotionRecord for `fromPromotion`, writes the
-  `commit` lock into the Environment file for `revision` with `commit`, and
-  opens a pull request merging the commit into `revision` for `revision`
-  alone; `changeGate: pullRequest` turns the first two into pull requests as
-  well. An environment that follows its entry worktree is not a promotion
-  target for its source.
-- A run uses a PromotionRecord's values only when the record's source commit
-  is the run's source commit, or an ancestor of it for a `revision` source.
-  Until a pending source change merges, the target's `fromPromotion` bindings
-  block instead of mixing new values with an old source.
+- `record` decides where the PromotionRecord lives. With `record: state`, the
+  default, it is written into the target's desired state, as a pull request
+  against the desired ref under `changeGate: pullRequest`. With
+  `record: source`, `nyl promote` writes it into the Environment's own
+  `source` block, as a pull request against source under
+  `changeGate: pullRequest`:
+
+  ```yaml
+  source:
+    fromPromotion:
+      path: dev-to-prod
+      record: source
+      promoted:                        # written by nyl promote, never by hand
+        sourceCommit: 3e7b9c…
+        from: {environment: dev, run: 0b8f6c1e-…, desiredCommit: 77aa…, observedCommit: 41f0…}
+        values: {webImage: registry.example.com/web@sha256:4f0c…}
+        evidence: {level: healthy, observed: recorded, at: 2026-09-25T16:40:00Z}
+        artifactsVerified: true
+  ```
+
+  The source commit and its values are then one reviewed change that is
+  reverted as one. The block is part of `source`, so it is read from the
+  entry worktree like the rest of that field, and validation rejects a block
+  that does not match the source state it names. `source-locks` never touches
+  it.
+- Either way, the source commit and the values sit in one record, so they
+  cannot diverge. An environment that follows its entry worktree, or a
+  revision, is not a promotion target for its source.
 - Before the first promotion, an environment with a `fromPromotion` source has
   no source commit, and `reconcile` exits 2 naming `nyl promote`.
 - The target may still select a unit dev also runs, such as `web-image`, and
@@ -917,9 +970,11 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
 - [ ] Implement PromotionPath, PromotionRecord, and `nyl promote`
   with evidence checks and an optional pull-request change gate.
 - [ ] Promote dev's source commit and image digest to prod from one recorded
-  dev state, for each source form (`fromPromotion`, `commit` lock, `revision`),
-  with the whole-source evidence rule, record matching, and rollback through
-  `--revision` with `--evidence published`.
+  dev state, with `record: state` and `record: source`, the whole-source
+  evidence rule, recorded evidence for older states, artifact verification,
+  and rollback through `--revision`.
+- [ ] Add `nyl get states`, `nyl get promotion-candidates`, and
+  `nyl promote --dry-run`.
 - [ ] Promote values only, such as an image digest and a Terraform source
   commit, across differently named units and inputs, from one consistent
   source state.
@@ -941,8 +996,8 @@ Application runs.
   drift-repair policy using M3–M6 evidence.
 - [ ] Decide which command-unit uses warrant typed drivers, and whether to add
   the plugin driver protocol.
-- [ ] Support minimum healthy durations, flapping guards, and promotion of
-  commits that no longer run, from recorded observations.
+- [ ] Support minimum healthy durations and flapping guards over recorded
+  observations.
 - [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 
@@ -960,7 +1015,6 @@ reasons to delay independent work.
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Hotfix workflow for environments whose source is promoted, such as a `release/prod` revision with its own path into prod | M6 |
-| Environment sources pinned with `revision` and `commit`: whether `source-locks` may move them, and where `nyl promote` writes the pin and its values so both land together | M6 |
 | Whether a `revision`-only environment can be a promotion target, given squash merges and pending promotion pull requests | M6 |
 | Shared catalogs: how targets contribute catalog files without writing outside their prefix, and who owns the shared manifest across Nyl versions | M5 |
 | Coverage for promoted sources: which Applications must be healthy when a path promotes the source but few or no values | M6 |

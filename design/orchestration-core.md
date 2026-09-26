@@ -104,8 +104,8 @@ spec:
 | --- | --- |
 | omitted | The entry worktree's commit, typical for dev and previews |
 | `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
-| `revision` and `commit` | `commit`, a reviewed pin in source |
-| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in state; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
+| `revision` and `commit` | `commit`, a reviewed pin in source that `nyl update source-locks` moves; never a promotion target |
+| `fromPromotion` | The source commit in the latest PromotionRecord on that path, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
 
 - The three forms exclude each other. `commit` requires `revision`, as for
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
