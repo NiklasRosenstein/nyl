@@ -1,0 +1,61 @@
+# Walkthrough "Deletion" in design/orchestration-core.md. Command units only,
+# so it runs with real drivers from M3 on.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+steps:
+  - commit: {branch: main, message: "Add cache and worker", apply: patches/add-cache}
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [cache, worker]
+
+  # Removing both from source destroys nothing without --allow-teardown.
+  - commit: {branch: main, message: "Remove cache and worker", delete: [nyl/units.yaml]}
+  - nyl: [plan, -e, dev]
+    exit: 0
+    expect:
+      codes: [NYL-PLAN-UNITS-LEAVING]
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      pending-teardown: [cache]
+      retained: [worker]
+      units:
+        cache: {lifecycle: {state: deleting, deletion: {reason: omission, intent: teardown, teardown: pending}}, receipt: current}
+        worker: {lifecycle: {state: retained}}
+
+  # Restoring both before any teardown returns them unchanged.
+  - commit: {branch: main, message: "Restore cache and worker", apply: patches/add-cache}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      current: [cache, worker]
+      units:
+        cache: {lifecycle: {state: active}, uid: same, receipt: current}
+        worker: {lifecycle: {state: active}, uid: same, receipt: current}
+
+  # Tearing cache down instead needs both overrides, because worker's tombstone cites it.
+  - commit: {branch: main, message: "Remove cache and worker again", delete: [nyl/units.yaml]}
+  - nyl: [reconcile, -e, dev, --allow-teardown]
+    exit: 2
+    expect:
+      pending-teardown: [cache]
+      retained: [worker]
+      codes: [NYL-TEARDOWN-HAS-DEPENDENTS]
+  - nyl: [reconcile, -e, dev, --allow-teardown, --allow-dependents]
+    exit: 0
+    expect:
+      removed: [cache]
+
+  # Restoring both now starts a new cache; worker adopts its tombstone but runs again.
+  - commit: {branch: main, message: "Restore cache and worker", apply: patches/add-cache}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [cache, worker]
+      units:
+        cache: {lifecycle: {state: active}, uid: new}
+        worker: {lifecycle: {state: active}, uid: same}

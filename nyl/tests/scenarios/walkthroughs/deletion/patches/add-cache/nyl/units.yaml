@@ -1,0 +1,31 @@
+# cache has a teardown step, so it defaults to deletionPolicy Teardown;
+# worker consumes its output and declares Retain.
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: cache
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/cache.sh']
+  values:
+    dataDir: '{{ values.dataDir }}'
+  workingDir: ../scripts
+  command: ['./cache.sh', 'create']
+  teardown: ['./cache.sh', 'remove']
+  idempotent: true
+  outputs:
+    endpoint: {type: string}
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: worker
+  labels: {dev: 'true'}
+spec:
+  files: ['../scripts/worker.sh']
+  values:
+    cache: {fromUnit: {unit: cache, output: endpoint}}
+  workingDir: ../scripts
+  command: ['./worker.sh']
+  idempotent: true
+  deletionPolicy: Retain

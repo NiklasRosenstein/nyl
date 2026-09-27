@@ -1,0 +1,29 @@
+apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata:
+  name: web
+  namespace: web
+spec:
+  inputs:
+    image: {type: string}
+    databaseHost: {type: string}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: web
+          image: '{{ inputs.image }}'
+          env:
+            - name: DATABASE_HOST
+              value: '{{ inputs.databaseHost }}'

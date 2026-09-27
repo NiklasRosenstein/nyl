@@ -131,6 +131,14 @@
           },
           "type": "array"
         },
+        "previous_paths": {
+          "default": [],
+          "description": "Earlier locations of this project's directory, as paths from the Git\nworktree root such as `/` or `/platform`. Commands that render another\nrevision of the repository, such as `diff-tree --against source`, look\nfor the project there when the revision has none at the current\nlocation, so a move stays comparable. Entries are harmless once every\ncompared revision has the project at its current location.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "strip_empty_metadata_labels": {
           "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
           "default": "always",
@@ -242,6 +250,7 @@
         "helm_chart_search_paths": [
           "."
         ],
+        "previous_paths": [],
         "strip_empty_metadata_labels": "always"
       }
     },

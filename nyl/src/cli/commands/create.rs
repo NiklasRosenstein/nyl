@@ -373,7 +373,7 @@ fn group_source_root(
             "ApplicationGroup {name:?} reads a remote source; create the Release in that repository"
         ))),
         Some(source) if contains_template(&source.path) => Err(templated_source(name)),
-        Some(source) => Ok(inventory.project_root.join(&source.path)),
+        Some(source) => inventory.paths().resolve("spec.source.path", &source.path),
         None => Ok(derived_group_source_root(
             &inventory.project_root,
             &discovered.source_path,

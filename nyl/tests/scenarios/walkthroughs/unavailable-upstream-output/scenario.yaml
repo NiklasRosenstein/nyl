@@ -1,0 +1,30 @@
+# Walkthrough "Unavailable upstream output" in design/orchestration-core.md.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - driver: {unit: web-image, operation: reconcile, outcome: failed, category: tool-error, retryable: true}
+  - nyl: [reconcile, -e, dev]
+    exit: 3                           # a failure outranks the blocked unit
+    expect:
+      executed: [network, database]
+      failed: [web-image]
+      blocked: [kubernetes]
+      commits: {desired: 1, observed: 1}
+      units:
+        web-image: {condition: {state: failed, category: tool-error, retryable: true}, receipt: none}
+        kubernetes: {lifecycle: active, receipt: none}
+  - nyl: [plan, -e, dev]
+    exit: 2                           # incomplete: kubernetes cannot be planned
+    expect:
+      blocked: [kubernetes]
+  - nyl: [reconcile, -e, dev]
+    exit: 0                           # retried, then kubernetes runs in a later wave of the same run
+    expect:
+      executed: [web-image, kubernetes]
+      current: [network, database]
+      units:
+        web-image: {condition: null, receipt: current}
+        kubernetes: {receipt: current}

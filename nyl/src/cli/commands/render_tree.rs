@@ -314,11 +314,12 @@ pub(super) fn hash_inputs(
     render_cluster.spec.live = None;
     let cluster_bytes = serde_json::to_vec(&render_cluster)?;
     let mut hashes = BTreeMap::new();
+    let paths = inventory.paths();
     for relative in &compiled.inputs {
         if relative.starts_with("@remote") {
             continue;
         }
-        let path = inventory.project_root.join(relative);
+        let path = paths.path_for_key(relative);
         if path.is_file() {
             let bytes = if relative == cluster_path {
                 let contents = std::fs::read_to_string(&path)?;

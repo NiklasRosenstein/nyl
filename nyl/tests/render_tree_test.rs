@@ -3864,3 +3864,261 @@ spec:
     let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/api.yaml")).unwrap();
     assert!(application.contains("project: workloads"));
 }
+
+/// Where a nested project keeps its Release files.
+enum NestedReleases {
+    /// `nyl/applications/<group>`, the group's default source.
+    Subdirectory,
+    /// `applications/<group>` beside `nyl/`, named by this `spec.source.path`.
+    Sibling(&'static str),
+}
+
+/// Move the fixture's project into `nyl/`, so `nyl.toml` sits beside the
+/// configuration, and place the Releases as `releases` says.
+fn nested_fixture(releases: NestedReleases) -> TempDir {
+    let fixture = fixture();
+    let root = fixture.path();
+    fs::create_dir(root.join("nyl")).unwrap();
+    fs::rename(root.join("nyl.toml"), root.join("nyl/nyl.toml")).unwrap();
+    fs::rename(root.join("config"), root.join("nyl/config")).unwrap();
+    match releases {
+        NestedReleases::Subdirectory => fs::rename(root.join("applications"), root.join("nyl/applications")).unwrap(),
+        NestedReleases::Sibling(path) => {
+            let group = root.join("nyl/config/application-groups/workloads.yaml");
+            let contents = fs::read_to_string(&group).unwrap().replace(
+                "  projectRef: workloads\n",
+                &format!("  projectRef: workloads\n  source:\n    path: {path}\n"),
+            );
+            fs::write(group, contents).unwrap();
+        }
+    }
+    fixture
+}
+
+/// Render the fixture's target from the worktree root into a fresh directory.
+fn render_from_worktree_root(fixture: &TempDir) -> (TempDir, BTreeMap<PathBuf, Vec<u8>>) {
+    let output = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", "--output-dir"])
+        .arg(output.path())
+        .args(["--color", "never", "--no-cache"])
+        .assert()
+        .success();
+    let tree = read_tree(&output.path().join("production"));
+    (output, tree)
+}
+
+#[test]
+fn test_render_tree_with_nested_project_and_release_subdirectory_matches_root_layout() {
+    let (_root_output, root_layout) = render_from_worktree_root(&fixture());
+    let (_nested_output, nested_layout) = render_from_worktree_root(&nested_fixture(NestedReleases::Subdirectory));
+
+    assert_eq!(nested_layout, root_layout);
+}
+
+#[test]
+fn test_render_tree_with_nested_project_reads_sibling_releases_by_either_path_form() {
+    let (_relative_output, relative) =
+        render_from_worktree_root(&nested_fixture(NestedReleases::Sibling("../applications/workloads")));
+    let (_rooted_output, rooted) =
+        render_from_worktree_root(&nested_fixture(NestedReleases::Sibling("/applications/workloads")));
+
+    // Only the group file differs between the two forms, so only its input
+    // digest in the ownership index may differ.
+    let index_path = PathBuf::from("_nyl/index.json");
+    let without_index = |tree: &BTreeMap<PathBuf, Vec<u8>>| {
+        tree.iter()
+            .filter(|(path, _)| **path != index_path)
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(without_index(&relative), without_index(&rooted));
+    let input_keys = |tree: &BTreeMap<PathBuf, Vec<u8>>| {
+        let index: serde_json::Value = serde_json::from_slice(&tree[&index_path]).unwrap();
+        index["inputs"].as_object().unwrap().keys().cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(input_keys(&relative), input_keys(&rooted));
+    let resources = String::from_utf8(relative[&PathBuf::from("workloads/api/resources.yaml")].clone()).unwrap();
+    assert!(
+        resources.contains("# Nyl-Provenance: Source: /applications/workloads/api.yaml (document 2)"),
+        "{resources}"
+    );
+    let index: serde_json::Value = serde_json::from_slice(&relative[&index_path]).unwrap();
+    assert!(
+        index["inputs"].get("/applications/workloads/api.yaml").is_some(),
+        "{index}"
+    );
+    assert!(
+        index["inputs"].get("config/targets/production.yaml").is_some(),
+        "{index}"
+    );
+}
+
+#[test]
+fn test_render_tree_rejects_group_source_outside_the_worktree() {
+    let fixture = nested_fixture(NestedReleases::Sibling("../../outside"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--check",
+            "--no-cache",
+            "--color",
+            "never",
+            "--output-dir",
+        ])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("resolves outside the Git worktree"));
+}
+
+/// Move the fixture's project directory from `from` to `to` (both relative to
+/// the worktree root; empty for the root itself).
+fn move_project(root: &std::path::Path, from: &str, to: &str) {
+    fs::create_dir_all(root.join(to)).unwrap();
+    for entry in ["nyl.toml", "config", "applications"] {
+        fs::rename(root.join(from).join(entry), root.join(to).join(entry)).unwrap();
+    }
+}
+
+/// Diff the fixture's target against `commit`, run from `directory`.
+fn diff_against_source(
+    root: &std::path::Path,
+    directory: &str,
+    commit: &str,
+    extra: &[&str],
+) -> assert_cmd::assert::Assert {
+    let artifacts = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join(directory))
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--against",
+            "source",
+            "--source-ref",
+            commit,
+            "--source-repository",
+        ])
+        .arg(root)
+        .args(extra)
+        .args([
+            "--progress",
+            "off",
+            "--no-stats-stderr",
+            "--stats-output",
+            "json:-",
+            "--output",
+        ])
+        .arg(artifacts.path().join("source.diff"))
+        .assert()
+}
+
+fn baseline_location(assert: assert_cmd::assert::Assert) -> (String, String) {
+    let report: serde_json::Value = serde_json::from_slice(&assert.success().get_output().stdout).unwrap();
+    let baseline = &report["comparison"]["baseline"];
+    (
+        baseline["project_path"].as_str().unwrap().to_owned(),
+        baseline["project_location"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn test_diff_tree_against_source_follows_a_project_move_across_its_merge() {
+    let fixture = fixture();
+    let root = fixture.path();
+    let repository = Repository::open(root).unwrap();
+    let head = |repository: &Repository| repository.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    move_project(root, "", "infra/nyl-config");
+    commit_all(&repository, "Project in infra/nyl-config");
+    let before_move = head(&repository);
+    move_project(root, "infra/nyl-config", "platform");
+    fs::write(
+        root.join("platform/nyl.toml"),
+        "[project]\nprevious_paths = [\"/infra/nyl-config\"]\n",
+    )
+    .unwrap();
+    commit_all(&repository, "Move the project to platform");
+    let after_move = head(&repository);
+
+    // The pull request that moves the project finds the baseline through the
+    // earlier location it records.
+    let located = baseline_location(diff_against_source(root, "platform", &before_move, &[]));
+    assert_eq!(located, ("infra/nyl-config".to_owned(), "previous_path".to_owned()));
+
+    // After the merge, the baseline has the project at the current location, and
+    // the leftover setting and option change nothing.
+    let located = baseline_location(diff_against_source(
+        root,
+        "platform",
+        &after_move,
+        &["--source-project-path", "infra/nyl-config"],
+    ));
+    assert_eq!(located, ("platform".to_owned(), "same".to_owned()));
+
+    // Without a recorded location the baseline is not found, unless the
+    // invocation names a candidate.
+    fs::write(root.join("platform/nyl.toml"), "").unwrap();
+    diff_against_source(root, "platform", &before_move, &[])
+        .failure()
+        .stderr(predicate::str::contains("/platform").and(predicate::str::contains("previous_paths")));
+    let located = baseline_location(diff_against_source(
+        root,
+        "platform",
+        &before_move,
+        &[
+            "--source-project-path",
+            "gone",
+            "--source-project-path",
+            "infra/nyl-config",
+        ],
+    ));
+    assert_eq!(located, ("infra/nyl-config".to_owned(), "candidate".to_owned()));
+}
+
+#[test]
+fn test_publish_tree_verifies_an_uncommitted_project_move_against_the_committed_location() {
+    let (fixture, destination, _seed, source_commit) = publication_fixture();
+    let root = fixture.path();
+    move_project(root, "", "platform");
+    fs::write(root.join("platform/nyl.toml"), "[project]\nprevious_paths = [\"/\"]\n").unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join("platform"))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+
+    let destination = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&destination, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&destination, &commit, "production/_nyl/index.json")).unwrap();
+    assert_eq!(index["sourceCommit"], source_commit.to_string());
+    assert_eq!(index["dirty"], false);
+}
+
+#[test]
+fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_is_not_found() {
+    let (fixture, _destination, _seed, _source_commit) = publication_fixture();
+    let root = fixture.path();
+    // Moved without recording the earlier location, so HEAD has no project
+    // at any location the lookup tries.
+    move_project(root, "", "platform");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join("platform"))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not locate the committed project"));
+
+    let worktrees = Repository::open(root).unwrap().worktrees().unwrap();
+    assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
+}

@@ -1,0 +1,11 @@
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata:
+  name: dev-to-prod
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: published
+  values:
+    webImage:
+      select: {unit: web-image, artifact: image, pointer: /reference}

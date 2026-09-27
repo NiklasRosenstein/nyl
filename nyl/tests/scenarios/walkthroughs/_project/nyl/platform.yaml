@@ -1,0 +1,51 @@
+# Shared project of the orchestration core walkthroughs: one environment, dev,
+# with two OpenTofu units, an image, and a Kubernetes publication.
+apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: platform
+spec:
+  repoURL: '%PROJECT_URL%'
+  publishURL: '%PROJECT_URL%'
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: Cluster
+metadata:
+  name: dev
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  clusterRef: {name: dev}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  publication:
+    repositoryRef: {name: platform}
+    revision: deploy
+    pathPrefix: dev
+  releaseInputs:
+    web/web:
+      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {fromUnit: {unit: database, output: host}}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  values:
+    target: dev
+    backendDir: '%SCENARIO_TMP%/tofu'
+  state:
+    repositoryRef: {name: platform}
+  allowUnprotectedSource: true

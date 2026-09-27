@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::{
     deduplicate_manifests, filter_render_resources, generate_render_resource, is_helm_renderable_resource,
     is_renderable_resource, load_release_bundle_with_root, prepare_manifests_for_output,
-    resolve_strip_empty_metadata_labels_mode, RenderResource,
+    resolve_strip_empty_metadata_labels_mode, ProvenanceRoots, RenderResource,
 };
 use crate::config::ProjectConfig;
 use crate::helm::HelmChartResolver;
@@ -45,6 +45,10 @@ pub struct RenderRequest<'a> {
     pub path: &'a Path,
     pub path_mode: RenderPathMode,
     pub provenance_root: Option<&'a Path>,
+    /// Worktree root for provenance of local files outside `provenance_root`,
+    /// which are then recorded with a leading `/` (see
+    /// [`crate::util::project_path`]).
+    pub provenance_worktree_root: Option<&'a Path>,
     pub only_source_kind: Option<&'a str>,
     pub max_depth: usize,
     pub track_parent: bool,
@@ -63,6 +67,7 @@ impl<'a> RenderRequest<'a> {
             path,
             path_mode: RenderPathMode::ProjectRootRelative,
             provenance_root,
+            provenance_worktree_root: None,
             only_source_kind: None,
             max_depth: 10,
             track_parent: false,
@@ -319,7 +324,21 @@ impl RenderSession {
         path: &Path,
         provenance_root: &Path,
     ) -> Result<RenderedBundle> {
-        self.render(RenderRequest::new(path, Some(provenance_root))).await
+        self.render_release_file_with_provenance_roots(path, provenance_root, None)
+            .await
+    }
+
+    /// Render one source file with provenance relative to `provenance_root`,
+    /// and `/`-prefixed relative to `worktree_root` for files outside it.
+    pub async fn render_release_file_with_provenance_roots(
+        &self,
+        path: &Path,
+        provenance_root: &Path,
+        worktree_root: Option<&Path>,
+    ) -> Result<RenderedBundle> {
+        let mut request = RenderRequest::new(path, Some(provenance_root));
+        request.provenance_worktree_root = worktree_root;
+        self.render(request).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -340,7 +359,10 @@ impl RenderSession {
         let bundle = load_release_bundle_with_root(
             Path::new(source_path_text),
             &self.template_context,
-            request.provenance_root,
+            ProvenanceRoots {
+                root: request.provenance_root,
+                worktree: request.provenance_worktree_root,
+            },
         )?;
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
@@ -549,6 +571,7 @@ impl RenderSession {
                 "onlySourceKind": request.only_source_kind,
                 "pathMode": format!("{:?}", request.path_mode),
                 "provenanceRoot": request.provenance_root,
+                "provenanceWorktreeRoot": request.provenance_worktree_root,
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
                 "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,

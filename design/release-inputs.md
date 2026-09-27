@@ -170,7 +170,7 @@ Each binding sets exactly one of these fields:
 | Field | M2 | Resolves from |
 | --- | --- | --- |
 | `value` | Yes | Inline literal. DeploymentTargets are static, so this is never templated; the inline targets of orchestration's `KubernetesPublication` units are the one exception, rendered per environment |
-| `fromFile` | Yes | Project-relative YAML or JSON file; `pointer` defaults to `""` |
+| `fromFile` | Yes | YAML or JSON file of this repository under the local path rule; `pointer` defaults to `""` |
 | `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
 | `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
 | `fromUnit` | Reserved | A recorded unit output or artifact field in an orchestrated environment (M5) |
@@ -178,8 +178,11 @@ Each binding sets exactly one of these fields:
 
 `fromFile`:
 
-- The path is normalized and project-relative. Absolute paths, parent traversal,
-  and symlinks that leave the project are rejected.
+- The path follows the local path rule of the
+  [configuration](../nyl/book/src/content/docs/configuration.md#local-paths):
+  relative to the directory containing `nyl.toml`, with leading `..` segments
+  allowed, or from the Git worktree root with a leading `/`. Paths that leave
+  the worktree or traverse a symbolic link are rejected.
 - The file is a rendering input like any other: it enters the dependency
   recorder and the ownership index under its path.
 - A file containing several YAML documents is rejected.
@@ -203,12 +206,12 @@ Each binding sets exactly one of these fields:
   in it to the same new commit. Bindings that share a current commit but name
   different revisions are addressed individually by their position in the
   document, never by matching the commit text alone.
-- `--require healthy` follows the per-value promotion rule in the roadmap's
-  health evidence section, so locks of one group may move to different
+- `--require healthy` follows the per-value promotion rule in the
+  [health evidence](promotion.md#health-evidence) contract, so locks of one group may move to different
   commits. It reads the source target's recorded observation, written by
   `nyl verify --target <source>` into
   `<prefix>/_nyl/observations/health.yaml` on the source's publication branch
-  (see the roadmap's health evidence section), so it needs no cluster
+  (see [Kubernetes publications](promotion.md#kubernetes-publications)), so it needs no cluster
   credentials; `--observe` observes Argo CD directly instead. Each lock is one
   value:
   - The file it reads must lie inside one source target's prefix on that
@@ -361,10 +364,10 @@ target's publication branch can feed another target:
   in the source target's prefix.
 - `nyl update source-locks --target <name> --require healthy` moves a lock group
   only to a source publication that is running and healthy, as described in
-  the roadmap's health evidence section, and writes the observation next to
+  the [health evidence](promotion.md#health-evidence) contract, and writes the observation next to
   the lock (see `fromGit`).
 - With orchestration, a PromotionPath with `from: {target: <name>}` selects the
-  source target's published inputs; see the roadmap's promotion section.
+  source target's published inputs; see [Promotion sources](promotion.md#promotion-sources).
 
 Example: dev carries image IDs from its CI build, and production promotes them
 by lock.

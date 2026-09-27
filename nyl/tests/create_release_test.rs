@@ -88,3 +88,19 @@ fn warns_when_the_release_namespace_is_outside_the_referenced_app_project() {
         .success()
         .stderr(predicate::str::contains("does not allow namespace").not());
 }
+
+#[test]
+fn test_create_release_writes_into_a_sibling_source_of_a_nested_project() {
+    let temp = project("../applications/platform", "*.yaml");
+    fs::create_dir(temp.path().join("nyl")).unwrap();
+    for file in ["nyl.toml", "gitops.yaml"] {
+        fs::rename(temp.path().join(file), temp.path().join("nyl").join(file)).unwrap();
+    }
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["create", "release", "api", "--namespace", "default"])
+        .assert()
+        .success();
+    assert!(temp.path().join("applications/platform/api.yaml").is_file());
+}

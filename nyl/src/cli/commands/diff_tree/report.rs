@@ -9,6 +9,7 @@ use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
 use crate::render::cache::CacheStats;
+use crate::util::project_path::ProjectLocation;
 use crate::util::{ansi_style, sanitize_url};
 use crate::{NylError, Result};
 
@@ -444,6 +445,9 @@ enum Baseline {
         repository: String,
         revision: String,
         commit: String,
+        /// Checkout-relative project directory; empty for the checkout root.
+        project_path: String,
+        project_location: ProjectLocation,
         publication: Publication,
     },
 }
@@ -573,6 +577,8 @@ impl Report {
                 repository: sanitize_url(&b.repository),
                 revision: b.revision.clone(),
                 commit: b.commit.to_string(),
+                project_path: b.project_path.clone(),
+                project_location: b.project_location,
                 publication: Publication::from_tree(&b.compiled),
             },
         });
@@ -676,6 +682,8 @@ impl Report {
                     repository,
                     revision,
                     commit,
+                    project_path,
+                    project_location,
                     publication,
                 } => {
                     sections.push((
@@ -684,6 +692,13 @@ impl Report {
                             ("Repository", repository.clone()),
                             ("Revision", revision.clone()),
                             ("Commit", commit.clone()),
+                            (
+                                "Project",
+                                match project_location {
+                                    ProjectLocation::Same => format!("/{project_path}"),
+                                    location => format!("/{project_path} (from {location})"),
+                                },
+                            ),
                         ],
                     ));
                     sections.push(("Baseline publication", publication.fields()));

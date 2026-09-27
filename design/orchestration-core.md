@@ -1,12 +1,12 @@
 # Orchestration core
 
-**Status:** draft M1 contract for M3–M5. See [ROADMAP.md](../ROADMAP.md) and the
+**Status:** M1 contract for M3–M5. See [ROADMAP.md](../ROADMAP.md) and the
 [Release inputs contract](release-inputs.md).
 
 This contract defines environments, units, desired and observed state,
 execution, recovery, deletion, the driver interface, the command unit, and the
-effects of the orchestration commands. Promotion rules are in the roadmap's
-promotion and health evidence sections; this contract defines the state they
+effects of the orchestration commands. Promotion rules are in the
+[promotion contract](promotion.md); this contract defines the state they
 read.
 
 Nothing here changes existing commands. A project without Environments and
@@ -25,7 +25,7 @@ Every resource in a unit group is a unit; the group identifies the family and
 the kind selects the driver, as `components.k8s.nyl/v1` does for component
 invocations. Discovery follows Git visibility across the project, like the
 rendered GitOps resources. `nyl create` and `nyl delete` gain `environment`,
-`environment-group`, `unit`, and `promotion-path` resources; `nyl get` covers those declarations
+`environment-group`, `environment-template`, `unit`, and `promotion-path` resources; `nyl get` covers those declarations
 and, with `-e`, an environment's units, outputs, artifacts, and promotions
 (see [Inspection](#inspection)).
 
@@ -36,6 +36,7 @@ apiVersion: gitops.nyl/v1
 kind: Environment
 metadata:
   name: production
+  labels: {stage: production}             # matched by -l and EnvironmentGroup selectors
 spec:
   unitSelector:
     matchLabels: {tier: platform}
@@ -51,7 +52,22 @@ spec:
   source: {revision: main, commit: 3e7b…}   # optional; omitted: the entry worktree's commit (see Source)
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
+  attestations: [qa]                        # environment-wide, recorded with nyl attest
 ```
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `metadata.labels` | map of strings | none |
+| `unitSelector` | label selector (`matchLabels`), as for `applicationGroupSelector` | `{}`: every unit |
+| `values` | object | `{}` |
+| `state.repositoryRef` / `state.repository` | GitRepository reference / inline GitRepository spec | the group's, else `origin`, else the local repository |
+| `state.desiredRef`, `state.observedRef` | ref name | `nyl/<environment>/desired`, `nyl/<environment>/observed` |
+| `state.path` | relative directory | `''` |
+| `state.coordinationRefPrefix` | ref prefix ending in `/` | `refs/nyl/` |
+| `source` | Git source without `path`, or `{fromPromotion}` | the entry worktree's commit |
+| `protectedRefs` | list of ref names or globs | the group's, else each repository's default branch |
+| `allowUnprotectedSource` | boolean | the group's, else `false` |
+| `attestations` | list of attestation names | `[]` |
 
 - An Environment is static at discovery, like a DeploymentTarget.
 - `unitSelector` matches literal unit `metadata.labels` across all unit kinds;
@@ -180,7 +196,7 @@ spec:
 | omitted | The entry worktree's commit, typical for dev and previews |
 | `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
 | `revision` and `commit` | `commit`, a reviewed pin in source that `nyl update source-locks` moves; never a promotion target |
-| `fromPromotion` | The source commit in the newest PromotionRecord on that path, or on any of `paths`, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see the roadmap's section on promoting an environment's source) |
+| `fromPromotion` | The source commit in the newest PromotionRecord on that path, or on any of `paths`, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see [Promoting an environment's source](promotion.md#promoting-an-environments-source)) |
 
 - The three forms exclude each other. `commit` requires `revision`, as for
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
@@ -261,16 +277,30 @@ spec:
   change into a deletion and a new incarnation. Unit names are already scoped
   per environment, and names that must differ on the Kubernetes side have
   their own templated fields.
-- Every unit kind shares the common fields `enabled` (evaluated after
-  rendering; `false` leaves the ownership set), `outputs`, `dependsOn`,
-  `approval` (see [Approval](#approval)), `deletionPolicy` (`Teardown` or
-  `Retain`; see [Deletion](#deletion)), `timeout`, and `env` (see
-  [Credentials](#credentials)). They are one Rust struct flattened into each kind's spec, so
-  their schema and documentation are identical everywhere. The remaining fields
-  belong to the kind, and each kind has its own schema and generated reference
-  page.
+- Every unit kind shares the common fields below. They are one Rust struct
+  flattened into each kind's spec, so their schema and documentation are
+  identical everywhere. The remaining fields belong to the kind, and each kind
+  has its own schema and generated reference page.
+
+  | Field | Type | Default | Meaning |
+  | --- | --- | --- | --- |
+  | `enabled` | boolean | `true` | Evaluated after rendering; `false` leaves the ownership set |
+  | `outputs` | map of name to output declaration | `{}` | Declared outputs, for kinds that let units declare them (see below) |
+  | `dependsOn` | list of unit names or `{environment?, unit, evidence?, attestations?}` | `[]` | Ordering without a data reference |
+  | `approval` | `auto`, `manual`, or `{mode, bind, requireDigest}` | `auto` | See [Approval](#approval) |
+  | `deletionPolicy` | `Teardown` \| `Retain` | `Teardown` where the kind supports teardown, else `Retain` | See [Deletion](#deletion) |
+  | `timeout` | duration | per kind (see [Defaults](#defaults)) | Deadline for one execution, teardown, or verification |
+  | `env` | `{passthrough: [name], secrets: {name: key}}` | `{}` | See [Credentials](#credentials) |
+  | `attestations` | list of `{name, from: external}` | `[]` | Attestations only external sources supply (see [Attestations](#attestations)); kinds that attest themselves add their own names |
+
 - References may appear in any field the kind's schema marks as accepting
-  them.
+  them, at any depth inside object and array values; a reference object
+  replaces the whole value it stands for, never part of a string. Every Git
+  source field (`source`, `context`, directory `contexts`) accepts
+  `fromPromotion` for a promoted source. Besides those, `Command` accepts
+  references in `values`; `Terraform` and `OpenTofu` in `variables`;
+  `OciImage` in `buildArgs` and image `contexts`; and `KubernetesPublication`
+  in the inline target's `releaseInputs`.
 - A kind either publishes fixed results as artifacts (`OciImage`,
   `KubernetesPublication`; see [Artifacts](#artifacts)), in which case
   `outputs` is rejected, or lets the unit declare outputs (`Command`,
@@ -286,7 +316,9 @@ spec:
   tool allows.
 - `dependsOn` lists units, by name or as `{unit, evidence}`, that must have a
   current receipt first, for ordering without a data reference. References add
-  dependencies implicitly.
+  dependencies implicitly. An entry with `environment` names a unit of another
+  declared environment, under the rules of
+  [Cross-environment references](#cross-environment-references).
 - A `dependsOn` entry or a `fromUnit` reference may require stronger evidence
   from its producer with `evidence: published | attested` (default
   `published`, which is a current receipt) and `attestations`, which names the
@@ -307,6 +339,15 @@ spec:
   without `revision`, the environment's source commit S. A field that names
   another repository must name its `revision`, because S is a commit of this
   repository. Most units set only `path`.
+  - In this repository, at any revision, `path` follows the one local path
+    rule that local ApplicationGroup sources use: relative to the directory
+    containing `nyl.toml`, with leading `..` segments allowed, or from the
+    worktree root with a leading `/`, never leaving the worktree or traversing
+    a symbolic link. The same rule covers `files` globs, Command
+    `workingDir`, and `fromFile`. In another repository, `path` is relative to
+    its root. Resolution records every such path in `resolvedSpec` in its
+    worktree-rooted form, such as `/infra/database`, so the desired document
+    means the same wherever `nyl.toml` lives.
   - `revision` alone resolves the ref's tip during resolution; the desired
     document records the resolved commit in `resolvedSpec.source.commit`, so
     every run is reproducible from state.
@@ -339,15 +380,34 @@ spec:
 - An explicit teardown closes an incarnation even while the unit stays in the
   ownership set; the next incarnation receives a new uid (see
   [Deletion](#deletion)).
+- **Native ownership.** Different unit names do not imply disjoint native
+  resources. Each driver reports the ownership scopes a resolved spec claims
+  (`ownership_scopes`, see [Drivers](#drivers)): a Terraform or OpenTofu
+  backend and key with its workspace, an `OciImage` registry repository with
+  the `nyl-<environment>-` tag prefix it moves, and a `KubernetesPublication`
+  target's publication repository, revision, and prefix. Resolution rejects
+  two units, in the same or in different declared environments and template
+  instances, that claim the same scope, and names both
+  (`NYL-UNIT-OWNERSHIP-OVERLAP`). Scopes a driver cannot establish, such as
+  what a command touches, are not checked. Environments may share a registry
+  repository, because each has its own tag prefix.
 
 ### References
 
 | Reference | Resolves to | Freshness |
 | --- | --- | --- |
-| `fromUnit: {unit, output, pointer, evidence}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
-| `fromUnit: {unit, artifact, kind, pointer, evidence}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
-| `fromPromotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see the roadmap's section on several paths into one environment) | The record must exist; broken selectors are errors |
+| `fromUnit: {unit, output, pointer, evidence, attestations}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
+| `fromUnit: {unit, artifact, kind, pointer, evidence, attestations}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
+| `fromPromotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see [Several paths into one environment](promotion.md#several-paths-into-one-environment)) | The record must exist; broken selectors are errors |
 | `fromUnit: {environment, unit, output \| artifact, …}` | An output or artifact of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
+
+- `pointer` is a JSON Pointer ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)):
+  `/` separates tokens, `~1` escapes `/`, and `~0` escapes `~`. An empty or
+  omitted pointer selects the whole output; an artifact pointer is relative to
+  the artifact's `spec`. PromotionPath selectors and `nyl get … --pointer` use
+  the same resolver.
+- The same reference forms are Release input bindings on a target that a
+  publication unit places into an environment, `environment` included.
 
 #### Cross-environment references
 
@@ -363,6 +423,11 @@ environment on the same cluster produces, or when previews use dev's network.
   producer's receipt is not current. Separate `nyl reconcile` calls therefore
   converge in any order: a consumer run before its producer waits, and the
   next run after the producer resolves.
+- A run reads each producer environment's desired and observed tips once, when
+  resolution first needs them, and resolves every reference to that
+  environment against that one snapshot for the rest of the run; provenance
+  cites the producer's observed commit. The consumer never takes the
+  producer's lease.
 - A unit that other environments reference is protected like a referenced unit
   in its own environment. `plan` lists the environments and instances that
   reference it, and a teardown, replacement, or omission of it, including
@@ -465,8 +530,9 @@ spec:
   - A render the recorder marks uncacheable, because an input cannot be
     observed completely, has no stable key: the unit executes on every
     reconcile.
-- Its resolved spec contains every Release input of its target, keyed as
-  `releases.<group>/<release>.<input>`: `value`, `fromFile` at the source
+- Its resolved spec contains every Release input of its target under
+  `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
+  an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
 - `fromPublication` is resolved like every other binding. Resolution reads the
   state file from the publication branch head B, or the carried file from the
@@ -487,7 +553,7 @@ spec:
 - It publishes a `PublishedTree` artifact named `tree` with the published
   commit and ownership-index digest (`published`). `mode: observe` additionally
   records Argo CD observations and attests `accepted` and `healthy` (M5), per
-  the roadmap's health evidence section. Direct application through Nyl, which
+  the promotion contract's [health evidence](promotion.md#health-evidence). Direct application through Nyl, which
   would attest `healthy` from rollout status during `reconcile`, is not a mode
   in the initial scope.
 
@@ -675,7 +741,7 @@ metadata:
   name: preview
 spec:
   parameters:
-    - {name: pr, type: integer}
+    pr: {type: integer}
   unitSelector:
     matchLabels: {preview: 'true'}
   values:
@@ -694,8 +760,10 @@ spec:
   maxInstances: 20
 ```
 
-The template has the Environment's fields plus `parameters` (typed like Release
-inputs and exposed as `params`), `deletionPolicy`, `allowTeardown`, `ttl`,
+The template has the Environment's fields plus `parameters` (a map of names to
+Release input declarations, `type` with optional `default`, `enum`, and
+`description`, exposed as `params`; `--param <name>=<value>` parses the value
+as YAML and checks it against the type), `deletionPolicy`, `allowTeardown`, `ttl`,
 `maxInstances`, and `keepSource`. The template's `deletionPolicy: Teardown`
 overrides every unit's own policy, including an explicit `Retain`, for kinds
 that support teardown. Units of other kinds, such as `OciImage`, are left in
@@ -887,10 +955,15 @@ removes expired ones.
 Kinds with fixed results publish artifacts instead of outputs. Artifacts are
 their own kinds in `artifacts.gitops.nyl/v1`:
 
-| Kind | Published by | `spec` |
+| Kind | Published by, as | `spec` |
 | --- | --- | --- |
-| `ContainerImage` | `OciImage` | `repository`, `digest`, `reference` (`<repository>@<digest>`), `platforms`, `tags` |
-| `PublishedTree` | `KubernetesPublication` | `repository`, `branch`, `commit`, `indexDigest` |
+| `ContainerImage` | `OciImage`, named `image` | `repository` (string), `digest` (`sha256:<hex>`), `reference` (`<repository>@<digest>`), `platforms` (list of strings), `tags` (list of strings) |
+| `PublishedTree` | `KubernetesPublication`, named `tree` | `repository` (publication URL), `branch` (string), `pathPrefix` (string), `commit` (commit ID), `indexDigest` (`sha256:<hex>` over the canonical JSON of `<prefix>/_nyl/index.json`) |
+
+Each kind publishes its artifacts under fixed names, so references name them
+without configuration. An artifact document has `apiVersion`, `kind`,
+`metadata.name`, `metadata.unit` (`{environment, name, uid}`), the
+`executionKey` of the receipt that published it, and `spec`.
 
 ```yaml
 # observed/units/web-image/artifacts/image.yaml
@@ -906,6 +979,20 @@ spec:
   reference: registry.example.com/web@sha256:4f0c…
   platforms: [linux/amd64, linux/arm64]
   tags: [nyl-dev-1a2b3c4d5e6f7a8b, dev]
+---
+# observed/units/kubernetes/artifacts/tree.yaml
+apiVersion: artifacts.gitops.nyl/v1
+kind: PublishedTree
+metadata:
+  name: tree
+  unit: {environment: dev, name: kubernetes, uid: 91c3…}
+executionKey: sha256:…
+spec:
+  repository: git@github.com:acme/deploy.git
+  branch: deploy
+  pathPrefix: dev
+  commit: 9c1e…
+  indexDigest: sha256:77d0…
 ```
 
 A reference reads an artifact through `fromUnit` with `artifact` instead of
@@ -959,8 +1046,23 @@ the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
 `ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
-keys, are computed over a canonical JSON form, so formatting never affects
-them. A reader rejects a state file whose kind version it does not know.
+keys, are computed over a canonical JSON form (RFC 8785), so formatting never
+affects them. The version in `apiVersion` is the format version of each kind:
+a format change adds a version with a migration from the previous one, golden
+files cover every version, and a reader rejects a version it does not know.
+
+| Kind | Location | Content |
+| --- | --- | --- |
+| `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, each with time, requester, and reason |
+| `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
+| `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file |
+| `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
+| `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
+| `Observation` | `observed/units/<unit>/observations/<type>.yaml` | `unit`, `type` (`drift`, `health`), `executionKey`, `at`, `result`, driver-specific `details` |
+| `Attestation` | `observed/units/<unit>/attestations/<name>.yaml`, `observed/attestations/<name>.yaml` | See [Attestations](#attestations) |
+| `Lease` | the lease ref | `run`, `runner`, `operation`, `units` executing, `deadline`, `takenAt` |
+| `Run` | the run ref's first commit, updated per phase | `run`, `runner`, `operation`, `sourceCommit`, `readDesired`, `readObserved`, `deadline`, `units` executing, and one checkpoint commit per finished unit holding its desired document, uid, and receipt or condition |
+| `Signal` | the signal ref | `run`, `unit`, `phase1Commit`, `by`, `identity`, `reason`, `at`, `from` |
 
 Each unit has one desired file and at most one observed file, holding only the
 latest state. Earlier states exist in Git history, which is enough for audit
@@ -1104,8 +1206,8 @@ details: {}                           # driver-specific, such as each Applicatio
 - `evidence: attested` requires every declared attestation of the producer to
   pass; `attestations: [<name>, …]` requires the named ones instead. A failing
   attestation fails that requirement until a newer one passes. Promotion
-  applies the same rules per unit and for the environment, as the roadmap's
-  promotion section describes.
+  applies the same rules per unit and for the environment, as the
+  [promotion contract](promotion.md#promotion-paths) describes.
 
 **Consumer freshness.** A reference is satisfied only by a current producer
 receipt. When a producer's desired document changes, its old receipt stops
@@ -1154,8 +1256,11 @@ Nyl-Version: 0.7.0
 - Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
-  `recover`, `verify`, `state-init`, `state-move`, `state-delete`,
-  `state-forget`.
+  `recover`, `verify`, `attest`, `state-init`, `state-move`, `state-delete`,
+  `state-forget`, and `state-restore`. `state reset` rewrites only the clone's
+  local branches, and `lease break` writes only the lease ref; the next
+  transition commit lists the break under `leaseBroken` with who broke it and
+  why.
 - Replaying operations in order, from the read commits and evaluation times
   they name, reproduces every state decision.
 
@@ -1196,9 +1301,13 @@ apply to desired state without mixing with observed commits.
 
 **Selection with `--unit`/`--units`:**
 
+- `--unit <u>` is repeatable; `--units <u>,<u>,…` is the same list in one
+  argument. Unknown names are an error, exit 1.
 - Resolution always covers the whole environment.
 - Only the named units execute. A dependency without a current receipt leaves
   the named unit `blocked`; dependencies and dependents are not executed.
+- `plan --unit` resolves the whole environment too and reports only the named
+  units, plus the leaving section, which is never filtered.
 
 **Transition commit conflicts.** Operations on one environment are serialized
 by its lease, and the final push is fenced by it (see
@@ -1329,15 +1438,18 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 
 1. **Lease.** A run creates the lease ref with compare-and-swap. If a lease
    exists and has not expired, or if a run ref's `Run` record has a deadline
-   that has not passed, the run exits 2 and reports who holds it; a live run
+   that has not passed, the run exits 2 with `NYL-LEASE-HELD` and reports who
+   holds it; a live run
    ref counts as a held lease, so a deleted lease ref alone never lets a
    second run execute units the first is still executing;
    `--wait-lease <duration>` waits up to that long for the lease instead, for
    jobs such as a preview's close job that must not give up. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
    `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `state init`,
-   `state move`, `state delete`, `state forget`), so only one runs per
-   environment at a time.
+   `state move`, `state delete`, `state forget`, `state restore`), so only one
+   runs per environment at a time. `promote` takes the target environment's
+   lease only. `lease break` is the one command that changes a lease it does
+   not hold.
 2. **Deadline.** Every phase sets the deadline before it starts, plus a grace
    period that also absorbs clock skew, and no phase runs without one:
    resolution, including target renders and `fingerprint` scripts, by
@@ -1372,17 +1484,19 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    `git push --atomic`, together with a compare-and-swap of the lease ref that
    expects the run's own lease commit, so either both land or neither does.
    Releasing the lease is a compare-and-swap too. A run whose lease was taken
-   over pushes nothing to the state refs and exits 4; its results stay on its
-   run ref for the next run to import. Atomic pushes work on GitHub, GitLab,
+   over pushes nothing to the state refs and exits 4 with `NYL-LEASE-LOST`;
+   its results stay on its run ref for the next run to import. Atomic pushes work on GitHub, GitLab,
    and plain Git servers.
 6. **Lost lease.** A runner whose lease update fails stops starting units,
-   checkpoints the units still running to its own run ref, and exits 4. The
-   next run imports those results as above.
+   waits for the units still running, checkpoints them to its own run ref,
+   marks its `Run` record finished, so the run ref no longer counts as a held
+   lease, and exits 4 with `NYL-LEASE-LOST`. The next run imports those
+   results as above.
 7. **Cancellation.** On SIGINT or SIGTERM, a run stops starting units and
    forwards the signal to running tools, so tools such as OpenTofu stop
    cleanly and release their own locks. It checkpoints finished units, gives
-   units that were still running an `uncertain` condition, pushes its run
-   ref, and releases the lease; it skips the final transition commit, and the
+   units that were still running an `uncertain` condition, marks its `Run`
+   record finished, pushes its run ref, and releases the lease; it skips the final transition commit, and the
    next run imports the run ref as after a crash. CI systems allow only
    seconds between the signal and a forced kill, so this path does no other
    work. Pipelines should not cancel runs that apply changes; a CI
@@ -1435,7 +1549,22 @@ checkpoint's execution key equals the unit's current desired document, and
 records the operator and reason in its transition commit.
 
 A retryable failure is retried by the next `reconcile`; a non-retryable one
-waits for `recover --retry`.
+waits for `recover --retry`. A failure is a claim that the execution made no
+effect it did not report; when effects may have happened, the result is
+uncertain instead. The failure categories are closed, so reports and exit
+categories treat them alike across drivers:
+
+| Category | Meaning | Retryable by default |
+| --- | --- | --- |
+| `tool-error` | The tool ran and reported failure, such as a nonzero exit or a failed apply | Per kind: Terraform and OpenTofu yes; OciImage yes; Command only with `idempotent: true` |
+| `output-rejected` | Outputs or artifacts violate their declarations: missing, mistyped, or sensitive but not declared so | No |
+| `missing-tool` | A required binary is absent or reports another version than the spec pins | Yes |
+| `credentials` | An admitted variable or secret is missing, or the tool rejected its credentials | Yes |
+| `ownership` | The execution found resources it must not touch, such as a publication file changed outside Nyl or a native lock held by another run | No |
+| `timeout` | A plan or verification passed its deadline; executions and teardowns that pass their deadline are uncertain instead | Yes |
+
+A driver may set `retryable` explicitly for a single failure; the defaults
+apply otherwise.
 
 ## Deletion
 
@@ -1447,10 +1576,24 @@ teardown is already there:
 lifecycle:
   state: deleting                    # active | deleting | held | retained
   deletion:
-    reason: omission                 # omission | teardown | replace | kind-change
+    reason: omission                 # omission | teardown | replace | kind-change | expired | decommission
     intent: teardown                 # retain | teardown
+    teardown: pending                # pending | in-progress; absent for intent: retain
     requested: {by: alice, at: 2026-09-24T12:00:00Z, reason: decommission}
 ```
+
+- `reason` says what requested the deletion: leaving the ownership set
+  (`omission`), `nyl teardown --unit` of a unit outside it (`teardown`) or
+  inside it (`replace`), a kind change (`kind-change`), an expired template
+  instance (`expired`), or `teardown --all` and `state delete --teardown`
+  (`decommission`).
+- `teardown: pending` means the teardown has not started, because it awaits
+  `--allow-teardown`, an approval, a dependent's teardown, or a readiness
+  override. `in-progress` means the driver's teardown has started, including a
+  publication waiting under its `teardownWait`.
+- The status values are projections of this block: `pending-teardown` is
+  `deleting` with `teardown: pending`, and `tearing-down` is `deleting` with
+  `teardown: in-progress`.
 
 A held unit's block looks like this:
 
@@ -1491,7 +1634,8 @@ lifecycle:
 - **Retained dependents.** A `retained` tombstone keeps running resources that
   may still use its producers. Tearing down a unit that a tombstone's receipt
   cites in its provenance refuses unless the invocation passes
-  `--allow-dependents`, as for units other environments reference; `plan`
+  `--allow-dependents`, as for units other environments reference: the unit
+  stays `pending-teardown` with `NYL-TEARDOWN-HAS-DEPENDENTS`, exit 2; `plan`
   lists such tombstones with the teardown, and the transition commit records
   the override.
 - **Retain, declared.** A unit that declares `deletionPolicy: Retain` keeps
@@ -1539,7 +1683,9 @@ lifecycle:
   - A unit without an incarnation (after a teardown, or declared but never
     executed) is not created. Its desired file has no uid, and its dependents
     stay blocked.
-  - A unit that is `deleting` pauses: no retention or teardown happens.
+  - A unit that is `deleting` pauses: no retention or teardown happens. Its
+    file has `state: held` and keeps its `deletion` block next to `hold`, so
+    `resume` returns it to `deleting` where it stopped.
   - A held unit that leaves the ownership set is not deleted; it is reported
     as held with a pending deletion.
   - An explicit `nyl teardown` of a held unit is still allowed, because it is
@@ -1758,16 +1904,26 @@ trait Driver {
     fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
-    fn capabilities(&self) -> Capabilities; // plan, reconcile, verify, teardown, inspect, observe, build
+    fn capabilities(&self) -> Capabilities;
     fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
     fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
+    fn ownership_scopes(&self, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity
+    fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint
 
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;
     fn reconcile(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>;
-    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Verification>>; // drift and attestations
+    fn verify(&self, ctx: &ExecutionContext, unit: &DesiredUnit, receipt: &Receipt) -> Result<Supported<Verification>>; // drift, observations, attestations
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
+    fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
+}
+
+struct Capabilities {
+    plan: bool, reconcile: bool, verify: bool, inspect: bool, teardown: bool,
+    observe: bool,              // verify records observations, such as Argo CD health
+    build: Option<BuildPush>,   // None: no `nyl build`; Some(Safe | LoadOnly)
+    change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
 }
 
 enum Supported<T> {
@@ -1778,11 +1934,29 @@ enum Supported<T> {
 enum Outcome {
     Succeeded { outputs: Outputs, artifacts: Vec<Artifact>, attestations: Vec<AttestationResult> },
     AwaitingApproval { digest: ChangeDigest },               // plan changed since approval; no effects
-    Failed { category: FailureCategory, retryable: bool },
-    Uncertain,
+    Waiting { phase: String, reason: String, until: Option<Timestamp> }, // effects so far are recorded; call again
+    Failed { category: FailureCategory, retryable: bool, message: String },
+    Uncertain { reason: String },
 }
 ```
 
+| Type | Content |
+| --- | --- |
+| `PlanReport` | `changes`: `none`, `create`, `update`, or `destroy`; a human `summary` with secrets masked; `changeDigest` when the capability reports one; `blockedBy` pointers the driver could not plan without |
+| `Receipt` | What an `ObservedUnit`'s `receipt` holds (see [Observed unit](#observed-unit)); drivers receive it and never write it |
+| `Outputs` | A JSON object of declared, non-sensitive outputs; Nyl validates it against the declarations and drops the rest before recording |
+| `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
+| `Verification` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; `observations`; `attestations` |
+| `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
+| `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
+
+- `Waiting` is how a two-phase teardown reports that phase 1 is published and
+  its `teardownWait` has not completed: the unit stays `tearing-down`, the
+  run checkpoints it, and the driver is called again in the same run while the
+  wait allows, or in a later run. Only teardown may return it.
+- `Result` errors are Nyl-side problems, such as an unreadable worktree; they
+  give the unit an `uncertain` condition when an effect may have started, and
+  otherwise fail the invocation with exit 1.
 - `ExecutionContext` provides the worktree at the effective source revision,
   the resolved spec, admitted environment variables and secrets, the approved
   change digest for `bind: plan` units, the deadline, a cancellation signal,
@@ -1790,8 +1964,20 @@ enum Outcome {
 - Every execution gets its own worktree and its own temporary directory for
   tool state, such as `TF_DATA_DIR`, so parallel units sharing a `source.path`
   never share a working directory.
+- The **effective source revision** of a Git source field is the commit
+  resolution wrote into it (`resolvedSpec.source.commit` and its
+  equivalents): S, a locked `commit`, a resolved `revision`, or a promoted
+  revision. Its worktree is a detached checkout of that commit.
 - Drivers run external tools only through the context, so transcripts,
-  masking, and deadlines are uniform.
+  masking, and deadlines are uniform. Each tool runs in its own process group.
+  At the deadline, or on cancellation, the context sends SIGTERM to the group,
+  waits up to 30 seconds (less when the run itself is being cancelled, see
+  [Runs and leases](#runs-and-leases)), and then sends SIGKILL. A reconcile or
+  teardown ended this way, or by the tool dying from a signal, is `uncertain`,
+  because effects may have happened; a plan or verification ended this way
+  fails with category `timeout`.
+- Transcripts are masked as they are written, stored on the runner only for
+  the invocation, and printed on stderr; state records no transcript.
 - Methods for capabilities a driver lacks return `Supported::Unsupported`, which is
   reported, never silently skipped.
 
@@ -1801,7 +1987,7 @@ A kind whose only effect is producing an artifact from source declares the
 `build` capability, and `nyl build <unit> [-e <env>]` runs it outside
 orchestration:
 
-- It uses the driver's own execution path, without a lease, a receipt, or
+- It calls the driver's `build` method, without a lease, a receipt, or
   any state write, and prints the artifact document.
 - Files come from the worktree it runs in, uncommitted changes included, like
   `nyl render`; `--source <rev>` builds at a commit instead. Nothing is
@@ -1812,8 +1998,8 @@ orchestration:
   with an error naming the reference and `-e`; there are no per-kind override
   flags, so the command stays the same for every kind.
 - The capability declares whether publishing the artifact outside
-  orchestration is safe. `--push` is refused for a kind that does not declare
-  it, and names `reconcile` instead.
+  orchestration is safe (`BuildPush::Safe`). `--push` is refused for a kind
+  that declares only `LoadOnly`, and names `reconcile` instead.
 - Kinds with external effects never declare `build`: a Terraform apply or a
   command without a receipt would leave state describing something else. Their
   direct forms are `nyl plan --unit` and `--local` runs.
@@ -1853,12 +2039,14 @@ kind: Command
 metadata:
   name: seed
 spec:
-  files: ['scripts/seed/**']
+  files: ['../scripts/seed/**']
   values:
     bucket: {fromUnit: {unit: storage, output: bucket}}
-  command: ['./scripts/seed/run.sh']
-  verify: ['./scripts/seed/verify.sh']
-  fingerprint: ['./scripts/seed/tool-versions.sh']
+  command: ['./run.sh']
+  verify: ['./verify.sh']
+  teardown: ['./remove.sh']  # optional; without it the kind cannot tear down
+  fingerprint: ['./tool-versions.sh']
+  workingDir: ../scripts/seed            # optional; default the nyl.toml directory
   env:
     passthrough: [AWS_REGION, AWS_PROFILE]
     secrets:
@@ -1869,15 +2057,30 @@ spec:
   timeout: 10m
 ```
 
-- The command runs in a worktree at the effective source revision, starting
-  from an empty environment plus:
-  - `NYL_INPUTS`: path to a JSON file with the resolved `values`;
-  - `NYL_OUTPUTS`: path where the command writes one JSON object of outputs;
-  - `NYL_UNIT` and `NYL_ENVIRONMENT`;
+- `command`, `verify`, `teardown`, and `fingerprint` are argument vectors,
+  executed directly without a shell; a relative first element is resolved
+  against the working directory. `workingDir` follows the local path rule of
+  [Units](#units), where `/` alone names the worktree root, and defaults to
+  the directory containing `nyl.toml`, in the worktree at S. Commands use S;
+  a Command has no `source` field of its own.
+- The command starts from an empty environment plus:
+  - `PATH` from the runner and `HOME` set to a fresh temporary directory, the
+    kind's fixed variables;
+  - `NYL_INPUTS`: path to a JSON file holding `{"values": …}` with the
+    resolved `values`;
+  - `NYL_OUTPUTS`: path to an existing empty file, where the command writes
+    one JSON object of outputs;
+  - `NYL_ATTESTATIONS`: path to an existing empty file for attestation
+    results, when the unit declares attestations;
+  - `NYL_UNIT`, `NYL_ENVIRONMENT`, and `NYL_OPERATION` (`reconcile`,
+    `verify`, `teardown`, or `fingerprint`);
   - variables and secrets admitted through the common `env` field (see
     [Credentials](#credentials)).
+- Every step has the unit's `timeout` and the termination rules of
+  [Drivers](#drivers): a `command` or `teardown` that passes it, or dies from
+  a signal, is uncertain; a `verify` or `fingerprint` that passes it fails.
 - Following the general rule, the execution key covers `command`, `verify`,
-  `fingerprint`, `idempotent`, `outputs`, the files matched by `files`,
+  `teardown`, `fingerprint`, `workingDir`, `idempotent`, `outputs`, the files matched by `files`,
   resolved `values`, the names in
   `env.passthrough` and `env.secrets` but not their values, and the output of
   `fingerprint`. Changing a passthrough variable or rotating a secret does not
@@ -1891,13 +2094,26 @@ spec:
 - Files outside `files` may be read but do not trigger re-execution.
 - Stdout and stderr form the transcript and are never parsed. Secret values
   and `sensitive` outputs are masked in it.
-- Exit code 0 with a valid outputs file is success. Any other exit code is a
-  failure; a missing or invalid outputs file, or a declared output that is
-  missing or has the wrong type, also fails the execution. Undeclared outputs
-  are ignored with a warning. Failures are not retryable unless
-  `idempotent: true`.
+- Exit code 0 with a valid outputs file is success. An empty outputs file
+  counts as `{}`, which is valid only when the unit declares no outputs. The
+  file may hold at most 1 MiB. Any other exit code is a `tool-error` failure;
+  an invalid outputs file, or a declared output that is missing or has the
+  wrong type, is an `output-rejected` failure. Undeclared outputs are ignored
+  with a warning. Failures are not retryable unless `idempotent: true`, and
+  an uncertain execution is re-run only with `idempotent: true` (recovery
+  policy `converge`); otherwise it waits for `recover` (`manual`).
+  Idempotency for identical inputs is the author's claim, which Nyl cannot
+  check.
 - `verify` exits 0 for clean, 2 for drift, and anything else for an error. It
-  records a drift observation, never a receipt.
+  records a drift observation, never a receipt, and it receives the same
+  inputs and admitted environment as `command`, with `NYL_OUTPUTS` absent.
+- `teardown`, when present, gives the kind the `teardown` capability and the
+  default `deletionPolicy: Teardown`. `NYL_INPUTS` then holds the resolved
+  `values` of the stored desired document under `values` and the last
+  receipt's outputs under `outputs`; exit 0
+  completes the deletion, and any other exit is a `tool-error` failure with the
+  same retry rule as `command`. Without `teardown`, the kind defaults to
+  `Retain` and rejects `deletionPolicy: Teardown`.
 - A command unit may declare attestations it produces itself, such as
   `attestations: [{name: healthy}]` for a smoke test. The command, or its
   `verify`, writes their results to `NYL_ATTESTATIONS` as one JSON object of
@@ -1929,7 +2145,7 @@ spec:
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the next transition commit |
 | `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only with `--push` where the kind allows it |
-| `promote` | See the roadmap's promotion section | PromotionRecord |
+| `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so lifting a hold is `resume` and
@@ -2062,8 +2278,8 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 - `get` only reads: it needs read access to the state repository and never
   takes the lease. Document and table forms exit 0 whenever they can read the
   requested state; value forms follow the rule above.
-- `nyl create` and `nyl delete` stay source-only, for environments, units, and
-  promotion paths. Artifacts and state records have no `create` or `delete`:
+- `nyl create` and `nyl delete` stay source-only, for environments,
+  environment groups and templates, units, and promotion paths. Artifacts and state records have no `create` or `delete`:
   drivers produce them, and state changes only through the operations above.
 - `nyl status -e <env>` remains the environment overview: the run holding the
   lease and what it is executing, blockers, and suggested next actions. It
@@ -2072,7 +2288,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
-`--allow-teardown`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
+`--allow-teardown`, `--allow-dependents`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
@@ -2089,8 +2305,8 @@ execute (all of them without `--unit`/`--units`):
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed |
 | 1 | Configuration, resolution, or operational error |
-| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, or another run's lease |
-| 3 | At least one execution failed |
+| 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, `--allow-dependents`, a teardown wait, or another run's lease |
+| 3 | At least one execution or verification failed |
 | 4 | At least one execution is uncertain and needs recovery, or the run lost its lease |
 
 When several categories apply, the most severe wins, in the order 4, 3, 1, 2,
@@ -2100,41 +2316,145 @@ a run that leaves units unreconciled says so. A pipeline that expects a hold
 names the units it should reconcile with `--unit`/`--units`, and then exits 0
 when those are current.
 
+The table applies to each command as follows:
+
+| Command | 0 | 1 | 2 | 3 | 4 |
+| --- | --- | --- | --- | --- | --- |
+| `reconcile`, `teardown` | As the table | As the table | As the table | As the table | As the table |
+| `plan` | The plan is complete, whatever changes it shows | Error, or `--fail-on-leaving` with a unit leaving | Incomplete: a unit is blocked, so its change cannot be planned | A driver's planning failed | — |
+| `verify` | Every verified unit is clean, and its attestations pass | Error | A unit could not be verified: no current receipt, or `unknown` drift | Drift, or a failing attestation | — |
+| `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
+| `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
+| `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
+| `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done | Error or refusal | The lease is held, `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
+
+`--output json` prints the operation's typed report, the same one that renders
+tables and the transition commit summary:
+
+```json
+{
+  "apiVersion": "gitops.nyl/v1",
+  "kind": "PlanReport",
+  "environments": [{
+    "name": "dev",
+    "exit": 2,
+    "complete": false,
+    "leaving": [{"unit": "seed", "reason": "deselected", "consequence": "dropped", "labels": {"dve": "true"}}],
+    "units": {
+      "network": {"state": "ready", "changes": "update", "changeDigest": "sha256:…", "summary": "…"},
+      "database": {"state": "blocked", "blockedBy": [{"pointer": "/variables/vpc_id", "unit": "network", "reason": "no-current-receipt"}]}
+    },
+    "warnings": [{"code": "NYL-PLAN-UNITS-LEAVING", "message": "…", "fix": "…"}]
+  }]
+}
+```
+
+Reconcile, teardown, verify, and status reports have the same shape, with
+`result` per unit as in the transition commit summary. The report's
+`apiVersion` versions the machine output.
+
 ## Walkthroughs
 
-**Successful dependency wave.** `network` has no references and runs in wave 1;
-its receipt is checkpointed on the run ref. Re-resolution makes `database`
-ready; it runs in wave 2 with `vpcId` in its resolved spec. `kubernetes`
-depends on `database` and on `web-image`'s `ContainerImage` through its
-target's bindings and runs in wave 3. The run ends with one desired and one
-observed commit whose summary lists all three. Exit 0.
+Each walkthrough is an executable scenario under
+[`nyl/tests/scenarios/walkthroughs/`](../nyl/tests/scenarios/walkthroughs/),
+in the format the [reference scenarios](reference-scenarios.md#scenario-files)
+define. A change to a rule a walkthrough uses changes its scenario in the same
+change. They use one environment, `dev`, with `network` and `database`
+(OpenTofu), `web-image` (OciImage), and `kubernetes` (KubernetesPublication,
+reading `database`'s `host` and `web-image`'s `image`); until M4 and M5, the
+harness runs them with the fake kinds that stand in for those kinds.
+
+**Successful dependency wave.** `nyl plan -e dev` resolves `network` and
+`web-image`, which have no references, reports `database` and `kubernetes`
+blocked on missing receipts, and exits 2 because the plan is incomplete.
+`nyl reconcile -e dev` then runs `network` and `web-image` in wave 1 and
+checkpoints both receipts on the run ref. Re-resolution at the same source
+commit S makes `database` ready; it runs in wave 2 with `vpcId` in its
+resolved spec and provenance citing the run. `kubernetes` runs in wave 3. The
+run ends with one desired and one observed commit whose summary lists all four
+units as `executed`, and exits 0. A second `reconcile` executes nothing,
+writes no transition commit, and exits 0.
+([`dependency-wave`](../nyl/tests/scenarios/walkthroughs/dependency-wave/scenario.yaml))
 
 **Unavailable upstream output.** `web-image` fails in wave 1 with a retryable
-failure. `kubernetes` stays `blocked` on `web-image` with its rendered spec
-retained; `database` is unaffected. The transition commit records the failure
-as `web-image`'s condition. Exit 3. The next run retries `web-image`; once its
-receipt exists, `kubernetes` resolves without rereading source.
+`tool-error`. `database` is unaffected and runs in wave 2. `kubernetes` stays
+`blocked` on `web-image`: its desired document records its rendering at this
+run's S with `readiness: blocked` and the unresolved pointer, and nothing
+executes it. The transition commit records `web-image`'s failure as its
+condition and `kubernetes` as blocked; the run exits 3, because a failure
+outranks a wait. A `plan` meanwhile reports `kubernetes` blocked and exits 2.
+The next run renders every unit at its own S, which replaces the blocked
+document, retries `web-image` because its failure is retryable, and, once the
+new receipt is checkpointed, re-resolves `kubernetes` in a later wave of the
+same run, which then executes it. It exits 0. Preview values never become
+inputs: `kubernetes` executes only against a current receipt.
+([`unavailable-upstream-output`](../nyl/tests/scenarios/walkthroughs/unavailable-upstream-output/scenario.yaml))
 
-**Effects without a receipt.** A runner applies OpenTofu for `database` and dies
-before checkpointing. Its lease expires; the next run takes it over, imports
-the dead run's checkpoints, and gives `database` an `uncertain` condition.
-OpenTofu's policy is `converge`, so the same run plans the same desired
-document again, finds no changes, and records the receipt. Its transition
-commit lists `database` under `recovered`. Nothing is assumed from the missing
-checkpoint.
+**Effects without a receipt.** A runner has checkpointed `network`, applies
+OpenTofu for `database`, and dies before checkpointing it. Its lease and run
+ref keep their deadline, `database`'s 60-minute timeout plus the 10-minute
+grace, so a run started before then exits 2 and names the holder. The first
+run after the deadline takes the expired lease over, imports the dead run's
+run ref, where the checkpoints of `network` and `web-image` match the new
+resolution's execution keys and become their receipts, and gives `database`
+an `uncertain` condition,
+because the dead run was executing it without a checkpoint. OpenTofu's
+recovery policy is `converge`, so the same run executes `database` again: the
+plan finds no changes, `apply` is skipped, and the receipt is recorded. The
+run then executes `kubernetes`. Its transition commit lists `network` and
+`web-image` under `imported` and `database` under `recovered`, and it exits 0. Nothing is
+assumed from the missing checkpoint.
+([`effects-without-receipt`](../nyl/tests/scenarios/walkthroughs/effects-without-receipt/scenario.yaml))
 
 **Competing runners.** Two CI jobs reconcile `dev` at once. One creates the
-lease; the other finds it held, reports the holder, and exits 2. If the holder
-is lost, its lease expires, and a later run takes over as above.
+lease ref with compare-and-swap; the other finds it held, reports the holder's
+run ID, runner, and operation, writes nothing, and exits 2. With
+`--wait-lease 30m` it waits instead, and runs once the lease is released,
+finding nothing left to execute. Deleting the lease ref while the first run
+executes does not let a second run start, because the first run's run ref
+still carries an unexpired deadline; the first run exits 4 at its next lease
+update and pushes nothing, and the next run imports its checkpoints. If the
+holder is lost, its lease expires and a later run takes over as above.
+([`competing-runners`](../nyl/tests/scenarios/walkthroughs/competing-runners/scenario.yaml))
 
-**Promotion with stale source evidence.** Dev's `web-image` has a new desired
-document without a receipt for its execution key. Promoting from `dev` at
-`published` walks the history of the selected units' observed files and takes
-the newest desired revision whose selected units each had a receipt for their
-execution key; the new, unexecuted document is skipped and the previous one is
-promoted. At `healthy`, the value comes from the publication the consuming
-Application runs. If no revision meets the required level, promotion blocks
-and reports which unit lacks evidence.
+**Promotion with stale source evidence.** Dev's run R1 at source commit S1
+recorded receipts for every unit. A later run R2 at S2 changed `web-image`,
+whose build failed, so the state R2 wrote has a new `web-image` desired
+document without a receipt for its execution key, and `kubernetes` blocked.
+Prod's source is `fromPromotion`, so before the first promotion
+`reconcile -e prod` exits 2 and names `nyl promote`.
+`nyl promote dev-to-prod`, with `evidence: published`, considers dev's
+recorded states, the transition commit pairs, newest first. The state R2 wrote
+fails: `web-image`, whose artifact the path selects, has no receipt for its
+new execution key, and `kubernetes`, which prod also selects, is blocked
+without a current receipt, so the whole-source rule rejects it. The state R1
+wrote passes. The PromotionRecord
+therefore carries S1 and R1's image digest, names R1's desired and observed
+commits as `from`, and the command exits 0; `reconcile -e prod` then
+publishes prod with R1's image, exit 0. `nyl get promotion-candidates
+dev-to-prod` shows R2's state as not reaching `published` and names
+`web-image` and `kubernetes`. With `evidence: attested`, a state must also
+have every required attestation passing for it, such as dev's
+environment-wide `qa`; when no recorded state reaches the level, `nyl
+promote` writes nothing, names what lacks evidence in the newest state, and
+exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
+([`stale-promotion-evidence`](../nyl/tests/scenarios/walkthroughs/stale-promotion-evidence/scenario.yaml))
+
+**Deletion.** `cache` and its only consumer `worker` are removed from source;
+`cache` has a teardown step and therefore the default `Teardown` policy,
+`worker` declares `Retain`. The next run replaces `worker`'s files with a
+`retained` tombstone, marks `cache` `deleting` with `teardown: pending`,
+reports it as `pending-teardown`, and exits 2; `plan` lists both as leaving.
+Restoring both before any teardown returns them unchanged and executes
+nothing, exit 0: `cache` returns to `active` with its uid and receipt, and
+`worker` adopts its tombstone. After a second removal, `reconcile
+--allow-teardown` still leaves `cache` pending, exit 2 with
+`NYL-TEARDOWN-HAS-DEPENDENTS`, because `worker`'s tombstone cites it;
+`--allow-teardown --allow-dependents` tears it down, removes its files, and
+exits 0. Restoring both afterwards starts a new `cache` incarnation with a new
+uid, and `worker` adopts its tombstone but executes again, because the `cache`
+incarnation its receipt cites is gone; exit 0.
+([`deletion`](../nyl/tests/scenarios/walkthroughs/deletion/scenario.yaml))
 
 **Preview expiry.** Instance `pr-123` of template `preview` (`ttl: 7d`,
 `allowTeardown: true`) was last reconciled with `reconcile -e pr-123` eight days
@@ -2148,18 +2468,6 @@ directory; the fleet reconcile then reconciles the other, live instances
 without extending them. Had the pull request been updated in the meantime, its
 pipeline's `reconcile -e pr-123 --template preview --param pr=123` would have
 extended the expiry first.
-
-**Deletion.** `cache` and its only consumer `worker` are removed from source;
-`cache` has the default `Teardown` policy, `worker` declares `Retain`. The next
-run marks both `deleting`, replaces `worker`'s files with a `retained`
-tombstone, and reports `cache` as `pending-teardown`, exiting 2, with `plan`
-naming `worker`'s tombstone as still citing `cache`. Restoring both before any
-teardown returns them unchanged: `cache` to `active` with its receipt, and
-`worker` adopts its tombstone and does not run. Tearing `cache` down instead
-needs `--allow-teardown --allow-dependents`; a new `cache` added in the
-meantime waits for that and then receives a new uid, and a `worker` restored
-afterwards adopts its tombstone but runs again, because the `cache` its
-receipt cites is gone.
 
 ## Remaining questions
 

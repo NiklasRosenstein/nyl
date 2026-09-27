@@ -1,0 +1,10 @@
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  values:
+    dataDir: '%SCENARIO_TMP%/data'
+  allowUnprotectedSource: true

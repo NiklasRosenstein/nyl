@@ -97,7 +97,7 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   contract section.
 - Contract walkthroughs are executable scenarios against an in-memory
   `StateStore`, fake drivers, and a fake clock, for example
-  `tests/scenarios/effects_without_receipt.yaml`. A contract change updates
+  `nyl/tests/scenarios/walkthroughs/effects-without-receipt/scenario.yaml`. A contract change updates
   its scenario in the same change.
 - The [reference scenarios](reference-scenarios.md) run whole workflows, from
   Git operations and clock changes to `nyl` invocations, against local bare

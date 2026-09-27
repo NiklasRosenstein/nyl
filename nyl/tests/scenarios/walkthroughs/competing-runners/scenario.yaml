@@ -1,0 +1,49 @@
+# Walkthrough "Competing runners" in design/orchestration-core.md.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: first
+    pause: {point: executing, unit: database}
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the lease is held
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - nyl: [reconcile, -e, dev, --wait-lease, 30m]
+    id: waiting
+    pause: {point: waiting-lease}
+  - resume: first
+    exit: 0
+    expect:
+      executed: [network, web-image, database, kubernetes]
+  - resume: waiting
+    exit: 0                           # ran after the release and found nothing to do
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+
+  # A deleted lease ref does not start a second execution.
+  - commit: {branch: main, message: "Change the web page", apply: patches/web-page}
+  - nyl: [reconcile, -e, dev]
+    id: third
+    pause: {point: executing, unit: web-image}
+  - ref: {delete: refs/nyl/dev/lease}
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the first run's run ref still carries a deadline
+    expect:
+      codes: [NYL-LEASE-HELD]
+      executed: []
+  - resume: third
+    exit: 4                           # its next lease update fails; it pushes nothing
+    expect:
+      codes: [NYL-LEASE-LOST]
+      commits: {desired: 0, observed: 0}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      imported: [web-image]
+      executed: [kubernetes]

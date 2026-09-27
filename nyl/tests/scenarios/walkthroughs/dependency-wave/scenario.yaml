@@ -1,0 +1,24 @@
+# Walkthrough "Successful dependency wave" in design/orchestration-core.md.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [plan, -e, dev]
+    exit: 2
+    expect:
+      blocked: [database, kubernetes]
+      commits: {desired: 0, observed: 0}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: [network, web-image, database, kubernetes]
+      commits: {desired: 1, observed: 1}
+      deploy: {branch: deploy, contains: ['dev/web/**', 'dev/_nyl/index.json']}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      current: [network, web-image, database, kubernetes]
+      commits: {desired: 0, observed: 0}

@@ -344,8 +344,23 @@ src/
   ApplicationGroups inherit the target Cluster destination.
 - ApplicationGroup and AppProjectDefinition specs are rendered after target
   selection, so structural templating is valid beneath the static envelope.
-- Discovery follows Git visibility across the whole project. The `config/` and
-  `applications/` paths are scaffold conventions, not lookup restrictions.
+- Discovery follows Git visibility across the whole project, the directory
+  containing `nyl.toml` and beneath it. The `config/` and `applications/`
+  paths are scaffold conventions, not lookup restrictions. `nyl.toml` is the
+  nearest one above the working directory, or `nyl/nyl.toml` at a worktree
+  root without its own.
+- Local paths in this repository follow one rule, owned by
+  `util::project_path`: relative to the `nyl.toml` directory with leading `..`
+  allowed, or `/`-rooted at the Git worktree, never leaving it or traversing a
+  symlink. Recorded paths are project-relative beneath the `nyl.toml`
+  directory and `/`-prefixed elsewhere, so projects with `nyl.toml` at the root
+  keep byte-identical output.
+- Commands that render another revision locate its project with
+  `locate_checkout_project`: the current location first, then invocation
+  candidates and `[project] previous_paths`, never an unnamed location, so
+  another project in the repository cannot stand in for it. Missing
+  candidates are skipped, never required, so a recorded move stays valid
+  before and after it merges.
 - One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
   repository revision must have disjoint prefixes.
 - `publish-tree` attributes reproducible output to a committed revision. A

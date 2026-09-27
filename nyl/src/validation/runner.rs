@@ -298,11 +298,12 @@ async fn validate_tree_inner(
     if !args.enabled(&inventory.project_config.config.validation)? {
         return Ok(());
     }
+    let paths = inventory.paths();
     let mut protected = inventory
         .yaml_files
         .iter()
         .chain(compiled.inputs.iter())
-        .map(|path| inventory.project_root.join(path))
+        .map(|path| paths.path_for_key(path))
         .collect::<Vec<_>>();
     protected.extend(inventory.project_config.file.iter().cloned());
     args.validate_outputs(

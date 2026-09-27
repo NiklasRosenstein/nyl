@@ -2,9 +2,11 @@
 title: 'Project Structure and Discovery'
 ---
 
-Rendered GitOps resources are discovered project-wide. Tracked files and
-non-ignored untracked YAML files are eligible, so directory names are
-conventions rather than mandatory lookup paths.
+Rendered GitOps resources are discovered project-wide: in the directory
+containing `nyl.toml` and beneath it. Tracked files and non-ignored untracked
+YAML files are eligible, so directory names are conventions rather than
+mandatory lookup paths. Release files may live anywhere in the Git worktree
+that an ApplicationGroup source names.
 
 ## Recommended layout
 
@@ -44,6 +46,31 @@ applications/
 components/
 ```
 
+## Keeping `nyl.toml` beside the configuration
+
+`nyl.toml` may also live in a `nyl/` directory at the worktree root, next to
+the control resources. Nyl finds `nyl/nyl.toml` from anywhere in the worktree,
+and the Releases can stay inside that directory or sit beside it:
+
+```text
+nyl/                          nyl/
+  nyl.toml                      nyl.toml
+  gitops.yaml                   gitops.yaml    # group source: ../applications/web
+  applications/                applications/
+    web/                         web/
+```
+
+On the left, the group derives `applications/web` beneath `nyl/` as usual. On
+the right, the group names its source as `../applications/web`: the `..`
+leaves `nyl/` on purpose, because sources may name any directory of the
+worktree. With `nyl.toml` in `nyl/`, `/applications/web` from the worktree root
+selects the same directory; the two forms differ as soon as `nyl.toml` lives
+elsewhere (see [local paths](/nyl/configuration/#local-paths)). Control
+resources must stay beneath `nyl/`, because discovery covers only the
+`nyl.toml` directory. When moving an existing project there, list its earlier
+location in `[project] previous_paths` so comparisons with older revisions
+still find it.
+
 Set `project.gitops_scaffold_path` in `nyl.toml` when generated control
 resources should live somewhere other than `config/`. This setting changes only
 scaffold destinations; it does not restrict discovery.
@@ -63,8 +90,11 @@ nyl create application-group workloads
 
 A centrally stored
 [`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/) with
-no explicit source derives `applications/<group-name>`. An explicit
-`spec.source.path` can select any other project-relative directory.
+no explicit source derives `applications/<group-name>` beneath the directory
+containing `nyl.toml`. An explicit `spec.source.path` can select any other
+directory of the worktree under the [local path rule](/nyl/configuration/#local-paths):
+relative to the `nyl.toml` directory, with leading `..` allowed, or from the
+worktree root with a leading `/`.
 
 An ApplicationGroup can instead be colocated with its source:
 

@@ -12,6 +12,7 @@ use crate::cli::commands::cluster::{self, ClusterCaptureArgs};
 use crate::config::{ProjectConfig, VendorMode};
 use crate::resources::{parse_gitops_resource, validate_repository_coordinates};
 use crate::util::path_for_display;
+use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
 
 const MINIMAL_PROJECT_CONFIG: &str = r"#:schema https://niklasrosenstein.github.io/nyl/reference/schemas/nyl.schema.json
@@ -99,7 +100,7 @@ pub struct GitOpsInitArgs {
     #[arg(long = "allow-cluster-resource")]
     allowed_cluster_resources: Vec<String>,
     #[arg(long)]
-    /// Project-relative directory containing Release manifests.
+    /// Directory containing Release manifests, relative to the nyl.toml directory; may begin with `..`, or with `/` for the Git worktree root.
     applications_path: Option<PathBuf>,
     #[arg(long)]
     /// Name for the generated ApplicationGroup.
@@ -133,6 +134,8 @@ struct GitOpsInitConfig {
     /// implied permissive project in place.
     project: Option<ProjectScope>,
     applications_path: Option<PathBuf>,
+    /// Absolute directory `applications_path` names.
+    applications_dir: Option<PathBuf>,
     applications_name: Option<String>,
     capture_cluster: bool,
     vendor: Option<VendorMode>,
@@ -244,8 +247,8 @@ async fn init_gitops(args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Result
         fs::create_dir_all(parent)?;
     }
     fs::write(&config.output, yaml)?;
-    if let Some(path) = &config.applications_path {
-        fs::create_dir_all(config.project_root.join(path))?;
+    if let Some(directory) = &config.applications_dir {
+        fs::create_dir_all(directory)?;
     }
 
     println!(
@@ -444,10 +447,11 @@ fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Resul
             interactive,
             true,
         )?;
-        let path = PathBuf::from(path);
-        validate_relative_path("--applications-path", &path)?;
-        Some(path)
+        let directory =
+            ProjectPaths::new(project_root.clone(), worktree.clone()).resolve("--applications-path", &path)?;
+        Some((PathBuf::from(path), directory))
     };
+    let (applications_path, applications_dir) = applications_path.unzip();
     let applications_name = if let Some(path) = &applications_path {
         let default = path
             .file_name()
@@ -517,6 +521,7 @@ fn resolve_config(mut args: GitOpsInitArgs, vendor: Option<VendorMode>) -> Resul
         argocd_namespace,
         project,
         applications_path,
+        applications_dir,
         applications_name,
         capture_cluster,
         vendor,
@@ -729,6 +734,7 @@ mod tests {
             argocd_namespace: "argocd".to_owned(),
             project: None,
             applications_path: Some(PathBuf::from("applications")),
+            applications_dir: Some(root.join("applications")),
             applications_name: Some("applications".to_owned()),
             capture_cluster: false,
             vendor: None,

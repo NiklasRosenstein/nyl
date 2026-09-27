@@ -16,6 +16,7 @@ use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::resources::{
     parse_gitops_resource, parse_gitops_resource_identity, GitOpsResource, GitOpsResourceIdentity, GitOpsResourceKind,
 };
+use crate::util::project_path::ProjectPaths;
 use crate::util::SourceContext;
 use crate::{NylError, Result};
 
@@ -60,8 +61,15 @@ pub struct GitOpsInventory {
     pub project_root: PathBuf,
     /// Parsed project configuration shared by discovery and central render sessions.
     pub project_config: ProjectConfig,
-    /// All eligible YAML files, relative to `project_root` and sorted.
+    /// Canonical root of the Git worktree containing `project_root`.
+    pub worktree_root: PathBuf,
+    /// All eligible YAML files, relative to `project_root` and sorted. Control
+    /// resources are discovered only here.
     pub yaml_files: Vec<PathBuf>,
+    /// Every eligible YAML file in the worktree, relative to `worktree_root` and
+    /// sorted. Local ApplicationGroup sources may select Release files outside
+    /// `project_root` (see [`crate::util::project_path`]).
+    pub worktree_yaml_files: Vec<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
     pub resources: BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
 }
@@ -69,6 +77,11 @@ pub struct GitOpsInventory {
 impl GitOpsInventory {
     pub fn get(&self, kind: GitOpsResourceKind, name: &str) -> Option<&DiscoveredGitOpsResource> {
         self.resources.get(&GitOpsInventoryKey::new(kind, name))
+    }
+
+    /// The roots that local paths resolve against.
+    pub fn paths(&self) -> ProjectPaths {
+        ProjectPaths::new(self.project_root.clone(), self.worktree_root.clone())
     }
 
     /// Repeat discovery with a different output exclusion without re-reading
@@ -196,13 +209,22 @@ fn discover_project_inventory(
             .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
         normalize_absolute_path(&path)
     });
-    let yaml_files = collect_git_visible_yaml(
+    let worktree_yaml_files = collect_git_visible_yaml(
         &repository,
         &repository_root,
-        &project_root,
         output_subtree.as_deref(),
         vendor_subtree.as_deref(),
     )?;
+    let yaml_files = worktree_yaml_files
+        .iter()
+        .filter_map(|relative| {
+            repository_root
+                .join(relative)
+                .strip_prefix(&project_root)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+        .collect::<Vec<_>>();
     let mut resources = BTreeMap::new();
 
     for relative_path in &yaml_files {
@@ -212,16 +234,20 @@ fn discover_project_inventory(
 
     Ok(GitOpsInventory {
         project_root,
+        worktree_root: repository_root,
         project_config,
         yaml_files,
+        worktree_yaml_files,
         resources,
     })
 }
 
+/// Git-visible YAML files of the whole worktree, relative to its root: tracked
+/// files and untracked files that are not ignored, without submodules, symbolic
+/// links, or paths through them, and without the output and vendor subtrees.
 fn collect_git_visible_yaml(
     repository: &Repository,
     repository_root: &Path,
-    project_root: &Path,
     output_subtree: Option<&Path>,
     vendor_subtree: Option<&Path>,
 ) -> Result<Vec<PathBuf>> {
@@ -262,8 +288,7 @@ fn collect_git_visible_yaml(
             continue;
         }
         let absolute_path = repository_root.join(&repository_relative);
-        if !absolute_path.starts_with(project_root)
-            || output_subtree.is_some_and(|output| absolute_path.starts_with(output))
+        if output_subtree.is_some_and(|output| absolute_path.starts_with(output))
             || vendor_subtree.is_some_and(|vendor| absolute_path.starts_with(vendor))
         {
             continue;
@@ -272,17 +297,10 @@ fn collect_git_visible_yaml(
             // A tracked file deleted from the worktree is not visible.
             continue;
         };
-        if !metadata.file_type().is_file() || contains_symlink_component(project_root, &absolute_path)? {
+        if !metadata.file_type().is_file() || contains_symlink_component(repository_root, &absolute_path)? {
             continue;
         }
-        let relative = absolute_path.strip_prefix(project_root).map_err(|error| {
-            NylError::config(format!(
-                "Failed to make {} relative to {}: {error}",
-                absolute_path.display(),
-                project_root.display()
-            ))
-        })?;
-        result.insert(relative.to_path_buf());
+        result.insert(repository_relative);
     }
     Ok(result.into_iter().collect())
 }

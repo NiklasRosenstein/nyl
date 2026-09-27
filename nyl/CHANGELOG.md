@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `nyl.toml` may live beside the configuration in `nyl/` at the Git worktree
+  root; Nyl finds `nyl/nyl.toml` when the worktree root has no `nyl.toml` of
+  its own.
+
+- A local ApplicationGroup `spec.source.path` may begin with `..` segments, or
+  start with `/` to name a directory from the Git worktree root, so Releases
+  can live beside the `nyl.toml` directory. Provenance and ownership-index
+  inputs record such files with a leading `/`; output for files beneath the
+  `nyl.toml` directory is unchanged.
+
 - Added `publish-tree --require-clean` for strict source-worktree validation
   and `--allow-dirty` for explicit publication with dirty provenance. By
   default, dirty worktrees are accepted only when the target matches a clean
@@ -27,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `always`: Always use colors, even when output is redirected
   - `never`: Never use colors
   - Colors are now automatically disabled when output is piped or redirected to a file
+
+### Fixed
+
+- `diff-tree --against source` renders the baseline from the project directory
+  of the checkout, so projects whose `nyl.toml` is not at the repository root
+  can be compared. When the baseline has the project elsewhere, it tries the
+  repeatable `--source-project-path` candidates and the new `[project]
+  previous_paths` of `nyl.toml`, skipping candidates without a project and
+  never falling back to another project; the `publish-tree` check against `HEAD` does
+  the same. The report names the baseline project directory.
 
 ### Changed
 
