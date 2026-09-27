@@ -88,6 +88,7 @@ Each binding sets exactly one source:
 | --- | --- |
 | `value` | An inline literal. Targets are static, so it is never templated. |
 | `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. |
+| `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
 | `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
 
 The effective value is the target binding if there is one, otherwise the
@@ -108,11 +109,39 @@ resolved values like local groups; the binding key on the platform's own target
 is the admission, and the remote session never sees binding definitions or
 file paths.
 
+## Locked Git state
+
+`fromGit` follows the ApplicationGroup source-lock pattern. `revision` is the
+human-readable branch or tag; `commit` is the full commit ID rendering reads.
+Rendering never resolves `revision`. A commit missing from the local Git cache
+is fetched by ID; offline rendering fails with a message naming the lock.
+
+```yaml
+releaseInputs:
+  platform/web:
+    tier:
+      fromGit:
+        repositoryRef: {name: platform-state}
+        revision: main
+        commit: 3f1c9a…        # moved by nyl update source-locks
+        path: staging/sizing.json
+        pointer: /web/tier
+```
+
+`nyl update source-locks` refreshes these locks together with ApplicationGroup
+source locks, so CI has one `--check` gate for every Git lock. `--target
+production` selects one target's locks. Locks of one repository and revision
+move to the same commit. When the locked file lies inside another target's
+publication prefix on that branch, the lock moves to that target's newest
+publication commit, so a production target can promote the state a dev target
+published by moving its lock in a reviewed change.
+
 ## Provenance
 
 Resolved inputs are part of the render-cache key. The ownership index records
-each `fromFile` file under its path, and each effective input as
+each `fromFile` file under its path, each effective input as
 `@input/<group>/<release>/<input>` with the SHA-256 digest of its canonical
-JSON value. Keys starting with `@` are reserved for entries that are not
+JSON value, and each `fromGit` file as `@git/<url>@<commit>/<path>` with the
+digest of its bytes. Keys starting with `@` are reserved for entries that are not
 project paths. Inputs are not a secret channel: their digests and the rendered
 manifests are published, so keep secrets in the secrets provider.

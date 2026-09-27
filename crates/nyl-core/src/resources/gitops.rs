@@ -1366,7 +1366,7 @@ fn validate_namespace_pattern(field: &str, value: &str) -> Result<()> {
         .map_err(|error| CoreError::config(format!("Invalid {field} glob {value:?}: {error}")))
 }
 
-fn validate_repository_choice(
+pub fn validate_repository_choice(
     repository_ref: Option<&LocalReference>,
     repository: Option<&InlineGitRepository>,
     field: &str,

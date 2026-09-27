@@ -52,6 +52,13 @@ pub(crate) fn remove_document(contents: &str, document_index: usize, expected: &
     Ok(output)
 }
 
+/// The text of the one-based `document_index`, without its `---` marker.
+pub(crate) fn document_text(contents: &str, document_index: usize) -> Option<&str> {
+    let ranges = document_ranges(contents);
+    let range = ranges.get(document_index.checked_sub(1)?)?;
+    Some(&contents[range.content.clone()])
+}
+
 pub(crate) fn document_count(contents: &str) -> usize {
     document_ranges(contents).len()
 }

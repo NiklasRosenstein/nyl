@@ -391,13 +391,24 @@ must refresh successfully; cached refs are not accepted as current state.
 
 ## `nyl update source-locks`
 
-Resolve remote ApplicationGroup revisions and update their full commit locks:
+Resolve the revisions of remote ApplicationGroup sources and `fromGit` Release
+input bindings, and update their full commit locks:
 
 ```bash
 nyl update source-locks
 nyl update source-locks workloads
+nyl update source-locks --target production
 nyl update source-locks --check
 ```
+
+A group name selects that ApplicationGroup and `--target` selects one
+DeploymentTarget's `fromGit` locks; without either, every lock is updated. Locks
+of one repository and revision are resolved once and move to the same commit.
+A `fromGit` lock whose file lies inside a DeploymentTarget's publication prefix
+on that branch moves to that target's newest publication commit, never to a
+later write-back by another tool; other locks move to the branch head. Locks
+are edited in place by their position, so write `fromGit` bindings in block
+style.
 
 Mutable revisions must refresh successfully before a lock is reported current
 or updated. Immutable commit rendering can use an existing local cache.

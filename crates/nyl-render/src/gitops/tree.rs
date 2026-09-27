@@ -407,7 +407,9 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let release_inputs = resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups)?;
+    let git_blobs = super::inputs::CachedGitBlobSource::new(git_manager.take(), cache.cloned());
+    let release_inputs =
+        resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups, &git_blobs)?;
 
     let target_cache_inputs = TargetCacheInputs {
         options,
@@ -2081,6 +2083,7 @@ fn resolve_prepared_release_inputs(
     target: &DeploymentTarget,
     groups: &[PreparedGroup],
     disabled_groups: &BTreeSet<String>,
+    git: &dyn super::inputs::GitBlobSource,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2098,11 +2101,32 @@ fn resolve_prepared_release_inputs(
         })
         .collect::<Vec<_>>();
     let paths = inventory.paths();
+    let repositories = inventory
+        .resources
+        .values()
+        .filter_map(|discovered| match &discovered.resource {
+            Some(GitOpsResource::GitRepository(repository)) => Some((
+                repository.metadata.name.clone(),
+                (
+                    InlineGitRepository {
+                        repo_url: repository.spec.repo_url.clone(),
+                        publish_url: repository.spec.publish_url.clone(),
+                    },
+                    discovered.source_path.clone(),
+                ),
+            )),
+            _ => None,
+        })
+        .collect();
     super::inputs::resolve_target_inputs(
         target,
         &releases,
         disabled_groups,
-        &super::inputs::InputSources { paths: &paths },
+        &super::inputs::InputSources {
+            paths: &paths,
+            repositories: &repositories,
+            git,
+        },
     )
 }
 

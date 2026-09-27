@@ -200,6 +200,9 @@ pub struct InputBinding {
     /// A YAML or JSON file of this repository.
     #[serde(default, rename = "fromFile", skip_serializing_if = "Option::is_none")]
     pub from_file: Option<FileInputSource>,
+    /// A YAML or JSON file of a Git repository at a locked commit.
+    #[serde(default, rename = "fromGit", skip_serializing_if = "Option::is_none")]
+    pub from_git: Option<GitInputSource>,
     /// Reserved for orchestration: a recorded unit output or artifact field. Rejected outside orchestrated execution.
     #[serde(default, rename = "fromUnit", skip_serializing_if = "Option::is_none")]
     pub from_unit: Option<UnitInputSource>,
@@ -215,6 +218,8 @@ pub enum BindingKind {
     Value,
     /// `fromFile`
     FromFile,
+    /// `fromGit`
+    FromGit,
     /// `fromUnit`
     FromUnit,
     /// `fromPromotion`
@@ -227,6 +232,7 @@ impl BindingKind {
         match self {
             Self::Value => "value",
             Self::FromFile => "fromFile",
+            Self::FromGit => "fromGit",
             Self::FromUnit => "fromUnit",
             Self::FromPromotion => "fromPromotion",
         }
@@ -244,6 +250,7 @@ impl InputBinding {
         let set = [
             (self.value.is_some(), BindingKind::Value),
             (self.from_file.is_some(), BindingKind::FromFile),
+            (self.from_git.is_some(), BindingKind::FromGit),
             (self.from_unit.is_some(), BindingKind::FromUnit),
             (self.from_promotion.is_some(), BindingKind::FromPromotion),
         ]
@@ -253,7 +260,7 @@ impl InputBinding {
         match set.as_slice() {
             [kind] => Ok(*kind),
             [] => Err(CoreError::config(format!(
-                "{field} must set exactly one of value, fromFile, fromUnit, or fromPromotion"
+                "{field} must set exactly one of value, fromFile, fromGit, fromUnit, or fromPromotion"
             ))),
             _ => Err(CoreError::config(format!(
                 "{field} sets {}; set exactly one source",
@@ -271,6 +278,11 @@ impl InputBinding {
                 crate::local_path::validate_local_path(&format!("{field}.fromFile.path"), &source.path)?;
                 crate::json_pointer::validate(&format!("{field}.fromFile.pointer"), &source.pointer)
             }
+            BindingKind::FromGit => self
+                .from_git
+                .as_ref()
+                .expect("kind agrees with the set field")
+                .validate(&format!("{field}.fromGit")),
         }
     }
 }
@@ -297,6 +309,53 @@ pub struct FileInputSource {
     /// JSON Pointer selecting the value inside the document; the whole document when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pointer: String,
+}
+
+/// A value read from a file of a Git repository at a locked commit.
+///
+/// Rendering reads only `commit` and never resolves `revision`; `nyl update
+/// source-locks` moves the lock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = git_input_source_constraints)]
+pub struct GitInputSource {
+    /// Project-local `gitops.nyl/v1` GitRepository to read from.
+    #[serde(rename = "repositoryRef", default, skip_serializing_if = "Option::is_none")]
+    pub repository_ref: Option<super::LocalReference>,
+    /// Inline repository coordinates to read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<super::InlineGitRepository>,
+    /// Human-readable branch or tag that `nyl update source-locks` resolves.
+    pub revision: String,
+    /// Full commit ID that rendering reads, refreshed by `nyl update source-locks`.
+    pub commit: String,
+    /// Repository-relative path of a YAML or JSON file holding one document.
+    pub path: String,
+    /// JSON Pointer selecting the value inside the document; the whole document when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pointer: String,
+}
+
+impl GitInputSource {
+    /// Validate the static form of this source.
+    pub fn validate(&self, field: &str) -> Result<()> {
+        super::validate_repository_choice(self.repository_ref.as_ref(), self.repository.as_ref(), field)?;
+        super::validate_static_required(&format!("{field}.revision"), &self.revision)?;
+        super::validate_immutable_git_commit(&format!("{field}.commit"), &self.commit)?;
+        super::validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
+        crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)
+    }
+}
+
+fn git_input_source_constraints(schema: &mut schemars::Schema) {
+    super::schema::exclusive_fields(
+        schema,
+        &[
+            ("repositoryRef", "Reads from the named GitRepository."),
+            ("repository", "Reads from the inline coordinates declared here."),
+        ],
+        None,
+    );
 }
 
 /// Reserved orchestration reference to a unit output or artifact field.
@@ -347,6 +406,10 @@ fn input_binding_constraints(schema: &mut schemars::Schema) {
             (
                 "fromFile",
                 "Reads the value from a YAML or JSON file of this repository.",
+            ),
+            (
+                "fromGit",
+                "Reads the value from a file of a Git repository at a locked commit.",
             ),
             (
                 "fromUnit",
@@ -487,6 +550,31 @@ mod tests {
             let bindings: ReleaseInputBindings = serde_json::from_value(value.clone()).unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
             assert!(error.contains(expected), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_from_git_requires_a_repository_revision_and_full_commit() {
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        let cases = [
+            (
+                json!({"revision": "main", "commit": commit, "path": "a.json"}),
+                "Exactly one of",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "3f1c", "path": "a.json"}),
+                "hexadecimal Git object ID",
+            ),
+            (
+                json!({"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "../a.json"}),
+                "fromGit.path",
+            ),
+        ];
+        for (source, expected) in cases {
+            let bindings: ReleaseInputBindings =
+                serde_json::from_value(json!({"g/r": {"image": {"fromGit": source.clone()}}})).unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains(expected), "{source}: {error}");
         }
     }
 

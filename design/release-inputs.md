@@ -199,7 +199,7 @@ Each binding sets exactly one of these fields:
 - `nyl update source-locks` refreshes `fromGit` locks together with
   ApplicationGroup source locks, so CI has one `--check` gate for every Git
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
-  existing `--group` filter.
+  existing ApplicationGroup name argument.
 - One target can hold many `fromGit` locks, and several bindings often lock the
   same repository at the same commit. The updater therefore groups locks by
   repository and `revision`: it resolves each group once and moves every lock

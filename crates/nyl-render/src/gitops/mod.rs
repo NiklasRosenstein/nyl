@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod inputs;
 pub mod layout;
 pub mod reconcile;
+pub mod source_locks;
 pub mod tree;
 
 pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};

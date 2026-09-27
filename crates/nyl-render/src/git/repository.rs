@@ -231,6 +231,33 @@ impl BareRepository {
         Ok(())
     }
 
+    /// Read the file at `path` in `commit`, fetching the commit by ID when it
+    /// is not cached. Returns `None` when the commit has no such path.
+    ///
+    /// The path is repository-relative. A symbolic link at the path is an
+    /// error, and a path through a symbolic link does not resolve.
+    pub fn read_blob(&self, commit: Oid, path: &str) -> Result<Option<Vec<u8>>> {
+        if !self.has_object(commit) {
+            self.fetch_objects(commit)?;
+        }
+        let tree = self.repo.find_commit(commit)?.tree()?;
+        let entry = match tree.get_path(Path::new(path)) {
+            Ok(entry) => entry,
+            Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(GitError::Repository(error)),
+        };
+        if entry.filemode() == 0o120_000 {
+            return Err(GitError::Command(format!(
+                "{path} at {commit} is a symbolic link; Nyl reads only regular files"
+            )));
+        }
+        let object = entry.to_object(&self.repo)?;
+        let blob = object
+            .as_blob()
+            .ok_or_else(|| GitError::Command(format!("{path} at {commit} is not a file")))?;
+        Ok(Some(blob.content().to_vec()))
+    }
+
     /// Get the repository path
     pub fn path(&self) -> &Path {
         self.repo.path()

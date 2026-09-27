@@ -629,7 +629,7 @@ ambiguous command semantics. Met by the
   defaults.
 - [ ] Support `carry` for `fromPublication`, excluding carried files from the
   dirty check.
-- [ ] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
+- [x] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
   `--target` filter.
 - [ ] Apply target bindings in direct commands and add `--input`/`--inputs`;
   a target that selects no group containing the Release fails unless

@@ -267,6 +267,17 @@ impl GitManager {
         }
     }
 
+    /// Read `path` at the immutable `commit` of `url` without a worktree.
+    ///
+    /// Refs are never resolved. A commit missing from the local cache is
+    /// fetched by ID. Returns `None` when the commit has no such path.
+    pub fn read_blob(&mut self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let oid = git2::Oid::from_str(commit)?;
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.read_blob(oid, path)
+    }
+
     /// Get or create a bare repository for the given URL
     fn get_or_create_bare_repo(&mut self, url: &str) -> Result<Arc<Mutex<BareRepository>>> {
         // Use the URL as the key (will be normalized internally)
