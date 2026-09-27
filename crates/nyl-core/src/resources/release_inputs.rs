@@ -351,7 +351,7 @@ pub struct GitInputSource {
     pub repository: Option<super::InlineGitRepository>,
     /// Human-readable branch or tag that `nyl update source-locks` resolves.
     pub revision: String,
-    /// Full commit ID that rendering reads, refreshed by `nyl update source-locks`.
+    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
     pub commit: String,
     /// Repository-relative path of a YAML or JSON file holding one document.
     pub path: String,
@@ -365,7 +365,18 @@ impl GitInputSource {
     pub fn validate(&self, field: &str) -> Result<()> {
         super::validate_repository_choice(self.repository_ref.as_ref(), self.repository.as_ref(), field)?;
         super::validate_static_required(&format!("{field}.revision"), &self.revision)?;
-        super::validate_immutable_git_commit(&format!("{field}.commit"), &self.commit)?;
+        // Rendering, staleness checks, and `@git/` index keys compare the
+        // lowercase SHA-1 form that Git reports.
+        if self.commit.len() != 40
+            || !self
+                .commit
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(CoreError::config(format!(
+                "{field}.commit must be a full 40-character lowercase hexadecimal Git commit ID"
+            )));
+        }
         super::validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
         crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)
     }
@@ -606,7 +617,15 @@ mod tests {
             ),
             (
                 json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "3f1c", "path": "a.json"}),
-                "hexadecimal Git object ID",
+                "40-character lowercase hexadecimal",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": commit.to_uppercase(), "path": "a.json"}),
+                "40-character lowercase hexadecimal",
+            ),
+            (
+                json!({"repository": {"repoURL": "https://example.invalid/x.git"}, "revision": "main", "commit": "a".repeat(64), "path": "a.json"}),
+                "40-character lowercase hexadecimal",
             ),
             (
                 json!({"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "../a.json"}),

@@ -267,6 +267,36 @@ impl GitManager {
         }
     }
 
+    /// Fetch the current refs of `url` from its remote, without a worktree.
+    pub fn fetch_refs(&mut self, url: &str) -> Result<()> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.fetch_refs()?;
+        self.observe_source(crate::render::cache::SourceOperation::GitRefRefresh);
+        Ok(())
+    }
+
+    /// Resolve `git_ref` against the cached refs of `url` to a commit ID,
+    /// without fetching or creating a worktree.
+    pub fn resolve_cached_ref(&mut self, url: &str, git_ref: &str) -> Result<git2::Oid> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.resolve_ref(git_ref)
+    }
+
+    /// The newest commit reachable from `head` in the cached repository of
+    /// `url` whose message has a line equal to `line`.
+    pub fn newest_commit_with_message_line(
+        &mut self,
+        url: &str,
+        head: git2::Oid,
+        line: &str,
+    ) -> Result<Option<git2::Oid>> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.newest_commit_with_message_line(head, line)
+    }
+
     /// Read `path` at the immutable `commit` of `url` without a worktree.
     ///
     /// Refs are never resolved. A commit missing from the local cache is

@@ -404,9 +404,11 @@ nyl update source-locks --check
 A group name selects that ApplicationGroup and `--target` selects one
 DeploymentTarget's `fromGit` locks; without either, every lock is updated. Locks
 of one repository and revision are resolved once and move to the same commit.
-A `fromGit` lock whose file lies inside a DeploymentTarget's publication prefix
-on that branch moves to that target's newest publication commit, never to a
-later write-back by another tool; other locks move to the branch head. Locks
+When a group's `fromGit` files lie inside one DeploymentTarget's publication
+prefix on that branch, the group moves to that target's newest publication
+commit, never to a later write-back by another tool; a group with no such file
+moves to the branch head, and a group reading several targets' publications is
+an error. Locks
 are edited in place by their position, so write `fromGit` bindings in block
 style.
 

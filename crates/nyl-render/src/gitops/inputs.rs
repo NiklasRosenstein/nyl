@@ -51,7 +51,12 @@ pub struct InputSources<'a> {
 pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
-    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String>;
+    fn read_blob(
+        &self,
+        url: &str,
+        commit: &str,
+        path: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError>;
 }
 
 /// [`GitBlobSource`] over the shared bare-repository cache.
@@ -72,7 +77,12 @@ impl CachedGitBlobSource {
 }
 
 impl GitBlobSource for CachedGitBlobSource {
-    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+    fn read_blob(
+        &self,
+        url: &str,
+        commit: &str,
+        path: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
             let created = match self
@@ -81,7 +91,7 @@ impl GitBlobSource for CachedGitBlobSource {
                 .and_then(crate::render::cache::RenderCache::external_cache_root)
             {
                 Some(root) => crate::git::GitManager::with_cache_dir(root),
-                None => crate::git::GitManager::new().map_err(|error| error.to_string())?,
+                None => crate::git::GitManager::new()?,
             }
             .with_render_cache(self.cache.clone());
             *manager = Some(created);
@@ -90,19 +100,21 @@ impl GitBlobSource for CachedGitBlobSource {
             .as_mut()
             .expect("manager was created above")
             .read_blob(url, commit, path)
-            .map_err(|error| error.to_string())
     }
 }
 
 /// A repository URL without userinfo, for provenance keys.
+///
+/// A parseable URL is always re-serialized, so a key does not depend on
+/// whether credentials are embedded in the configured URL.
 pub fn credential_free_url(url: &str) -> String {
     match reqwest::Url::parse(url) {
-        Ok(mut parsed) if !parsed.username().is_empty() || parsed.password().is_some() => {
+        Ok(mut parsed) => {
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
             parsed.to_string()
         }
-        _ => url.to_owned(),
+        Err(_) => url.to_owned(),
     }
 }
 
@@ -563,8 +575,8 @@ mod tests {
     struct NoGit;
 
     impl GitBlobSource for NoGit {
-        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, String> {
-            Err("no Git in this test".to_owned())
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
+            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
         }
     }
 
@@ -657,7 +669,12 @@ mod tests {
     struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);
 
     impl GitBlobSource for FakeGit {
-        fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+        fn read_blob(
+            &self,
+            url: &str,
+            commit: &str,
+            path: &str,
+        ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
             Ok(self
                 .0
                 .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))
@@ -729,6 +746,10 @@ mod tests {
         assert_eq!(
             credential_free_url("https://user:token@git.example.com/state.git"),
             "https://git.example.com/state.git"
+        );
+        assert_eq!(
+            credential_free_url("https://token@Git.Example.com/state.git"),
+            credential_free_url("https://Git.Example.com/state.git")
         );
         assert_eq!(
             credential_free_url("git@github.com:org/repo.git"),

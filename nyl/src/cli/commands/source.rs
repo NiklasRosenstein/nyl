@@ -1,5 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
 use crate::git::GitManager;
@@ -46,32 +47,149 @@ pub(crate) fn update_locks(
         }
         return Ok(());
     }
-    // Apply edits per document, in order, so several locks in one document
-    // compose and every write checks the file it read.
+    let edits = plan_lock_edits(&inventory.project_root, &resolutions)?;
+    for (file, (original, contents)) in &edits {
+        atomic_replace(file, original, contents)?;
+    }
     for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
-        let lock = &resolution.lock;
-        let resolved = resolution.resolved.as_deref().expect("stale locks have a resolution");
-        let file = inventory.project_root.join(&lock.resource.source_path);
-        let contents = fs::read_to_string(&file)?;
-        let current = current_document(&contents, lock.resource.document_index)?;
-        let mut current_lock = lock.clone();
-        current_lock.resource.raw_document.clone_from(&current);
-        let document = replace_lock_commit(&current_lock, resolved)?;
-        let updated = replace_document(&contents, lock.resource.document_index, &current, &document)?;
-        atomic_replace(&file, &contents, &updated)?;
         let note = resolution
             .note
             .as_deref()
             .map(|note| format!(" ({note})"))
             .unwrap_or_default();
-        println!("✓ {}: updated {} lock to {resolved}{note}", lock.owner, lock.revision);
+        println!(
+            "✓ {}: updated {} lock to {}{note}",
+            resolution.lock.owner,
+            resolution.lock.revision,
+            resolution.resolved.as_deref().unwrap_or_default()
+        );
     }
     Ok(())
 }
 
-/// The document's current text, which earlier edits in this run may have changed.
-fn current_document(contents: &str, document_index: usize) -> Result<String> {
-    crate::cli::resource_file::document_text(contents, document_index)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| NylError::config(format!("Document {document_index} is missing")))
+/// The original and updated contents of every file a stale lock lives in.
+///
+/// Every edit is computed before any file is written, so a lock that cannot
+/// be located leaves the project unchanged. Each document is checked against
+/// the text discovery parsed, so a concurrent edit of the resource or a
+/// shifted document index refuses the update.
+fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Result<BTreeMap<PathBuf, (String, String)>> {
+    let mut files = BTreeMap::<PathBuf, (String, String, BTreeMap<usize, String>)>::new();
+    for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
+        let lock = &resolution.lock;
+        let resolved = resolution.resolved.as_deref().expect("stale locks have a resolution");
+        let file = project_root.join(&lock.resource.source_path);
+        if !files.contains_key(&file) {
+            let contents = fs::read_to_string(&file)?;
+            files.insert(file.clone(), (contents.clone(), contents, BTreeMap::new()));
+        }
+        let (_, contents, documents) = files.get_mut(&file).expect("inserted above");
+        let index = lock.resource.document_index;
+        let expected = documents
+            .get(&index)
+            .cloned()
+            .unwrap_or_else(|| lock.resource.raw_document.clone());
+        let mut current_lock = lock.clone();
+        current_lock.resource.raw_document.clone_from(&expected);
+        let document = replace_lock_commit(&current_lock, resolved)?;
+        *contents = replace_document(contents, index, &expected, &document)?;
+        documents.insert(index, document);
+    }
+    Ok(files
+        .into_iter()
+        .map(|(file, (original, contents, _))| (file, (original, contents)))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gitops::source_locks::{LockOwner, SourceLock};
+    use crate::gitops::DiscoveredGitOpsResource;
+    use crate::resources::{GitOpsResourceIdentity, GitOpsResourceKind};
+
+    fn group(name: &str) -> String {
+        format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  source:\n    revision: main\n    commit: aaaa\n")
+    }
+
+    fn stale(file: &str, document_index: usize, raw_document: &str, owner: LockOwner) -> LockResolution {
+        LockResolution {
+            lock: SourceLock {
+                owner,
+                resource: DiscoveredGitOpsResource {
+                    source_path: file.into(),
+                    document_index,
+                    raw_document: raw_document.to_owned(),
+                    identity: GitOpsResourceIdentity {
+                        kind: GitOpsResourceKind::ApplicationGroup,
+                        name: "second".to_owned(),
+                    },
+                    static_labels: BTreeMap::default(),
+                    resource: None,
+                },
+                repository_url: "https://git.example.com/apps.git".to_owned(),
+                revision: "main".to_owned(),
+                commit: "aaaa".to_owned(),
+                path: None,
+            },
+            resolved: Some("bbbb".to_owned()),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn test_plan_lock_edits_edits_only_the_discovered_document() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (first, second) = (group("first"), group("second"));
+        let owner = LockOwner::ApplicationGroup {
+            name: "second".to_owned(),
+        };
+        fs::write(temp.path().join("gitops.yaml"), format!("{first}---\n{second}")).unwrap();
+        let resolutions = [stale("gitops.yaml", 2, &second, owner.clone())];
+        let edits = plan_lock_edits(temp.path(), &resolutions).unwrap();
+        assert_eq!(
+            edits[&temp.path().join("gitops.yaml")].1,
+            format!("{first}---\n{}", second.replace("aaaa", "bbbb"))
+        );
+
+        // A document inserted before the resource while the update resolved
+        // shifts its index; the update refuses instead of editing `first`.
+        fs::write(
+            temp.path().join("gitops.yaml"),
+            format!("{first}---\n{first}---\n{second}"),
+        )
+        .unwrap();
+        assert!(plan_lock_edits(temp.path(), &resolutions).is_err());
+    }
+
+    #[test]
+    fn test_plan_lock_edits_fails_when_any_lock_cannot_be_located() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let first = group("first");
+        fs::write(temp.path().join("a.yaml"), &first).unwrap();
+        let unlocatable = "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: b\nspec:\n  releaseInputs:\n    g/r: {image: {fromGit: {commit: aaaa}}}\n";
+        fs::write(temp.path().join("b.yaml"), unlocatable).unwrap();
+        let resolutions = [
+            stale(
+                "a.yaml",
+                1,
+                &first,
+                LockOwner::ApplicationGroup {
+                    name: "first".to_owned(),
+                },
+            ),
+            stale(
+                "b.yaml",
+                1,
+                unlocatable,
+                LockOwner::ReleaseInput {
+                    target: "b".to_owned(),
+                    key: "g/r".to_owned(),
+                    input: "image".to_owned(),
+                },
+            ),
+        ];
+        let error = plan_lock_edits(temp.path(), &resolutions).unwrap_err().to_string();
+        assert!(error.contains("Cannot locate the commit lock"), "{error}");
+    }
 }

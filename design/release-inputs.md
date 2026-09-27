@@ -228,10 +228,13 @@ Each binding sets exactly one of these fields:
     Applications run different values of the same file and pointer, the lock
     does not move and the updater reports the conflict.
   - Without `--require healthy`, a group moves to one new commit as described
-    above. When the locked file lies inside a target's prefix on that branch,
-    that commit is the target's newest publication commit, never a later
-    commit made by another tool, such as a state file write-back the target
-    has not yet published. Otherwise it is the branch head.
+    above. When the group's locked files lie inside one target's prefix on
+    that branch, that commit is the target's newest publication commit, never
+    a later commit made by another tool, such as a state file write-back the
+    target has not yet published; locks of the group that read files outside
+    every prefix move with it. When no locked file lies inside a prefix, it is
+    the branch head. A group whose files lie inside several targets' prefixes
+    has no single commit to move to and is an error.
 - With `--require healthy`, the updater writes the observation that justified
   the move next to each lock, so the pull request commits the evidence together
   with the lock:

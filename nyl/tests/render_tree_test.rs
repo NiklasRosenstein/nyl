@@ -4678,7 +4678,7 @@ fn update_source_locks(fixture: &TempDir, cache: &TempDir, args: &[&str]) -> ass
 }
 
 #[test]
-fn from_git_bindings_render_the_locked_commit() {
+fn test_render_tree_from_git_reads_the_locked_commit() {
     let fixture = fixture();
     let state = StateRepository::new();
     let first = state.commit(
@@ -4731,7 +4731,7 @@ fn from_git_bindings_render_the_locked_commit() {
 }
 
 #[test]
-fn source_locks_move_from_git_groups_together_and_keep_other_revisions() {
+fn test_update_source_locks_moves_from_git_groups_and_keeps_other_revisions() {
     let fixture = fixture();
     let state = StateRepository::new();
     let first = state.commit(
@@ -4784,7 +4784,7 @@ fn source_locks_move_from_git_groups_together_and_keep_other_revisions() {
 }
 
 #[test]
-fn source_locks_follow_the_newest_publication_of_the_owning_target() {
+fn test_update_source_locks_follows_the_newest_publication_of_the_owning_target() {
     let fixture = fixture();
     let state = StateRepository::new();
     let published = state.commit(
@@ -4811,7 +4811,7 @@ fn source_locks_follow_the_newest_publication_of_the_owning_target() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n"
+            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n      tag:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: \"{zero}\"\n          path: shared/tag.json\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -4819,11 +4819,84 @@ fn source_locks_follow_the_newest_publication_of_the_owning_target() {
         .success()
         .stdout(predicate::str::contains("newest publication of DeploymentTarget dev"));
     let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
+    // Both locks of the group move to one commit, including the one reading
+    // a file outside the publication prefix.
     assert!(target.contains(&format!("commit: '{published}'")), "{target}");
+    assert!(
+        target.contains(&format!("commit: \"{published}\"\n          path: shared/tag.json")),
+        "{target}"
+    );
 }
 
 #[test]
-fn from_git_reports_an_unavailable_locked_commit() {
+fn test_update_source_locks_rejects_a_group_reading_several_publications() {
+    let fixture = fixture();
+    let state = StateRepository::new();
+    let commit = state.commit("dev/images.json", "{}", "One", "deploy");
+    let url = state.url();
+    for (name, prefix) in [("dev", "dev"), ("staging", "staging")] {
+        fs::write(
+            fixture.path().join(format!("config/targets/{name}.yaml")),
+            format!(
+                "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: kasoku\n  applicationGroupSelector:\n    matchLabels:\n      environment: {name}\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy\n    pathPrefix: {prefix}\n"
+            ),
+        )
+        .unwrap();
+    }
+    with_image_binding(
+        &fixture,
+        &format!(
+            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy\n          commit: {commit}\n          path: dev/images.json\n      tag:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy\n          commit: {commit}\n          path: staging/tag.json\n"
+        ),
+    );
+    let cache = TempDir::new().unwrap();
+    update_source_locks(&fixture, &cache, &["--target", "production"])
+        .failure()
+        .stderr(predicate::str::contains("published by DeploymentTargets dev, staging"));
+}
+
+#[test]
+fn test_render_tree_from_git_repository_ref_records_the_repository_from_a_subdirectory() {
+    let fixture = fixture();
+    let state = StateRepository::new();
+    let commit = state.commit("images.json", r#"{"api": "one"}"#, "One", "main");
+    fs::write(
+        fixture.path().join("config/repositories/state.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: state\nspec:\n  repoURL: '{}'\n",
+            state.url()
+        ),
+    )
+    .unwrap();
+    with_image_binding(
+        &fixture,
+        &format!(
+            "      image:\n        fromGit:\n          repositoryRef: {{name: state}}\n          revision: main\n          commit: {commit}\n          path: images.json\n          pointer: /api\n"
+        ),
+    );
+    let cache = TempDir::new().unwrap();
+    // The GitRepository resource path is project-relative; the render cache
+    // must read it from the project, not from the working directory.
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path().join("applications"))
+        .env("NYL_CACHE_DIR", cache.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["render-tree", "--target", "production", "--output-dir"])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .success();
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let rendered = tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect::<String>();
+    assert!(rendered.contains("image: one"), "{rendered}");
+}
+
+#[test]
+fn test_render_tree_from_git_reports_an_unavailable_locked_commit() {
     let fixture = fixture();
     let state = StateRepository::new();
     state.commit("images.json", r#"{"api": "one"}"#, "One", "main");
