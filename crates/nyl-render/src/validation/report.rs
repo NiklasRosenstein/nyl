@@ -153,6 +153,8 @@ impl Default for ValidationReport {
 }
 
 impl ValidationReport {
+    /// Sort resources and findings deterministically and derive the summary,
+    /// completeness, and overall status. Call once after all resources are added.
     pub fn finish(&mut self) {
         self.resources.sort_by(|a, b| {
             (
@@ -200,6 +202,8 @@ impl ValidationReport {
         .into();
     }
 
+    /// Human-readable text of the invalid and errored resources reported to one
+    /// destination; empty when the destination has no failures.
     pub fn destination_text(&self, destination: &Destination, color: bool) -> String {
         let mut output = String::new();
         let failures = self

@@ -127,8 +127,10 @@ impl<'a> SchemaResolver<'a> {
     pub async fn builtin(&mut self, url: &str) -> Result<Option<SchemaDocument>> {
         let document = self.load_builtin(url).await?;
         if let Some(document) = &document {
-            self.schema_digests
-                .insert(url.to_owned(), store::digest(&store::json_bytes(&document.value)?));
+            self.schema_digests.insert(
+                url.to_owned(),
+                nyl_core::digest::sha256_hex(&store::json_bytes(&document.value)?),
+            );
         }
         Ok(document)
     }
@@ -161,12 +163,17 @@ impl<'a> SchemaResolver<'a> {
                 "Missing vendored built-in schema {url}; run nyl vendor"
             )));
         }
-        let cache_path = self.cache.join(format!("{}.json", store::digest(url.as_bytes())));
+        let cache_path = self
+            .cache
+            .join(format!("{}.json", nyl_core::digest::sha256_hex(url.as_bytes())));
         let cached = (!self.refresh)
             .then(|| std::fs::read(&cache_path).ok())
             .flatten()
             .and_then(|bytes| serde_json::from_slice::<CachedSchema>(&bytes).ok())
-            .filter(|record| store::json_bytes(&record.value).is_ok_and(|bytes| store::digest(&bytes) == record.digest))
+            .filter(|record| {
+                store::json_bytes(&record.value)
+                    .is_ok_and(|bytes| nyl_core::digest::sha256_hex(&bytes) == record.digest)
+            })
             .map(|record| record.value);
         let value = if let Some(value) = cached {
             value
@@ -191,7 +198,7 @@ impl<'a> SchemaResolver<'a> {
             // A disposable cache must not make a valid download fail.
             if let Ok(bytes) = store::json_bytes(&value) {
                 let record = CachedSchema {
-                    digest: store::digest(&bytes),
+                    digest: nyl_core::digest::sha256_hex(&bytes),
                     value: value.clone(),
                 };
                 if let Ok(bytes) = store::json_bytes(&record) {
@@ -333,7 +340,7 @@ impl<'a> SchemaResolver<'a> {
                 };
                 let path = stage
                     .join("dependencies")
-                    .join(format!("{}.json", store::digest(identity.as_bytes())));
+                    .join(format!("{}.json", nyl_core::digest::sha256_hex(identity.as_bytes())));
                 let url = reqwest::Url::from_file_path(&path)
                     .map_err(|()| NylError::validation("Cannot construct staged schema reference"))?;
                 let replacement = format!("{url}#{fragment}");
@@ -668,7 +675,9 @@ mod tests {
             value: value.clone(),
         };
         store::atomic_write(
-            &resolver.cache.join(format!("{}.json", store::digest(url.as_bytes()))),
+            &resolver
+                .cache
+                .join(format!("{}.json", nyl_core::digest::sha256_hex(url.as_bytes()))),
             &store::json_bytes(&cache).unwrap(),
         )
         .unwrap();

@@ -1,12 +1,12 @@
 //! Shared exact-source cache and authoritative vendor resolution.
 
+use nyl_core::digest::sha256_hex;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::cache::{CacheMode, RenderCache, SourceOperation};
 use crate::config::{ProjectConfig, VendorMode};
@@ -39,7 +39,7 @@ pub enum ArtifactRequest {
 
 impl ArtifactRequest {
     pub fn fingerprint(&self) -> Result<String> {
-        Ok(sha256(&serde_json::to_vec(self)?))
+        Ok(sha256_hex(&serde_json::to_vec(self)?))
     }
 
     pub fn display(&self) -> String {
@@ -274,8 +274,8 @@ impl DirectoryVendorWriter {
             let portable_relative = portable_relative_path(&relative)?;
             let destination = checked_relative_path(&self.root, &relative, "generated vendor artifact path")?;
             let bytes = fs::read(&artifact.path)?;
-            let digest = sha256(&bytes);
-            if destination.is_file() && fs::read(&destination).is_ok_and(|current| sha256(&current) == digest) {
+            let digest = sha256_hex(&bytes);
+            if destination.is_file() && fs::read(&destination).is_ok_and(|current| sha256_hex(&current) == digest) {
                 reused += 1;
             } else {
                 let parent = destination
@@ -454,7 +454,7 @@ impl VendorStore for DirectoryVendorStore {
                 path.display()
             )));
         }
-        let digest = sha256(&bytes);
+        let digest = sha256_hex(&bytes);
         if digest != entry.digest || bytes.len() as u64 != entry.size {
             return Err(NylError::config(format!(
                 "Vendored artifact {} failed its lock integrity check for {}",
@@ -595,7 +595,7 @@ impl ArtifactResolver {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if sha256(&bytes) != record.digest || bytes.len() as u64 != record.size {
+        if sha256_hex(&bytes) != record.digest || bytes.len() as u64 != record.size {
             tracing::warn!(path = %path.display(), "Ignoring corrupt source cache artifact");
             return Ok(None);
         }
@@ -619,7 +619,7 @@ impl ArtifactResolver {
         resolved_ref: Option<String>,
     ) -> Result<ResolvedArtifact> {
         let bytes = fs::read(source)?;
-        let digest = sha256(&bytes);
+        let digest = sha256_hex(&bytes);
         if !self.cache_mode.writes() {
             let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("blob");
             let path = self
@@ -847,12 +847,6 @@ fn sanitize_segment(value: &str) -> String {
     }
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
 fn atomic_write_once(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.is_file() {
         return Ok(());
@@ -986,7 +980,7 @@ mod tests {
         let request = manifest_request();
         let artifact = ResolvedArtifact {
             path: source,
-            digest: sha256(b"apiVersion: v1\nkind: ConfigMap\n"),
+            digest: sha256_hex(b"apiVersion: v1\nkind: ConfigMap\n"),
             format: ArtifactFormat::Manifest,
             resolved_ref: None,
             origin: ArtifactOrigin::Remote,
@@ -1029,7 +1023,7 @@ mod tests {
         let request = manifest_request();
         let artifact = ResolvedArtifact {
             path: source,
-            digest: sha256(b"original"),
+            digest: sha256_hex(b"original"),
             format: ArtifactFormat::Manifest,
             resolved_ref: None,
             origin: ArtifactOrigin::Remote,
@@ -1079,7 +1073,7 @@ mod tests {
         let bytes = fs::read(archive.path()).unwrap();
         let artifact = ResolvedArtifact {
             path: archive.path().to_path_buf(),
-            digest: sha256(&bytes),
+            digest: sha256_hex(&bytes),
             format: ArtifactFormat::GitArchive,
             resolved_ref: None,
             origin: ArtifactOrigin::Remote,

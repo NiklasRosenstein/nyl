@@ -122,7 +122,7 @@ impl ResourceKind {
 }
 
 /// Add discriminators without discarding descriptions from Rust documentation.
-pub fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
+pub(crate) fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&str>) {
     schema["properties"]["apiVersion"]["const"] = json!(api_version);
     if let Some(kind) = kind {
         schema["properties"]["kind"]["const"] = json!(kind);
@@ -163,7 +163,8 @@ pub fn validate_resource_api(value: &Value) -> Result<()> {
 
 /// Published resource artifacts, including portable aliases for stable schema
 /// URLs. The project configuration schema, `nyl.schema.json`, is published next
-/// to them by the rendering crate that owns `nyl.toml`.
+/// to them by the rendering crate that owns `nyl.toml`, whose
+/// `config::schema::published_schema_artifacts` returns the complete set.
 pub fn schema_artifacts() -> BTreeMap<String, Value> {
     let mut files = BTreeMap::new();
     let mut manifest = Vec::new();
@@ -231,7 +232,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
 /// messages quote these branches; without them a reader sees only
 /// `required: [<field>]` from one branch, which reads as if that field were
 /// required outright, and the branch has no name to report.
-pub fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], neither: Option<&str>) {
+pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], neither: Option<&str>) {
     let mut alternatives = Vec::new();
     for (field, description) in fields {
         let excluded = fields
@@ -257,7 +258,7 @@ pub fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &str)], 
     schema.insert("oneOf".into(), json!(alternatives));
 }
 
-pub fn cluster_destination_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
         &[
@@ -271,7 +272,7 @@ pub fn cluster_destination_constraints(schema: &mut schemars::Schema) {
     );
 }
 
-pub fn cluster_contract_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
     schema.insert(
         "if".into(),
         json!({
@@ -285,7 +286,7 @@ pub fn cluster_contract_constraints(schema: &mut schemars::Schema) {
         json!({"required":["kubernetes"],"properties":{"kubernetes":{"not":{"type":"null"}}}}),
     );
 }
-pub fn publication_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
         &[
@@ -298,7 +299,7 @@ pub fn publication_constraints(schema: &mut schemars::Schema) {
         None,
     );
 }
-pub fn application_group_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
         &[
@@ -314,7 +315,7 @@ pub fn application_group_constraints(schema: &mut schemars::Schema) {
         Some("Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource."),
     );
 }
-pub fn remote_manifest_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
         &[
@@ -324,7 +325,7 @@ pub fn remote_manifest_constraints(schema: &mut schemars::Schema) {
         None,
     );
 }
-pub fn source_constraints(schema: &mut schemars::Schema) {
+pub(crate) fn source_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
         &[

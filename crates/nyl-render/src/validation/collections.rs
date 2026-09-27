@@ -98,7 +98,7 @@ impl SchemaResolver<'_> {
         self.populate_collection(&collection).await?;
         let bytes = store::json_bytes(&collection)?;
         let hash = if self.check {
-            store::digest(&bytes)
+            nyl_core::digest::sha256_hex(&bytes)
         } else {
             store::write_blob(&self.vendor, &bytes)?
         };
@@ -203,7 +203,9 @@ impl SchemaResolver<'_> {
                 .ok_or_else(|| NylError::validation(format!("Missing builtin schema {url}")))?;
             self.materialize(
                 document,
-                stage.path().join(format!("{}.json", store::digest(url.as_bytes()))),
+                stage
+                    .path()
+                    .join(format!("{}.json", nyl_core::digest::sha256_hex(url.as_bytes()))),
                 stage.path(),
             )
             .await?;
@@ -317,7 +319,7 @@ mod tests {
             let bytes = store::read_blob(&root, hash).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             store::atomic_write(
-                &cache.join(format!("{}.json", store::digest(url.as_bytes()))),
+                &cache.join(format!("{}.json", nyl_core::digest::sha256_hex(url.as_bytes()))),
                 &store::json_bytes(&json!({"digest":hash,"value":value})).unwrap(),
             )
             .unwrap();

@@ -73,6 +73,13 @@ if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; t
   exit 1
 fi
 
+# Restore the manifest and lockfile if any step before the commit fails, so
+# the clean-tree check does not block a re-run.
+restore_manifests() {
+  git checkout -- Cargo.toml Cargo.lock
+}
+trap restore_manifests ERR
+
 tmp_file="$(mktemp)"
 
 # Update the shared workspace package version in Cargo.toml
@@ -101,42 +108,14 @@ END {
 ' Cargo.toml > "${tmp_file}"
 mv "${tmp_file}" Cargo.toml
 
-# Update the Cargo.lock entries of every workspace package
-tmp_file="$(mktemp)"
-awk -v v="$version" '
-BEGIN { in_pkg = 0; is_member = 0; updated = 0 }
-{
-  if ($0 == "[[package]]") {
-    in_pkg = 1
-    is_member = 0
-    print
-    next
-  }
-  if (in_pkg && ($0 == "name = \"nyl\"" || $0 == "name = \"nyl-core\"" || $0 == "name = \"nyl-render\"")) {
-    is_member = 1
-    print
-    next
-  }
-  if (in_pkg && is_member && $0 ~ /^version = "/) {
-    print "version = \"" v "\""
-    updated++
-    in_pkg = 0
-    is_member = 0
-    next
-  }
-  print
-}
-END {
-  if (updated != 3) {
-    print "error: failed to update the workspace package versions in Cargo.lock" > "/dev/stderr"
-    exit 1
-  }
-}
-' Cargo.lock > "${tmp_file}"
-mv "${tmp_file}" Cargo.lock
+# Refresh the Cargo.lock entries of every workspace member from the bumped
+# manifest, then confirm the lockfile is consistent with it.
+cargo update --workspace --offline
+cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null
 
 git add Cargo.toml Cargo.lock
 git commit -m "chore(release): bump nyl to ${version}"
+trap - ERR
 git tag "${tag}"
 git push origin "${branch}"
 git push origin "${tag}"

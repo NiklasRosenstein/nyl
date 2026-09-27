@@ -1,10 +1,5 @@
-/// Utility functions
-///
-/// This module will handle:
-/// - Hash computation
-/// - File system utilities
-/// - Process execution helpers
-use sha2::{Digest, Sha256};
+//! Shared utilities: file system and project path helpers, source context,
+//! and small formatting helpers. Content digests live in `nyl_core::digest`.
 
 pub mod fs;
 pub mod project_path;
@@ -34,13 +29,6 @@ pub fn deep_merge_value(base: Option<serde_json::Value>, overlay: serde_json::Va
         }
         (_, overlay) => overlay,
     }
-}
-
-/// Compute SHA256 hash of a string
-pub fn compute_hash(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
 }
 
 /// Execute a command and return output

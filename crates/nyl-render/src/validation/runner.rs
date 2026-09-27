@@ -275,10 +275,14 @@ pub async fn validate_tree(
 
 /// Validation evidence survives both validation and report-delivery failures.
 pub struct TreeValidationOutcome {
+    /// The collected report, when validation ran far enough to produce one.
     pub report: Option<report::ValidationReport>,
+    /// Overall outcome, including report-delivery failures.
     pub result: Result<()>,
 }
 
+/// Validate a compiled target tree and keep the report even when validation or
+/// report delivery fails, so callers can still present the evidence.
 pub async fn collect_tree_validation(
     args: &ValidationArgs,
     inventory: &GitOpsInventory,
@@ -854,7 +858,7 @@ impl PartitionSchemas {
                     .unwrap_or(path)
                     .to_string_lossy()
                     .into_owned(),
-                digest: store::digest(&store::json_bytes(&schema.value)?),
+                digest: nyl_core::digest::sha256_hex(&store::json_bytes(&schema.value)?),
             },
             Origin::Builtin(url) => {
                 let source = if let Some(reference) = schema.value.get("$ref").and_then(Value::as_str) {
@@ -874,7 +878,7 @@ impl PartitionSchemas {
                 }
             }
             Origin::Captured => {
-                let digest = store::digest(&store::json_bytes(&schema.value)?);
+                let digest = nyl_core::digest::sha256_hex(&store::json_bytes(&schema.value)?);
                 if self.desired.values().any(|crd| crd.group == group && crd.kind == kind) {
                     SchemaOrigin::Desired {
                         crd: self

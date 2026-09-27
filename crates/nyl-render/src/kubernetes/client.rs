@@ -595,6 +595,7 @@ fn is_known_cluster_scoped_kind(kind: &str) -> bool {
     )
 }
 
+/// Whether a built-in group/version/kind is cluster-scoped without asking the API server.
 pub fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
     match gvk.group.as_str() {
         "" => is_known_cluster_scoped_kind(&gvk.kind),

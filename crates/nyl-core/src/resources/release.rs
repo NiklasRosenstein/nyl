@@ -147,7 +147,7 @@ pub fn generate_release_schema() -> serde_json::Value {
     schema
 }
 
-pub fn validate_namespace_name(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_namespace_name(field: &str, value: &str) -> Result<()> {
     let valid = !value.is_empty()
         && value.len() <= 63
         && value

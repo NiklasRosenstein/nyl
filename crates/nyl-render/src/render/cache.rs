@@ -1,5 +1,6 @@
 //! Versioned, content-addressed storage shared by manifest and tree rendering.
 
+use nyl_core::digest::sha256_hex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs;
@@ -131,6 +132,7 @@ impl CacheStats {
         self.layers.is_empty() && self.sources.is_empty()
     }
 
+    /// Whether any reuse, layer, or source activity is worth reporting to the user.
     pub fn has_reportable_work(&self) -> bool {
         self.target_reuse.is_some()
             || self.layers.values().any(CacheLayerStats::has_reportable_work)
@@ -436,7 +438,7 @@ impl DependencyRecorder {
             name.into(),
             RecordedDependency {
                 kind: kind.into(),
-                digest: sha256(bytes),
+                digest: sha256_hex(bytes),
             },
         );
     }
@@ -582,6 +584,7 @@ impl DependencyRecorder {
         self.cacheable
     }
 
+    /// Close the recording into the dependency record stored beside the artifact with `artifact_digest`.
     pub fn finish(self, action: impl Into<String>, artifact_digest: String) -> DependencyRecord {
         DependencyRecord {
             version: 1,
@@ -759,6 +762,7 @@ impl RenderCache {
             .insert(request, artifact);
     }
 
+    /// Every external artifact resolved through this cache so far, keyed by request.
     pub fn observed_artifacts(&self) -> BTreeMap<super::artifact::ArtifactRequest, super::artifact::ResolvedArtifact> {
         self.observed_artifacts
             .lock()
@@ -795,7 +799,7 @@ impl RenderCache {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if sha256(&bytes) != digest {
+        if sha256_hex(&bytes) != digest {
             tracing::warn!(path = %path.display(), "Ignoring corrupt GitOps cache artifact");
             return Ok(None);
         }
@@ -813,7 +817,7 @@ impl RenderCache {
             return Ok(None);
         }
         let bytes = serde_json::to_vec(value)?;
-        let digest = sha256(&bytes);
+        let digest = sha256_hex(&bytes);
         let path = self.artifact_path(kind, &digest)?;
         atomic_write_once(&path, &bytes)?;
         Ok(Some(digest))
@@ -863,7 +867,7 @@ impl RenderCache {
             .root
             .join("records")
             .join(action)
-            .join(format!("{}.json", sha256(key.as_bytes()))))
+            .join(format!("{}.json", sha256_hex(key.as_bytes()))))
     }
 }
 
@@ -881,7 +885,7 @@ fn renderer_tool_dependencies() -> Result<BTreeMap<String, RecordedDependency>> 
         "tool:nyl".to_string(),
         RecordedDependency {
             kind: "file".to_string(),
-            digest: sha256(&fs::read(executable)?),
+            digest: sha256_hex(&fs::read(executable)?),
         },
     );
     for (tool, arguments) in [("helm", &["version", "--short"][..]), ("kyverno", &["version"][..])] {
@@ -894,7 +898,7 @@ fn tool_dependency(tool: &str, arguments: &[&str]) -> RecordedDependency {
     let Some(path) = find_executable(tool) else {
         return RecordedDependency {
             kind: "tool".to_string(),
-            digest: sha256(b"unavailable"),
+            digest: sha256_hex(b"unavailable"),
         };
     };
     let output = std::process::Command::new(&path).args(arguments).output();
@@ -909,7 +913,7 @@ fn tool_dependency(tool: &str, arguments: &[&str]) -> RecordedDependency {
     }
     RecordedDependency {
         kind: "tool".to_string(),
-        digest: sha256(&fingerprint),
+        digest: sha256_hex(&fingerprint),
     }
 }
 
@@ -954,10 +958,6 @@ fn random_key() -> Result<[u8; 32]> {
     let mut key = [0_u8; 32];
     fill_random(&mut key).map_err(|error| NylError::config(format!("Failed to generate cache key: {error}")))?;
     Ok(key)
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 fn hmac_sha256(key: &[u8; 32], value: &[u8]) -> String {
