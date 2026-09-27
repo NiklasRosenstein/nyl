@@ -20,13 +20,24 @@ pub(crate) struct LoadedReleaseBundle {
 /// Load one manifest entrypoint and any files selected by its Release.
 #[cfg(test)]
 pub(crate) fn load_release_bundle(path: &Path, context: &TemplateContext) -> Result<LoadedReleaseBundle> {
-    load_release_bundle_with_root(path, context, None)
+    load_release_bundle_with_root(path, context, ProvenanceRoots::default())
+}
+
+/// Roots that source provenance paths are recorded relative to.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProvenanceRoots<'a> {
+    /// Files beneath this root are recorded relative to it.
+    pub root: Option<&'a Path>,
+    /// Other files beneath this worktree root are recorded as `/` plus their
+    /// worktree-relative path, the portable form of
+    /// [`crate::util::project_path`].
+    pub worktree: Option<&'a Path>,
 }
 
 pub(crate) fn load_release_bundle_with_root(
     path: &Path,
     context: &TemplateContext,
-    provenance_root: Option<&Path>,
+    provenance_root: ProvenanceRoots<'_>,
 ) -> Result<LoadedReleaseBundle> {
     let mut resources = load_resource_file(path, context, provenance_root)?;
     let values = resources
@@ -184,7 +195,7 @@ fn resolve_release_includes(path: &Path, release: &Release) -> Result<Vec<PathBu
 fn load_resource_file(
     path: &Path,
     context: &TemplateContext,
-    provenance_root: Option<&Path>,
+    provenance_root: ProvenanceRoots<'_>,
 ) -> Result<Vec<RenderResource>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
@@ -232,16 +243,20 @@ fn load_resource_file(
     Ok(resources)
 }
 
-fn provenance_path(path: &Path, root: Option<&Path>) -> PathBuf {
-    if let Some(root) = root {
-        if let Ok(relative) = path.strip_prefix(root) {
-            return relative.to_path_buf();
-        }
-        if let (Ok(path), Ok(root)) = (path.canonicalize(), root.canonicalize()) {
-            if let Ok(relative) = path.strip_prefix(root) {
-                return relative.to_path_buf();
-            }
-        }
+fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
+    if let Some(relative) = roots.root.and_then(|root| relative_to(path, root)) {
+        return relative;
+    }
+    if let Some(relative) = roots.worktree.and_then(|worktree| relative_to(path, worktree)) {
+        return Path::new("/").join(relative);
     }
     crate::util::path_for_display(path)
+}
+
+fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let (path, root) = (path.canonicalize().ok()?, root.canonicalize().ok()?);
+    path.strip_prefix(root).ok().map(Path::to_path_buf)
 }

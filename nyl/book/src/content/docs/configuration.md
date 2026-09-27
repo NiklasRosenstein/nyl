@@ -3,8 +3,28 @@ title: 'Configuration'
 ---
 
 Nyl loads project settings from `nyl.toml`. It searches from the current
-directory upward and resolves relative paths against the directory containing
-the file.
+directory upward, and the nearest `nyl.toml` wins. At the root of a Git
+worktree without its own `nyl.toml`, it also checks `nyl/nyl.toml`, so a
+project can keep `nyl.toml` beside its configuration in `nyl/` and still run
+from anywhere in the worktree. Relative paths in the file resolve against the
+directory containing it.
+
+## Local paths
+
+Resources name directories and files of this repository with one rule, for
+example a local ApplicationGroup `spec.source.path`:
+
+- A relative path resolves against the directory containing `nyl.toml`, and
+  may begin with `..` segments, such as `../applications/web`.
+- A path that starts with `/` resolves against the Git worktree root, such as
+  `/applications/web`.
+- A path must stay inside the worktree and must not traverse a symbolic link.
+
+Paths inside another repository, such as a remote source or a `fromGit`
+binding, are relative to that repository's root instead. Recorded paths, such
+as rendered provenance and ownership-index inputs, are relative to the
+`nyl.toml` directory for files beneath it and start with `/` for other files of
+the worktree.
 
 ## Project settings
 

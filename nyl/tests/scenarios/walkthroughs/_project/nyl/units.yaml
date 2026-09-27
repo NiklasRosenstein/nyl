@@ -4,7 +4,7 @@ metadata:
   name: network
   labels: {dev: 'true'}
 spec:
-  source: {path: infra/network}
+  source: {path: ../infra/network}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-network.tfstate'}
   outputs:
     vpcId: {type: string}
@@ -15,7 +15,7 @@ metadata:
   name: database
   labels: {dev: 'true'}
 spec:
-  source: {path: infra/database}
+  source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
     vpc_id: {fromUnit: {unit: network, output: vpcId}}
@@ -28,7 +28,7 @@ metadata:
   name: web-image
   labels: {dev: 'true'}
 spec:
-  context: {path: services/web}
+  context: {path: ../services/web}
   repository: '%REGISTRY%/web'
 ---
 apiVersion: units.gitops.nyl/v1

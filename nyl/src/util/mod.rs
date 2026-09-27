@@ -7,6 +7,7 @@
 use sha2::{Digest, Sha256};
 
 pub mod fs;
+pub mod project_path;
 pub mod source_context;
 
 pub use fs::{find_config_file, path_for_display, resolve_path, resolve_paths};

@@ -5,3 +5,4 @@ metadata:
   labels: {app: web}
 spec:
   applicationNamespace: argocd
+  source: {path: ../applications/web}   # beside nyl/

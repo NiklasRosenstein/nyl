@@ -3864,3 +3864,159 @@ spec:
     let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/api.yaml")).unwrap();
     assert!(application.contains("project: workloads"));
 }
+
+/// Where a nested project keeps its Release files.
+enum NestedReleases {
+    /// `nyl/applications/<group>`, the group's default source.
+    Subdirectory,
+    /// `applications/<group>` beside `nyl/`, named by this `spec.source.path`.
+    Sibling(&'static str),
+}
+
+/// Move the fixture's project into `nyl/`, so `nyl.toml` sits beside the
+/// configuration, and place the Releases as `releases` says.
+fn nested_fixture(releases: NestedReleases) -> TempDir {
+    let fixture = fixture();
+    let root = fixture.path();
+    fs::create_dir(root.join("nyl")).unwrap();
+    fs::rename(root.join("nyl.toml"), root.join("nyl/nyl.toml")).unwrap();
+    fs::rename(root.join("config"), root.join("nyl/config")).unwrap();
+    match releases {
+        NestedReleases::Subdirectory => fs::rename(root.join("applications"), root.join("nyl/applications")).unwrap(),
+        NestedReleases::Sibling(path) => {
+            let group = root.join("nyl/config/application-groups/workloads.yaml");
+            let contents = fs::read_to_string(&group).unwrap().replace(
+                "  projectRef: workloads\n",
+                &format!("  projectRef: workloads\n  source:\n    path: {path}\n"),
+            );
+            fs::write(group, contents).unwrap();
+        }
+    }
+    fixture
+}
+
+/// Render the fixture's target from the worktree root into a fresh directory.
+fn render_from_worktree_root(fixture: &TempDir) -> (TempDir, BTreeMap<PathBuf, Vec<u8>>) {
+    let output = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", "--output-dir"])
+        .arg(output.path())
+        .args(["--color", "never", "--no-cache"])
+        .assert()
+        .success();
+    let tree = read_tree(&output.path().join("production"));
+    (output, tree)
+}
+
+#[test]
+fn test_render_tree_with_nested_project_and_release_subdirectory_matches_root_layout() {
+    let (_root_output, root_layout) = render_from_worktree_root(&fixture());
+    let (_nested_output, nested_layout) = render_from_worktree_root(&nested_fixture(NestedReleases::Subdirectory));
+
+    assert_eq!(nested_layout, root_layout);
+}
+
+#[test]
+fn test_render_tree_with_nested_project_reads_sibling_releases_by_either_path_form() {
+    let (_relative_output, relative) =
+        render_from_worktree_root(&nested_fixture(NestedReleases::Sibling("../applications/workloads")));
+    let (_rooted_output, rooted) =
+        render_from_worktree_root(&nested_fixture(NestedReleases::Sibling("/applications/workloads")));
+
+    // Only the group file differs between the two forms, so only its input
+    // digest in the ownership index may differ.
+    let index_path = PathBuf::from("_nyl/index.json");
+    let without_index = |tree: &BTreeMap<PathBuf, Vec<u8>>| {
+        tree.iter()
+            .filter(|(path, _)| **path != index_path)
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(without_index(&relative), without_index(&rooted));
+    let input_keys = |tree: &BTreeMap<PathBuf, Vec<u8>>| {
+        let index: serde_json::Value = serde_json::from_slice(&tree[&index_path]).unwrap();
+        index["inputs"].as_object().unwrap().keys().cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(input_keys(&relative), input_keys(&rooted));
+    let resources = String::from_utf8(relative[&PathBuf::from("workloads/api/resources.yaml")].clone()).unwrap();
+    assert!(
+        resources.contains("# Nyl-Provenance: Source: /applications/workloads/api.yaml (document 2)"),
+        "{resources}"
+    );
+    let index: serde_json::Value = serde_json::from_slice(&relative[&index_path]).unwrap();
+    assert!(
+        index["inputs"].get("/applications/workloads/api.yaml").is_some(),
+        "{index}"
+    );
+    assert!(
+        index["inputs"].get("config/targets/production.yaml").is_some(),
+        "{index}"
+    );
+}
+
+#[test]
+fn test_render_tree_rejects_group_source_outside_the_worktree() {
+    let fixture = nested_fixture(NestedReleases::Sibling("../../outside"));
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--check",
+            "--no-cache",
+            "--color",
+            "never",
+            "--output-dir",
+        ])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("resolves outside the Git worktree"));
+}
+
+#[test]
+fn test_diff_tree_against_source_finds_a_nested_project_in_the_baseline_checkout() {
+    let fixture = fixture();
+    let root = fixture.path();
+    fs::create_dir(root.join("platform")).unwrap();
+    for entry in ["nyl.toml", "config", "applications"] {
+        fs::rename(root.join(entry), root.join("platform").join(entry)).unwrap();
+    }
+    let repository = Repository::open(root).unwrap();
+    commit_all(&repository, "Nested project");
+    let commit = repository.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    let artifacts = TempDir::new().unwrap();
+
+    let output = Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join("platform"))
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--against",
+            "source",
+            "--source-ref",
+            &commit,
+            "--source-repository",
+        ])
+        .arg(root)
+        .args([
+            "--progress",
+            "off",
+            "--no-stats-stderr",
+            "--stats-output",
+            "json:-",
+            "--output",
+        ])
+        .arg(artifacts.path().join("source.diff"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["comparison"]["baseline"]["mode"], "source");
+    assert_eq!(report["diff"]["has_changes"], false, "{report}");
+}

@@ -57,7 +57,16 @@ impl Provenance {
         let mut result = self.clone();
         for frame in &mut result.0 {
             if let ProvenanceFrame::Source { path, .. } = frame {
-                *path = crate::resources::relative_path_to_posix("rendered provenance path", path)?.into();
+                // A leading `/` marks a worktree-relative path outside the
+                // project (see crate::util::project_path).
+                *path = match path.strip_prefix("/") {
+                    Ok(relative) => format!(
+                        "/{}",
+                        crate::resources::relative_path_to_posix("rendered provenance path", relative)?
+                    ),
+                    Err(_) => crate::resources::relative_path_to_posix("rendered provenance path", path)?,
+                }
+                .into();
             }
         }
         Ok(result)

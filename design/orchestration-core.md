@@ -339,6 +339,15 @@ spec:
   without `revision`, the environment's source commit S. A field that names
   another repository must name its `revision`, because S is a commit of this
   repository. Most units set only `path`.
+  - In this repository, at any revision, `path` follows the one local path
+    rule that local ApplicationGroup sources use: relative to the directory
+    containing `nyl.toml`, with leading `..` segments allowed, or from the
+    worktree root with a leading `/`, never leaving the worktree or traversing
+    a symbolic link. The same rule covers `files` globs, Command
+    `workingDir`, and `fromFile`. In another repository, `path` is relative to
+    its root. Resolution records every such path in `resolvedSpec` in its
+    worktree-rooted form, such as `/infra/database`, so the desired document
+    means the same wherever `nyl.toml` lives.
   - `revision` alone resolves the ref's tip during resolution; the desired
     document records the resolved commit in `resolvedSpec.source.commit`, so
     every run is reproducible from state.
@@ -2030,14 +2039,14 @@ kind: Command
 metadata:
   name: seed
 spec:
-  files: ['scripts/seed/**']
+  files: ['../scripts/seed/**']
   values:
     bucket: {fromUnit: {unit: storage, output: bucket}}
-  command: ['./scripts/seed/run.sh']
-  verify: ['./scripts/seed/verify.sh']
-  teardown: ['./scripts/seed/remove.sh']  # optional; without it the kind cannot tear down
-  fingerprint: ['./scripts/seed/tool-versions.sh']
-  workingDir: scripts/seed               # optional; relative to the repository root
+  command: ['./run.sh']
+  verify: ['./verify.sh']
+  teardown: ['./remove.sh']  # optional; without it the kind cannot tear down
+  fingerprint: ['./tool-versions.sh']
+  workingDir: ../scripts/seed            # optional; default the nyl.toml directory
   env:
     passthrough: [AWS_REGION, AWS_PROFILE]
     secrets:
@@ -2050,9 +2059,10 @@ spec:
 
 - `command`, `verify`, `teardown`, and `fingerprint` are argument vectors,
   executed directly without a shell; a relative first element is resolved
-  against the working directory. `workingDir` defaults to the repository root
-  of the worktree at S, and must stay inside it. Commands use S; a Command
-  has no `source` field of its own.
+  against the working directory. `workingDir` follows the local path rule of
+  [Units](#units), where `/` alone names the worktree root, and defaults to
+  the directory containing `nyl.toml`, in the worktree at S. Commands use S;
+  a Command has no `source` field of its own.
 - The command starts from an empty environment plus:
   - `PATH` from the runner and `HOME` set to a fresh temporary directory, the
     kind's fixed variables;

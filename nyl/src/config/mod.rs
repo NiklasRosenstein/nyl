@@ -6,7 +6,7 @@
 /// - JSON schema generation for `nyl.toml`
 pub mod schema;
 
-use crate::util::fs::{find_config_file, resolve_path, resolve_paths};
+use crate::util::fs::{resolve_path, resolve_paths};
 use crate::{NylError, Result};
 use clap::ValueEnum;
 use schemars::JsonSchema;
@@ -163,9 +163,17 @@ impl ProjectConfig {
     /// Config file names searched in priority order.
     pub const FILENAMES: &'static [&'static str] = &["nyl.toml"];
 
+    /// Directory at the Git worktree root that may hold the project's
+    /// `nyl.toml` next to its configuration files.
+    pub const NESTED_CONFIG_DIR: &'static str = "nyl";
+
     /// Find the project configuration file
     ///
-    /// Searches current directory and parent directories for config files.
+    /// Searches the starting directory and its ancestors for `nyl.toml`; the
+    /// nearest one wins. At a Git worktree root without its own `nyl.toml`,
+    /// `nyl/nyl.toml` is checked before the search continues above the
+    /// worktree, so a project that keeps `nyl.toml` beside its configuration
+    /// in `nyl/` is found from anywhere in the worktree.
     ///
     /// # Arguments
     /// * `cwd` - Starting directory (defaults to current working directory)
@@ -174,7 +182,23 @@ impl ProjectConfig {
     /// * `Some(PathBuf)` - Path to config file if found
     /// * `None` - No config file found
     pub fn find(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
-        find_config_file(Self::FILENAMES, cwd, false)
+        let start = match cwd {
+            Some(path) => std::path::absolute(path)?,
+            None => std::env::current_dir()?,
+        };
+        for directory in start.ancestors() {
+            let candidate = directory.join("nyl.toml");
+            if candidate.is_file() {
+                return Ok(Some(candidate));
+            }
+            if directory.join(".git").exists() {
+                let nested = directory.join(Self::NESTED_CONFIG_DIR).join("nyl.toml");
+                if nested.is_file() {
+                    return Ok(Some(nested));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Load project configuration from file.
@@ -579,6 +603,52 @@ components_search_paths = ["comps1", "comps2"]
 
         let found = ProjectConfig::find(Some(temp.path())).unwrap();
         assert_eq!(found, Some(temp.path().join("nyl.toml")));
+    }
+
+    /// A temporary Git worktree whose project keeps `nyl.toml` in `nyl/`.
+    fn worktree_with_nested_config() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+        fs::create_dir_all(temp.path().join("nyl")).unwrap();
+        fs::create_dir_all(temp.path().join("applications/web")).unwrap();
+        fs::write(temp.path().join("nyl/nyl.toml"), "[project]").unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_find_falls_back_to_nested_config_at_the_worktree_root() {
+        let temp = worktree_with_nested_config();
+
+        for start in [temp.path().to_path_buf(), temp.path().join("applications/web")] {
+            let found = ProjectConfig::find(Some(&start)).unwrap();
+            assert_eq!(
+                found,
+                Some(temp.path().join("nyl/nyl.toml")),
+                "from {}",
+                start.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_prefers_the_nearest_nyl_toml_over_the_nested_fallback() {
+        let temp = worktree_with_nested_config();
+        fs::write(temp.path().join("applications/nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(&temp.path().join("applications/web"))).unwrap();
+        assert_eq!(found, Some(temp.path().join("applications/nyl.toml")));
+
+        fs::write(temp.path().join("nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(temp.path())).unwrap();
+        assert_eq!(found, Some(temp.path().join("nyl.toml")));
+    }
+
+    #[test]
+    fn test_find_ignores_nested_config_outside_a_worktree_root() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join("project/nyl")).unwrap();
+        fs::write(temp.path().join("project/nyl/nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(&temp.path().join("project"))).unwrap();
+        assert_ne!(found, Some(temp.path().join("project/nyl/nyl.toml")));
     }
 
     #[test]

@@ -719,7 +719,9 @@ async fn source_derived_tree(
         .resolve_ref_fresh(&repository_url, Some(source_ref), None)
         .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
-    let inventory = discover_gitops_inventory(&checkout, None)?;
+    // The baseline project sits at the same place in the checkout as the local
+    // project does in its worktree.
+    let inventory = discover_gitops_inventory(&checkout.join(project_path_in_worktree(project_root)?), None)?;
     let mut progress = TreeProgressReporter::new(progress_args, Some(format!("Baseline {source_ref}")));
     let compiled =
         compile_target_tree_cached_with_observer_and_options(&inventory, target, cache, &mut progress, options).await?;
@@ -729,6 +731,18 @@ async fn source_derived_tree(
         revision: source_ref.to_owned(),
         commit,
     })
+}
+
+/// The project directory relative to the root of the worktree containing it.
+fn project_path_in_worktree(project_root: &Path) -> Result<PathBuf> {
+    let project_root = project_root.canonicalize()?;
+    let Some(worktree) = crate::util::project_path::find_worktree_root(&project_root) else {
+        return Ok(PathBuf::new());
+    };
+    Ok(project_root
+        .strip_prefix(worktree)
+        .map(Path::to_path_buf)
+        .unwrap_or_default())
 }
 
 fn checkout_commit(checkout: &Path) -> Result<git2::Oid> {

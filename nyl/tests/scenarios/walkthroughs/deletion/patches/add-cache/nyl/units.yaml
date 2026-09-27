@@ -6,11 +6,12 @@ metadata:
   name: cache
   labels: {dev: 'true'}
 spec:
-  files: ['scripts/cache.sh']
+  files: ['../scripts/cache.sh']
   values:
     dataDir: '{{ values.dataDir }}'
-  command: ['./scripts/cache.sh', 'create']
-  teardown: ['./scripts/cache.sh', 'remove']
+  workingDir: ../scripts
+  command: ['./cache.sh', 'create']
+  teardown: ['./cache.sh', 'remove']
   idempotent: true
   outputs:
     endpoint: {type: string}
@@ -21,9 +22,10 @@ metadata:
   name: worker
   labels: {dev: 'true'}
 spec:
-  files: ['scripts/worker.sh']
+  files: ['../scripts/worker.sh']
   values:
     cache: {fromUnit: {unit: cache, output: endpoint}}
-  command: ['./scripts/worker.sh']
+  workingDir: ../scripts
+  command: ['./worker.sh']
   idempotent: true
   deletionPolicy: Retain

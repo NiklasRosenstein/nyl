@@ -94,7 +94,7 @@ metadata:
   name: web-image
   labels: {dev: 'true'}
 spec:
-  context: {path: services/web}
+  context: {path: ../services/web}
   repository: '%REGISTRY%/web'
 ---
 apiVersion: units.gitops.nyl/v1

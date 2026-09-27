@@ -169,14 +169,17 @@ All three scenarios run against one project, which also lives at
 dev, prod, and preview environments. Same files in both places, so the
 example can never drift from what is tested.
 
-The example uses a condensed layout: one file per environment, one for shared
-resources, and the native source files next to them.
+The example uses a condensed layout: `nyl.toml` beside the Nyl resources in
+`nyl/`, one file per environment, one for shared resources, and the native
+source files and Releases next to `nyl/`. Nyl finds `nyl/nyl.toml` from the
+repository root, so every command runs from there.
 
 ```text
 examples/platform/
-  nyl.toml
   nyl/
+    nyl.toml
     platform.yaml            # GitRepository platform; ArgoCDInstances dev and prod; PromotionPath dev-to-prod; units
+    web.yaml                 # ApplicationGroup web, source ../applications/web
     dev.yaml                 # Cluster dev, DeploymentTarget dev, Environment dev (follows its worktree)
     prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source fromPromotion)
     preview.yaml             # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
@@ -186,7 +189,6 @@ examples/platform/
   infra/modules/postgres/
   services/web/Dockerfile    # FROM scratch, COPY index.html: builds without pulling
   services/web/index.html
-  applications/web/group.yaml
   applications/web/release.yaml   # inputs: image (string), database (object)
   .github/workflows/
     plan.yaml                # pull request: nyl validate; nyl plan -e dev -e prod
@@ -203,8 +205,14 @@ examples/platform/
 | `seed` | ✓ | | |
 | `kubernetes` | ✓ | ✓ | ✓ |
 
-Directories and files carry no meaning: discovery follows Git visibility, and a
-file may hold any number of resources. The documentation suggests an expanded
+Directories and files carry no meaning beyond one boundary: discovery follows
+Git visibility beneath the directory containing `nyl.toml`, and a file may hold
+any number of resources. Paths to everything else, such as a unit's
+`source.path` or the group's source, are relative to that directory
+(`../infra/database`) or start with `/` from the repository root
+(`/infra/database`). The same project also works with `nyl.toml` at the
+repository root and all resources beneath it, or with the Releases in
+`nyl/applications/web`, where the group needs no `source`. The documentation suggests an expanded
 layout for larger projects, with one resource per file:
 
 ```text
@@ -270,12 +278,13 @@ spec:
   values:
     webImage: {select: {unit: web-image, artifact: image, pointer: /reference}}
 ---
-# applications/web/group.yaml: names and namespaces per target, so previews never collide
+# web.yaml: names and namespaces per target, so previews never collide
 apiVersion: k8s.gitops.nyl/v1
 kind: ApplicationGroup
 metadata: {name: web, labels: {app: web}}
 spec:
   applicationNamespace: argocd
+  source: {path: ../applications/web}                 # beside nyl/; `/applications/web` is the same directory
   applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'   # a template value, expanded per Release
   destinationNamespace: '{{ values.namespace | default("web") }}'
   projectTemplate:
@@ -293,7 +302,7 @@ metadata:
     prod: 'true'
     preview: 'true'
 spec:
-  source: {path: infra/database}
+  source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
     vpc_id: {fromUnit: {unit: network, output: vpcId}}   # previews: from environment dev, see below

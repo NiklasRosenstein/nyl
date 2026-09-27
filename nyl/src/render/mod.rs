@@ -10,7 +10,7 @@ mod session;
 
 #[cfg(test)]
 pub(crate) use bundle::load_release_bundle;
-pub(crate) use bundle::{load_release_bundle_with_root, static_release_envelope};
+pub(crate) use bundle::{load_release_bundle_with_root, static_release_envelope, ProvenanceRoots};
 pub(crate) use expand::*;
 pub(crate) use postprocess::*;
 pub use provenance::{Provenance, ProvenanceFrame};
@@ -956,7 +956,15 @@ spec:
             target: None,
         };
 
-        let bundle = load_release_bundle_with_root(&entry, &context, Some(temporary.path())).unwrap();
+        let bundle = load_release_bundle_with_root(
+            &entry,
+            &context,
+            ProvenanceRoots {
+                root: Some(temporary.path()),
+                worktree: None,
+            },
+        )
+        .unwrap();
         assert_eq!(bundle.resources.len(), 3);
         assert_eq!(bundle.inputs.len(), 3);
         assert_eq!(bundle.resources[1]["metadata"]["name"], "one");

@@ -546,7 +546,7 @@ pub struct ApplicationGroupSource {
     /// Full immutable remote Git commit lock used for rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// Normalized project-relative source directory; relative to the checkout for a remote source.
+    /// Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.
     pub path: String,
     /// Relative candidate file globs. Only entries with a literal Release are rendered; attach other files using Release `spec.include`.
     #[serde(default = "default_source_include")]
@@ -1245,9 +1245,18 @@ impl ApplicationGroupSource {
         self.repository_ref.is_some() || self.repository.is_some()
     }
 
+    /// The path inside the remote checkout, without the optional leading `/`.
+    pub fn checkout_path(&self) -> &str {
+        self.path.strip_prefix('/').unwrap_or(&self.path)
+    }
+
     pub fn validate(&self) -> Result<()> {
-        validate_relative_path("spec.source.path", &self.path, false, false)?;
         let remote = self.is_remote();
+        if remote {
+            validate_relative_path("spec.source.path", self.checkout_path(), false, false)?;
+        } else {
+            crate::util::project_path::validate_local_path("spec.source.path", &self.path)?;
+        }
         match (&self.repository_ref, &self.repository) {
             (Some(reference), None) => validate_static_required("spec.source.repositoryRef.name", &reference.name)?,
             (None, Some(repository)) => repository.validate("spec.source.repository")?,
@@ -1790,9 +1799,9 @@ mod tests {
     #[test]
     fn rejects_paths_with_traversal_or_non_normal_forms() {
         for path in [
-            "../outside",
             "applications/../outside",
-            "/absolute",
+            "/../outside",
+            "/",
             "applications//cloud",
             "applications/./cloud",
         ] {
@@ -1800,6 +1809,29 @@ mod tests {
             value["spec"]["source"]["path"] = json!(path);
             assert!(parse_gitops_resource(&value).is_err(), "accepted {path}");
         }
+    }
+
+    #[test]
+    fn test_local_source_accepts_parent_and_worktree_rooted_paths() {
+        for path in ["../applications/cloud", "/applications/cloud"] {
+            let mut value = application_group();
+            value["spec"]["source"]["path"] = json!(path);
+            assert!(parse_gitops_resource(&value).is_ok(), "rejected {path}");
+        }
+    }
+
+    #[test]
+    fn test_remote_source_rejects_parent_traversal() {
+        let mut value = application_group();
+        value["spec"]["source"] = json!({
+            "repositoryRef": {"name": "workloads"},
+            "revision": "refs/heads/main",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "path": "../applications/cloud"
+        });
+        assert!(parse_gitops_resource(&value).is_err());
+        value["spec"]["source"]["path"] = json!("/applications/cloud");
+        assert!(parse_gitops_resource(&value).is_ok());
     }
 
     #[test]

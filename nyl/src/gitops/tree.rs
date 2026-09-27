@@ -478,17 +478,16 @@ async fn compile_target_tree_inner(
                 .expect("remote source must carry a restricted rendering session"),
         };
         let mut claimed_source_files = BTreeSet::new();
+        let project_paths = inventory.paths();
 
         for source_file in &source.files {
             claimed_source_files.insert(manifest_path_identity(&source_file.path));
             let input_path = if source.remote {
                 PathBuf::from("@remote").join(source_file.path.strip_prefix(&source.root).unwrap_or(&source_file.path))
             } else {
-                source_file
-                    .path
-                    .strip_prefix(&inventory.project_root)
-                    .unwrap_or(&source_file.path)
-                    .to_path_buf()
+                project_paths
+                    .key(&source_file.path)
+                    .unwrap_or_else(|| source_file.path.clone())
             };
             let current = progress_completed + 1;
             observer.release_started(
@@ -502,8 +501,9 @@ async fn compile_target_tree_inner(
             );
             inputs.insert(input_path);
             let provenance_root = &source.provenance_root;
+            let worktree_root = (!source.remote).then_some(inventory.worktree_root.as_path());
             let mut rendered = session
-                .render_release_file_with_provenance_root(&source_file.path, provenance_root)
+                .render_release_file_with_provenance_roots(&source_file.path, provenance_root, worktree_root)
                 .await?;
             if let (Some(repository), Some(revision)) = (
                 &source.repository,
@@ -531,10 +531,7 @@ async fn compile_target_tree_inner(
                 let input_path = if source.remote {
                     PathBuf::from("@remote").join(bundle_input.strip_prefix(&source.root).unwrap_or(bundle_input))
                 } else {
-                    bundle_input
-                        .strip_prefix(&inventory.project_root)
-                        .unwrap_or(bundle_input)
-                        .to_path_buf()
+                    project_paths.key(bundle_input).unwrap_or_else(|| bundle_input.clone())
                 };
                 inputs.insert(input_path);
             }
@@ -2088,7 +2085,7 @@ fn resolve_remote_group_source(
         )?;
         artifacts.materialize_git(&artifact)?
     };
-    let selected = checked_checkout_subpath(&checkout, &source.path, "ApplicationGroup source.path")?;
+    let selected = checked_checkout_subpath(&checkout, source.checkout_path(), "ApplicationGroup source.path")?;
     Ok((selected, checkout, repository))
 }
 
@@ -2107,7 +2104,12 @@ fn resolve_group_source(
                 resolve_remote_group_source(inventory, source, git_manager, cache, &mut provenance_inputs)?;
             (selected, source.clone(), Some(checkout), Some(repository))
         }
-        Some(source) => (inventory.project_root.join(&source.path), source.clone(), None, None),
+        Some(source) => (
+            local_group_source_root(inventory, &group.metadata.name, &source.path)?,
+            source.clone(),
+            None,
+            None,
+        ),
         None => {
             let root = crate::gitops::derived_group_source_root(
                 &inventory.project_root,
@@ -2144,9 +2146,9 @@ fn resolve_group_source(
         collect_checkout_yaml(&root)?
     } else {
         inventory
-            .yaml_files
+            .worktree_yaml_files
             .iter()
-            .map(|path| inventory.project_root.join(path))
+            .map(|path| inventory.worktree_root.join(path))
             .filter(|path| path.starts_with(&root))
             .collect()
     };
@@ -2173,6 +2175,21 @@ fn resolve_group_source(
         provenance_inputs,
         repository: source_repository,
     })
+}
+
+/// Resolve a local ApplicationGroup `spec.source.path` under the shared local
+/// path rule ([`crate::util::project_path`]).
+pub(crate) fn local_group_source_root(inventory: &GitOpsInventory, group: &str, path: &str) -> Result<PathBuf> {
+    let root = inventory.paths().resolve("spec.source.path", path)?;
+    if !root.is_dir() {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {group:?} source directory does not exist: {} (spec.source.path {path:?} is relative \
+             to {}; start it with '/' to name a path from the Git worktree root)",
+            root.display(),
+            inventory.project_root.display()
+        )));
+    }
+    Ok(root)
 }
 
 fn build_group_source_session(

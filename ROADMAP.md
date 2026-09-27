@@ -497,6 +497,12 @@ Reports retain completed results on operational failure and distinguish invalid
 resources from unchecked inputs; rendering caches retain the provenance needed
 for identical reports on cache hits.
 
+`nyl.toml` may sit at the repository root or beside the configuration in
+`nyl/`, where Nyl finds it from the root. Local paths, such as ApplicationGroup
+sources, unit sources, and `fromFile`, share one resolver: relative to the
+`nyl.toml` directory or `/`-rooted at the Git worktree, so Releases can live
+beside `nyl/` as well as beneath it.
+
 Kubernetes normalization, namespace handling, deduplication, and policy
 processing belong to this path. Every input affecting rendered bytes, including
 resolved Release inputs, participates in dependency recording; cache entries are

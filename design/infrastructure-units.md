@@ -209,8 +209,9 @@ bound to it:
   another repository. `nyl update source-locks` refreshes a `commit` lock. A
   promoted revision replaces the commit, subject to the reachability rule in
   the core contract.
-- `files` lists the repository-relative globs that enter the execution key.
-  The default is `<source.path>/**`, excluding `.terraform/`.
+- `files` lists the globs that enter the execution key, under the core
+  contract's local path rule, like `source.path`. The default is
+  `<source.path>/**`, excluding `.terraform/`.
 - Relative local modules resolve inside the same worktree, so pinning the
   revision pins them too. After `init`, the driver reads the tool's module
   manifest; a local module directory outside `files` fails the execution with a
