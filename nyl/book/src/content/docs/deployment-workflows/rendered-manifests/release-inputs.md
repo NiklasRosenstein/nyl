@@ -87,7 +87,7 @@ Each binding sets exactly one source:
 | Source | Resolves from |
 | --- | --- |
 | `value` | An inline literal. Targets are static, so it is never templated. |
-| `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. |
+| `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
 | `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
 
 The effective value is the target binding if there is one, otherwise the
@@ -113,6 +113,7 @@ file paths.
 Resolved inputs are part of the render-cache key. The ownership index records
 each `fromFile` file under its path, and each effective input as
 `@input/<group>/<release>/<input>` with the SHA-256 digest of its canonical
-JSON value. Keys starting with `@` are reserved for entries that are not
-project paths. Inputs are not a secret channel: their digests and the rendered
-manifests are published, so keep secrets in the secrets provider.
+JSON value. Keys under `@input/` are reserved for these entries; a project file
+whose key equals one fails the render instead of being overwritten. Inputs are
+not a secret channel: their digests and the rendered manifests are published,
+so keep secrets in the secrets provider.

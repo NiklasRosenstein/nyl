@@ -2171,7 +2171,10 @@ fn resolve_prepared_release_inputs(
         target,
         &releases,
         disabled_groups,
-        &super::inputs::InputSources { paths: &paths },
+        &super::inputs::InputSources {
+            paths: &paths,
+            visible_files: &inventory.worktree_data_files,
+        },
     )
 }
 

@@ -340,9 +340,8 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
-        let mut request = RenderRequest::new(path, Some(provenance_root));
-        request.provenance_worktree_root = worktree_root;
-        self.render(request).await
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None)
+            .await
     }
 
     /// Render one Release entry file of a target with its resolved inputs.
