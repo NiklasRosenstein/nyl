@@ -316,7 +316,9 @@ pub(super) fn hash_inputs(
     let mut hashes = BTreeMap::new();
     let paths = inventory.paths();
     for relative in &compiled.inputs {
-        if relative.starts_with("@remote") {
+        // Keys starting with `@` are reserved for entries that are not project
+        // paths, such as `@remote/…` source files and `@input/…` digests.
+        if relative.to_string_lossy().starts_with('@') {
             continue;
         }
         let path = paths.path_for_key(relative);
@@ -346,5 +348,6 @@ pub(super) fn hash_inputs(
             );
         }
     }
+    hashes.extend(compiled.input_digests.clone());
     Ok(hashes)
 }

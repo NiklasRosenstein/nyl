@@ -289,6 +289,9 @@ pub struct DeploymentTargetSpec {
     /// Target-specific catalog Application settings. Unspecified policy inherits from the ArgoCDInstance.
     #[serde(rename = "catalogApplication", default)]
     pub catalog_application: CatalogApplicationOverrides,
+    /// Release input bindings, keyed by `<applicationGroup>/<release>` and then input name. Each binding sets exactly one source and replaces the Release default whole. Keys of selected but disabled groups are ignored; other keys must name a rendered Release and inputs it declares. Not visible to templates as `target.spec.releaseInputs`.
+    #[serde(rename = "releaseInputs", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub release_inputs: super::release_inputs::ReleaseInputBindings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1077,6 +1080,7 @@ impl DeploymentTarget {
         if let Some(project) = &self.spec.catalog_application.project {
             validate_static_required("spec.catalogApplication.project", project)?;
         }
+        super::release_inputs::validate_bindings(&self.spec.release_inputs)?;
         Ok(())
     }
 }

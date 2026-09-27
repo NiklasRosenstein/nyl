@@ -8,6 +8,7 @@ mod helmchart;
 mod kyverno;
 mod path_glob;
 mod release;
+pub mod release_inputs;
 mod remote_manifest;
 pub mod schema;
 

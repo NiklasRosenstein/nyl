@@ -4194,3 +4194,255 @@ fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_
     let worktrees = Repository::open(root).unwrap().worktrees().unwrap();
     assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
 }
+
+const API_RELEASE_WITH_INPUTS: &str = r#"apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+spec:
+  include: [extra.yaml]
+  inputs:
+    image:
+      type: string
+      description: Immutable image reference
+    replicas:
+      type: integer
+      default: 2
+    database:
+      type: object
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api
+  namespace: api
+data:
+  image: '{{ inputs.image }}'
+  replicas: '{{ inputs.replicas }}'
+  host: '{{ inputs.database.host }}'
+  bindingsVisible: '{{ target.spec.releaseInputs is defined }}'
+"#;
+
+fn with_api_inputs(fixture: &TempDir, bindings: &str) {
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        API_RELEASE_WITH_INPUTS,
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/extra.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api-extra\n  namespace: api\ndata:\n  image: '{{ inputs.image }}'\n",
+    )
+    .unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    fs::write(target_path, format!("{target}  releaseInputs:\n{bindings}")).unwrap();
+}
+
+fn render_production(fixture: &TempDir) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            fixture.path().join("deploy").to_str().unwrap(),
+        ])
+        .assert()
+}
+
+#[test]
+fn release_inputs_render_from_values_files_and_defaults() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("environments")).unwrap();
+    fs::write(
+        fixture.path().join("environments/database.yaml"),
+        "database:\n  host: db.production.internal\n",
+    )
+    .unwrap();
+    with_api_inputs(
+        &fixture,
+        r#"    workloads/api:
+      image:
+        value: registry.example.com/api@sha256:4f0c
+      database:
+        fromFile:
+          path: environments/database.yaml
+          pointer: /database
+"#,
+    );
+    render_production(&fixture).success();
+
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let manifests = tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        manifests.contains("image: registry.example.com/api@sha256:4f0c"),
+        "{manifests}"
+    );
+    assert!(manifests.contains("replicas: \"2\""), "{manifests}");
+    assert!(manifests.contains("host: db.production.internal"), "{manifests}");
+    assert!(manifests.contains("bindingsVisible: \"false\""), "{manifests}");
+    assert!(manifests.contains("name: api-extra"), "{manifests}");
+    assert_eq!(manifests.matches("registry.example.com/api@sha256:4f0c").count(), 2);
+
+    let index: serde_json::Value = serde_json::from_slice(&tree[&PathBuf::from("_nyl/index.json")]).unwrap();
+    let inputs = index["inputs"].as_object().unwrap();
+    assert!(inputs.contains_key("environments/database.yaml"), "{inputs:?}");
+    for input in ["image", "replicas", "database"] {
+        let digest = inputs[&format!("@input/workloads/api/{input}")].as_str().unwrap();
+        assert_eq!(digest.len(), 64);
+    }
+}
+
+#[test]
+fn release_input_changes_reach_rendered_output_through_the_cache() {
+    let fixture = fixture();
+    fs::write(fixture.path().join("database.json"), r#"{"host": "one"}"#).unwrap();
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {value: a}\n      database: {fromFile: {path: database.json}}\n",
+    );
+    render_production(&fixture).success();
+    fs::write(fixture.path().join("database.json"), r#"{"host": "two"}"#).unwrap();
+    render_production(&fixture).success();
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let rendered = tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect::<String>();
+    assert!(rendered.contains("host: two"), "{rendered}");
+}
+
+#[test]
+fn release_input_problems_are_reported_together_before_rendering() {
+    let fixture = fixture();
+    with_api_inputs(
+        &fixture,
+        r#"    workloads/api:
+      replicas: {value: "3"}
+      unknown: {value: 1}
+      database: {fromUnit: {unit: database, output: facts}}
+    workloads/missing:
+      image: {value: x}
+"#,
+    );
+    render_production(&fixture)
+        .failure()
+        .stderr(predicate::str::contains(
+            "DeploymentTarget \"production\" has invalid Release inputs",
+        ))
+        .stderr(predicate::str::contains(
+            "requires input \"image\" (Immutable image reference)",
+        ))
+        .stderr(predicate::str::contains("expected integer, got string"))
+        .stderr(predicate::str::contains("does not declare"))
+        .stderr(predicate::str::contains("fromUnit needs orchestrated execution"))
+        .stderr(predicate::str::contains("\"workloads/missing\" names no Release"));
+    assert!(!fixture.path().join("deploy").exists());
+}
+
+#[test]
+fn release_input_bindings_of_disabled_groups_are_ignored() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap();
+    fs::write(group_path, format!("{group}  enabled: false\n")).unwrap();
+    with_api_inputs(&fixture, "    workloads/api:\n      image: {value: x}\n");
+    render_production(&fixture).success();
+}
+
+#[test]
+fn release_inputs_must_be_declared_literally() {
+    let fixture = fixture();
+    with_api_inputs(&fixture, "    workloads/api:\n      image: {value: x}\n");
+    let release_path = fixture.path().join("applications/workloads/api.yaml");
+    let release = fs::read_to_string(&release_path)
+        .unwrap()
+        .replace("      default: 2\n", "      default: '{{ values.replicas }}'\n");
+    fs::write(release_path, release).unwrap();
+    render_production(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("must declare spec.inputs literally"));
+}
+
+#[test]
+fn remote_application_groups_receive_resolved_inputs_only() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("image.json"),
+        r#"{"image": "registry.example.com/api@sha256:remote"}"#,
+    )
+    .unwrap();
+    let remote = TempDir::new().unwrap();
+    let repository = Repository::init(remote.path()).unwrap();
+    fs::create_dir(remote.path().join("releases")).unwrap();
+    fs::write(
+        remote.path().join("releases/api.yaml"),
+        r#"apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+spec:
+  inputs:
+    image: {type: string}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api
+  namespace: api
+data:
+  image: '{{ inputs.image }}'
+"#,
+    )
+    .unwrap();
+    commit_all(&repository, "Remote release");
+    let commit = repository.head().unwrap().target().unwrap().to_string();
+    let url = reqwest::Url::from_directory_path(remote.path()).unwrap().to_string();
+    let group = fixture.path().join("config/application-groups/workloads.yaml");
+    fs::write(
+        &group,
+        format!(
+            "{}\n  source:\n    repository: {{repoURL: '{url}'}}\n    revision: HEAD\n    commit: '{commit}'\n    path: releases\n",
+            fs::read_to_string(&group).unwrap()
+        ),
+    )
+    .unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    fs::write(
+        target_path,
+        format!("{target}  releaseInputs:\n    workloads/api:\n      image: {{fromFile: {{path: image.json, pointer: /image}}}}\n"),
+    )
+    .unwrap();
+    let cache = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("NYL_CACHE_DIR", cache.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["render-tree", "--target", "production", "--output-dir"])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .success();
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let rendered = tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect::<String>();
+    assert!(
+        rendered.contains("image: registry.example.com/api@sha256:remote"),
+        "{rendered}"
+    );
+}

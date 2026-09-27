@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Releases may declare typed inputs in `spec.inputs` (`string`, `integer`,
+  `number`, `boolean`, `object`, `array`, with optional `default` and scalar
+  `enum`), read by templates as `inputs.<name>`. DeploymentTargets bind them
+  in `spec.releaseInputs` by `<applicationGroup>/<release>` from an inline
+  `value` or a project file through `fromFile`. Nyl reports every binding
+  problem of a target together before rendering, and records resolved inputs
+  in the render-cache key and as `@input/…` digests in the ownership index.
+  `fromUnit` and `fromPromotion` are reserved for orchestration and rejected.
+
 - `ApplicationGroup.spec.applicationNameTemplate` accepts template values:
   `${ expression }` is evaluated once per Release with `release` in scope, and
   `$${` writes a literal `${`. The `{% raw %}` form keeps working.

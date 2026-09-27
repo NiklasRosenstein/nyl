@@ -83,6 +83,7 @@ export default defineConfig({
           items: [
             "deployment-workflows/rendered-manifests/project-structure",
             "deployment-workflows/rendered-manifests/targets-and-clusters",
+            "deployment-workflows/rendered-manifests/release-inputs",
             "deployment-workflows/rendered-manifests/rendering-and-publishing",
             "deployment-workflows/rendered-manifests/security",
             "reference/resources/gitops",

@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::git::GitManager;
 use crate::render::cache::{CacheLayer, CacheOutcome};
+use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
     AppProjectTemplate, ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec,
@@ -48,6 +49,10 @@ pub struct CompiledTargetTree {
     /// Per-document provenance, keyed by target-relative output path.
     pub provenance: BTreeMap<PathBuf, Vec<crate::render::Provenance>>,
     pub inputs: BTreeSet<PathBuf>,
+    /// Ownership-index input entries that are not project paths, such as
+    /// `@input/<group>/<release>/<input>` digests of resolved Release inputs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input_digests: BTreeMap<String, String>,
 }
 
 /// Stable source identity for one Release as it enters tree compilation.
@@ -353,6 +358,7 @@ async fn compile_target_tree_inner(
     let mut git_manager = None;
 
     let mut groups = Vec::new();
+    let mut disabled_groups = BTreeSet::new();
     for discovered in inventory.resources.values() {
         if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup {
             continue;
@@ -366,6 +372,8 @@ async fn compile_target_tree_inner(
         };
         if group.spec.enabled {
             groups.push((discovered.source_path.clone(), *group));
+        } else {
+            disabled_groups.insert(group.metadata.name.clone());
         }
     }
     groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
@@ -399,6 +407,8 @@ async fn compile_target_tree_inner(
         });
     }
 
+    let release_inputs = resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups)?;
+
     let target_cache_inputs = TargetCacheInputs {
         options,
         target: &target,
@@ -416,6 +426,7 @@ async fn compile_target_tree_inner(
         &central_session,
         cache,
         &prepared_groups,
+        &release_inputs,
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
@@ -440,6 +451,10 @@ async fn compile_target_tree_inner(
     if let Some(repository_path) = repository_path {
         inputs.insert(repository_path);
     }
+    for path in release_inputs.files() {
+        inputs.insert(inventory.paths().key(&path).unwrap_or(path));
+    }
+    let input_digests = release_inputs.index_entries()?;
     let mut provenance_by_key = HashMap::new();
     let mut emitted_projects = BTreeSet::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
@@ -502,8 +517,24 @@ async fn compile_target_tree_inner(
             inputs.insert(input_path);
             let provenance_root = &source.provenance_root;
             let worktree_root = (!source.remote).then_some(inventory.worktree_root.as_path());
+            let resolved_inputs = source_file
+                .name
+                .as_ref()
+                .filter(|_| !source_file.inputs.is_empty())
+                .and_then(|name| {
+                    release_inputs.releases.get(&ReleaseKey {
+                        group: group.metadata.name.clone(),
+                        release: name.clone(),
+                    })
+                })
+                .map(super::inputs::ResolvedReleaseInputs::values);
             let mut rendered = session
-                .render_release_file_with_provenance_roots(&source_file.path, provenance_root, worktree_root)
+                .render_release_file_with_inputs(
+                    &source_file.path,
+                    provenance_root,
+                    worktree_root,
+                    resolved_inputs.as_ref(),
+                )
                 .await?;
             if let (Some(repository), Some(revision)) = (
                 &source.repository,
@@ -538,6 +569,7 @@ async fn compile_target_tree_inner(
             let Some(release) = rendered.release.take() else {
                 continue;
             };
+            super::inputs::verify_rendered_declarations(&source_file.path, &source_file.inputs, &release)?;
             release_count += 1;
             let destination_namespace = group
                 .spec
@@ -712,6 +744,7 @@ async fn compile_target_tree_inner(
         files,
         provenance,
         inputs,
+        input_digests,
     };
     store_cached_target(
         cache,
@@ -750,6 +783,7 @@ fn prepare_target_cache(
     session: &RenderSession,
     cache: Option<&GitOpsCache>,
     groups: &[PreparedGroup],
+    release_inputs: &super::inputs::ResolvedTargetInputs,
 ) -> Result<Option<TargetCacheProbe>> {
     let Some(cache) = cache else {
         return Ok(None);
@@ -810,6 +844,14 @@ fn prepare_target_cache(
         }
     }
     recorder.record_template_context(&session.template_context().to_json())?;
+    for (key, release) in &release_inputs.releases {
+        for (name, input) in &release.inputs {
+            recorder.record_value(format!("input:{key}/{name}"), &input.value)?;
+        }
+    }
+    for path in release_inputs.files() {
+        recorder.record_path_file(&path)?;
+    }
     cache.record_renderer_tools(&mut recorder)?;
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
         recorder.replay_filesystem_dependencies(previous)?;
@@ -2028,6 +2070,40 @@ struct ResolvedGroupSource {
 struct StaticReleaseFile {
     path: PathBuf,
     name: Option<String>,
+    /// Literal input declarations; empty when the Release declares none.
+    inputs: BTreeMap<String, crate::resources::release_inputs::InputDeclaration>,
+}
+
+/// Resolve the target's Release inputs before any Release renders, so every
+/// binding problem of the target is reported together.
+fn resolve_prepared_release_inputs(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+    groups: &[PreparedGroup],
+    disabled_groups: &BTreeSet<String>,
+) -> Result<super::inputs::ResolvedTargetInputs> {
+    let releases = groups
+        .iter()
+        .flat_map(|prepared| {
+            prepared.source.files.iter().filter_map(|file| {
+                file.name.as_ref().map(|name| super::inputs::ReleaseDeclaration {
+                    key: ReleaseKey {
+                        group: prepared.group.metadata.name.clone(),
+                        release: name.clone(),
+                    },
+                    declarations: &file.inputs,
+                    source: &file.path,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let paths = inventory.paths();
+    super::inputs::resolve_target_inputs(
+        target,
+        &releases,
+        disabled_groups,
+        &super::inputs::InputSources { paths: &paths },
+    )
 }
 
 fn resolve_remote_group_source(
@@ -2229,6 +2305,7 @@ fn static_release_files(files: &[PathBuf]) -> Result<Vec<StaticReleaseFile>> {
             release_files.push(StaticReleaseFile {
                 path: path.clone(),
                 name: envelope.name,
+                inputs: envelope.inputs,
             });
         }
     }
@@ -2593,6 +2670,7 @@ mod tests {
             files: vec![StaticReleaseFile {
                 path: entry.clone(),
                 name: Some("test".to_string()),
+                inputs: BTreeMap::new(),
             }],
             renderer_mode: RendererConfigMode::Central,
             source_session: None,

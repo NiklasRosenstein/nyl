@@ -61,6 +61,7 @@ impl Default for TemplateEngine {
 }
 
 /// Template context for rendering
+#[derive(Clone)]
 pub struct TemplateContext {
     pub values: serde_json::Value,
     pub secrets: serde_json::Value,
@@ -70,6 +71,8 @@ pub struct TemplateContext {
     pub cluster: Option<serde_json::Value>,
     /// Sanitized DeploymentTarget exposed as `target.*` during target rendering.
     pub target: Option<serde_json::Value>,
+    /// Resolved inputs exposed as `inputs.*`, only while rendering a Release that declares inputs.
+    pub inputs: Option<serde_json::Value>,
 }
 
 impl TemplateContext {
@@ -88,6 +91,7 @@ impl TemplateContext {
             env: Self::filter_env_vars(std::env::vars()),
             cluster: None,
             target: None,
+            inputs: None,
         })
     }
 
@@ -111,6 +115,9 @@ impl TemplateContext {
         }
         if let Some(target) = &self.target {
             context.insert("target".to_string(), target.clone());
+        }
+        if let Some(inputs) = &self.inputs {
+            context.insert("inputs".to_string(), inputs.clone());
         }
         context.into()
     }

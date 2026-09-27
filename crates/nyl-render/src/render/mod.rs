@@ -495,6 +495,7 @@ metadata:
             env: serde_json::Map::new(),
             cluster: None,
             target: None,
+            inputs: None,
         };
         let resource = serde_json::json!({
             "apiVersion": "k8s.nyl/v1",
@@ -955,6 +956,7 @@ spec:
             env: serde_json::Map::new(),
             cluster: None,
             target: None,
+            inputs: None,
         };
 
         let bundle = load_release_bundle_with_root(
@@ -995,6 +997,7 @@ spec:
             env: serde_json::Map::new(),
             cluster: None,
             target: None,
+            inputs: None,
         };
         assert!(load_release_bundle(&entry, &context)
             .unwrap_err()
