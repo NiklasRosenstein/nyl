@@ -113,9 +113,25 @@ every indexed file must match its recorded digest. Unindexed repository content
 is never treated as target-owned baseline data.</p>
 <p>Compare with a render from a source revision:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--against</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">source</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--source-ref</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">origin/main</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl diff-tree \  --target production \  --against source \  --source-ref origin/main"><div></div></button></div></figure></div>
+<p>The baseline checkout may hold the project somewhere else, for example while a
+pull request moves <code dir="auto">nyl.toml</code> into <code dir="auto">nyl/</code>. Nyl looks for it in this order and
+skips every candidate that holds no <code dir="auto">nyl.toml</code>:</p>
+<ol>
+<li>the directory that matches the current project;</li>
+<li>each <code dir="auto">--source-project-path &#x3C;PATH></code>, relative to the worktree root with an
+optional leading <code dir="auto">/</code> (repeatable);</li>
+<li>each entry of <code dir="auto">[project] previous_paths</code> in the current <code dir="auto">nyl.toml</code>.</li>
+</ol>
+<p>Nyl never guesses another location, so in a repository with several projects
+a new project is never compared against a different one; when none of these
+holds a project, the command fails and lists every path it tried.</p>
+<p>Because missing candidates are skipped, record a move in <code dir="auto">previous_paths</code> in
+the commit that performs it: the pull request’s own diff finds the old
+location, and after the merge the entry no longer matters. A
+<code dir="auto">--source-project-path</code> left in a CI job is equally harmless.</p>
 <p>The command identifies the desired source commit and exact baseline repository,
-revision, resolved commit, path, selected view, and output destination on
-stderr. By default, stdout contains only multi-file unified diff bytes; a
+revision, resolved commit, project directory, path, selected view, and output
+destination on stderr. By default, stdout contains only multi-file unified diff bytes; a
 comparison with no differences produces no stdout. Use <code dir="auto">--output</code> to write the same bytes
 atomically to a file instead:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--output</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">rendered.diff</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--output</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">rendered.diff</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--fail-on-diff</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl diff-tree --target production --output rendered.diffnyl diff-tree --target production --output rendered.diff --fail-on-diff"><div></div></button></div></figure></div>

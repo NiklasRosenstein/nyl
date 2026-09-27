@@ -415,7 +415,7 @@ one generated workload Application.</p>
 <p><a id="field-spec.source.path"></a></p>
 <h3 id="specsourcepath">spec.source.path</h3>
 <p><strong>Required</strong> · string</p>
-<p>Normalized project-relative source directory; relative to the checkout for a remote source.</p>
+<p>Source directory. A local path is relative to the directory containing <code>nyl.toml</code>, may begin with <code>..</code> segments, and starts with <code>/</code> to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading <code>/</code>.</p>
 <p><a id="field-spec.source.recursive"></a></p>
 <h3 id="specsourcerecursive">spec.source.recursive</h3>
 <p><strong>Optional</strong> · boolean</p>

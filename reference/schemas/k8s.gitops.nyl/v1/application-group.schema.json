@@ -176,7 +176,7 @@
           "type": "array"
         },
         "path": {
-          "description": "Normalized project-relative source directory; relative to the checkout for a remote source.",
+          "description": "Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.",
           "type": "string"
         },
         "recursive": {
