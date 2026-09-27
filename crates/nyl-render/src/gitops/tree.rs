@@ -2195,6 +2195,7 @@ fn resolve_prepared_release_inputs(
             paths: &paths,
             repositories: &repositories,
             git,
+            visible_files: &inventory.worktree_data_files,
         },
     )
 }

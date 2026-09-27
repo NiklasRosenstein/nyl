@@ -97,7 +97,7 @@ impl InputDeclaration {
             ));
         }
         if let Some(allowed) = &self.allowed {
-            if !allowed.contains(value) {
+            if !allowed.iter().any(|candidate| same_value(candidate, value)) {
                 return Err(format!(
                     "{} is not one of the allowed values {}",
                     value,
@@ -106,6 +106,21 @@ impl InputDeclaration {
             }
         }
         Ok(())
+    }
+}
+
+/// Equality for `enum` membership: numbers compare by numeric value, so `1`
+/// and `1.0` are the same allowed `number`.
+fn same_value(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            match (left.as_i64(), right.as_i64(), left.as_u64(), right.as_u64()) {
+                (Some(left), Some(right), _, _) => left == right,
+                (_, _, Some(left), Some(right)) => left == right,
+                _ => left.as_f64() == right.as_f64(),
+            }
+        }
+        _ => left == right,
     }
 }
 
@@ -272,7 +287,16 @@ impl InputBinding {
     /// Validate the static form of this binding.
     pub fn validate(&self, field: &str) -> Result<()> {
         match self.kind(field)? {
-            BindingKind::Value | BindingKind::FromUnit | BindingKind::FromPromotion => Ok(()),
+            BindingKind::Value | BindingKind::FromPromotion => Ok(()),
+            BindingKind::FromUnit => {
+                let source = self.from_unit.as_ref().expect("kind agrees with the set field");
+                match (&source.output, &source.artifact) {
+                    (Some(_), None) | (None, Some(_)) => Ok(()),
+                    _ => Err(CoreError::config(format!(
+                        "{field}.fromUnit must set exactly one of output and artifact"
+                    ))),
+                }
+            }
             BindingKind::FromFile => {
                 let source = self.from_file.as_ref().expect("kind agrees with the set field");
                 crate::local_path::validate_local_path(&format!("{field}.fromFile.path"), &source.path)?;
@@ -485,6 +509,17 @@ mod tests {
     }
 
     #[test]
+    fn test_declaration_check_compares_enum_numbers_by_value() {
+        let ratio = declaration(json!({"type": "number", "enum": [1, 2.5]}));
+        assert!(ratio.check(&json!(1.0)).is_ok());
+        assert!(ratio.check(&json!(2.5)).is_ok());
+        assert!(ratio.check(&json!(1.5)).unwrap_err().contains("allowed values"));
+        let count = declaration(json!({"type": "integer", "enum": [u64::MAX]}));
+        assert!(count.check(&json!(u64::MAX)).is_ok());
+        assert!(count.check(&json!(u64::MAX - 1)).is_err());
+    }
+
+    #[test]
     fn test_validate_declarations_rejects_invalid_defaults_enums_and_names() {
         let cases = [
             (json!({"type": "integer", "default": "2"}), "default is invalid"),
@@ -544,6 +579,14 @@ mod tests {
             (
                 json!({"g/r": {"image": {"fromFile": {"path": "x.yaml", "pointer": "image"}}}}),
                 "JSON Pointer",
+            ),
+            (
+                json!({"g/r": {"image": {"fromUnit": {"unit": "db"}}}}),
+                "exactly one of output and artifact",
+            ),
+            (
+                json!({"g/r": {"image": {"fromUnit": {"unit": "db", "output": "a", "artifact": "b"}}}}),
+                "exactly one of output and artifact",
             ),
         ];
         for (value, expected) in cases {

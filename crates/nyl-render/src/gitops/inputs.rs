@@ -36,6 +36,10 @@ pub const INDEX_GIT_PREFIX: &str = "@git/";
 pub struct InputSources<'a> {
     /// Local path rule of this project, for `fromFile`.
     pub paths: &'a ProjectPaths,
+    /// Git-visible YAML and JSON files, relative to the worktree root. A
+    /// `fromFile` binding reads only these, so published output reproduces
+    /// from committed source.
+    pub visible_files: &'a BTreeSet<PathBuf>,
     /// Project GitRepository resources by name, with their source files, for
     /// `fromGit` `repositoryRef`.
     pub repositories: &'a BTreeMap<String, (InlineGitRepository, PathBuf)>,
@@ -384,6 +388,15 @@ fn resolve_binding(
                 .paths
                 .resolve(&format!("{field}.fromFile.path"), &source.path)
                 .map_err(|error| error.to_string())?;
+            let visible = path
+                .strip_prefix(&sources.paths.worktree_root)
+                .is_ok_and(|relative| sources.visible_files.contains(relative));
+            if !visible {
+                return Err(format!(
+                    "{field}.fromFile.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
+                    source.path
+                ));
+            }
             let document = read_single_document(&path).map_err(|reason| format!("{field}.fromFile: {reason}"))?;
             let value = select(&document, &source.pointer)
                 .map_err(|reason| format!("{field}.fromFile: {} {reason}", source.path))?;
@@ -521,6 +534,11 @@ mod tests {
         root: &Path,
     ) -> Result<ResolvedTargetInputs> {
         let paths = ProjectPaths::new(root.to_path_buf(), root.to_path_buf());
+        let visible_files = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| PathBuf::from(entry.unwrap().file_name()))
+            .filter(|name| !name.to_string_lossy().starts_with("ignored"))
+            .collect::<BTreeSet<_>>();
         let releases = declared
             .iter()
             .map(|(key, declarations)| ReleaseDeclaration {
@@ -537,6 +555,7 @@ mod tests {
                 paths: &paths,
                 repositories: &BTreeMap::new(),
                 git: &NoGit,
+                visible_files: &visible_files,
             },
         )
     }
@@ -682,6 +701,7 @@ mod tests {
         }];
         let sources = InputSources {
             paths: &paths,
+            visible_files: &BTreeSet::new(),
             repositories: &repositories,
             git: &git,
         };
@@ -714,6 +734,20 @@ mod tests {
             credential_free_url("git@github.com:org/repo.git"),
             "git@github.com:org/repo.git"
         );
+    }
+
+    #[test]
+    fn test_from_file_reads_only_git_visible_files() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("ignored.yaml"), "port: 1\n").unwrap();
+        let declared = declarations(json!({"port": {"type": "integer"}}));
+        for path in ["ignored.yaml", "missing.yaml"] {
+            let target = target(json!({"platform/web": {"port": {"fromFile": {"path": path, "pointer": "/port"}}}}));
+            let error = resolve(&target, &[("platform/web", &declared)], &[], temp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("names no Git-visible YAML or JSON file"), "{error}");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::resources::release_inputs::InputDeclaration;
 use crate::resources::{extract_release, Release};
 use crate::template::{TemplateContext, TemplateEngine};
 use crate::{NylError, Result};
+use nyl_core::template_syntax::has_template_syntax;
 
 #[derive(Debug)]
 pub(crate) struct LoadedReleaseBundle {
@@ -104,10 +105,10 @@ pub(crate) struct StaticReleaseEnvelope {
 pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleaseEnvelope>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
-    for document in best_effort_parse_yaml_documents(&raw) {
-        crate::resources::schema::validate_resource_api(&document)?;
-    }
     let documents = best_effort_parse_yaml_documents(&raw);
+    for document in &documents {
+        crate::resources::schema::validate_resource_api(document)?;
+    }
     let Some(release) = documents.iter().find(|document| Release::is_release(document)) else {
         return Ok(None);
     };
@@ -140,10 +141,6 @@ pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleas
         }
     };
     Ok(Some(StaticReleaseEnvelope { name, inputs }))
-}
-
-fn has_template_syntax(value: &str) -> bool {
-    value.contains("{{") || value.contains("{%") || value.contains("{#")
 }
 
 fn contains_template_syntax(value: &serde_json::Value) -> bool {
