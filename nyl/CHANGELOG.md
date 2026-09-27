@@ -87,7 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Nyl is no longer published to crates.io; install it from the
   release binaries, the shell installer, or the container image. Module-level
   `RUST_LOG` filters for rendering name the new crate, for example
-  `RUST_LOG=nyl_render::helm=debug` instead of `nyl::helm=debug`.
+  `RUST_LOG=nyl_render::helm=debug` instead of `nyl::helm=debug`. Errors in
+  an inline `repository` no longer repeat the `Configuration error:` prefix
+  and hint inside the field-qualified message.
 
 - **BREAKING**: Kubernetes GitOps kinds (`Cluster`, `DeploymentTarget`,
   `ArgoCDInstance`, `ApplicationGroup`, `AppProjectDefinition`, and `Release`)

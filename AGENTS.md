@@ -363,7 +363,8 @@ src/
   nearest one above the working directory, or `nyl/nyl.toml` at a worktree
   root without its own.
 - Local paths in this repository follow one rule, owned by
-  `util::project_path`: relative to the `nyl.toml` directory with leading `..`
+  `nyl_core::local_path` for the authored string and nyl-render's
+  `util::project_path` for resolution: relative to the `nyl.toml` directory with leading `..`
   allowed, or `/`-rooted at the Git worktree, never leaving it or traversing a
   symlink. Recorded paths are project-relative beneath the `nyl.toml`
   directory and `/`-prefixed elsewhere, so projects with `nyl.toml` at the root
