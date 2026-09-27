@@ -132,6 +132,135 @@ impl ProjectPaths {
     }
 }
 
+/// Resolve a checkout-relative path, such as a remote ApplicationGroup
+/// `source.path`, to a canonical directory inside the checkout. It rejects
+/// traversal, symbolic links, and anything resolving outside the checkout.
+pub fn checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Result<PathBuf> {
+    crate::resources::validate_relative_path(field, relative, true, true)?;
+    let canonical_checkout = checkout
+        .canonicalize()
+        .map_err(|error| NylError::config(format!("Failed to resolve checkout {}: {error}", checkout.display())))?;
+    let selected = checkout.join(relative);
+    let relative_path = selected
+        .strip_prefix(checkout)
+        .map_err(|error| NylError::config(format!("{field} {relative:?} escapes checkout: {error}")))?;
+    let mut current = checkout.to_path_buf();
+    for component in relative_path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(NylError::config(format!(
+                    "{field} {relative:?} traverses symbolic link {}",
+                    current.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let canonical_selected = selected
+        .canonicalize()
+        .map_err(|error| NylError::config(format!("Failed to resolve {field} {relative:?}: {error}")))?;
+    if !canonical_selected.starts_with(&canonical_checkout) {
+        return Err(NylError::config(format!(
+            "{field} {relative:?} resolves outside checkout {}",
+            checkout.display()
+        )));
+    }
+    Ok(canonical_selected)
+}
+
+/// How [`locate_checkout_project`] found a checkout's project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLocation {
+    /// The same worktree-relative directory as the local project.
+    Same,
+    /// A candidate given by the invocation.
+    Candidate,
+    /// An entry of the local project's `[project] previous_paths`.
+    PreviousPath,
+    /// A worktree-root convention: `nyl.toml`, then `nyl/nyl.toml`.
+    Convention,
+}
+
+/// A project found in another checkout of the repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedProject {
+    /// Canonical project directory inside the checkout.
+    pub directory: PathBuf,
+    /// Checkout-relative, slash-separated project directory; empty for the root.
+    pub path: String,
+    pub location: ProjectLocation,
+}
+
+/// Find the project in a checkout of this repository at another revision,
+/// such as a diff baseline or a clean render of `HEAD`, where it may live
+/// elsewhere because the repository was restructured in between.
+///
+/// Candidates are tried in order, and each is skipped when it holds no
+/// `nyl.toml`, so a stale candidate is harmless once the move reached the
+/// checkout:
+///
+/// 1. `same`: the local project's worktree-relative directory;
+/// 2. `candidates`: checkout-relative directories from the invocation;
+/// 3. `previous_paths`: `/`-rooted entries of the local `nyl.toml`;
+/// 4. the worktree-root conventions of [`crate::config::ProjectConfig::find`].
+pub fn locate_checkout_project(
+    checkout: &Path,
+    same: &Path,
+    candidates: &[String],
+    previous_paths: &[String],
+) -> Result<LocatedProject> {
+    let same = same.to_string_lossy().replace('\\', "/");
+    let mut ordered = vec![(same, ProjectLocation::Same)];
+    ordered.extend(candidates.iter().map(|path| (path.clone(), ProjectLocation::Candidate)));
+    ordered.extend(
+        previous_paths
+            .iter()
+            .map(|path| (path.trim_start_matches('/').to_owned(), ProjectLocation::PreviousPath)),
+    );
+    ordered.extend(
+        ["", crate::config::ProjectConfig::NESTED_CONFIG_DIR]
+            .into_iter()
+            .map(|path| (path.to_owned(), ProjectLocation::Convention)),
+    );
+    let mut tried = Vec::new();
+    for (path, location) in ordered {
+        let field = match location {
+            ProjectLocation::Same => "project directory",
+            ProjectLocation::Candidate => "--source-project-path",
+            ProjectLocation::PreviousPath => "project.previous_paths",
+            ProjectLocation::Convention => "project directory convention",
+        };
+        crate::resources::validate_relative_path(field, &path, true, true)?;
+        let display = if path.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{path}")
+        };
+        if !checkout.join(&path).join("nyl.toml").is_file() {
+            if !tried.contains(&display) {
+                tried.push(display);
+            }
+            continue;
+        }
+        let directory = checkout_subpath(checkout, if path.is_empty() { "." } else { &path }, field)?;
+        return Ok(LocatedProject {
+            directory,
+            path,
+            location,
+        });
+    }
+    Err(NylError::config(format!(
+        "No nyl.toml found in checkout {} at {}; if the project moved, list its earlier location in \
+         [project] previous_paths of nyl.toml or pass --source-project-path",
+        checkout.display(),
+        tried.join(", ")
+    )))
+}
+
 /// Find the root of the Git worktree containing `path`: the nearest ancestor
 /// holding a `.git` directory or file.
 pub fn find_worktree_root(path: &Path) -> Option<PathBuf> {
@@ -217,6 +346,84 @@ mod tests {
         std::os::unix::fs::symlink(paths.worktree_root.join("real"), paths.worktree_root.join("link")).unwrap();
         let error = paths.resolve("path", "/link/web").unwrap_err().to_string();
         assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    fn checkout_with_projects(projects: &[&str]) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        for project in projects {
+            let directory = temp.path().join(project);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("nyl.toml"), "").unwrap();
+        }
+        temp
+    }
+
+    fn locate(checkout: &TempDir, same: &str, candidates: &[&str], previous: &[&str]) -> Result<LocatedProject> {
+        let owned = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        locate_checkout_project(checkout.path(), Path::new(same), &owned(candidates), &owned(previous))
+    }
+
+    #[test]
+    fn test_locate_checkout_project_prefers_the_same_directory_over_every_fallback() {
+        let checkout = checkout_with_projects(&["platform", "old", "nyl", ""]);
+        let found = locate(&checkout, "platform", &["old"], &["/old"]).unwrap();
+        assert_eq!(
+            (found.path.as_str(), found.location),
+            ("platform", ProjectLocation::Same)
+        );
+    }
+
+    #[test]
+    fn test_locate_checkout_project_skips_missing_candidates_in_order() {
+        let checkout = checkout_with_projects(&["infra/config", "nyl"]);
+        let found = locate(&checkout, "platform", &["gone", "infra/config"], &[]).unwrap();
+        assert_eq!(
+            (found.path.as_str(), found.location),
+            ("infra/config", ProjectLocation::Candidate)
+        );
+
+        let found = locate(&checkout, "platform", &["gone"], &["/infra/config"]).unwrap();
+        assert_eq!(found.location, ProjectLocation::PreviousPath);
+
+        let found = locate(&checkout, "platform", &["gone"], &["/gone"]).unwrap();
+        assert_eq!(
+            (found.path.as_str(), found.location),
+            ("nyl", ProjectLocation::Convention)
+        );
+    }
+
+    #[test]
+    fn test_locate_checkout_project_uses_the_root_for_a_rooted_previous_path() {
+        let checkout = checkout_with_projects(&["", "nyl"]);
+        let found = locate(&checkout, "platform", &[], &["/"]).unwrap();
+        assert_eq!(
+            (found.path.as_str(), found.location),
+            ("", ProjectLocation::PreviousPath)
+        );
+    }
+
+    #[test]
+    fn test_locate_checkout_project_lists_tried_paths_when_nothing_matches() {
+        let checkout = checkout_with_projects(&[]);
+        let error = locate(&checkout, "platform", &["old"], &["/older"])
+            .unwrap_err()
+            .to_string();
+        for tried in [
+            "/platform",
+            "/old",
+            "/older",
+            "/nyl",
+            "previous_paths",
+            "--source-project-path",
+        ] {
+            assert!(error.contains(tried), "{tried}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_locate_checkout_project_rejects_escaping_candidates() {
+        let checkout = checkout_with_projects(&["platform"]);
+        assert!(locate(&checkout, "elsewhere", &["../outside"], &[]).is_err());
     }
 
     #[test]

@@ -2192,6 +2192,8 @@ pub(crate) fn local_group_source_root(inventory: &GitOpsInventory, group: &str, 
     Ok(root)
 }
 
+use crate::util::project_path::checkout_subpath as checked_checkout_subpath;
+
 fn build_group_source_session(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
@@ -2263,45 +2265,6 @@ fn warn_unclaimed_group_manifests(
             "ApplicationGroup ignored manifest because it contains no literal k8s.gitops.nyl/v1 Release and is not included by another Release"
         );
     }
-}
-
-fn checked_checkout_subpath(checkout: &Path, relative: &str, field: &str) -> Result<PathBuf> {
-    crate::resources::validate_relative_path(field, relative, true, true)?;
-    let canonical_checkout = checkout.canonicalize().map_err(|error| {
-        NylError::config(format!(
-            "Failed to resolve remote checkout {}: {error}",
-            checkout.display()
-        ))
-    })?;
-    let selected = checkout.join(relative);
-    let relative_path = selected
-        .strip_prefix(checkout)
-        .map_err(|error| NylError::config(format!("{field} {relative:?} escapes remote checkout: {error}")))?;
-    let mut current = checkout.to_path_buf();
-    for component in relative_path.components() {
-        current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(NylError::config(format!(
-                    "{field} {relative:?} traverses symbolic link {}",
-                    current.display()
-                )))
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let canonical_selected = selected
-        .canonicalize()
-        .map_err(|error| NylError::config(format!("Failed to resolve {field} {relative:?}: {error}")))?;
-    if !canonical_selected.starts_with(&canonical_checkout) {
-        return Err(NylError::config(format!(
-            "{field} {relative:?} resolves outside remote checkout {}",
-            checkout.display()
-        )));
-    }
-    Ok(canonical_selected)
 }
 
 fn resolve_source_repository(

@@ -61,10 +61,15 @@ nyl/                          nyl/
 ```
 
 On the left, the group derives `applications/web` beneath `nyl/` as usual. On
-the right, the group names its source as `../applications/web`, or as
-`/applications/web` from the worktree root; both select the same directory.
-Control resources must stay beneath `nyl/`, because discovery covers only the
-`nyl.toml` directory.
+the right, the group names its source as `../applications/web`: the `..`
+leaves `nyl/` on purpose, because sources may name any directory of the
+worktree. With `nyl.toml` in `nyl/`, `/applications/web` from the worktree root
+selects the same directory; the two forms differ as soon as `nyl.toml` lives
+elsewhere (see [local paths](/nyl/configuration/#local-paths)). Control
+resources must stay beneath `nyl/`, because discovery covers only the
+`nyl.toml` directory. When moving an existing project there, list its earlier
+location in `[project] previous_paths` so comparisons with older revisions
+still find it.
 
 Set `project.gitops_scaffold_path` in `nyl.toml` when generated control
 resources should live somewhere other than `config/`. This setting changes only

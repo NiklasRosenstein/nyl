@@ -210,7 +210,9 @@ Git visibility beneath the directory containing `nyl.toml`, and a file may hold
 any number of resources. Paths to everything else, such as a unit's
 `source.path` or the group's source, are relative to that directory
 (`../infra/database`) or start with `/` from the repository root
-(`/infra/database`). The same project also works with `nyl.toml` at the
+(`/infra/database`). The two forms name the same directory here only because
+`nyl.toml` sits one level below the root; relative paths move with `nyl.toml`,
+rooted ones do not. The same project also works with `nyl.toml` at the
 repository root and all resources beneath it, or with the Releases in
 `nyl/applications/web`, where the group needs no `source`. The documentation suggests an expanded
 layout for larger projects, with one resource per file:
@@ -284,7 +286,7 @@ kind: ApplicationGroup
 metadata: {name: web, labels: {app: web}}
 spec:
   applicationNamespace: argocd
-  source: {path: ../applications/web}                 # beside nyl/; `/applications/web` is the same directory
+  source: {path: ../applications/web}                 # leaves nyl/ on purpose; with nyl/nyl.toml, `/applications/web` is the same
   applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'   # a template value, expanded per Release
   destinationNamespace: '{{ values.namespace | default("web") }}'
   projectTemplate:

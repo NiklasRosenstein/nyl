@@ -15,10 +15,18 @@ Resources name directories and files of this repository with one rule, for
 example a local ApplicationGroup `spec.source.path`:
 
 - A relative path resolves against the directory containing `nyl.toml`, and
-  may begin with `..` segments, such as `../applications/web`.
+  may begin with `..` segments that deliberately leave it, such as
+  `../applications/web` from `nyl/nyl.toml`.
 - A path that starts with `/` resolves against the Git worktree root, such as
   `/applications/web`.
 - A path must stay inside the worktree and must not traverse a symbolic link.
+
+The two forms name the same directory only for one `nyl.toml` location, such as
+`nyl/nyl.toml` for the examples above. Relative paths move with `nyl.toml`:
+use them for Releases kept together with the configuration. Rooted paths do
+not: use them for fixed places in the repository. Only discovery of control
+resources is bounded by the `nyl.toml` directory; sources may name any
+directory of the worktree.
 
 Paths inside another repository, such as a remote source or a `fromGit`
 binding, are relative to that repository's root instead. Recorded paths, such
@@ -45,6 +53,11 @@ gitops_scaffold_path = "config"
 - `gitops_scaffold_path` defaults to `"config"` and controls where `nyl create`
   writes GitOps resources when the project has no root `gitops.yaml`.
   Discovery remains project-wide.
+- `previous_paths` lists earlier locations of the project directory as paths
+  from the Git worktree root, such as `["/"]` after moving `nyl.toml` from the
+  root into `nyl/`. Commands that render another revision, such as
+  `diff-tree --against source` and the `publish-tree` check against `HEAD`,
+  look there when that revision has no project at the current location.
 - `aliases` maps an API version and kind to a component shortcut or local
   component path.
 

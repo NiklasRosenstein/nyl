@@ -113,6 +113,14 @@ pub struct ProjectSettings {
     /// Directory where GitOps configuration resources are scaffolded.
     pub gitops_scaffold_path: PathBuf,
 
+    /// Earlier locations of this project's directory, as paths from the Git
+    /// worktree root such as `/` or `/platform`. Commands that render another
+    /// revision of the repository, such as `diff-tree --against source`, look
+    /// for the project there when the revision has none at the current
+    /// location, so a move stays comparable. Entries are harmless once every
+    /// compared revision has the project at its current location.
+    pub previous_paths: Vec<String>,
+
     /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
     /// Values are component kind targets (local component path or remote shortcut URL).
     pub aliases: BTreeMap<String, String>,
@@ -127,6 +135,7 @@ impl Default for ProjectSettings {
             components_search_paths: default_components_search_paths(),
             helm_chart_search_paths: default_helm_chart_search_paths(),
             gitops_scaffold_path: default_gitops_scaffold_path(),
+            previous_paths: Vec::new(),
             aliases: default_aliases(),
             strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
         }
@@ -308,6 +317,17 @@ impl ProjectConfig {
         project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
         project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
         project.project.gitops_scaffold_path = resolve_path(&project.project.gitops_scaffold_path, base_dir);
+        for previous in &project.project.previous_paths {
+            if !previous.starts_with('/') {
+                return Err(NylError::config(format!(
+                    "project.previous_paths entry {previous:?} must start with '/' and name a directory from the Git \
+                     worktree root"
+                )));
+            }
+            if previous != "/" {
+                crate::util::project_path::validate_local_path("project.previous_paths", previous)?;
+            }
+        }
         if let Some(vendor) = &mut project.vendor {
             if vendor.path.is_absolute() {
                 return Err(NylError::config(

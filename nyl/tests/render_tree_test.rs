@@ -3976,32 +3976,37 @@ fn test_render_tree_rejects_group_source_outside_the_worktree() {
         .stderr(predicate::str::contains("resolves outside the Git worktree"));
 }
 
-#[test]
-fn test_diff_tree_against_source_finds_a_nested_project_in_the_baseline_checkout() {
-    let fixture = fixture();
-    let root = fixture.path();
-    fs::create_dir(root.join("platform")).unwrap();
+/// Move the fixture's project directory from `from` to `to` (both relative to
+/// the worktree root; empty for the root itself).
+fn move_project(root: &std::path::Path, from: &str, to: &str) {
+    fs::create_dir_all(root.join(to)).unwrap();
     for entry in ["nyl.toml", "config", "applications"] {
-        fs::rename(root.join(entry), root.join("platform").join(entry)).unwrap();
+        fs::rename(root.join(from).join(entry), root.join(to).join(entry)).unwrap();
     }
-    let repository = Repository::open(root).unwrap();
-    commit_all(&repository, "Nested project");
-    let commit = repository.head().unwrap().peel_to_commit().unwrap().id().to_string();
-    let artifacts = TempDir::new().unwrap();
+}
 
-    let output = Command::cargo_bin("nyl")
+/// Diff the fixture's target against `commit`, run from `directory`.
+fn diff_against_source(
+    root: &std::path::Path,
+    directory: &str,
+    commit: &str,
+    extra: &[&str],
+) -> assert_cmd::assert::Assert {
+    let artifacts = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
         .unwrap()
-        .current_dir(root.join("platform"))
+        .current_dir(root.join(directory))
         .timeout(std::time::Duration::from_secs(60))
         .args([
             "diff-tree",
             "--against",
             "source",
             "--source-ref",
-            &commit,
+            commit,
             "--source-repository",
         ])
         .arg(root)
+        .args(extra)
         .args([
             "--progress",
             "off",
@@ -4012,11 +4017,88 @@ fn test_diff_tree_against_source_finds_a_nested_project_in_the_baseline_checkout
         ])
         .arg(artifacts.path().join("source.diff"))
         .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(report["comparison"]["baseline"]["mode"], "source");
-    assert_eq!(report["diff"]["has_changes"], false, "{report}");
+}
+
+fn baseline_location(assert: assert_cmd::assert::Assert) -> (String, String) {
+    let report: serde_json::Value = serde_json::from_slice(&assert.success().get_output().stdout).unwrap();
+    let baseline = &report["comparison"]["baseline"];
+    (
+        baseline["project_path"].as_str().unwrap().to_owned(),
+        baseline["project_location"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn test_diff_tree_against_source_follows_a_project_move_across_its_merge() {
+    let fixture = fixture();
+    let root = fixture.path();
+    let repository = Repository::open(root).unwrap();
+    let head = |repository: &Repository| repository.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    move_project(root, "", "infra/nyl-config");
+    commit_all(&repository, "Project in infra/nyl-config");
+    let before_move = head(&repository);
+    move_project(root, "infra/nyl-config", "platform");
+    fs::write(
+        root.join("platform/nyl.toml"),
+        "[project]\nprevious_paths = [\"/infra/nyl-config\"]\n",
+    )
+    .unwrap();
+    commit_all(&repository, "Move the project to platform");
+    let after_move = head(&repository);
+
+    // The pull request that moves the project finds the baseline through the
+    // earlier location it records.
+    let located = baseline_location(diff_against_source(root, "platform", &before_move, &[]));
+    assert_eq!(located, ("infra/nyl-config".to_owned(), "previous_path".to_owned()));
+
+    // After the merge, the baseline has the project at the current location, and
+    // the leftover setting and option change nothing.
+    let located = baseline_location(diff_against_source(
+        root,
+        "platform",
+        &after_move,
+        &["--source-project-path", "infra/nyl-config"],
+    ));
+    assert_eq!(located, ("platform".to_owned(), "same".to_owned()));
+
+    // Without a recorded location the baseline is not found, unless the
+    // invocation names a candidate.
+    fs::write(root.join("platform/nyl.toml"), "").unwrap();
+    diff_against_source(root, "platform", &before_move, &[])
+        .failure()
+        .stderr(predicate::str::contains("/platform").and(predicate::str::contains("previous_paths")));
+    let located = baseline_location(diff_against_source(
+        root,
+        "platform",
+        &before_move,
+        &[
+            "--source-project-path",
+            "gone",
+            "--source-project-path",
+            "infra/nyl-config",
+        ],
+    ));
+    assert_eq!(located, ("infra/nyl-config".to_owned(), "candidate".to_owned()));
+}
+
+#[test]
+fn test_publish_tree_verifies_an_uncommitted_project_move_against_the_committed_location() {
+    let (fixture, destination, _seed, source_commit) = publication_fixture();
+    let root = fixture.path();
+    move_project(root, "", "platform");
+    fs::write(root.join("platform/nyl.toml"), "[project]\nprevious_paths = [\"/\"]\n").unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join("platform"))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+
+    let destination = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&destination, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&destination, &commit, "production/_nyl/index.json")).unwrap();
+    assert_eq!(index["sourceCommit"], source_commit.to_string());
+    assert_eq!(index["dirty"], false);
 }

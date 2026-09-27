@@ -13,6 +13,7 @@ use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
     GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions,
 };
+use crate::util::project_path::{locate_checkout_project, ProjectLocation};
 use crate::{NylError, Result};
 
 use report::{DiffMode, Report, ReportFormat, ReportOutput, StageState, TreeDiff};
@@ -53,6 +54,11 @@ pub struct DiffTreeArgs {
     /// Source repository URL. Defaults to the current repository's origin.
     #[arg(long)]
     pub source_repository: Option<String>,
+    /// Checkout-relative project directory to try in the --source-ref checkout
+    /// when it has no project at the current location (repeatable). Missing
+    /// candidates are skipped, so a candidate for a completed move is harmless.
+    #[arg(long, value_name = "PATH", requires = "source_ref")]
+    pub source_project_path: Vec<String>,
     /// Write the unified diff to a file instead of stdout.
     #[arg(short, long, default_value = "-")]
     pub output: PathBuf,
@@ -109,6 +115,9 @@ struct SourceBaseline {
     repository: String,
     revision: String,
     commit: git2::Oid,
+    /// Checkout-relative project directory; empty for the checkout root.
+    project_path: String,
+    project_location: ProjectLocation,
 }
 
 enum ResolvedBaseline {
@@ -278,7 +287,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         },
     );
     let compared = async {
-        let baseline = resolve_baseline(args, &inventory.project_root, &target_name, &desired, &cache, options).await?;
+        let baseline = resolve_baseline(args, &inventory, &target_name, &desired, &cache, options).await?;
         report.baseline(&baseline, &desired);
         let selection = DiffSelection::from_args(args);
         let comparison = comparison_files(&selection, &baseline, &desired)?;
@@ -298,7 +307,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
 
 async fn resolve_baseline(
     args: &DiffTreeArgs,
-    project_root: &Path,
+    inventory: &crate::gitops::GitOpsInventory,
     target_name: &str,
     desired: &crate::gitops::CompiledTargetTree,
     cache: &GitOpsCache,
@@ -312,7 +321,8 @@ async fn resolve_baseline(
                 .as_deref()
                 .ok_or_else(|| NylError::config("--source-ref is required with --against source"))?;
             let baseline = source_derived_tree(
-                project_root,
+                inventory,
+                &args.source_project_path,
                 args.source_repository.as_deref(),
                 source_ref,
                 target_name,
@@ -694,8 +704,10 @@ pub(super) fn checked_published_root(checkout: &Path, path_prefix: &str) -> Resu
     Ok(selected)
 }
 
+#[allow(clippy::too_many_arguments)] // Each argument is an independent baseline input.
 async fn source_derived_tree(
-    project_root: &Path,
+    local: &crate::gitops::GitOpsInventory,
+    project_candidates: &[String],
     source_repository: Option<&str>,
     source_ref: &str,
     target: &str,
@@ -706,7 +718,7 @@ async fn source_derived_tree(
     let repository_url = if let Some(url) = source_repository {
         url.to_string()
     } else {
-        let repository = Repository::discover(project_root)
+        let repository = Repository::discover(&local.project_root)
             .map_err(|error| NylError::config(format!("Failed to inspect source repository: {error}")))?;
         repository
             .find_remote("origin")
@@ -719,9 +731,16 @@ async fn source_derived_tree(
         .resolve_ref_fresh(&repository_url, Some(source_ref), None)
         .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
-    // The baseline project sits at the same place in the checkout as the local
-    // project does in its worktree.
-    let inventory = discover_gitops_inventory(&checkout.join(project_path_in_worktree(project_root)?), None)?;
+    let located = locate_checkout_project(
+        &checkout,
+        local
+            .project_root
+            .strip_prefix(&local.worktree_root)
+            .unwrap_or(Path::new("")),
+        project_candidates,
+        &local.project_config.config.project.previous_paths,
+    )?;
+    let inventory = discover_gitops_inventory(&located.directory, None)?;
     let mut progress = TreeProgressReporter::new(progress_args, Some(format!("Baseline {source_ref}")));
     let compiled =
         compile_target_tree_cached_with_observer_and_options(&inventory, target, cache, &mut progress, options).await?;
@@ -730,19 +749,9 @@ async fn source_derived_tree(
         repository: repository_url,
         revision: source_ref.to_owned(),
         commit,
+        project_path: located.path,
+        project_location: located.location,
     })
-}
-
-/// The project directory relative to the root of the worktree containing it.
-fn project_path_in_worktree(project_root: &Path) -> Result<PathBuf> {
-    let project_root = project_root.canonicalize()?;
-    let Some(worktree) = crate::util::project_path::find_worktree_root(&project_root) else {
-        return Ok(PathBuf::new());
-    };
-    Ok(project_root
-        .strip_prefix(worktree)
-        .map(Path::to_path_buf)
-        .unwrap_or_default())
 }
 
 fn checkout_commit(checkout: &Path) -> Result<git2::Oid> {

@@ -87,7 +87,7 @@ struct CleanHeadWorktree {
 }
 
 impl CleanHeadWorktree {
-    fn create(project_root: &Path, source_commit: &str) -> Result<(Self, PathBuf)> {
+    fn create(project_root: &Path, previous_paths: &[String], source_commit: &str) -> Result<(Self, PathBuf)> {
         let repository = Repository::discover(project_root)
             .map_err(|error| NylError::config(format!("Failed to inspect source Git repository: {error}")))?;
         let repository_root = repository
@@ -112,7 +112,11 @@ impl CleanHeadWorktree {
         let checkout_root = temporary.path().join(checkout_name);
         WorktreeManager::get_or_create_worktree(&repository_root, "HEAD", oid, &checkout_root)
             .map_err(NylError::Git)?;
-        let clean_project_root = checkout_root.join(project_relative);
+        // The committed project may still be at an earlier location when the
+        // move is not committed yet.
+        let clean_project_root =
+            crate::util::project_path::locate_checkout_project(&checkout_root, project_relative, &[], previous_paths)?
+                .directory;
         Ok((
             Self {
                 repository_root,
@@ -315,7 +319,18 @@ async fn compile_clean_head(
     cache: &GitOpsCache,
     render_options: TreeRenderOptions,
 ) -> Result<CleanHeadCompilation> {
-    let (worktree, project_root) = CleanHeadWorktree::create(&working_inventory.project_root, source_commit)?;
+    let (worktree, project_root) = CleanHeadWorktree::create(
+        &working_inventory.project_root,
+        &working_inventory.project_config.config.project.previous_paths,
+        source_commit,
+    )
+    .map_err(|error| {
+        dirty_verification_failure(
+            target_name,
+            source_commit,
+            format!("could not locate the committed project: {error}"),
+        )
+    })?;
     let inventory = discover_gitops_inventory(&project_root, None).map_err(|error| {
         dirty_verification_failure(
             target_name,

@@ -78,9 +78,23 @@ nyl diff-tree \
   --source-ref origin/main
 ```
 
+The baseline checkout may hold the project somewhere else, for example while a
+pull request moves `nyl.toml` into `nyl/`. Nyl looks for it in this order and
+skips every candidate that holds no `nyl.toml`:
+
+1. the directory that matches the current project;
+2. each `--source-project-path <PATH>`, relative to the checkout (repeatable);
+3. each entry of `[project] previous_paths` in the current `nyl.toml`;
+4. `nyl.toml`, then `nyl/nyl.toml`, at the checkout root.
+
+Because missing candidates are skipped, record a move in `previous_paths` in
+the commit that performs it: the pull request's own diff finds the old
+location, and after the merge the entry no longer matters. A
+`--source-project-path` left in a CI job is equally harmless.
+
 The command identifies the desired source commit and exact baseline repository,
-revision, resolved commit, path, selected view, and output destination on
-stderr. By default, stdout contains only multi-file unified diff bytes; a
+revision, resolved commit, project directory, path, selected view, and output
+destination on stderr. By default, stdout contains only multi-file unified diff bytes; a
 comparison with no differences produces no stdout. Use `--output` to write the same bytes
 atomically to a file instead:
 

@@ -42,7 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `diff-tree --against source` renders the baseline from the project directory
   of the checkout, so projects whose `nyl.toml` is not at the repository root
-  can be compared.
+  can be compared. When the baseline has the project elsewhere, it tries the
+  repeatable `--source-project-path` candidates, the new `[project]
+  previous_paths` of `nyl.toml`, and the worktree-root conventions, skipping
+  candidates without a project; the `publish-tree` check against `HEAD` does
+  the same. The report names the baseline project directory.
 
 ### Changed
 

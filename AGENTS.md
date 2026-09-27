@@ -355,6 +355,11 @@ src/
   symlink. Recorded paths are project-relative beneath the `nyl.toml`
   directory and `/`-prefixed elsewhere, so projects with `nyl.toml` at the root
   keep byte-identical output.
+- Commands that render another revision locate its project with
+  `locate_checkout_project`: the current location first, then invocation
+  candidates, `[project] previous_paths`, and the worktree-root conventions.
+  Missing candidates are skipped, never required, so a recorded move stays
+  valid before and after it merges.
 - One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
   repository revision must have disjoint prefixes.
 - `publish-tree` attributes reproducible output to a committed revision. A

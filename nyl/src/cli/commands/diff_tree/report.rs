@@ -444,6 +444,9 @@ enum Baseline {
         repository: String,
         revision: String,
         commit: String,
+        /// Checkout-relative project directory; empty for the checkout root.
+        project_path: String,
+        project_location: crate::util::project_path::ProjectLocation,
         publication: Publication,
     },
 }
@@ -573,6 +576,8 @@ impl Report {
                 repository: sanitize_url(&b.repository),
                 revision: b.revision.clone(),
                 commit: b.commit.to_string(),
+                project_path: b.project_path.clone(),
+                project_location: b.project_location,
                 publication: Publication::from_tree(&b.compiled),
             },
         });
@@ -676,6 +681,8 @@ impl Report {
                     repository,
                     revision,
                     commit,
+                    project_path,
+                    project_location,
                     publication,
                 } => {
                     sections.push((
@@ -684,6 +691,7 @@ impl Report {
                             ("Repository", repository.clone()),
                             ("Revision", revision.clone()),
                             ("Commit", commit.clone()),
+                            ("Project", baseline_project(project_path, *project_location)),
                         ],
                     ));
                     sections.push(("Baseline publication", publication.fields()));
@@ -874,6 +882,19 @@ fn markdown_value(value: &str) -> String {
         }
     }
     output
+}
+
+/// The baseline project directory, marked when it was not at the current
+/// project's location.
+fn baseline_project(path: &str, location: crate::util::project_path::ProjectLocation) -> String {
+    use crate::util::project_path::ProjectLocation;
+    let directory = format!("/{path}");
+    match location {
+        ProjectLocation::Same => directory,
+        ProjectLocation::Candidate => format!("{directory} (from --source-project-path)"),
+        ProjectLocation::PreviousPath => format!("{directory} (from project.previous_paths)"),
+        ProjectLocation::Convention => format!("{directory} (worktree-root convention)"),
+    }
 }
 
 #[cfg(test)]
