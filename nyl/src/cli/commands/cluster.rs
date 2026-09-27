@@ -202,7 +202,7 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
     if let Some((index, blobs)) = prepared {
         let _lock = store::lock(&root)?;
         for (hash, bytes) in blobs {
-            debug_assert_eq!(hash, store::digest(&bytes));
+            debug_assert_eq!(hash, nyl_core::digest::sha256_hex(&bytes));
             store::write_blob(&root, &bytes)?;
         }
         store::atomic_write(
