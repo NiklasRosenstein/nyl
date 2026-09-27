@@ -635,7 +635,7 @@ async fn compile_target_tree_inner(
     }
 
     for ((cluster, namespace), owner) in namespace_owners {
-        let digest = crate::gitops::reconcile::sha256(format!("{cluster}\0{namespace}").as_bytes());
+        let digest = nyl_core::digest::sha256_hex(format!("{cluster}\0{namespace}").as_bytes());
         let suffix = &digest[..20];
         let application_name = format!("nyl-namespace-{suffix}");
         let namespace_directory = PathBuf::from("_nyl/namespaces").join(suffix);

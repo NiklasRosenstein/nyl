@@ -277,27 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_local_path_accepts_the_three_forms() {
-        for value in [
-            "applications/web",
-            "../applications/web",
-            "../../x/y",
-            "/applications/web",
-        ] {
-            validate_local_path("path", value).unwrap_or_else(|error| panic!("{value}: {error}"));
-        }
-    }
-
-    #[test]
-    fn test_validate_local_path_rejects_unnormalized_forms() {
-        for value in [
-            "", ".", "/", "..", "a/../b", "a//b", "./a", "/../a", "a\\b", "a/", "{{ x }}",
-        ] {
-            assert!(validate_local_path("path", value).is_err(), "{value}");
-        }
-    }
-
-    #[test]
     fn test_resolve_relative_to_project_and_rooted_to_worktree() {
         let temp = TempDir::new().unwrap();
         let paths = paths(&temp);

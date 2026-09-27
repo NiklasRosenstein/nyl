@@ -603,6 +603,7 @@ pub struct GitOpsSyncPolicy {
 }
 
 impl GitOpsSyncPolicy {
+    /// Add the generated-Application sync option defaults whose keys are not already set.
     pub fn add_generated_application_defaults(&mut self) {
         for default in ["ApplyOutOfSyncOnly=true", "ServerSideApply=true"] {
             let default_key = sync_option_key(default);
@@ -1379,6 +1380,8 @@ fn validate_repository_choice(
     }
 }
 
+/// Validate Git repository URLs: static, non-empty, and free of HTTP user
+/// information. `publish_url` is checked only when present.
 pub fn validate_repository_coordinates(repo_url: &str, publish_url: Option<&str>) -> Result<()> {
     validate_static_required("spec.repoURL", repo_url)?;
     reject_http_userinfo("spec.repoURL", repo_url)?;
@@ -1859,6 +1862,23 @@ mod tests {
         assert!(parse_gitops_resource(&value).is_err());
         value["spec"]["source"].as_object_mut().unwrap().remove("commit");
         assert!(parse_gitops_resource(&value).is_err());
+    }
+
+    #[test]
+    fn inline_source_repository_errors_name_the_nested_field_once() {
+        let mut value = application_group();
+        value["spec"]["source"] = json!({
+            "repository": {"repoURL": "https://token@example.invalid/workloads.git"},
+            "revision": "refs/heads/main",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "path": "applications/cloud"
+        });
+        let error = parse_gitops_resource(&value).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "spec.source.repository: spec.repoURL must not contain HTTP user information; configure Git \
+             credentials outside GitOps resources"
+        );
     }
 
     #[test]
