@@ -4483,6 +4483,39 @@ fn release_input_bindings_of_disabled_groups_are_ignored() {
 }
 
 #[test]
+fn release_input_files_under_at_prefixed_directories_enter_the_index() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("@shared")).unwrap();
+    fs::write(fixture.path().join("@shared/database.json"), r#"{"host": "db"}"#).unwrap();
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {value: a}\n      database: {fromFile: {path: '@shared/database.json'}}\n",
+    );
+    render_production(&fixture).success();
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let index: serde_json::Value = serde_json::from_slice(&tree[&PathBuf::from("_nyl/index.json")]).unwrap();
+    assert!(
+        index["inputs"]["@shared/database.json"].is_string(),
+        "{}",
+        index["inputs"]
+    );
+}
+
+#[test]
+fn release_input_files_must_be_visible_to_git() {
+    let fixture = fixture();
+    fs::write(fixture.path().join(".gitignore"), "local.json\n").unwrap();
+    fs::write(fixture.path().join("local.json"), r#"{"host": "db"}"#).unwrap();
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {value: a}\n      database: {fromFile: {path: local.json}}\n",
+    );
+    render_production(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("names no Git-visible YAML or JSON file"));
+}
+
+#[test]
 fn release_inputs_must_be_declared_literally() {
     let fixture = fixture();
     with_api_inputs(&fixture, "    workloads/api:\n      image: {value: x}\n");

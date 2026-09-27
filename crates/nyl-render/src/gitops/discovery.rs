@@ -70,6 +70,10 @@ pub struct GitOpsInventory {
     /// sorted. Local ApplicationGroup sources may select Release files outside
     /// `project_root` (see [`crate::util::project_path`]).
     pub worktree_yaml_files: Vec<PathBuf>,
+    /// Every eligible YAML and JSON file in the worktree, relative to
+    /// `worktree_root`: the files a `fromFile` Release input binding may read,
+    /// under the same Git visibility rule as discovery.
+    pub worktree_data_files: BTreeSet<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
     pub resources: BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
 }
@@ -209,12 +213,17 @@ fn discover_project_inventory(
             .map_or_else(|| settings.path.clone(), |relative| project_root.join(relative));
         normalize_absolute_path(&path)
     });
-    let worktree_yaml_files = collect_git_visible_yaml(
+    let worktree_data_files = collect_git_visible_data_files(
         &repository,
         &repository_root,
         output_subtree.as_deref(),
         vendor_subtree.as_deref(),
     )?;
+    let worktree_yaml_files = worktree_data_files
+        .iter()
+        .filter(|path| is_yaml_path(path))
+        .cloned()
+        .collect::<Vec<_>>();
     let yaml_files = worktree_yaml_files
         .iter()
         .filter_map(|relative| {
@@ -238,19 +247,21 @@ fn discover_project_inventory(
         project_config,
         yaml_files,
         worktree_yaml_files,
+        worktree_data_files,
         resources,
     })
 }
 
-/// Git-visible YAML files of the whole worktree, relative to its root: tracked
-/// files and untracked files that are not ignored, without submodules, symbolic
-/// links, or paths through them, and without the output and vendor subtrees.
-fn collect_git_visible_yaml(
+/// Git-visible YAML and JSON files of the whole worktree, relative to its
+/// root: tracked files and untracked files that are not ignored, without
+/// submodules, symbolic links, or paths through them, and without the output
+/// and vendor subtrees.
+fn collect_git_visible_data_files(
     repository: &Repository,
     repository_root: &Path,
     output_subtree: Option<&Path>,
     vendor_subtree: Option<&Path>,
-) -> Result<Vec<PathBuf>> {
+) -> Result<BTreeSet<PathBuf>> {
     let mut repository_paths = BTreeSet::new();
     let index = repository.index().map_err(crate::git::GitError::from)?;
     for entry in index.iter() {
@@ -284,7 +295,7 @@ fn collect_git_visible_yaml(
 
     let mut result = BTreeSet::new();
     for repository_relative in repository_paths {
-        if has_dot_git_component(&repository_relative) || !is_yaml_path(&repository_relative) {
+        if has_dot_git_component(&repository_relative) || !is_data_path(&repository_relative) {
             continue;
         }
         let absolute_path = repository_root.join(&repository_relative);
@@ -302,7 +313,7 @@ fn collect_git_visible_yaml(
         }
         result.insert(repository_relative);
     }
-    Ok(result.into_iter().collect())
+    Ok(result)
 }
 
 fn discover_file_resources(
@@ -335,7 +346,7 @@ fn discover_file_resources(
             identity.kind,
             GitOpsResourceKind::ApplicationGroup | GitOpsResourceKind::AppProjectDefinition
         );
-        let has_template = document.contains("{{") || document.contains("{%") || document.contains("{#");
+        let has_template = nyl_core::template_syntax::has_template_syntax(document);
         let resource = match parse_complete_resource(document, &contextual_path) {
             Ok(resource) => Some(resource),
             Err(_) if templatable && has_template => None,
@@ -500,7 +511,7 @@ fn static_mapping_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         return None;
     }
     let value = parse_static_scalar(value);
-    (!value.is_empty() && !value.contains("{{") && !value.contains("{%") && !value.contains("{#")).then_some(value)
+    (!value.is_empty() && !nyl_core::template_syntax::has_template_syntax(value)).then_some(value)
 }
 
 fn split_yaml_documents(contents: &str) -> Vec<&str> {
@@ -604,6 +615,10 @@ fn contains_symlink_component(root: &Path, path: &Path) -> Result<bool> {
 
 fn has_dot_git_component(path: &Path) -> bool {
     path.components().any(|component| component.as_os_str() == ".git")
+}
+
+fn is_data_path(path: &Path) -> bool {
+    is_yaml_path(path) || path.extension().is_some_and(|extension| extension == "json")
 }
 
 fn is_yaml_path(path: &Path) -> bool {

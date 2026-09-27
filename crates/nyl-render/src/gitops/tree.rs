@@ -2240,6 +2240,7 @@ fn resolve_prepared_release_inputs(
             repositories: &repositories,
             git,
             publication,
+            visible_files: &inventory.worktree_data_files,
         },
     )
 }
