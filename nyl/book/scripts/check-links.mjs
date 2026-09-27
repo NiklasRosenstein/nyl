@@ -22,7 +22,9 @@ for (const [path, html] of pages) {
     if (!existsSync(target)) { errors.push(`${relative(root, path)}: missing target: ${href}`); continue; }
     if (url.hash && target.includes('/reference/resources/') && pages.has(target)) {
       const ids = new Set([...pages.get(target).matchAll(/\bid="([^"]*)"/g)].map((match) => match[1]));
-      if (!ids.has(decodeURIComponent(url.hash.slice(1)))) errors.push(`${relative(root, path)}: missing field or section anchor: ${href}`);
+      // Browsers match the raw fragment first and then its percent-decoded form.
+      const fragment = url.hash.slice(1);
+      if (!ids.has(fragment) && !ids.has(decodeURIComponent(fragment))) errors.push(`${relative(root, path)}: missing field or section anchor: ${href}`);
     }
   }
 }
