@@ -506,15 +506,20 @@ checks:
 
 - Namespace collisions between environments.
 - Cluster-scoped resources, such as CRDs, that only one environment may own.
-- Argo CD names generated into one control-plane namespace. Today's check
-  compares only targets sharing an explicit ArgoCDInstance, so targets on
-  implicit per-target instances of one Cluster can generate the same
-  Application and AppProject names in the same namespace. M2 extends the check
-  to every pair of targets whose instances resolve to the same cluster and
-  namespace.
+- Argo CD names generated into one control-plane namespace. Every pair of
+  targets whose Argo CD instances resolve to the same control plane and
+  namespace must generate distinct catalog Application, workload Application,
+  namespace-owner Application, and AppProject names, whether the instances are
+  explicit or implicit per-target ones. Clusters are compared by their Argo CD
+  destination (`server`, or `name`), not by resource name. Validation of the
+  configuration explains the common cases before rendering, such as two
+  targets selecting one group with default Release names; `nyl validate` then
+  compares the names every target actually generates, so templated names and
+  Releases of different groups are covered.
 
-Detecting cross-target conflicts on a shared Cluster is a later validation, and
-it belongs to the layer that sees all targets on that Cluster.
+Detecting namespace and cluster-scoped resource conflicts between targets on a
+shared Cluster is a later validation, and it belongs to the layer that sees all
+targets on that Cluster.
 
 ## Remaining questions
 
