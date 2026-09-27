@@ -1,0 +1,25 @@
+# Walkthrough "Effects without a receipt" in design/orchestration-core.md.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - fault: {point: after-effect, unit: database}   # applied, never checkpointed
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the dead run's lease and run ref are still within their deadline
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - clock: {advance: 71m}             # database's 60m timeout plus the 10m grace
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      imported: [network, web-image]  # checkpointed by the dead run
+      recovered: [database]           # uncertain, converged: the plan finds no changes
+      executed: [kubernetes]
+      commits: {desired: 1, observed: 1}
+      units:
+        database: {condition: null, receipt: current}

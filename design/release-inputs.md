@@ -203,12 +203,12 @@ Each binding sets exactly one of these fields:
   in it to the same new commit. Bindings that share a current commit but name
   different revisions are addressed individually by their position in the
   document, never by matching the commit text alone.
-- `--require healthy` follows the per-value promotion rule in the roadmap's
-  health evidence section, so locks of one group may move to different
+- `--require healthy` follows the per-value promotion rule in the
+  [health evidence](promotion.md#health-evidence) contract, so locks of one group may move to different
   commits. It reads the source target's recorded observation, written by
   `nyl verify --target <source>` into
   `<prefix>/_nyl/observations/health.yaml` on the source's publication branch
-  (see the roadmap's health evidence section), so it needs no cluster
+  (see [Kubernetes publications](promotion.md#kubernetes-publications)), so it needs no cluster
   credentials; `--observe` observes Argo CD directly instead. Each lock is one
   value:
   - The file it reads must lie inside one source target's prefix on that
@@ -361,10 +361,10 @@ target's publication branch can feed another target:
   in the source target's prefix.
 - `nyl update source-locks --target <name> --require healthy` moves a lock group
   only to a source publication that is running and healthy, as described in
-  the roadmap's health evidence section, and writes the observation next to
+  the [health evidence](promotion.md#health-evidence) contract, and writes the observation next to
   the lock (see `fromGit`).
 - With orchestration, a PromotionPath with `from: {target: <name>}` selects the
-  source target's published inputs; see the roadmap's promotion section.
+  source target's published inputs; see [Promotion sources](promotion.md#promotion-sources).
 
 Example: dev carries image IDs from its CI build, and production promotes them
 by lock.

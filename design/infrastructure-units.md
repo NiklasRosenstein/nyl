@@ -1,6 +1,6 @@
 # Infrastructure units
 
-**Status:** draft M1 contract for M4. See [ROADMAP.md](../ROADMAP.md) and the
+**Status:** M1 contract for M4. See [ROADMAP.md](../ROADMAP.md) and the
 [orchestration core contract](orchestration-core.md), which defines the common
 unit fields, execution, approval, credentials, and recovery used here.
 
@@ -98,12 +98,13 @@ then changes the Dockerfile and rebuilds.
 | Capability | Behavior |
 | --- | --- |
 | plan | Reports whether the execution key changed and what would be built; no build runs |
-| reconcile | Build and push; record outputs and the artifact |
+| reconcile | Build and push; record the artifact |
 | verify | Checks that the artifact's `reference` still exists in the registry (`docker buildx imagetools inspect`); a missing image is drift |
 | inspect | Not supported; recovery is `converge` |
 | build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `--load`, or pushes it with `--push`, which is safe because nothing consumes an image until a reference names it. It pushes only the spec's `tags` and `--tag` values, never the `nyl-` tag that identifies recorded executions |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
+| ownership scope | The `repository` with the tag prefix `nyl-<environment>-`; units may share a repository, and two units of one environment pushing to the same repository are rejected |
 
 ## Terraform and OpenTofu
 
@@ -168,7 +169,8 @@ undeclared sensitive outputs. Only declared, non-sensitive outputs are kept.
 
 Output sensitivity is checked before any effect: after step 2, the driver reads
 the plan's outputs, and a declared output that the tool marks sensitive but
-the unit does not declare `sensitive` fails the execution before `apply`. A
+the unit does not declare `sensitive` fails the execution before `apply`, with
+category `output-rejected`. A
 secret can therefore never be recorded by accident, and the check never leaves
 changes applied without a receipt.
 
@@ -218,8 +220,8 @@ bound to it:
 
 - The binary comes from `PATH`; Nyl never downloads tools. Tool managers such as
   mise install them.
-- `version` sets an exact version. The driver fails the execution when the binary
-  reports another version. `version` is part of the execution key, so changing
+- `version` sets an exact version. The driver fails the execution with category
+  `missing-tool` when the binary is absent or reports another version. `version` is part of the execution key, so changing
   it re-plans.
 - Without `version`, any installed version runs, and upgrading the tool does
   not re-plan. The receipt always records the version that ran.
@@ -248,11 +250,12 @@ commit itself is excluded; the matched bytes stand for it.
 | inspect | Not supported; recovery is `converge` |
 | teardown | `plan -destroy -out=<planfile>`, then `apply`. For `bind: plan` units, the destroy plan's digest is compared with the approved digest from the execution context, and a mismatch returns `AwaitingApproval` without effects |
 | recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain execution shows what is still missing |
+| ownership scope | The backend configuration without credentials, canonicalized, with `key` and the workspace (`default` unless the spec selects one); two units claiming the same scope are rejected, across environments too |
 
 `plan` and `verify` only read, so they never take the backend's state lock and
 never collide with a running `reconcile`. A state lock left behind by a lost
 runner makes the next execution fail with the lock ID, as a non-retryable
-failure. The operator releases it with the tool's
+`ownership` failure. The operator releases it with the tool's
 `force-unlock` and then runs `nyl recover --retry`; Nyl never releases locks
 itself.
 

@@ -1,6 +1,6 @@
 # Reference scenarios
 
-**Status:** draft acceptance scenarios for M3–M5. See [ROADMAP.md](../ROADMAP.md),
+**Status:** acceptance scenarios for M3–M5. See [ROADMAP.md](../ROADMAP.md),
 the [orchestration core contract](orchestration-core.md), the
 [infrastructure units contract](infrastructure-units.md), and the
 [implementation architecture](implementation-architecture.md).
@@ -95,7 +95,10 @@ global clock.
 
 ### Scenario files
 
-Each scenario is a directory under `nyl/tests/scenarios/reference/`:
+Scenarios live under `nyl/tests/scenarios/`, one directory each:
+`reference/<name>/` for the whole workflows below, and `walkthroughs/<name>/`
+for the [orchestration core walkthroughs](orchestration-core.md#walkthroughs)
+and the other contract walkthroughs.
 
 ```text
 platform/
@@ -105,6 +108,8 @@ platform/
 ```
 
 ```yaml
+contract: design/orchestration-core.md#walkthroughs   # the rules the scenario proves
+milestone: M3                                         # first milestone whose harness runs it
 steps:
   - commit: {branch: main, message: "Change the web page", apply: patches/web-page}
   - nyl: [reconcile, -e, dev]
@@ -116,14 +121,46 @@ steps:
   - clock: {advance: 8d}
 ```
 
-- Step kinds: `commit`, `branch`, `squash-merge`, `delete-branch`, `clock`,
-  and `nyl`.
-- Expectations cover only user-visible results: the exit code, per-unit results
-  from the transition commit summary, `nyl get … -o json` documents, files and
-  commits on the deploy branches and the state refs, and in tier 2 the registry's
-  manifests and `tofu output`.
-- Both tiers read the same file. A step that only one tier can run, such as a
-  scripted observer response, is marked `tier: 1`.
+Top-level fields are `contract`, `milestone`, optional `tiers` (default
+`[1, 2]`), optional `project` (default `project/`, a path relative to the
+scenario directory, so scenarios can share one project), and `steps`. Before
+the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
+files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL
+of `project.git`, and `%REGISTRY%` with the registry's host and port. The harness reads every scenario at every milestone,
+runs those whose `milestone` it has reached, and fails on a field or step kind
+it does not know, so the files cannot drift from the format.
+
+| Step | Effect |
+| --- | --- |
+| `commit: {branch, message, apply, delete}` | Copies the files under `apply` over the working clone, removes the paths in `delete`, commits, and pushes |
+| `branch: {name, from}` | Creates and pushes a branch |
+| `squash-merge: {branch, into}` | Squash-merges and pushes, keeping the branch |
+| `delete-branch: <name>` | Deletes a branch in `project.git` |
+| `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
+| `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result |
+| `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `verify`, `teardown`), returning `outcome` (`succeeded`, `failed`, `uncertain`) |
+| `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point` for `unit`, as a forced kill would: `after-effect`, `before-checkpoint`, `before-lease-update`, or `before-push`; that step has `killed: true` instead of `exit` |
+| `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease`, or a fault point), leaving it running |
+| `resume: <id>` | Lets a paused invocation continue and waits for it; `exit` and `expect` check its result |
+| `ref: {delete: <ref>}` | Deletes a ref in the state repository, as someone with push access could |
+
+`expect` holds only user-visible results:
+
+| Key | Checks |
+| --- | --- |
+| `executed`, `current`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed` | Exactly the units with that result in the operation's report and transition commit summary, so `executed: []` asserts that nothing executed; a key that is not given is not checked |
+| `recovered`, `imported` | The summary's lists of the same name |
+| `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
+| `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit) |
+| `codes` | Stable error and warning codes the invocation reported |
+| `get` | `{args, value}` or `{args, json: {<pointer>: <value>}}` for a `nyl get` invocation after the step |
+| `deploy` | Files and commits on a deploy branch |
+| `promotion` | The PromotionRecord a `promote` step wrote: `path`, `sourceCommit` as a Git revision of `project.git` such as `main~1`, and `from.run` as the `id` of the `nyl` step whose run recorded the promoted state |
+
+Tier 2 also checks the registry's manifests and `tofu output`. Both tiers read
+the same file. `driver`, `fault`, and `pause` steps are tier 1 by kind, and a
+step that depends on one, or on a scripted observer response, carries
+`tier: 1`.
 
 ## Reference project
 
@@ -290,7 +327,7 @@ apiVersion: gitops.nyl/v1
 kind: EnvironmentTemplate
 metadata: {name: preview}
 spec:
-  parameters: [{name: pr, type: integer}]
+  parameters: {pr: {type: integer}}
   unitSelector: {matchLabels: {preview: 'true'}}
   values:
     backendDir: <temporary directory>/tofu

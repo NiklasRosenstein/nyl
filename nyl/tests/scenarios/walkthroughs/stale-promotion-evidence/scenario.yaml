@@ -1,0 +1,47 @@
+# Walkthrough "Promotion with stale source evidence" in
+# design/orchestration-core.md, under the rules of design/promotion.md.
+contract: design/promotion.md#promotion-paths
+milestone: M6
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [state, init, -e, prod]
+    exit: 0
+  - nyl: [reconcile, -e, prod]
+    exit: 2                           # no promotion yet, so prod has no source commit
+  - nyl: [reconcile, -e, dev]
+    id: r1                            # every unit gets a receipt at S1
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+
+  # R2 at S2: the image build fails, so the newest state lacks evidence.
+  - commit: {branch: main, message: "Change the web page", apply: patches/web-page}
+  - driver: {unit: web-image, operation: reconcile, outcome: failed, category: tool-error, retryable: true}
+  - nyl: [reconcile, -e, dev]
+    id: r2
+    exit: 3
+    expect:
+      failed: [web-image]
+      blocked: [kubernetes]
+
+  - nyl: [promote, dev-to-prod]
+    exit: 0
+    expect:
+      promotion:
+        path: dev-to-prod
+        sourceCommit: main~1          # S1, not S2
+        from: {run: r1}
+  - nyl: [reconcile, -e, prod]
+    exit: 0
+    expect:
+      executed: [kubernetes]
+      deploy: {branch: deploy, contains: ['prod/web/**']}
+
+  # At attested, dev's qa attestation is required and was never recorded.
+  - commit: {branch: main, message: "Require attested evidence", apply: patches/require-attested}
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      commits: {desired: 0, observed: 0}
