@@ -185,6 +185,18 @@ pub enum ProjectLocation {
     Convention,
 }
 
+impl std::fmt::Display for ProjectLocation {
+    /// Where the project directory came from, for reports.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Same => "the current location",
+            Self::Candidate => "--source-project-path",
+            Self::PreviousPath => "project.previous_paths",
+            Self::Convention => "the worktree-root convention",
+        })
+    }
+}
+
 /// A project found in another checkout of the repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocatedProject {

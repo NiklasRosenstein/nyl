@@ -9,6 +9,7 @@ use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
 use crate::render::cache::CacheStats;
+use crate::util::project_path::ProjectLocation;
 use crate::util::{ansi_style, sanitize_url};
 use crate::{NylError, Result};
 
@@ -446,7 +447,7 @@ enum Baseline {
         commit: String,
         /// Checkout-relative project directory; empty for the checkout root.
         project_path: String,
-        project_location: crate::util::project_path::ProjectLocation,
+        project_location: ProjectLocation,
         publication: Publication,
     },
 }
@@ -691,7 +692,13 @@ impl Report {
                             ("Repository", repository.clone()),
                             ("Revision", revision.clone()),
                             ("Commit", commit.clone()),
-                            ("Project", baseline_project(project_path, *project_location)),
+                            (
+                                "Project",
+                                match project_location {
+                                    ProjectLocation::Same => format!("/{project_path}"),
+                                    location => format!("/{project_path} (from {location})"),
+                                },
+                            ),
                         ],
                     ));
                     sections.push(("Baseline publication", publication.fields()));
@@ -882,19 +889,6 @@ fn markdown_value(value: &str) -> String {
         }
     }
     output
-}
-
-/// The baseline project directory, marked when it was not at the current
-/// project's location.
-fn baseline_project(path: &str, location: crate::util::project_path::ProjectLocation) -> String {
-    use crate::util::project_path::ProjectLocation;
-    let directory = format!("/{path}");
-    match location {
-        ProjectLocation::Same => directory,
-        ProjectLocation::Candidate => format!("{directory} (from --source-project-path)"),
-        ProjectLocation::PreviousPath => format!("{directory} (from project.previous_paths)"),
-        ProjectLocation::Convention => format!("{directory} (worktree-root convention)"),
-    }
 }
 
 #[cfg(test)]
