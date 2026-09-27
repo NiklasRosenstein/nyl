@@ -25,8 +25,8 @@ pub use reconcile::{
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,
     compile_target_tree_cached_with_observer_and_options, compile_target_tree_cached_with_options,
-    compile_target_tree_with_options, validate_gitops_inventory, CompiledTargetTree, ReleaseProgress,
-    TreeRenderObserver, TreeRenderOptions,
+    compile_target_tree_with_options, validate_compiled_argocd_names, validate_gitops_inventory, CompiledTargetTree,
+    ReleaseProgress, TreeRenderObserver, TreeRenderOptions,
 };
 pub use tree::{namespace_matches_any, source_matches};
 mod cluster;

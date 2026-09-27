@@ -54,7 +54,10 @@ Each Release produces one workload Application named after the Release. When
 several targets place Applications into the same Argo CD namespace on the same
 control-plane Cluster, set `applicationNameTemplate` so their names differ.
 Targets on implicit per-target instances of one Cluster share the `argocd`
-namespace, so they need it too:
+namespace, so they need it too. Clusters count as one control plane when they
+share an Argo CD destination, and `nyl validate` compares the names every
+target generates, so a template without the target, or Releases of the same
+name in different groups, are reported as well:
 
 ```yaml
 spec:
@@ -63,8 +66,8 @@ spec:
 
 The field is a template value: the structural pass leaves `${ … }` untouched,
 and Nyl evaluates each expression once per Release with the target context and
-`release`. Expressions and filters work as in `{{ … }}`; blocks do not. Write
-`$${` for a literal `${`. A value protected with `{% raw %}` that still contains
+`release`. Expressions and filters work as in `{{ … }}`; blocks do not. An
+undefined variable or attribute is an error. Write `$${` for a literal `${`. A value protected with `{% raw %}` that still contains
 `{{ … }}` renders as before; mixing both forms is an error.
 
 ## Source selection
