@@ -238,7 +238,7 @@
       ],
       "properties": {
         "commit": {
-          "description": "Full commit ID that rendering reads, refreshed by `nyl update source-locks`.",
+          "description": "Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.",
           "type": "string"
         },
         "path": {
@@ -510,6 +510,18 @@
               },
               {
                 "properties": {
+                  "fromPublication": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPublication"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -572,6 +584,18 @@
                 },
                 "required": [
                   "fromGit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPublication": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPublication"
                 ]
               },
               {
@@ -642,6 +666,18 @@
               },
               {
                 "properties": {
+                  "fromPublication": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPublication"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -677,6 +713,84 @@
             "fromGit"
           ],
           "title": "fromGit"
+        },
+        {
+          "description": "Reads the value from a state file in this target's publication branch.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "value": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "properties": {
+                  "fromFile": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromGit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromGit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromUnit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromUnit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPromotion": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPromotion"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "fromPublication": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "fromPublication"
+          ],
+          "title": "fromPublication"
         },
         {
           "description": "Reserved for orchestration: reads a recorded unit output or artifact field.",
@@ -716,6 +830,18 @@
                 },
                 "required": [
                   "fromGit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPublication": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPublication"
                 ]
               },
               {
@@ -786,6 +912,18 @@
               },
               {
                 "properties": {
+                  "fromPublication": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPublication"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -844,6 +982,17 @@
             }
           ],
           "description": "Reserved for orchestration: a value recorded through a PromotionPath. Rejected outside orchestrated execution."
+        },
+        "fromPublication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicationInputSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A state file in this target's publication branch, read at the publication base commit."
         },
         "fromUnit": {
           "anyOf": [
@@ -925,6 +1074,31 @@
       },
       "required": [
         "value"
+      ],
+      "type": "object"
+    },
+    "PublicationInputSource": {
+      "additionalProperties": false,
+      "description": "A value read from a state file in the target's own publication branch.\n\nThe file is read at the publication base commit, the branch head that\n`publish-tree` builds on, so a published commit holds the state and the\nmanifests rendered from it.",
+      "properties": {
+        "carry": {
+          "description": "Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carry`, `path` is owned by this target.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "State file path relative to the target's publication path prefix. It must lie outside every directory a generated Argo CD Application syncs: workload Release directories and `_nyl`.",
+          "type": "string"
+        },
+        "pointer": {
+          "description": "JSON Pointer selecting the value inside the document; the whole document when empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
       ],
       "type": "object"
     },

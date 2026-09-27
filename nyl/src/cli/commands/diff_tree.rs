@@ -178,7 +178,7 @@ struct ComparisonFiles {
 
 /// Compare rendered trees with the automatic report color policy.
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
-    execute_with_color(args, crate::cli::ColorChoice::Auto).await
+    Box::pin(execute_with_color(args, crate::cli::ColorChoice::Auto)).await
 }
 
 pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {

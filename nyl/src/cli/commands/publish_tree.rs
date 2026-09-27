@@ -579,7 +579,14 @@ fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<
     if provenance.source_dirty {
         writeln!(message, "Nyl-Source-Dirty: true").expect("writing to a String cannot fail");
     }
-    writeln!(message, "Nyl-Deployment-Target: {}", provenance.target).expect("writing to a String cannot fail");
+    // `nyl update source-locks` finds publication commits by this trailer.
+    writeln!(
+        message,
+        "{}: {}",
+        crate::gitops::source_locks::DEPLOYMENT_TARGET_TRAILER,
+        provenance.target
+    )
+    .expect("writing to a String cannot fail");
     write!(message, "Nyl-Cluster: {}", provenance.cluster).expect("writing to a String cannot fail");
     message
 }

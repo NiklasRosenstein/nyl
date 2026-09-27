@@ -1844,27 +1844,13 @@ fn resolve_git_publication(
     inventory: &GitOpsInventory,
     publication: &GitPublication,
 ) -> Result<(Option<String>, InlineGitRepository, Option<PathBuf>)> {
-    if let Some(repository) = &publication.repository {
-        return Ok((None, repository.clone(), None));
-    }
-    let reference = publication
+    let (repository, path) =
+        inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
+    let name = publication
         .repository_ref
         .as_ref()
-        .expect("validated publication has a repository reference or inline repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory kind key and resource variant must agree");
-    };
-    Ok((
-        Some(reference.name.clone()),
-        InlineGitRepository {
-            repo_url: repository.spec.repo_url.clone(),
-            publish_url: repository.spec.publish_url.clone(),
-        },
-        Some(discovered.source_path.clone()),
-    ))
+        .map(|reference| reference.name.clone());
+    Ok((name.filter(|_| path.is_some()), repository, path))
 }
 
 fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
@@ -2218,19 +2204,18 @@ fn resolve_prepared_release_inputs(
         .resources
         .values()
         .filter_map(|discovered| match &discovered.resource {
-            Some(GitOpsResource::GitRepository(repository)) => Some((
-                repository.metadata.name.clone(),
-                (
-                    InlineGitRepository {
-                        repo_url: repository.spec.repo_url.clone(),
-                        publish_url: repository.spec.publish_url.clone(),
-                    },
-                    discovered.source_path.clone(),
-                ),
-            )),
+            Some(GitOpsResource::GitRepository(repository)) => Some(repository.metadata.name.clone()),
             _ => None,
         })
-        .collect();
+        .map(|name| {
+            let reference = crate::resources::LocalReference { name: name.clone() };
+            let (repository, source) = inventory.resolve_git_repository(Some(&reference), None)?;
+            let source = source.expect("a referenced GitRepository has a source file");
+            // Absolute, like `fromFile` paths, so the cache recorder reads the
+            // file wherever the command runs.
+            Ok((name, (repository, inventory.project_root.join(source))))
+        })
+        .collect::<Result<_>>()?;
     super::inputs::resolve_target_inputs(
         target,
         &releases,
@@ -2486,26 +2471,7 @@ fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
 ) -> Result<(InlineGitRepository, Option<PathBuf>)> {
-    if let Some(repository) = &source.repository {
-        return Ok((repository.clone(), None));
-    }
-    let reference = source
-        .repository_ref
-        .as_ref()
-        .expect("validated remote source has repositoryRef or repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory kind key and resource variant must agree");
-    };
-    Ok((
-        InlineGitRepository {
-            repo_url: repository.spec.repo_url.clone(),
-            publish_url: repository.spec.publish_url.clone(),
-        },
-        Some(discovered.source_path.clone()),
-    ))
+    inventory.resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {

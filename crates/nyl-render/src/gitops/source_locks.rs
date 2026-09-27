@@ -5,20 +5,19 @@
 //!
 //! - Locks are grouped by repository and `revision`. Each group is resolved
 //!   once, and every lock in it moves to the same new commit.
-//! - A `fromGit` lock whose file lies inside a DeploymentTarget's publication
-//!   prefix on that branch moves to that target's newest publication commit,
-//!   never to a later commit another tool made on the branch. Other locks move
-//!   to the branch head.
+//! - A group whose `fromGit` files lie inside one DeploymentTarget's
+//!   publication prefix on that branch moves to that target's newest
+//!   publication commit, never to a later commit another tool made on the
+//!   branch. A group with no such file moves to the branch head, and a group
+//!   reading several targets' publications is an error.
 //! - Locks are addressed by their position in the document, never by matching
 //!   the commit text alone, so bindings that share a commit but name different
 //!   revisions stay independent.
 
-use std::collections::BTreeMap;
-
-use git2::Repository;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::git::{normalize_git_url_for_equality, GitManager};
-use crate::resources::{GitOpsResource, GitOpsResourceKind, InlineGitRepository};
+use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
 use super::{DiscoveredGitOpsResource, GitOpsInventory};
@@ -109,7 +108,9 @@ pub fn collect_source_locks(
                     continue;
                 };
                 group_found = true;
-                let repository = repository(inventory, source.repository_ref.as_ref(), source.repository.as_ref())?;
+                let repository = inventory
+                    .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
+                    .0;
                 locks.push(SourceLock {
                     owner: LockOwner::ApplicationGroup {
                         name: resource.metadata.name.clone(),
@@ -130,8 +131,9 @@ pub fn collect_source_locks(
                         let Some(source) = &binding.from_git else {
                             continue;
                         };
-                        let repository =
-                            repository(inventory, source.repository_ref.as_ref(), source.repository.as_ref())?;
+                        let repository = inventory
+                            .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
+                            .0;
                         locks.push(SourceLock {
                             owner: LockOwner::ReleaseInput {
                                 target: resource.metadata.name.clone(),
@@ -165,60 +167,97 @@ pub fn collect_source_locks(
 }
 
 /// Resolve every lock, one repository and revision at a time.
+///
+/// Each repository's refs are fetched once. A group whose `fromGit` files lie
+/// inside one DeploymentTarget's publication prefix moves to that target's
+/// newest publication commit; a group with no such file moves to the branch
+/// head. A group reading files of several targets' publications has no single
+/// commit to move to and is an error.
 pub fn resolve_source_locks(
     inventory: &GitOpsInventory,
     locks: Vec<SourceLock>,
     manager: &mut GitManager,
 ) -> Result<Vec<LockResolution>> {
-    let mut heads = BTreeMap::<(String, String), (String, std::path::PathBuf)>::new();
-    let mut publications = BTreeMap::<(String, String, String), Option<String>>::new();
-    let publishers = publication_prefixes(inventory)?;
-    let mut resolutions = Vec::new();
+    // Prefixes are needed only to place `fromGit` files, so an unrelated
+    // target's publication never blocks an ApplicationGroup-only update.
+    let publishers = if locks.iter().any(|lock| lock.path.is_some()) {
+        publication_prefixes(inventory)?
+    } else {
+        Vec::new()
+    };
+    let mut groups = BTreeMap::<(String, String), Vec<SourceLock>>::new();
     for lock in locks {
         let group = (
             normalize_git_url_for_equality(&lock.repository_url),
             lock.revision.clone(),
         );
-        if !heads.contains_key(&group) {
-            let checkout = manager
-                .resolve_ref_fresh(&lock.repository_url, Some(&lock.revision), None)
-                .map_err(NylError::Git)?;
-            let head = checkout_head(&checkout, &lock.repository_url, &lock.revision)?;
-            heads.insert(group.clone(), (head, checkout));
+        groups.entry(group).or_default().push(lock);
+    }
+    let mut fetched = BTreeSet::new();
+    let mut resolutions = Vec::new();
+    for ((url, revision), locks) in groups {
+        let repository_url = locks[0].repository_url.clone();
+        if fetched.insert(url.clone()) {
+            manager.fetch_refs(&repository_url).map_err(NylError::Git)?;
         }
-        let (head, checkout) = &heads[&group];
-        let owner = lock.path.as_deref().and_then(|path| {
-            publishers
-                .iter()
-                .find(|(url, revision, prefix, _)| {
-                    url == &group.0 && branch(revision) == branch(&group.1) && path_within(path, prefix)
-                })
-                .map(|(_, _, _, target)| target.clone())
-        });
-        let (resolved, note) = match owner {
-            None => (Some(head.clone()), None),
-            Some(target) => {
-                let key = (group.0.clone(), group.1.clone(), target.clone());
-                if !publications.contains_key(&key) {
-                    publications.insert(key.clone(), newest_publication(checkout, head, &target)?);
-                }
-                match &publications[&key] {
+        let head = manager
+            .resolve_cached_ref(&repository_url, &revision)
+            .map_err(NylError::Git)?;
+        let owners = locks
+            .iter()
+            .filter_map(|lock| lock.path.as_deref())
+            .filter_map(|path| {
+                publishers
+                    .iter()
+                    .find(|(publisher_url, publisher_revision, prefix, _)| {
+                        publisher_url == &url
+                            && branch(publisher_revision) == branch(&revision)
+                            && path_within(path, prefix)
+                    })
+                    .map(|(_, _, _, target)| target.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let (resolved, note) = match owners.len() {
+            0 => (Some(head.to_string()), None),
+            1 => {
+                let target = owners.first().expect("one owner");
+                let trailer = format!("{DEPLOYMENT_TARGET_TRAILER}: {target}");
+                match manager
+                    .newest_commit_with_message_line(&repository_url, head, &trailer)
+                    .map_err(NylError::Git)?
+                {
                     Some(commit) => (
-                        Some(commit.clone()),
+                        Some(commit.to_string()),
                         Some(format!("newest publication of DeploymentTarget {target}")),
                     ),
                     None => (
                         None,
                         Some(format!(
-                            "{} has no publication commit of DeploymentTarget {target} yet",
-                            lock.revision
+                            "{revision} has no publication commit of DeploymentTarget {target} yet"
                         )),
                     ),
                 }
             }
+            _ => {
+                let owners = owners.into_iter().collect::<Vec<_>>().join(", ");
+                let bindings = locks
+                    .iter()
+                    .map(|lock| lock.owner.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(NylError::config(format!(
+                    "Locks of {}@{revision} ({bindings}) read files published by DeploymentTargets {owners}; every lock of one repository and revision moves to one commit, so bind each target's published files from a revision that only that target publishes",
+                    crate::util::sanitize_url(&repository_url)
+                )));
+            }
         };
-        resolutions.push(LockResolution { lock, resolved, note });
+        resolutions.extend(locks.into_iter().map(|lock| LockResolution {
+            lock,
+            resolved: resolved.clone(),
+            note: note.clone(),
+        }));
     }
+    resolutions.sort_by_key(|resolution| resolution.lock.owner.to_string());
     Ok(resolutions)
 }
 
@@ -277,6 +316,9 @@ fn replace_block_scalar(document: &str, path: &[&str], current: &str, resolved: 
     for (depth, segment) in path.iter().enumerate() {
         let mut index = start;
         let mut hit = None;
+        // The first key line of the block sets the indentation of its direct
+        // children; deeper lines belong to nested values or block scalars.
+        let mut child_indent = None;
         while index < lines.len() {
             let line = lines[index];
             let trimmed = line.trim_start();
@@ -285,7 +327,7 @@ fn replace_block_scalar(document: &str, path: &[&str], current: &str, resolved: 
             if !blank && parent_indent.is_some_and(|parent| indent <= parent) {
                 break;
             }
-            if !blank && key_matches(trimmed, segment) {
+            if !blank && *child_indent.get_or_insert(indent) == indent && key_matches(trimmed, segment) {
                 hit = Some((index, indent));
                 break;
             }
@@ -333,27 +375,6 @@ fn key_matches(line: &str, key: &str) -> bool {
         .any(|prefix| line.starts_with(prefix.as_str()))
 }
 
-fn repository(
-    inventory: &GitOpsInventory,
-    reference: Option<&crate::resources::LocalReference>,
-    inline: Option<&InlineGitRepository>,
-) -> Result<InlineGitRepository> {
-    if let Some(repository) = inline {
-        return Ok(repository.clone());
-    }
-    let reference = reference.expect("validated source names a repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory kind key and resource variant must agree");
-    };
-    Ok(InlineGitRepository {
-        repo_url: repository.spec.repo_url.clone(),
-        publish_url: repository.spec.publish_url.clone(),
-    })
-}
-
 /// Every target's publication as (normalized URL, revision, prefix, target).
 /// Both the read and the publish URL identify the repository.
 fn publication_prefixes(inventory: &GitOpsInventory) -> Result<Vec<(String, String, String, String)>> {
@@ -363,11 +384,8 @@ fn publication_prefixes(inventory: &GitOpsInventory) -> Result<Vec<(String, Stri
             continue;
         };
         let publication = &target.spec.publication;
-        let repository = repository(
-            inventory,
-            publication.repository_ref.as_ref(),
-            publication.repository.as_ref(),
-        )?;
+        let (repository, _) =
+            inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
         for url in std::iter::once(&repository.repo_url).chain(repository.publish_url.as_ref()) {
             prefixes.push((
                 normalize_git_url_for_equality(url),
@@ -386,48 +404,6 @@ fn branch(revision: &str) -> &str {
 
 fn path_within(path: &str, prefix: &str) -> bool {
     prefix.is_empty() || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
-}
-
-fn checkout_head(checkout: &std::path::Path, url: &str, revision: &str) -> Result<String> {
-    let repository = Repository::discover(checkout)
-        .map_err(|error| NylError::config(format!("Failed to inspect resolved source: {error}")))?;
-    repository
-        .head()
-        .ok()
-        .and_then(|head| head.target())
-        .map(|oid| oid.to_string())
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "Resolved source {}@{revision} has no HEAD",
-                crate::util::sanitize_url(url)
-            ))
-        })
-}
-
-/// The newest commit reachable from `head` whose message names `target` in
-/// its [`DEPLOYMENT_TARGET_TRAILER`].
-fn newest_publication(checkout: &std::path::Path, head: &str, target: &str) -> Result<Option<String>> {
-    let repository = Repository::discover(checkout)
-        .map_err(|error| NylError::config(format!("Failed to inspect resolved source: {error}")))?;
-    let mut walk = repository.revwalk().map_err(crate::git::GitError::Repository)?;
-    walk.push(git2::Oid::from_str(head).map_err(crate::git::GitError::Repository)?)
-        .map_err(crate::git::GitError::Repository)?;
-    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
-        .map_err(crate::git::GitError::Repository)?;
-    let trailer = format!("{DEPLOYMENT_TARGET_TRAILER}: {target}");
-    for oid in walk {
-        let oid = oid.map_err(crate::git::GitError::Repository)?;
-        let commit = repository.find_commit(oid).map_err(crate::git::GitError::Repository)?;
-        if commit
-            .message()
-            .unwrap_or_default()
-            .lines()
-            .any(|line| line.trim() == trailer)
-        {
-            return Ok(Some(oid.to_string()));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -488,6 +464,59 @@ spec:
         let flow = "spec:\n  releaseInputs:\n    g/r: {image: {fromGit: {commit: aaaa}}}\n";
         let path = ["spec", "releaseInputs", "g/r", "image", "fromGit", "commit"];
         assert!(replace_block_scalar(flow, &path, "aaaa", "bbbb").is_none());
+    }
+
+    #[test]
+    fn test_replace_block_scalar_matches_only_direct_children() {
+        let document = r"spec:
+  releaseInputs:
+    workloads/api:
+      config:
+        value:
+          image: {fromGit: none}
+          notes: |
+            path:
+              fromGit:
+                commit: aaaa
+      image:
+        fromGit:
+          commit: aaaa
+          path: x.json
+      path:
+        fromGit:
+          commit: aaaa
+          path: y.json
+";
+        let image = replace_block_scalar(
+            document,
+            &["spec", "releaseInputs", "workloads/api", "image", "fromGit", "commit"],
+            "aaaa",
+            "bbbb",
+        )
+        .unwrap();
+        assert_eq!(
+            image,
+            document.replacen(
+                "commit: aaaa\n          path: x.json",
+                "commit: bbbb\n          path: x.json",
+                1
+            )
+        );
+        let path = replace_block_scalar(
+            document,
+            &["spec", "releaseInputs", "workloads/api", "path", "fromGit", "commit"],
+            "aaaa",
+            "bbbb",
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            document.replacen(
+                "commit: aaaa\n          path: y.json",
+                "commit: bbbb\n          path: y.json",
+                1
+            )
+        );
     }
 
     #[test]

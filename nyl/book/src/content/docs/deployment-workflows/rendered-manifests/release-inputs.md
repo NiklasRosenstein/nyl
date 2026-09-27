@@ -112,8 +112,8 @@ file paths.
 ## Locked Git state
 
 `fromGit` follows the ApplicationGroup source-lock pattern. `revision` is the
-human-readable branch or tag; `commit` is the full commit ID rendering reads.
-Rendering never resolves `revision`. A commit missing from the local Git cache
+human-readable branch or tag; `commit` is the full 40-character lowercase
+commit ID rendering reads. Rendering never resolves `revision`. A commit missing from the local Git cache
 is fetched by ID; offline rendering fails with a message naming the lock.
 
 ```yaml
@@ -131,10 +131,12 @@ releaseInputs:
 `nyl update source-locks` refreshes these locks together with ApplicationGroup
 source locks, so CI has one `--check` gate for every Git lock. `--target
 production` selects one target's locks. Locks of one repository and revision
-move to the same commit. When the locked file lies inside another target's
-publication prefix on that branch, the lock moves to that target's newest
+move to the same commit. When their locked files lie inside another target's
+publication prefix on that branch, the locks move to that target's newest
 publication commit, so a production target can promote the state a dev target
-published by moving its lock in a reviewed change.
+published by moving its lock in a reviewed change. Locks of one revision that
+read several targets' publications are rejected, because they cannot move to
+one commit.
 
 ## Provenance
 

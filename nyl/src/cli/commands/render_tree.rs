@@ -18,6 +18,7 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
 /// Render one deployment target into its owned manifest tree.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct RenderTreeArgs {
     #[command(flatten)]
     pub validation: crate::validation::ValidationArgs,
@@ -56,6 +57,7 @@ pub struct RenderTreeArgs {
     pub offline: bool,
 }
 
+#[allow(clippy::too_many_lines)] // One linear command flow from arguments to the rendered tree.
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;

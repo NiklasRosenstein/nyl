@@ -124,11 +124,21 @@ pub struct InputSources<'a> {
 pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
-    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String>;
+    fn read_blob(
+        &self,
+        url: &str,
+        commit: &str,
+        path: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError>;
 
     /// The commit `branch` of `url` names, or `None` when it does not exist,
     /// refreshing refs first when `refresh` is set.
-    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> std::result::Result<Option<String>, String>;
+    fn branch_head(
+        &self,
+        url: &str,
+        branch: &str,
+        refresh: bool,
+    ) -> std::result::Result<Option<String>, crate::git::GitError>;
 }
 
 /// [`GitBlobSource`] over the shared bare-repository cache.
@@ -152,7 +162,7 @@ impl CachedGitBlobSource {
     fn with_manager<T>(
         &self,
         operation: impl FnOnce(&mut crate::git::GitManager) -> crate::git::Result<T>,
-    ) -> std::result::Result<T, String> {
+    ) -> std::result::Result<T, crate::git::GitError> {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
             let created = match self
@@ -161,34 +171,47 @@ impl CachedGitBlobSource {
                 .and_then(crate::render::cache::RenderCache::external_cache_root)
             {
                 Some(root) => crate::git::GitManager::with_cache_dir(root),
-                None => crate::git::GitManager::new().map_err(|error| error.to_string())?,
+                None => crate::git::GitManager::new()?,
             }
             .with_render_cache(self.cache.clone());
             *manager = Some(created);
         }
-        operation(manager.as_mut().expect("manager was created above")).map_err(|error| error.to_string())
+        operation(manager.as_mut().expect("manager was created above"))
     }
 }
 
 impl GitBlobSource for CachedGitBlobSource {
-    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+    fn read_blob(
+        &self,
+        url: &str,
+        commit: &str,
+        path: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
         self.with_manager(|manager| manager.read_blob(url, commit, path))
     }
 
-    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> std::result::Result<Option<String>, String> {
+    fn branch_head(
+        &self,
+        url: &str,
+        branch: &str,
+        refresh: bool,
+    ) -> std::result::Result<Option<String>, crate::git::GitError> {
         self.with_manager(|manager| manager.branch_head(url, branch, refresh))
     }
 }
 
 /// A repository URL without userinfo, for provenance keys.
+///
+/// A parseable URL is always re-serialized, so a key does not depend on
+/// whether credentials are embedded in the configured URL.
 pub fn credential_free_url(url: &str) -> String {
     match reqwest::Url::parse(url) {
-        Ok(mut parsed) if !parsed.username().is_empty() || parsed.password().is_some() => {
+        Ok(mut parsed) => {
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
             parsed.to_string()
         }
-        _ => url.to_owned(),
+        Err(_) => url.to_owned(),
     }
 }
 
@@ -625,13 +648,12 @@ fn is_tracked(path: &Path) -> bool {
         return false;
     };
     let workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf());
-    let path = parent
-        .canonicalize()
-        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
-        .unwrap_or_else(|_| path.to_path_buf());
+    let path = parent.canonicalize().map_or_else(
+        |_| path.to_path_buf(),
+        |parent| parent.join(path.file_name().unwrap_or_default()),
+    );
     path.strip_prefix(&workdir)
-        .ok()
-        .is_some_and(|relative| index.get_path(relative, 0).is_some())
+        .is_ok_and(|relative| index.get_path(relative, 0).is_some())
 }
 
 fn resolve_bound(
@@ -908,12 +930,12 @@ mod tests {
     struct NoGit;
 
     impl GitBlobSource for NoGit {
-        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, String> {
-            Err("no Git in this test".to_owned())
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
+            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
         }
 
-        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, String> {
-            Err("no Git in this test".to_owned())
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, crate::git::GitError> {
+            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
         }
     }
 
@@ -1006,14 +1028,19 @@ mod tests {
     struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);
 
     impl GitBlobSource for FakeGit {
-        fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+        fn read_blob(
+            &self,
+            url: &str,
+            commit: &str,
+            path: &str,
+        ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
             Ok(self
                 .0
                 .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))
                 .cloned())
         }
 
-        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, String> {
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, crate::git::GitError> {
             Ok(None)
         }
     }
@@ -1083,6 +1110,10 @@ mod tests {
         assert_eq!(
             credential_free_url("https://user:token@git.example.com/state.git"),
             "https://git.example.com/state.git"
+        );
+        assert_eq!(
+            credential_free_url("https://token@Git.Example.com/state.git"),
+            credential_free_url("https://Git.Example.com/state.git")
         );
         assert_eq!(
             credential_free_url("git@github.com:org/repo.git"),
