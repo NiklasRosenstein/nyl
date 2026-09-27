@@ -238,7 +238,7 @@
       ],
       "properties": {
         "commit": {
-          "description": "Full commit ID that rendering reads, refreshed by `nyl update source-locks`.",
+          "description": "Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.",
           "type": "string"
         },
         "path": {
