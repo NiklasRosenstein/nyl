@@ -19,7 +19,7 @@ use crate::resources::{
     GitPublication, InlineGitRepository, LocalReference, ManagedResourceDeletionPolicy, RendererConfig,
     RendererConfigMode, SharedNamespaceOwner,
 };
-use crate::template::TemplateEngine;
+use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
 use crate::{NylError, Result};
 
@@ -464,6 +464,7 @@ async fn compile_target_tree_inner(
     let mut release_count = 0;
     let mut progress_completed = 0;
     let mut helm_render_count = 0;
+    let template_values = TemplateEngine::new().template_values();
 
     for PreparedGroup {
         group_resource_path,
@@ -594,7 +595,7 @@ async fn compile_target_tree_inner(
                 ));
             }
             let release_directory = PathBuf::from(group_output).join(&release.metadata.name);
-            let application_name = render_application_name(session, &group, &release)?;
+            let application_name = render_application_name(&template_values, session, &group, &release)?;
             validate_path_segment("rendered Application name", &application_name)?;
             pending_workloads.push(PendingWorkload {
                 group: group.clone(),
@@ -1624,7 +1625,9 @@ fn validate_argocd_name_collisions(
     for target in targets {
         let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
         // Argo CD names live in one namespace of one control-plane cluster,
-        // whichever instance resource, explicit or implicit, put them there.
+        // whichever instance or Cluster resource, explicit or implicit, put them
+        // there. Clusters are compared by their Argo CD destination.
+        let control_plane = control_plane_identity(&argocd.cluster);
         let control_cluster = argocd.cluster.metadata.name.clone();
         let control_namespace = argocd.resource.spec.namespace.clone();
         if target.spec.catalog_application.enabled {
@@ -1634,7 +1637,7 @@ fn validate_argocd_name_collisions(
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
-            let key = (control_cluster.clone(), control_namespace.clone(), parent_name.clone());
+            let key = (control_plane.clone(), control_namespace.clone(), parent_name.clone());
             if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
                 return Err(NylError::config(format!(
                     "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}; customize spec.catalogApplication.name",
@@ -1665,7 +1668,7 @@ fn validate_argocd_name_collisions(
             }
             if group.spec.application_name_template.is_none() {
                 let key = (
-                    control_cluster.clone(),
+                    control_plane.clone(),
                     group.spec.application_namespace.clone(),
                     group.metadata.name.clone(),
                 );
@@ -1695,7 +1698,7 @@ fn validate_argocd_name_collisions(
                 (group.metadata.name.clone(), name, true, false)
             };
             if rendered {
-                let key = (control_cluster.clone(), control_namespace.clone(), project_name.clone());
+                let key = (control_plane.clone(), control_namespace.clone(), project_name.clone());
                 let owner = (
                     target.metadata.name.clone(),
                     group.metadata.name.clone(),
@@ -1720,6 +1723,72 @@ fn validate_argocd_name_collisions(
                     )));
                 }
                 project_owners.insert(key, owner);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The Argo CD control plane a Cluster names, by its destination rather than
+/// its resource name, so two Cluster resources for one API server compare equal.
+fn control_plane_identity(cluster: &Cluster) -> String {
+    match (&cluster.spec.destination.server, &cluster.spec.destination.name) {
+        (Some(server), _) => format!("server:{}", server.trim_end_matches('/')),
+        (None, Some(name)) => format!("name:{name}"),
+        (None, None) => format!("cluster:{}", cluster.metadata.name),
+    }
+}
+
+/// Generated Argo CD objects of every target must have distinct names on each
+/// control plane, checked on the compiled trees.
+///
+/// Contract: [Environments and DeploymentTargets](../../../../design/release-inputs.md#environments-and-deploymenttargets).
+/// The static check in `validate_argocd_name_collisions` explains the common
+/// cases before rendering; this check compares the names actually generated,
+/// including templated workload names, Releases of different groups, and
+/// namespace-owner Applications.
+pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[CompiledTargetTree]) -> Result<()> {
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let mut owners = BTreeMap::<(String, String, String, String), (String, PathBuf)>::new();
+    for tree in trees {
+        let argocd = resolve_argocd_instance(inventory, &tree.target, instance_count)?;
+        let control_plane = control_plane_identity(&argocd.cluster);
+        for (path, bytes) in tree.files.range(PathBuf::from("_nyl/catalog")..) {
+            if !path.starts_with("_nyl/catalog") {
+                break;
+            }
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| NylError::config(format!("generated catalog file {} is not UTF-8", path.display())))?;
+            for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+                let field = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str).unwrap_or_default();
+                let kind = field("/kind").to_owned();
+                let namespace = field("/metadata/namespace");
+                let namespace = if namespace.is_empty() {
+                    argocd.resource.spec.namespace.clone()
+                } else {
+                    namespace.to_owned()
+                };
+                let name = field("/metadata/name").to_owned();
+                let key = (control_plane.clone(), kind.clone(), namespace.clone(), name.clone());
+                let owner = (tree.target.metadata.name.clone(), path.clone());
+                if let Some(previous) = owners.get(&key) {
+                    if previous != &owner {
+                        return Err(NylError::config(format!(
+                            "DeploymentTargets {:?} ({}) and {:?} ({}) generate the same Argo CD {kind} {namespace}/{name} on Cluster {:?}; give each target its own names, for example ApplicationGroup.spec.applicationNameTemplate '${{ target.metadata.name }}-${{ release.metadata.name }}'",
+                            previous.0,
+                            previous.1.display(),
+                            owner.0,
+                            owner.1.display(),
+                            argocd.cluster.metadata.name
+                        )));
+                    }
+                    continue;
+                }
+                owners.insert(key, owner);
             }
         }
     }
@@ -2411,6 +2480,7 @@ pub fn source_matches(root: &Path, path: &Path, source: &ApplicationGroupSource)
 }
 
 fn render_application_name(
+    template_values: &TemplateValueExpander,
     session: &RenderSession,
     group: &ApplicationGroup,
     release: &crate::resources::Release,
@@ -2425,7 +2495,7 @@ fn render_application_name(
         .cloned()
         .expect("template context is an object");
     context.insert("release".to_string(), serde_json::to_value(release)?);
-    TemplateEngine::new().expand_template_value(
+    template_values.expand(
         "ApplicationGroup.spec.applicationNameTemplate",
         template,
         &Value::Object(context),

@@ -82,9 +82,11 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
                 .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
                 .map(|resource| resource.identity.name.clone())
                 .collect::<Vec<_>>();
+            let mut compiled = Vec::with_capacity(target_names.len());
             for target in target_names {
-                crate::gitops::compile_target_tree(&inventory, &target).await?;
+                compiled.push(crate::gitops::compile_target_tree(&inventory, &target).await?);
             }
+            crate::gitops::validate_compiled_argocd_names(&inventory, &compiled)?;
             println!(
                 "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
                 inventory.resources.len(),
