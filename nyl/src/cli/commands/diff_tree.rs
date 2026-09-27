@@ -98,6 +98,10 @@ pub struct DiffTreeArgs {
     /// Allow project secrets and NYL_* environment variables to affect rendered output.
     #[arg(long)]
     pub allow_secret_inputs: bool,
+
+    /// Read fromPublication state at the cached publication branch head.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Debug)]
@@ -236,7 +240,8 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
+        let carried = crate::gitops::inputs::carry_paths(&inventory, &target)?;
+        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
         let repository = source_repository_url(&inventory.project_root)?;
         Ok::<_, NylError>((inventory, target, commit, dirty, repository))
     })();
@@ -260,6 +265,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let mut progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
+        offline: args.offline,
     };
     let rendered =
         compile_target_tree_cached_with_observer_and_options(&inventory, &target_name, &cache, &mut progress, options)
@@ -272,6 +278,9 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             return;
         }
     };
+    if let Some(base) = &desired.publication_base {
+        eprintln!("{}", base.describe());
+    }
     report.desired(&desired);
     // The combined report owns findings; the validator still emits progress and exports.
     let validation_args = crate::validation::ValidationArgs {
@@ -1017,6 +1026,7 @@ mod tests {
             files: BTreeMap::new(),
             inputs: BTreeSet::new(),
             input_digests: BTreeMap::new(),
+            publication_base: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;

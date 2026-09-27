@@ -158,7 +158,8 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
+    let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
+    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
     let Some(source_commit) = source_commit else {
         return Err(NylError::config(
             "publish-tree requires the source worktree to have a committed revision",
@@ -174,6 +175,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let render_options = TreeRenderOptions {
         allow_secret_inputs: args.source.allow_secret_inputs,
+        offline: false,
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(
         &inventory,
@@ -255,6 +257,7 @@ fn publish_compiled(
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
+    verify_publication_base(compiled, expected, publication_url, branch)?;
 
     let output_root = if compiled.target.publication_path_prefix().is_empty() {
         temp.path().to_path_buf()
@@ -478,6 +481,30 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         input.output_root,
         &message,
     )
+}
+
+/// The state `fromPublication` bindings read must be the state at the base
+/// commit this publication builds on, so the published commit holds the
+/// state and the manifests rendered from it.
+fn verify_publication_base(
+    compiled: &CompiledTargetTree,
+    expected: Option<git2::Oid>,
+    publication_url: &str,
+    branch: &str,
+) -> Result<()> {
+    let Some(base) = &compiled.publication_base else {
+        return Ok(());
+    };
+    let expected = expected.map(|oid| oid.to_string());
+    if base.commit == expected {
+        return Ok(());
+    }
+    Err(NylError::config(format!(
+        "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
+        crate::util::sanitize_url(publication_url),
+        expected.as_deref().unwrap_or("no commit"),
+        base.commit.as_deref().unwrap_or("no commit"),
+    )))
 }
 
 fn publication_current_commit(

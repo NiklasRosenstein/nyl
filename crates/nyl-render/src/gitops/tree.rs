@@ -36,6 +36,10 @@ pub struct TreeRenderOptions {
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
+    /// Read `fromPublication` state at the cached publication branch head
+    /// instead of refreshing it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub offline: bool,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -53,6 +57,10 @@ pub struct CompiledTargetTree {
     /// `@input/<group>/<release>/<input>` digests of resolved Release inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_digests: BTreeMap<String, String>,
+    /// Publication branch head that `fromPublication` bindings read; `None`
+    /// when the target has none. Never cached: it is re-resolved every run.
+    #[serde(skip)]
+    pub publication_base: Option<super::inputs::PublicationBase>,
 }
 
 /// Stable source identity for one Release as it enters tree compilation.
@@ -408,8 +416,31 @@ async fn compile_target_tree_inner(
     }
 
     let git_blobs = super::inputs::CachedGitBlobSource::new(git_manager.take(), cache.cloned());
-    let release_inputs =
-        resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups, &git_blobs)?;
+    let publication_base = if target
+        .spec
+        .release_inputs
+        .values()
+        .flat_map(BTreeMap::values)
+        .any(|binding| binding.from_publication.is_some())
+    {
+        Some(super::inputs::PublicationBase::resolve(
+            &git_blobs,
+            &repository.repo_url,
+            &target.spec.publication.revision,
+            target.publication_path_prefix(),
+            options.offline,
+        )?)
+    } else {
+        None
+    };
+    let release_inputs = resolve_prepared_release_inputs(
+        inventory,
+        &target,
+        &prepared_groups,
+        &disabled_groups,
+        &git_blobs,
+        publication_base.as_ref(),
+    )?;
 
     let target_cache_inputs = TargetCacheInputs {
         options,
@@ -432,7 +463,8 @@ async fn compile_target_tree_inner(
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
-    if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+    if let Some(mut compiled) = load_cached_target(cache, cache_probe.as_ref())? {
+        compiled.publication_base = publication_base;
         observer.finished();
         return Ok(compiled);
     }
@@ -620,6 +652,10 @@ async fn compile_target_tree_inner(
     }
 
     resolve_namespace_ownership(&mut pending_workloads, &mut namespace_owners, &cluster)?;
+    let release_directories = pending_workloads
+        .iter()
+        .map(|workload| workload.release_directory.clone())
+        .collect::<Vec<_>>();
 
     for workload in pending_workloads {
         for manifest in &workload.manifests {
@@ -714,6 +750,8 @@ async fn compile_target_tree_inner(
         )?;
     }
 
+    super::inputs::place_state_files(&release_inputs, &release_directories, &mut files)?;
+
     let provenance = files
         .iter()
         .map(|(path, bytes)| {
@@ -747,6 +785,7 @@ async fn compile_target_tree_inner(
         provenance,
         inputs,
         input_digests,
+        publication_base,
     };
     store_cached_target(
         cache,
@@ -853,6 +892,10 @@ fn prepare_target_cache(
     }
     for path in release_inputs.files() {
         recorder.record_path_file(&path)?;
+    }
+    let provenance = release_inputs.index_entries()?;
+    if !provenance.is_empty() {
+        recorder.record_value("input-provenance", &provenance)?;
     }
     cache.record_renderer_tools(&mut recorder)?;
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
@@ -2084,6 +2127,7 @@ fn resolve_prepared_release_inputs(
     groups: &[PreparedGroup],
     disabled_groups: &BTreeSet<String>,
     git: &dyn super::inputs::GitBlobSource,
+    publication: Option<&super::inputs::PublicationBase>,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2126,6 +2170,7 @@ fn resolve_prepared_release_inputs(
             paths: &paths,
             repositories: &repositories,
             git,
+            publication,
         },
     )
 }

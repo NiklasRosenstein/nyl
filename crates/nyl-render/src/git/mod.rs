@@ -278,6 +278,19 @@ impl GitManager {
         repo.read_blob(oid, path)
     }
 
+    /// The commit `branch` of `url` names, or `None` when the branch does not
+    /// exist. With `refresh`, the refs are fetched first and a failed fetch is
+    /// an error; without it, the cached refs are used.
+    pub fn branch_head(&mut self, url: &str, branch: &str, refresh: bool) -> Result<Option<String>> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        if refresh {
+            repo.fetch_refs()?;
+            self.observe_source(crate::render::cache::SourceOperation::GitRefRefresh);
+        }
+        Ok(repo.branch_commit(branch)?.map(|oid| oid.to_string()))
+    }
+
     /// Get or create a bare repository for the given URL
     fn get_or_create_bare_repo(&mut self, url: &str) -> Result<Arc<Mutex<BareRepository>>> {
         // Use the URL as the key (will be normalized internally)

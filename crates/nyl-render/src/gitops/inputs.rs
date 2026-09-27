@@ -7,7 +7,9 @@
 //! - [Binding kinds](../../../../design/release-inputs.md#binding-kinds): `value`,
 //!   `fromFile`, and `fromGit` resolve here; `fromUnit` and `fromPromotion`
 //!   need orchestrated execution and are rejected. `fromGit` reads only its
-//!   locked commit and never resolves `revision`.
+//!   locked commit and never resolves `revision`. `fromPublication` reads the
+//!   target's own publication branch at the base commit, or a carried
+//!   working-tree file; a missing branch or file leaves the input unbound.
 //! - [Provenance, caching, and validation](../../../../design/release-inputs.md#provenance-caching-and-validation):
 //!   failures are reported together per target, before any Release renders,
 //!   and each resolved input is digested for the ownership index.
@@ -31,6 +33,74 @@ pub const INDEX_INPUT_PREFIX: &str = "@input/";
 
 /// Ownership-index key prefix of `fromGit` blob digests.
 pub const INDEX_GIT_PREFIX: &str = "@git/";
+/// Ownership-index key prefix of state files read from the publication base commit.
+pub const INDEX_PUBLICATION_PREFIX: &str = "@publication/";
+/// Ownership-index key prefix of state files carried from the working tree.
+pub const INDEX_CARRIED_PREFIX: &str = "@carried/";
+
+/// The publication branch head that `fromPublication` bindings read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationBase {
+    /// Repository URL the state is read from.
+    pub url: String,
+    /// Publication branch.
+    pub branch: String,
+    /// Target publication path prefix; state paths are relative to it.
+    pub prefix: String,
+    /// Branch head, or `None` when the branch does not exist yet.
+    pub commit: Option<String>,
+    /// Whether the head came from cached refs without a refresh.
+    pub cached: bool,
+}
+
+impl PublicationBase {
+    /// Resolve the head of `branch`, refreshing refs unless `offline`.
+    pub fn resolve(git: &dyn GitBlobSource, url: &str, branch: &str, prefix: &str, offline: bool) -> Result<Self> {
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch).to_owned();
+        let commit = git.branch_head(url, &branch, !offline).map_err(|error| {
+            NylError::config(format!(
+                "Cannot read publication branch {branch} of {} for fromPublication Release inputs: {error}{}",
+                crate::util::sanitize_url(url),
+                if offline {
+                    ""
+                } else {
+                    "; use --offline to read the cached branch head"
+                }
+            ))
+        })?;
+        Ok(Self {
+            url: url.to_owned(),
+            branch,
+            prefix: prefix.trim_matches('/').to_owned(),
+            commit,
+            cached: offline,
+        })
+    }
+
+    /// Human-readable description of the state this render read.
+    pub fn describe(&self) -> String {
+        let url = crate::util::sanitize_url(&self.url);
+        match &self.commit {
+            Some(commit) => format!(
+                "Read publication state from {url}@{} at {commit}{}",
+                self.branch,
+                if self.cached { " (cached head, --offline)" } else { "" }
+            ),
+            None => format!(
+                "Publication branch {} of {url} does not exist yet; fromPublication inputs are unbound",
+                self.branch
+            ),
+        }
+    }
+
+    fn repository_path(&self, path: &str) -> String {
+        if self.prefix.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{}/{path}", self.prefix)
+        }
+    }
+}
 
 /// Where resolution may read binding sources from.
 pub struct InputSources<'a> {
@@ -39,8 +109,11 @@ pub struct InputSources<'a> {
     /// Project GitRepository resources by name, with their source files, for
     /// `fromGit` `repositoryRef`.
     pub repositories: &'a BTreeMap<String, (InlineGitRepository, PathBuf)>,
-    /// Reader of files at locked commits, for `fromGit`.
+    /// Reader of files at locked commits, for `fromGit` and `fromPublication`.
     pub git: &'a dyn GitBlobSource,
+    /// Publication branch head, for `fromPublication`. Resolution fails when
+    /// a binding needs it and it is absent.
+    pub publication: Option<&'a PublicationBase>,
 }
 
 /// Reads a file at an immutable commit.
@@ -48,6 +121,10 @@ pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
     fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String>;
+
+    /// The commit `branch` of `url` names, or `None` when it does not exist,
+    /// refreshing refs first when `refresh` is set.
+    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> std::result::Result<Option<String>, String>;
 }
 
 /// [`GitBlobSource`] over the shared bare-repository cache.
@@ -67,8 +144,11 @@ impl CachedGitBlobSource {
     }
 }
 
-impl GitBlobSource for CachedGitBlobSource {
-    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+impl CachedGitBlobSource {
+    fn with_manager<T>(
+        &self,
+        operation: impl FnOnce(&mut crate::git::GitManager) -> crate::git::Result<T>,
+    ) -> std::result::Result<T, String> {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
             let created = match self
@@ -82,11 +162,17 @@ impl GitBlobSource for CachedGitBlobSource {
             .with_render_cache(self.cache.clone());
             *manager = Some(created);
         }
-        manager
-            .as_mut()
-            .expect("manager was created above")
-            .read_blob(url, commit, path)
-            .map_err(|error| error.to_string())
+        operation(manager.as_mut().expect("manager was created above")).map_err(|error| error.to_string())
+    }
+}
+
+impl GitBlobSource for CachedGitBlobSource {
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.with_manager(|manager| manager.read_blob(url, commit, path))
+    }
+
+    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> std::result::Result<Option<String>, String> {
+        self.with_manager(|manager| manager.branch_head(url, branch, refresh))
     }
 }
 
@@ -131,6 +217,24 @@ pub enum InputOrigin {
         blob_digest: String,
         /// Source file of the referenced GitRepository resource.
         repository_source: Option<PathBuf>,
+    },
+    /// A `fromPublication` binding reading `path` at the publication base commit.
+    Publication {
+        /// Path relative to the publication prefix.
+        path: String,
+        commit: String,
+        blob_digest: String,
+        /// The bytes to write back to `path`, when the binding declares `carry`.
+        carried_back: Option<Vec<u8>>,
+    },
+    /// A `fromPublication` binding reading its `carry` file from the working tree.
+    Carried {
+        /// Path relative to the publication prefix that receives the bytes.
+        path: String,
+        /// Working-tree file the bytes came from.
+        source: PathBuf,
+        blob_digest: String,
+        bytes: Vec<u8>,
     },
     /// A `--input` or `--inputs` override of a direct command.
     Override,
@@ -183,6 +287,43 @@ impl ResolvedTargetInputs {
             .collect()
     }
 
+    /// State files this target writes: carried bytes, or the base copy written
+    /// back, keyed by path relative to the publication prefix.
+    pub fn carried_files(&self) -> BTreeMap<String, Vec<u8>> {
+        self.origins()
+            .filter_map(|origin| match origin {
+                InputOrigin::Carried { path, bytes, .. }
+                | InputOrigin::Publication {
+                    path,
+                    carried_back: Some(bytes),
+                    ..
+                } => Some((path.clone(), bytes.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// State paths other tools commit, read from the publication base commit.
+    pub fn committed_state_paths(&self) -> BTreeSet<String> {
+        self.origins()
+            .filter_map(|origin| match origin {
+                InputOrigin::Publication {
+                    path,
+                    carried_back: None,
+                    ..
+                } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn origins(&self) -> impl Iterator<Item = &InputOrigin> {
+        self.releases
+            .values()
+            .flat_map(|release| release.inputs.values())
+            .map(|input| &input.origin)
+    }
+
     /// Ownership-index entries: `@input/<group>/<release>/<input>` to the digest
     /// of the canonical JSON value.
     pub fn index_entries(&self) -> Result<BTreeMap<String, String>> {
@@ -199,6 +340,15 @@ impl ResolvedTargetInputs {
                 } = &input.origin
                 {
                     entries.insert(format!("{INDEX_GIT_PREFIX}{url}@{commit}/{path}"), blob_digest.clone());
+                }
+                match &input.origin {
+                    InputOrigin::Publication { path, blob_digest, .. } => {
+                        entries.insert(format!("{INDEX_PUBLICATION_PREFIX}{path}"), blob_digest.clone());
+                    }
+                    InputOrigin::Carried { path, blob_digest, .. } => {
+                        entries.insert(format!("{INDEX_CARRIED_PREFIX}{path}"), blob_digest.clone());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -325,13 +475,21 @@ pub fn resolve_release_inputs(
                 value: value.clone(),
                 origin: InputOrigin::Override,
             }))
-        } else if let Some(binding) = binding {
-            resolve_binding(&field, binding, sources).map(Some)
         } else {
-            Ok(declaration.default.clone().map(|value| ResolvedInput {
-                value,
-                origin: InputOrigin::Default,
-            }))
+            // An unbound fromPublication binding (bootstrap) falls back to the
+            // default like a missing binding.
+            binding
+                .map(|binding| resolve_binding(&field, binding, sources))
+                .transpose()
+                .map(Option::flatten)
+                .map(|input| {
+                    input.or_else(|| {
+                        declaration.default.clone().map(|value| ResolvedInput {
+                            value,
+                            origin: InputOrigin::Default,
+                        })
+                    })
+                })
         };
         match candidate {
             Ok(Some(input)) => match declaration.check(&input.value) {
@@ -363,16 +521,121 @@ fn describe_origin(field: &str, origin: &InputOrigin) -> String {
         InputOrigin::Value => format!("{field}.value"),
         InputOrigin::File(path) => format!("{field}.fromFile ({})", path.display()),
         InputOrigin::Git { url, commit, path, .. } => format!("{field}.fromGit ({url}@{commit}/{path})"),
+        InputOrigin::Publication { path, commit, .. } => format!("{field}.fromPublication ({path} at {commit})"),
+        InputOrigin::Carried { source, .. } => format!("{field}.fromPublication carry ({})", source.display()),
         InputOrigin::Override => "The --input/--inputs override".to_owned(),
     }
 }
 
+/// Resolve one binding; `Ok(None)` leaves the input unbound.
 fn resolve_binding(
     field: &str,
     binding: &InputBinding,
     sources: &InputSources<'_>,
-) -> std::result::Result<ResolvedInput, String> {
+) -> std::result::Result<Option<ResolvedInput>, String> {
     let kind = binding.kind(field).map_err(|error| error.to_string())?;
+    if kind == BindingKind::FromPublication {
+        return resolve_publication(field, binding, sources);
+    }
+    resolve_bound(field, kind, binding, sources).map(Some)
+}
+
+fn resolve_publication(
+    field: &str,
+    binding: &InputBinding,
+    sources: &InputSources<'_>,
+) -> std::result::Result<Option<ResolvedInput>, String> {
+    let source = binding
+        .from_publication
+        .as_ref()
+        .expect("kind agrees with the set field");
+    let field = format!("{field}.fromPublication");
+    if let Some(carry) = &source.carry {
+        let carry_path = sources
+            .paths
+            .resolve(&format!("{field}.carry"), carry)
+            .map_err(|error| error.to_string())?;
+        if is_tracked(&carry_path) {
+            return Err(format!(
+                "{field}.carry {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with fromFile"
+            ));
+        }
+        if carry_path.is_file() {
+            let bytes =
+                std::fs::read(&carry_path).map_err(|error| format!("{field}.carry: cannot read {carry}: {error}"))?;
+            let document =
+                parse_single_document(&bytes).map_err(|reason| format!("{field}.carry: {carry} {reason}"))?;
+            let value =
+                select(&document, &source.pointer).map_err(|reason| format!("{field}.carry: {carry} {reason}"))?;
+            return Ok(Some(ResolvedInput {
+                value,
+                origin: InputOrigin::Carried {
+                    path: source.path.clone(),
+                    source: carry_path,
+                    blob_digest: nyl_core::digest::sha256_hex(&bytes),
+                    bytes,
+                },
+            }));
+        }
+    }
+    let base = sources
+        .publication
+        .ok_or_else(|| format!("{field} needs the target's publication branch, which this command does not read"))?;
+    let Some(commit) = &base.commit else {
+        return Ok(None);
+    };
+    let Some(bytes) = sources
+        .git
+        .read_blob(&base.url, commit, &base.repository_path(&source.path))
+        .map_err(|error| {
+            format!(
+                "{field}: cannot read {} at publication commit {commit}: {error}",
+                source.path
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    let document = parse_single_document(&bytes).map_err(|reason| format!("{field}: {} {reason}", source.path))?;
+    let value = select(&document, &source.pointer).map_err(|reason| format!("{field}: {} {reason}", source.path))?;
+    Ok(Some(ResolvedInput {
+        value,
+        origin: InputOrigin::Publication {
+            path: source.path.clone(),
+            commit: commit.clone(),
+            blob_digest: nyl_core::digest::sha256_hex(&bytes),
+            carried_back: source.carry.is_some().then_some(bytes),
+        },
+    }))
+}
+
+/// Whether Git tracks `path` in the index of the repository containing it.
+fn is_tracked(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(repository) = git2::Repository::discover(parent) else {
+        return false;
+    };
+    let (Some(workdir), Ok(index)) = (repository.workdir(), repository.index()) else {
+        return false;
+    };
+    let workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf());
+    let path = parent
+        .canonicalize()
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .unwrap_or_else(|_| path.to_path_buf());
+    path.strip_prefix(&workdir)
+        .ok()
+        .is_some_and(|relative| index.get_path(relative, 0).is_some())
+}
+
+fn resolve_bound(
+    field: &str,
+    kind: BindingKind,
+    binding: &InputBinding,
+    sources: &InputSources<'_>,
+) -> std::result::Result<ResolvedInput, String> {
     match kind {
         BindingKind::Value => Ok(ResolvedInput {
             value: binding.value.clone().expect("kind agrees with the set field"),
@@ -439,11 +702,92 @@ fn resolve_binding(
                 },
             })
         }
+        BindingKind::FromPublication => unreachable!("resolved by resolve_publication"),
         BindingKind::FromUnit | BindingKind::FromPromotion => Err(format!(
             "{field}.{} needs orchestrated execution, which resolves it into a pinned input snapshot; render-tree, publish-tree, diff-tree, and direct commands never resolve it",
             kind.field()
         )),
     }
+}
+
+/// Working-tree files the target's `fromPublication` bindings carry.
+///
+/// They are excluded from the source dirty check, because a carried file is
+/// an output of this run, and the clean-`HEAD` verification render receives
+/// the same bytes.
+pub fn carry_paths(inventory: &super::GitOpsInventory, target_name: &str) -> Result<Vec<PathBuf>> {
+    let Some(super::DiscoveredGitOpsResource {
+        resource: Some(crate::resources::GitOpsResource::DeploymentTarget(target)),
+        ..
+    }) = inventory.get(crate::resources::GitOpsResourceKind::DeploymentTarget, target_name)
+    else {
+        return Ok(Vec::new());
+    };
+    let paths = inventory.paths();
+    let mut carried = Vec::new();
+    for (key, bindings) in &target.spec.release_inputs {
+        for (name, binding) in bindings {
+            if let Some(carry) = binding
+                .from_publication
+                .as_ref()
+                .and_then(|source| source.carry.as_ref())
+            {
+                carried.push(paths.resolve(
+                    &format!("spec.releaseInputs.{key:?}.{name}.fromPublication.carry"),
+                    carry,
+                )?);
+            }
+        }
+    }
+    Ok(carried)
+}
+
+/// Check the placement of `fromPublication` state files and add the carried
+/// ones to the target's owned files.
+///
+/// Contract: [`fromPublication`](../../../../design/release-inputs.md#binding-kinds),
+/// Placement. Every state path lies outside the directories generated Argo CD
+/// Applications sync (workload Release directories and `_nyl`, which holds the
+/// catalog), so Argo CD never applies a state file as a manifest. A committed
+/// state file must not be owned by this target; a carried one is.
+pub fn place_state_files(
+    resolved: &ResolvedTargetInputs,
+    release_directories: &[PathBuf],
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    let carried = resolved.carried_files();
+    for path in resolved.committed_state_paths().iter().chain(carried.keys()) {
+        let relative = Path::new(path);
+        if relative.starts_with("_nyl") {
+            return Err(NylError::config(format!(
+                "fromPublication state file {path} lies inside _nyl, which the catalog Application syncs; choose a path outside _nyl"
+            )));
+        }
+        if let Some(directory) = release_directories
+            .iter()
+            .find(|directory| relative.starts_with(directory))
+        {
+            return Err(NylError::config(format!(
+                "fromPublication state file {path} lies inside workload Release directory {}, which its Argo CD Application syncs; choose a path outside every Release directory",
+                directory.display()
+            )));
+        }
+    }
+    for path in resolved.committed_state_paths() {
+        if files.contains_key(Path::new(&path)) {
+            return Err(NylError::config(format!(
+                "fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target"
+            )));
+        }
+    }
+    for (path, bytes) in carried {
+        if files.insert(PathBuf::from(&path), bytes).is_some() {
+            return Err(NylError::config(format!(
+                "Carried fromPublication state file {path} collides with a rendered file"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// After rendering, a Release's `spec.inputs` must equal its static
@@ -537,6 +881,7 @@ mod tests {
                 paths: &paths,
                 repositories: &BTreeMap::new(),
                 git: &NoGit,
+                publication: None,
             },
         )
     }
@@ -545,6 +890,10 @@ mod tests {
 
     impl GitBlobSource for NoGit {
         fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+            Err("no Git in this test".to_owned())
+        }
+
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, String> {
             Err("no Git in this test".to_owned())
         }
     }
@@ -644,6 +993,10 @@ mod tests {
                 .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))
                 .cloned())
         }
+
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, String> {
+            Ok(None)
+        }
     }
 
     #[test]
@@ -684,6 +1037,7 @@ mod tests {
             paths: &paths,
             repositories: &repositories,
             git: &git,
+            publication: None,
         };
         let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
             .unwrap_err()
