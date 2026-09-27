@@ -38,7 +38,6 @@ regex = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
-serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }
@@ -52,6 +51,7 @@ unicode-width = { workspace = true }
 assert_cmd = { workspace = true }
 criterion = { workspace = true }
 predicates = { workspace = true }
+serde-saphyr = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }

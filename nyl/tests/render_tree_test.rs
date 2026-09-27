@@ -2999,7 +2999,7 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     fs::write(path, &quoted).unwrap();
     let index_path = root.join("_nyl/index.json");
     let mut index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-    index["files"]["workloads/api/resources.yaml"] = nyl::gitops::reconcile::sha256(quoted.as_bytes()).into();
+    index["files"]["workloads/api/resources.yaml"] = nyl_core::digest::sha256_hex(quoted.as_bytes()).into();
     fs::write(index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
     commit_all(&repository, "Quoted publication configuration");
     repository

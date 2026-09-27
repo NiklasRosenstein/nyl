@@ -94,6 +94,7 @@ pub(crate) fn resolve_strip_empty_metadata_labels_mode(
         .unwrap_or(project_mode)
 }
 
+/// Copy manifests for emission, stripping empty `metadata.labels` when requested.
 pub fn prepare_manifests_for_output(
     manifests: &[serde_json::Value],
     strip_empty_metadata_labels: bool,

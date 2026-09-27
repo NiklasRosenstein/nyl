@@ -1,5 +1,6 @@
 //! Ownership-indexed reconciliation of rendered files.
 
+use nyl_core::digest::sha256_hex;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,11 +81,6 @@ impl RenderIndex {
     }
 }
 
-/// SHA-256 digest used for source provenance and owned output verification.
-pub fn sha256(bytes: &[u8]) -> String {
-    nyl_core::digest::sha256_hex(bytes)
-}
-
 /// Reconcile a complete desired target tree while preserving unowned files.
 ///
 /// All bytes and collisions are validated in a sibling staging directory first.
@@ -131,7 +127,7 @@ pub fn reconcile_rendered_tree_with_options(
 
     next_index.files = desired
         .iter()
-        .map(|(path, bytes)| Ok((path_text(path)?, sha256(bytes))))
+        .map(|(path, bytes)| Ok((path_text(path)?, sha256_hex(bytes))))
         .collect::<Result<_>>()?;
     if let Some(previous) = &previous {
         if previous.same_owner(&next_index)
@@ -332,8 +328,8 @@ fn verify_owned_files(
                 )))
             }
         };
-        let actual_hash = sha256(&actual);
-        let desired_hash = desired.get(Path::new(relative)).map(|bytes| sha256(bytes));
+        let actual_hash = sha256_hex(&actual);
+        let desired_hash = desired.get(Path::new(relative)).map(|bytes| sha256_hex(bytes));
         if actual_hash != *expected && (!resumes_transaction || desired_hash.as_deref() != Some(&actual_hash)) {
             if options.force_owned {
                 tracing::warn!("Replacing modified owned rendered file {}", path.display());
@@ -536,7 +532,7 @@ mod tests {
         let mut intended = index();
         intended.files = desired
             .iter()
-            .map(|(path, bytes)| (path_text(path).unwrap(), sha256(bytes)))
+            .map(|(path, bytes)| (path_text(path).unwrap(), sha256_hex(bytes)))
             .collect();
         install_transaction(&root, &intended).unwrap();
         fs::write(root.join("apps/a.yaml"), "new\n").unwrap();

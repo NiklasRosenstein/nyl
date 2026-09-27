@@ -1,5 +1,6 @@
 //! Project-owned schema inventories and shared immutable blobs.
 
+use nyl_core::digest::sha256_hex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
@@ -49,10 +50,6 @@ pub struct BuiltinIndex {
     pub collections: BTreeMap<String, String>,
 }
 
-pub fn digest(bytes: &[u8]) -> String {
-    nyl_core::digest::sha256_hex(bytes)
-}
-
 pub fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(nyl_core::digest::canonical_json_bytes(value)?)
 }
@@ -61,7 +58,7 @@ pub fn capabilities_fingerprint(capabilities: &ClusterKubernetesCapabilities) ->
     let mut normalized = capabilities.clone();
     normalized.api_versions.sort();
     normalized.api_versions.dedup();
-    Ok(digest(&json_bytes(&normalized)?))
+    Ok(sha256_hex(&json_bytes(&normalized)?))
 }
 
 pub fn vendor_root(project: &Path, config: &ProjectConfig) -> Result<PathBuf> {
@@ -140,7 +137,7 @@ pub fn read_blob(root: &Path, hash: &str) -> Result<Vec<u8>> {
             path.display()
         ))
     })?;
-    if digest(&bytes) != hash {
+    if sha256_hex(&bytes) != hash {
         return Err(NylError::validation(format!(
             "Schema digest mismatch: {}",
             path.display()
@@ -151,7 +148,7 @@ pub fn read_blob(root: &Path, hash: &str) -> Result<Vec<u8>> {
 }
 
 pub fn write_blob(root: &Path, bytes: &[u8]) -> Result<String> {
-    let hash = digest(bytes);
+    let hash = sha256_hex(bytes);
     atomic_write(&blob_path(root, &hash)?, bytes)?;
     Ok(hash)
 }
@@ -169,8 +166,8 @@ pub fn prepare_capture(
             let strict = json_bytes(&schemas.strict)?;
             let permissive = json_bytes(&schemas.permissive)?;
             let refs = SchemaDigests {
-                strict: digest(&strict),
-                permissive: digest(&permissive),
+                strict: sha256_hex(&strict),
+                permissive: sha256_hex(&permissive),
             };
             blobs.insert(refs.strict.clone(), strict);
             blobs.insert(refs.permissive.clone(), permissive);
