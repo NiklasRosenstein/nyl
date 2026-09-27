@@ -357,9 +357,10 @@ src/
   keep byte-identical output.
 - Commands that render another revision locate its project with
   `locate_checkout_project`: the current location first, then invocation
-  candidates, `[project] previous_paths`, and the worktree-root conventions.
-  Missing candidates are skipped, never required, so a recorded move stays
-  valid before and after it merges.
+  candidates and `[project] previous_paths`, never an unnamed location, so
+  another project in the repository cannot stand in for it. Missing
+  candidates are skipped, never required, so a recorded move stays valid
+  before and after it merges.
 - One target owns one publication repository/revision/path-prefix tuple. Targets sharing a
   repository revision must have disjoint prefixes.
 - `publish-tree` attributes reproducible output to a committed revision. A

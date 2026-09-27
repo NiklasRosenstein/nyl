@@ -112,19 +112,23 @@ impl CleanHeadWorktree {
         let checkout_root = temporary.path().join(checkout_name);
         WorktreeManager::get_or_create_worktree(&repository_root, "HEAD", oid, &checkout_root)
             .map_err(NylError::Git)?;
+        // Own the worktree before anything else can fail, so dropping the guard
+        // removes it on every error path.
+        let worktree = Self {
+            repository_root,
+            checkout_root,
+            _temporary: temporary,
+        };
         // The committed project may still be at an earlier location when the
         // move is not committed yet.
-        let clean_project_root =
-            crate::util::project_path::locate_checkout_project(&checkout_root, project_relative, &[], previous_paths)?
-                .directory;
-        Ok((
-            Self {
-                repository_root,
-                checkout_root,
-                _temporary: temporary,
-            },
-            clean_project_root,
-        ))
+        let clean_project_root = crate::util::project_path::locate_checkout_project(
+            &worktree.checkout_root,
+            project_relative,
+            &[],
+            previous_paths,
+        )?
+        .directory;
+        Ok((worktree, clean_project_root))
     }
 }
 

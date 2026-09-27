@@ -54,9 +54,10 @@ pub struct DiffTreeArgs {
     /// Source repository URL. Defaults to the current repository's origin.
     #[arg(long)]
     pub source_repository: Option<String>,
-    /// Checkout-relative project directory to try in the --source-ref checkout
-    /// when it has no project at the current location (repeatable). Missing
-    /// candidates are skipped, so a candidate for a completed move is harmless.
+    /// Project directory to try in the --source-ref checkout when it has no
+    /// project at the current location (repeatable). PATH is relative to the
+    /// worktree root, with an optional leading `/`. Missing candidates are
+    /// skipped, so a candidate for a completed move is harmless.
     #[arg(long, value_name = "PATH", requires = "source_ref")]
     pub source_project_path: Vec<String>,
     /// Write the unified diff to a file instead of stdout.

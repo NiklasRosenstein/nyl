@@ -4102,3 +4102,23 @@ fn test_publish_tree_verifies_an_uncommitted_project_move_against_the_committed_
     assert_eq!(index["sourceCommit"], source_commit.to_string());
     assert_eq!(index["dirty"], false);
 }
+
+#[test]
+fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_is_not_found() {
+    let (fixture, _destination, _seed, _source_commit) = publication_fixture();
+    let root = fixture.path();
+    // Moved without recording the earlier location, so HEAD has no project
+    // at any location the lookup tries.
+    move_project(root, "", "platform");
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root.join("platform"))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not locate the committed project"));
+
+    let worktrees = Repository::open(root).unwrap().worktrees().unwrap();
+    assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
+}

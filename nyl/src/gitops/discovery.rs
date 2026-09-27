@@ -79,13 +79,13 @@ impl GitOpsInventory {
         self.resources.get(&GitOpsInventoryKey::new(kind, name))
     }
 
-    /// Repeat discovery with a different output exclusion without re-reading
-    /// the project configuration.
     /// The roots that local paths resolve against.
     pub fn paths(&self) -> ProjectPaths {
         ProjectPaths::new(self.project_root.clone(), self.worktree_root.clone())
     }
 
+    /// Repeat discovery with a different output exclusion without re-reading
+    /// the project configuration.
     pub fn rediscover(&self, output_subtree: Option<&Path>) -> Result<Self> {
         discover_project_inventory(self.project_root.clone(), self.project_config.clone(), output_subtree)
     }

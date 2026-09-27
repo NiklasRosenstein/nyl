@@ -181,8 +181,6 @@ pub enum ProjectLocation {
     Candidate,
     /// An entry of the local project's `[project] previous_paths`.
     PreviousPath,
-    /// A worktree-root convention: `nyl.toml`, then `nyl/nyl.toml`.
-    Convention,
 }
 
 impl std::fmt::Display for ProjectLocation {
@@ -192,7 +190,6 @@ impl std::fmt::Display for ProjectLocation {
             Self::Same => "the current location",
             Self::Candidate => "--source-project-path",
             Self::PreviousPath => "project.previous_paths",
-            Self::Convention => "the worktree-root convention",
         })
     }
 }
@@ -216,9 +213,14 @@ pub struct LocatedProject {
 /// checkout:
 ///
 /// 1. `same`: the local project's worktree-relative directory;
-/// 2. `candidates`: checkout-relative directories from the invocation;
-/// 3. `previous_paths`: `/`-rooted entries of the local `nyl.toml`;
-/// 4. the worktree-root conventions of [`crate::config::ProjectConfig::find`].
+/// 2. `candidates`: worktree-rooted directories from the invocation, with an
+///    optional leading `/`;
+/// 3. `previous_paths`: `/`-rooted entries of the local `nyl.toml`.
+///
+/// Only locations the project itself or the invocation names are tried, so
+/// another project in the same repository is never picked up by accident.
+/// Every candidate is validated before the search, so a malformed one is an
+/// error even when an earlier candidate matches.
 pub fn locate_checkout_project(
     checkout: &Path,
     same: &Path,
@@ -231,22 +233,25 @@ pub fn locate_checkout_project(
     ordered.extend(
         previous_paths
             .iter()
-            .map(|path| (path.trim_start_matches('/').to_owned(), ProjectLocation::PreviousPath)),
+            .map(|path| (path.clone(), ProjectLocation::PreviousPath)),
     );
-    ordered.extend(
-        ["", crate::config::ProjectConfig::NESTED_CONFIG_DIR]
-            .into_iter()
-            .map(|path| (path.to_owned(), ProjectLocation::Convention)),
-    );
+    let field = |location| match location {
+        ProjectLocation::Same => "project directory",
+        ProjectLocation::Candidate => "--source-project-path",
+        ProjectLocation::PreviousPath => "project.previous_paths",
+    };
+    let ordered = ordered
+        .into_iter()
+        .map(|(path, location)| {
+            // Candidates are worktree-rooted; a leading `/` says so explicitly.
+            let path = path.strip_prefix('/').unwrap_or(&path).to_owned();
+            crate::resources::validate_relative_path(field(location), &path, true, true)?;
+            Ok((path, location))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut tried = Vec::new();
     for (path, location) in ordered {
-        let field = match location {
-            ProjectLocation::Same => "project directory",
-            ProjectLocation::Candidate => "--source-project-path",
-            ProjectLocation::PreviousPath => "project.previous_paths",
-            ProjectLocation::Convention => "project directory convention",
-        };
-        crate::resources::validate_relative_path(field, &path, true, true)?;
+        let field = field(location);
         let display = if path.is_empty() {
             "/".to_owned()
         } else {
@@ -397,11 +402,29 @@ mod tests {
         let found = locate(&checkout, "platform", &["gone"], &["/infra/config"]).unwrap();
         assert_eq!(found.location, ProjectLocation::PreviousPath);
 
-        let found = locate(&checkout, "platform", &["gone"], &["/gone"]).unwrap();
+        let found = locate(&checkout, "platform", &["/infra/config"], &[]).unwrap();
         assert_eq!(
             (found.path.as_str(), found.location),
-            ("nyl", ProjectLocation::Convention)
+            ("infra/config", ProjectLocation::Candidate)
         );
+    }
+
+    #[test]
+    fn test_locate_checkout_project_never_falls_back_to_an_unnamed_project() {
+        // A monorepo project at the root must not stand in for a new project
+        // at `platform/` that the baseline does not have yet.
+        let checkout = checkout_with_projects(&["", "nyl"]);
+        let error = locate(&checkout, "platform", &[], &[]).unwrap_err().to_string();
+        assert!(error.contains("/platform"), "{error}");
+    }
+
+    #[test]
+    fn test_locate_checkout_project_validates_candidates_that_are_never_reached() {
+        let checkout = checkout_with_projects(&["platform"]);
+        let error = locate(&checkout, "platform", &["../outside"], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--source-project-path"), "{error}");
     }
 
     #[test]
@@ -420,14 +443,7 @@ mod tests {
         let error = locate(&checkout, "platform", &["old"], &["/older"])
             .unwrap_err()
             .to_string();
-        for tried in [
-            "/platform",
-            "/old",
-            "/older",
-            "/nyl",
-            "previous_paths",
-            "--source-project-path",
-        ] {
+        for tried in ["/platform", "/old", "/older", "previous_paths", "--source-project-path"] {
             assert!(error.contains(tried), "{tried}: {error}");
         }
     }
