@@ -10,6 +10,8 @@ use crate::{secrets::SecretsConfig, Result};
 
 mod template_value;
 
+pub use template_value::TemplateValueExpander;
+
 pub struct TemplateEngine {
     env: Environment<'static>,
 }
@@ -47,10 +49,10 @@ impl TemplateEngine {
         Ok(result)
     }
 
-    /// Expand a template value of `field`: `${ … }` expressions, or `{{ … }}`
+    /// An expander for template values: `${ … }` expressions, or `{{ … }}`
     /// syntax protected from the structural pass with `{% raw %}`.
-    pub fn expand_template_value(&self, field: &str, template: &str, context: &serde_json::Value) -> Result<String> {
-        template_value::expand(&self.env, field, template, context)
+    pub fn template_values(&self) -> TemplateValueExpander {
+        TemplateValueExpander::new(&self.env)
     }
 }
 
