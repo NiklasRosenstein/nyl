@@ -118,10 +118,13 @@ pull request moves <code dir="auto">nyl.toml</code> into <code dir="auto">nyl/</
 skips every candidate that holds no <code dir="auto">nyl.toml</code>:</p>
 <ol>
 <li>the directory that matches the current project;</li>
-<li>each <code dir="auto">--source-project-path &#x3C;PATH></code>, relative to the checkout (repeatable);</li>
-<li>each entry of <code dir="auto">[project] previous_paths</code> in the current <code dir="auto">nyl.toml</code>;</li>
-<li><code dir="auto">nyl.toml</code>, then <code dir="auto">nyl/nyl.toml</code>, at the checkout root.</li>
+<li>each <code dir="auto">--source-project-path &#x3C;PATH></code>, relative to the worktree root with an
+optional leading <code dir="auto">/</code> (repeatable);</li>
+<li>each entry of <code dir="auto">[project] previous_paths</code> in the current <code dir="auto">nyl.toml</code>.</li>
 </ol>
+<p>Nyl never guesses another location, so in a repository with several projects
+a new project is never compared against a different one; when none of these
+holds a project, the command fails and lists every path it tried.</p>
 <p>Because missing candidates are skipped, record a move in <code dir="auto">previous_paths</code> in
 the commit that performs it: the pull request’s own diff finds the old
 location, and after the merge the entry no longer matters. A
