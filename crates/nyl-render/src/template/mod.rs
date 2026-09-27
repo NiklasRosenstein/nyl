@@ -8,6 +8,8 @@ use minijinja::Environment;
 
 use crate::{secrets::SecretsConfig, Result};
 
+mod template_value;
+
 pub struct TemplateEngine {
     env: Environment<'static>,
 }
@@ -43,6 +45,12 @@ impl TemplateEngine {
     pub fn render_named(&self, name: &str, template: &str, context: &serde_json::Value) -> Result<String> {
         let result = self.env.render_named_str(name, template, context)?;
         Ok(result)
+    }
+
+    /// Expand a template value of `field`: `${ … }` expressions, or `{{ … }}`
+    /// syntax protected from the structural pass with `{% raw %}`.
+    pub fn expand_template_value(&self, field: &str, template: &str, context: &serde_json::Value) -> Result<String> {
+        template_value::expand(&self.env, field, template, context)
     }
 }
 

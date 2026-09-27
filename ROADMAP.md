@@ -634,7 +634,7 @@ ambiguous command semantics. Met by the
 - [ ] Apply target bindings in direct commands and add `--input`/`--inputs`;
   a target that selects no group containing the Release fails unless
   `--application-group` or `--defaults-only` is given.
-- [ ] Require unique generated Argo CD names across every pair of targets whose
+- [x] Require unique generated Argo CD names across every pair of targets whose
   instances resolve to the same cluster and namespace, including implicit
   per-target instances.
 - [ ] Record resolved inputs in the dependency recorder, render-cache key, and
@@ -643,7 +643,7 @@ ambiguous command semantics. Met by the
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
-- [ ] Expand template values (`${ … }`) in fields rendered later than the
+- [x] Expand template values (`${ … }`) in fields rendered later than the
   structural pass, starting with `applicationNameTemplate`, keeping the
   `{% raw %}` form working.
 - [x] Extract `nyl-core` and `nyl-render` from the current crate without

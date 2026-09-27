@@ -225,7 +225,7 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
             }
         }
     }
-    validate_same_instance_catalog_collisions(inventory, instance_count, options)?;
+    validate_argocd_name_collisions(inventory, instance_count, options)?;
     Ok(())
 }
 
@@ -1548,10 +1548,16 @@ fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: 
     }
 }
 
+/// Names generated into one Argo CD namespace must be unambiguous across targets.
+///
+/// Contract: [Environments and DeploymentTargets](../../../../design/release-inputs.md#environments-and-deploymenttargets).
+/// Targets collide when their instances resolve to the same control-plane
+/// Cluster and namespace, including the implicit per-target instances, not only
+/// when they share an explicit ArgoCDInstance.
 // Keep the cross-target checks together so every generated Argo CD identity is
 // audited in one pass over each target's effective configuration.
 #[allow(clippy::too_many_lines)]
-fn validate_same_instance_catalog_collisions(
+fn validate_argocd_name_collisions(
     inventory: &GitOpsInventory,
     instance_count: usize,
     options: TreeRenderOptions,
@@ -1575,6 +1581,10 @@ fn validate_same_instance_catalog_collisions(
 
     for target in targets {
         let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+        // Argo CD names live in one namespace of one control-plane cluster,
+        // whichever instance resource, explicit or implicit, put them there.
+        let control_cluster = argocd.cluster.metadata.name.clone();
+        let control_namespace = argocd.resource.spec.namespace.clone();
         if target.spec.catalog_application.enabled {
             let parent_name = target
                 .spec
@@ -1582,15 +1592,11 @@ fn validate_same_instance_catalog_collisions(
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
-            let key = (
-                argocd.identity.clone(),
-                argocd.resource.spec.namespace.clone(),
-                parent_name.clone(),
-            );
+            let key = (control_cluster.clone(), control_namespace.clone(), parent_name.clone());
             if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
                 return Err(NylError::config(format!(
-                    "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {}/{} on ArgoCDInstance {:?}; customize spec.catalogApplication.name",
-                    target.metadata.name, argocd.resource.spec.namespace, parent_name, argocd.identity
+                    "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}; customize spec.catalogApplication.name",
+                    target.metadata.name
                 )));
             }
         }
@@ -1617,14 +1623,14 @@ fn validate_same_instance_catalog_collisions(
             }
             if group.spec.application_name_template.is_none() {
                 let key = (
-                    argocd.identity.clone(),
+                    control_cluster.clone(),
                     group.spec.application_namespace.clone(),
                     group.metadata.name.clone(),
                 );
                 if let Some(previous) = default_application_owners.insert(key, target.metadata.name.clone()) {
                     return Err(NylError::config(format!(
-                        "DeploymentTargets {previous:?} and {:?} select ApplicationGroup {:?} on ArgoCDInstance {:?} while using the default Release Application names; set ApplicationGroup.spec.applicationNameTemplate, for example \"{{{{ target.metadata.name }}}}-{{{{ release.metadata.name }}}}\"",
-                        target.metadata.name, group.metadata.name, argocd.identity
+                        "DeploymentTargets {previous:?} and {:?} select ApplicationGroup {:?} with Argo CD Applications in namespace {:?} on Cluster {control_cluster:?} while using the default Release Application names; set ApplicationGroup.spec.applicationNameTemplate, for example '${{ target.metadata.name }}-${{ release.metadata.name }}'",
+                        target.metadata.name, group.metadata.name, group.spec.application_namespace
                     )));
                 }
             }
@@ -1647,11 +1653,7 @@ fn validate_same_instance_catalog_collisions(
                 (group.metadata.name.clone(), name, true, false)
             };
             if rendered {
-                let key = (
-                    argocd.identity.clone(),
-                    argocd.resource.spec.namespace.clone(),
-                    project_name.clone(),
-                );
+                let key = (control_cluster.clone(), control_namespace.clone(), project_name.clone());
                 let owner = (
                     target.metadata.name.clone(),
                     group.metadata.name.clone(),
@@ -1668,14 +1670,11 @@ fn validate_same_instance_catalog_collisions(
                         "a target-specific AppProjectDefinition name or management: External"
                     };
                     return Err(NylError::config(format!(
-                        "{}/{} and {}/{} generate the same AppProject {}/{} on ArgoCDInstance {:?} (catalog id {catalog_id:?}); customize {field}",
+                        "{}/{} and {}/{} generate the same AppProject {control_namespace}/{project_name} in Argo CD on Cluster {control_cluster:?} (catalog id {catalog_id:?}); customize {field}",
                         previous.0,
                         previous.1,
                         target.metadata.name,
                         group.metadata.name,
-                        argocd.resource.spec.namespace,
-                        project_name,
-                        argocd.identity
                     )));
                 }
                 project_owners.insert(key, owner);
@@ -2349,7 +2348,11 @@ fn render_application_name(
         .cloned()
         .expect("template context is an object");
     context.insert("release".to_string(), serde_json::to_value(release)?);
-    TemplateEngine::new().render(template, &Value::Object(context))
+    TemplateEngine::new().expand_template_value(
+        "ApplicationGroup.spec.applicationNameTemplate",
+        template,
+        &Value::Object(context),
+    )
 }
 
 fn apply_release_application_override(

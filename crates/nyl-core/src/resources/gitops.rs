@@ -468,7 +468,7 @@ pub struct ApplicationGroupSpec {
     /// Relative output directory beneath the target prefix. Defaults to the group name.
     #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
-    /// Generated workload Application name template, with `release` context. Defaults to the Release name; use target-qualified templates when targets share an Argo CD namespace.
+    /// Generated workload Application name, as a template value expanded once per Release: `${ expression }` is evaluated with the target context plus `release`, the rendered Release, and `$${` writes a literal `${`. Defaults to the Release name; use target-qualified names such as `${ target.metadata.name }-${ release.metadata.name }` when targets share an Argo CD namespace.
     #[serde(rename = "applicationNameTemplate", skip_serializing_if = "Option::is_none")]
     pub application_name_template: Option<String>,
     /// Workload Application sync policy. Generated Applications include apply-only-out-of-sync and server-side apply unless explicitly overridden.

@@ -1314,6 +1314,78 @@ spec:
         .stderr(predicate::str::contains("applicationNameTemplate"));
 }
 
+const STAGING_TARGET_ON_KASOKU: &str = r#"apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: staging
+  labels:
+    environment: production
+spec:
+  clusterRef:
+    name: kasoku
+  publication:
+    repositoryRef:
+      name: deploy
+    revision: deploy/staging
+    pathPrefix: staging
+"#;
+
+#[test]
+fn implicit_argocd_instances_on_one_cluster_require_explicit_cross_target_names() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU,
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("on Cluster \"kasoku\""))
+        .stderr(predicate::str::contains(
+            "'${ target.metadata.name }-${ release.metadata.name }'",
+        ));
+}
+
+#[test]
+fn application_name_template_values_expand_per_release() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectRef: workloads\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let tree = read_tree(&output);
+    let application = tree
+        .iter()
+        .find(|(path, _)| path.to_string_lossy().contains("_nyl/catalog") && path.to_string_lossy().contains("api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_else(|| {
+            panic!(
+                "no catalog Application for api in {:?}",
+                tree.keys().collect::<Vec<_>>()
+            )
+        });
+    assert!(application.contains("name: production-api"), "{application}");
+}
+
 #[test]
 fn force_repairs_missing_and_modified_owned_files() {
     let fixture = fixture();
