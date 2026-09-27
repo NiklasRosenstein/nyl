@@ -1,0 +1,764 @@
+/// Configuration module for project settings
+///
+/// This module handles:
+/// - `nyl.toml` loading
+/// - Path resolution
+/// - JSON schema generation for `nyl.toml`
+pub mod schema;
+
+use crate::util::fs::{resolve_path, resolve_paths};
+use crate::{NylError, Result};
+use clap::ValueEnum;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+fn default_components_search_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from("components")]
+}
+
+fn default_helm_chart_search_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from(".")]
+}
+
+fn default_gitops_scaffold_path() -> PathBuf {
+    PathBuf::from("config")
+}
+
+fn default_vendor_path() -> PathBuf {
+    PathBuf::from("vendor")
+}
+
+const fn default_vendor_lfs_threshold_bytes() -> u64 {
+    1024 * 1024
+}
+
+fn default_aliases() -> BTreeMap<String, String> {
+    BTreeMap::new()
+}
+
+pub use nyl_core::settings::StripEmptyMetadataLabelsMode;
+
+/// Controls whether remote renderer inputs may use an in-tree vendor snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorMode {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+impl VendorMode {
+    /// The value written to and read from `vendor.mode` in `nyl.toml`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Preferred => "preferred",
+            Self::Required => "required",
+        }
+    }
+}
+
+/// Project-global remote artifact vendoring settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VendorSettings {
+    /// Resolution policy for vendored remote inputs.
+    pub mode: VendorMode,
+
+    /// In-tree directory containing the generated lock and artifact blobs.
+    #[serde(default = "default_vendor_path")]
+    pub path: PathBuf,
+
+    /// Text blobs at least this large are tracked through Git LFS.
+    #[serde(default = "default_vendor_lfs_threshold_bytes")]
+    pub lfs_threshold_bytes: u64,
+}
+
+/// Project settings in `[project]` section of `nyl.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectSettings {
+    /// Search paths for local component charts.
+    pub components_search_paths: Vec<PathBuf>,
+
+    /// Search paths for Helm chart names.
+    pub helm_chart_search_paths: Vec<PathBuf>,
+
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub gitops_scaffold_path: PathBuf,
+
+    /// Earlier locations of this project's directory, as paths from the Git
+    /// worktree root such as `/` or `/platform`. Commands that render another
+    /// revision of the repository, such as `diff-tree --against source`, look
+    /// for the project there when the revision has none at the current
+    /// location, so a move stays comparable. Entries are harmless once every
+    /// compared revision has the project at its current location.
+    pub previous_paths: Vec<String>,
+
+    /// Aliases for component-like resources keyed as `<apiVersion>/<kind>`.
+    /// Values are component kind targets (local component path or remote shortcut URL).
+    pub aliases: BTreeMap<String, String>,
+
+    /// Control when empty `metadata.labels` maps are stripped from emitted manifests.
+    pub strip_empty_metadata_labels: StripEmptyMetadataLabelsMode,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            components_search_paths: default_components_search_paths(),
+            helm_chart_search_paths: default_helm_chart_search_paths(),
+            gitops_scaffold_path: default_gitops_scaffold_path(),
+            previous_paths: Vec::new(),
+            aliases: default_aliases(),
+            strip_empty_metadata_labels: StripEmptyMetadataLabelsMode::default(),
+        }
+    }
+}
+
+/// Root structure of `nyl.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectFile {
+    pub project: ProjectSettings,
+
+    /// Final rendered-manifest validation policy.
+    pub validation: crate::validation::ValidationSettings,
+
+    /// Defaults for explicit cluster capture.
+    pub capture: crate::validation::CaptureSettings,
+
+    /// Optional project-global artifact vendoring policy.
+    pub vendor: Option<VendorSettings>,
+}
+
+/// Wrapper for project configuration file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectConfig {
+    /// Path to the configuration file (None if using defaults).
+    pub file: Option<PathBuf>,
+
+    /// The loaded project configuration.
+    pub config: ProjectFile,
+}
+
+impl ProjectConfig {
+    /// Config file names searched in priority order.
+    pub const FILENAMES: &'static [&'static str] = &["nyl.toml"];
+
+    /// Directory at the Git worktree root that may hold the project's
+    /// `nyl.toml` next to its configuration files.
+    pub const NESTED_CONFIG_DIR: &'static str = "nyl";
+
+    /// Find the project configuration file
+    ///
+    /// Searches the starting directory and its ancestors for `nyl.toml`; the
+    /// nearest one wins. At a Git worktree root without its own `nyl.toml`,
+    /// `nyl/nyl.toml` is checked before the search continues above the
+    /// worktree, so a project that keeps `nyl.toml` beside its configuration
+    /// in `nyl/` is found from anywhere in the worktree.
+    ///
+    /// # Arguments
+    /// * `cwd` - Starting directory (defaults to current working directory)
+    ///
+    /// # Returns
+    /// * `Some(PathBuf)` - Path to config file if found
+    /// * `None` - No config file found
+    pub fn find(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
+        let start = match cwd {
+            Some(path) => std::path::absolute(path)?,
+            None => std::env::current_dir()?,
+        };
+        for directory in start.ancestors() {
+            let candidate = directory.join("nyl.toml");
+            if candidate.is_file() {
+                return Ok(Some(candidate));
+            }
+            if directory.join(".git").exists() {
+                let nested = directory.join(Self::NESTED_CONFIG_DIR).join("nyl.toml");
+                if nested.is_file() {
+                    return Ok(Some(nested));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Load project configuration from file.
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_from_dir(file, None)
+    }
+
+    /// Load project configuration from file in a specific directory context.
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    /// * `dir` - Optional directory to search from (defaults to current directory)
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
+        let file = match file {
+            Some(f) => Some(f),
+            None => Self::find(dir)?,
+        };
+
+        if let Some(ref path) = file {
+            Self::load_from_file(path)
+        } else {
+            Ok(Self {
+                file: None,
+                config: ProjectFile::default(),
+            })
+        }
+    }
+
+    /// Load project configuration with warning if no config file found.
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_with_warning(file: Option<PathBuf>) -> Result<Self> {
+        Self::load_with_warning_from_dir(file, None)
+    }
+
+    /// Load project configuration with warning from a specific directory context
+    ///
+    /// # Arguments
+    /// * `file` - Optional path to config file
+    /// * `dir` - Optional directory to search from
+    ///
+    /// # Returns
+    /// * ProjectConfig with loaded or default configuration
+    pub fn load_with_warning_from_dir(file: Option<PathBuf>, dir: Option<&Path>) -> Result<Self> {
+        let file = match file {
+            Some(f) => Some(f),
+            None => Self::find(dir)?,
+        };
+
+        if let Some(ref path) = file {
+            Self::load_from_file(path)
+        } else {
+            tracing::warn!("No project configuration file found");
+            tracing::info!("Using default settings. Run 'nyl init' to create a project.");
+            Ok(Self {
+                file: None,
+                config: ProjectFile::default(),
+            })
+        }
+    }
+
+    /// Load configuration from a specific file.
+    fn load_from_file(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(NylError::Config(format!(
+                "Configuration file does not exist: {}",
+                path.display()
+            )));
+        }
+
+        if path.file_name().and_then(|s| s.to_str()) != Some("nyl.toml") {
+            return Err(NylError::Config(format!(
+                "Unsupported project configuration file '{}'. Use 'nyl.toml'.",
+                path.display()
+            )));
+        }
+
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            return Err(NylError::Config(format!(
+                "Unsupported project configuration format for '{}'. Only TOML is supported.",
+                path.display()
+            )));
+        }
+
+        tracing::debug!("Reading configuration file: {}", path.display());
+
+        let contents = std::fs::read_to_string(path)?;
+        reject_removed_configuration(&contents)?;
+        let mut project: ProjectFile =
+            toml::from_str(&contents).map_err(|e| NylError::Config(format!("Failed to parse TOML config: {}", e)))?;
+
+        // Resolve paths relative to config file parent directory.
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        project.project.components_search_paths = resolve_paths(&project.project.components_search_paths, base_dir);
+        project.project.helm_chart_search_paths = resolve_paths(&project.project.helm_chart_search_paths, base_dir);
+        project.project.gitops_scaffold_path = resolve_path(&project.project.gitops_scaffold_path, base_dir);
+        for previous in &project.project.previous_paths {
+            if !previous.starts_with('/') {
+                return Err(NylError::config(format!(
+                    "project.previous_paths entry {previous:?} must start with '/' and name a directory from the Git \
+                     worktree root"
+                )));
+            }
+            if previous != "/" {
+                crate::util::project_path::validate_local_path("project.previous_paths", previous)?;
+            }
+        }
+        if let Some(vendor) = &mut project.vendor {
+            if vendor.path.is_absolute() {
+                return Err(NylError::config(
+                    "vendor.path must be relative to the directory containing nyl.toml",
+                ));
+            }
+            if vendor.path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            }) {
+                return Err(NylError::config(
+                    "vendor.path must not contain parent-directory components",
+                ));
+            }
+            vendor.path = resolve_path(&vendor.path, base_dir);
+            if vendor.path == base_dir || !vendor.path.starts_with(base_dir) {
+                return Err(NylError::config(
+                    "vendor.path must resolve to a directory beneath the project root",
+                ));
+            }
+        }
+
+        Ok(Self {
+            file: Some(path.to_path_buf()),
+            config: project,
+        })
+    }
+
+    /// Component roots from configuration.
+    pub fn get_components_search_paths(&self) -> &[PathBuf] {
+        &self.config.project.components_search_paths
+    }
+
+    /// Helm chart search paths from configuration.
+    pub fn get_helm_chart_search_paths(&self) -> &[PathBuf] {
+        &self.config.project.helm_chart_search_paths
+    }
+
+    /// Directory where GitOps configuration resources are scaffolded.
+    pub fn get_gitops_scaffold_path(&self) -> &Path {
+        &self.config.project.gitops_scaffold_path
+    }
+
+    /// Return alias target for a fully qualified key (`<apiVersion>/<kind>`).
+    pub fn get_alias_target(&self, key: &str) -> Option<&str> {
+        self.config.project.aliases.get(key).map(String::as_str)
+    }
+
+    /// Return alias target for an apiVersion/kind pair.
+    pub fn get_alias_target_for_kind(&self, api_version: &str, kind: &str) -> Option<&str> {
+        let key = format!("{}/{}", api_version, kind);
+        self.get_alias_target(&key)
+    }
+
+    /// Return the configured empty-label stripping mode for emitted manifests.
+    pub fn get_strip_empty_metadata_labels_mode(&self) -> StripEmptyMetadataLabelsMode {
+        self.config.project.strip_empty_metadata_labels
+    }
+
+    /// Project-global artifact vendoring settings.
+    pub fn vendor(&self) -> Option<&VendorSettings> {
+        self.config.vendor.as_ref()
+    }
+
+    pub fn vendor_lock_path(&self) -> Option<PathBuf> {
+        self.vendor().map(|settings| settings.path.join("lock.yaml"))
+    }
+
+    /// Resolve a local component kind (`<apiVersion>/<kind>`) to a chart directory.
+    pub fn resolve_component_chart_dir(&self, kind: &str) -> Result<PathBuf> {
+        for root in self.get_components_search_paths() {
+            let chart_dir = root.join(kind);
+            if chart_dir.join("Chart.yaml").exists() {
+                return Ok(chart_dir);
+            }
+        }
+
+        Err(NylError::Config(format!(
+            "Component '{}' was not found in configured components_search_paths",
+            kind
+        )))
+    }
+
+    /// Validate the configuration
+    ///
+    /// Returns a list of validation warnings
+    pub fn validate(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        for path in self.get_components_search_paths() {
+            if !path.exists() {
+                warnings.push(format!("Components search path does not exist: {}", path.display()));
+            }
+        }
+
+        for path in self.get_helm_chart_search_paths() {
+            if !path.exists() {
+                warnings.push(format!("Helm chart search path does not exist: {}", path.display()));
+            }
+        }
+
+        for (key, target) in &self.config.project.aliases {
+            if !key.contains('/') {
+                warnings.push(format!(
+                    "Alias key '{}' is invalid; expected '<apiVersion>/<kind>'",
+                    key
+                ));
+            }
+            if target.trim().is_empty() {
+                warnings.push(format!("Alias '{}' has an empty target", key));
+            }
+        }
+
+        warnings
+    }
+}
+
+fn reject_removed_configuration(contents: &str) -> Result<()> {
+    let value: toml::Value =
+        toml::from_str(contents).map_err(|error| NylError::Config(format!("Failed to parse TOML config: {error}")))?;
+    if value.get("profile").is_some() {
+        return Err(NylError::config(
+            "[profile.*] is no longer supported. Define Cluster and DeploymentTarget resources under config/ and select a target with --target.",
+        ));
+    }
+    if value
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|project| project.contains_key("kubernetes"))
+    {
+        return Err(NylError::config(
+            "[project.kubernetes] is no longer supported. Store kubeVersion and apiVersions in a Cluster resource under spec.kubernetes.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::needless_raw_string_hashes)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_default_project_settings() {
+        let settings = ProjectSettings::default();
+        assert_eq!(settings.components_search_paths, vec![PathBuf::from("components")]);
+        assert_eq!(settings.helm_chart_search_paths, vec![PathBuf::from(".")]);
+        assert_eq!(settings.gitops_scaffold_path, PathBuf::from("config"));
+        assert!(settings.aliases.is_empty());
+        assert_eq!(
+            settings.strip_empty_metadata_labels,
+            StripEmptyMetadataLabelsMode::Always
+        );
+    }
+
+    #[test]
+    fn test_load_toml_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+components_search_paths = ["my-components"]
+helm_chart_search_paths = ["lib", "vendor"]
+gitops_scaffold_path = "gitops-config"
+strip_empty_metadata_labels = "argocd"
+[project.aliases]
+"myapi.io/v1/MyKind" = "oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
+        assert_eq!(config.file, Some(config_path.clone()));
+
+        assert_eq!(config.get_components_search_paths().len(), 1);
+        assert_eq!(config.get_helm_chart_search_paths().len(), 2);
+        assert_eq!(
+            config.get_alias_target_for_kind("myapi.io/v1", "MyKind"),
+            Some("oci://registry-1.docker.io/bitnamicharts/nginx@18.2.4")
+        );
+        assert_eq!(
+            config.get_strip_empty_metadata_labels_mode(),
+            StripEmptyMetadataLabelsMode::Argocd
+        );
+        assert!(config.get_components_search_paths()[0].is_absolute());
+        assert!(config.get_helm_chart_search_paths()[0].is_absolute());
+        assert!(config.get_helm_chart_search_paths()[1].is_absolute());
+        assert_eq!(config.get_gitops_scaffold_path(), temp.path().join("gitops-config"));
+    }
+
+    #[test]
+    fn loads_project_global_vendor_settings_relative_to_config() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(
+            &config_path,
+            "[vendor]\nmode = \"required\"\npath = \"third-party\"\nlfs_threshold_bytes = 2048\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let vendor = config.vendor().unwrap();
+        assert_eq!(vendor.mode, VendorMode::Required);
+        assert_eq!(vendor.path, temp.path().join("third-party"));
+        assert_eq!(vendor.lfs_threshold_bytes, 2048);
+        assert_eq!(
+            config.vendor_lock_path().unwrap(),
+            temp.path().join("third-party/lock.yaml")
+        );
+    }
+
+    #[test]
+    fn rejects_vendor_paths_that_escape_the_project() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"../vendor\"\n").unwrap();
+        assert!(ProjectConfig::load(Some(config_path))
+            .unwrap_err()
+            .to_string()
+            .contains("parent-directory"));
+    }
+
+    #[test]
+    fn test_load_no_config_returns_defaults() {
+        let temp = TempDir::new().unwrap();
+
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap();
+        assert!(config.file.is_none());
+        assert_eq!(config.get_components_search_paths(), &[PathBuf::from("components")]);
+        assert_eq!(config.get_helm_chart_search_paths(), &[PathBuf::from(".")]);
+        assert_eq!(config.get_gitops_scaffold_path(), Path::new("config"));
+        assert!(config.config.project.aliases.is_empty());
+        assert_eq!(
+            config.get_strip_empty_metadata_labels_mode(),
+            StripEmptyMetadataLabelsMode::Always
+        );
+    }
+
+    #[test]
+    fn test_validate_aliases() {
+        let config = ProjectConfig {
+            file: None,
+            config: ProjectFile {
+                project: ProjectSettings {
+                    aliases: BTreeMap::from([
+                        ("bad-key".to_string(), "oci://example.com/app@1.0.0".to_string()),
+                        ("good.io/v1/Empty".to_string(), "   ".to_string()),
+                    ]),
+                    ..ProjectSettings::default()
+                },
+                vendor: None,
+                ..ProjectFile::default()
+            },
+        };
+
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| w.contains("Alias key 'bad-key' is invalid")));
+        assert!(warnings.iter().any(|w| w.contains("has an empty target")));
+    }
+
+    #[test]
+    fn test_resolve_component_chart_dir() {
+        let temp = TempDir::new().unwrap();
+        let root1 = temp.path().join("comps1");
+        let root2 = temp.path().join("comps2");
+        fs::create_dir_all(root1.join("v1.example.io/WebApp")).unwrap();
+        fs::create_dir_all(root2.join("v1.example.io/WebApp")).unwrap();
+        fs::write(root2.join("v1.example.io/WebApp/Chart.yaml"), "apiVersion = \"v2\"").unwrap();
+
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(
+            &config_path,
+            r#"[project]
+components_search_paths = ["comps1", "comps2"]
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        let resolved = config.resolve_component_chart_dir("v1.example.io/WebApp").unwrap();
+        assert_eq!(resolved, root2.join("v1.example.io/WebApp"));
+    }
+
+    #[test]
+    fn test_find_uses_nyl_toml_only() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl-project.yaml"), "settings: {}").unwrap();
+        fs::write(temp.path().join("nyl.toml"), "[project]").unwrap();
+
+        let found = ProjectConfig::find(Some(temp.path())).unwrap();
+        assert_eq!(found, Some(temp.path().join("nyl.toml")));
+    }
+
+    /// A temporary Git worktree whose project keeps `nyl.toml` in `nyl/`.
+    fn worktree_with_nested_config() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+        fs::create_dir_all(temp.path().join("nyl")).unwrap();
+        fs::create_dir_all(temp.path().join("applications/web")).unwrap();
+        fs::write(temp.path().join("nyl/nyl.toml"), "[project]").unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_find_falls_back_to_nested_config_at_the_worktree_root() {
+        let temp = worktree_with_nested_config();
+
+        for start in [temp.path().to_path_buf(), temp.path().join("applications/web")] {
+            let found = ProjectConfig::find(Some(&start)).unwrap();
+            assert_eq!(
+                found,
+                Some(temp.path().join("nyl/nyl.toml")),
+                "from {}",
+                start.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_prefers_the_nearest_nyl_toml_over_the_nested_fallback() {
+        let temp = worktree_with_nested_config();
+        fs::write(temp.path().join("applications/nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(&temp.path().join("applications/web"))).unwrap();
+        assert_eq!(found, Some(temp.path().join("applications/nyl.toml")));
+
+        fs::write(temp.path().join("nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(temp.path())).unwrap();
+        assert_eq!(found, Some(temp.path().join("nyl.toml")));
+    }
+
+    #[test]
+    fn test_find_ignores_nested_config_outside_a_worktree_root() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join("project/nyl")).unwrap();
+        fs::write(temp.path().join("project/nyl/nyl.toml"), "[project]").unwrap();
+        let found = ProjectConfig::find(Some(&temp.path().join("project"))).unwrap();
+        assert_ne!(found, Some(temp.path().join("project/nyl/nyl.toml")));
+    }
+
+    #[test]
+    fn test_validate_missing_paths() {
+        let config = ProjectConfig {
+            file: None,
+            config: ProjectFile::default(),
+        };
+
+        let warnings = config.validate();
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Components search path does not exist")));
+    }
+
+    #[test]
+    fn test_malformed_toml() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        fs::write(&config_path, "[project\ninvalid toml").unwrap();
+
+        let result = ProjectConfig::load(Some(config_path));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse TOML"));
+    }
+
+    #[test]
+    fn test_reject_legacy_filename() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl-project.toml");
+        fs::write(&config_path, "[project]").unwrap();
+
+        let result = ProjectConfig::load(Some(config_path));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported project configuration file"));
+    }
+
+    #[test]
+    fn test_removed_profile_configuration_has_migration_error() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+
+[profile.dev.values]
+replicas = 1
+image_tag = "dev-latest"
+
+[profile.prod.values]
+replicas = 3
+image_tag = "v1.0.0"
+
+[profile.prod.kubernetes]
+kube_version = "1.30.0"
+api_versions = ["v1", "apps/v1"]
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[profile.*] is no longer supported"));
+        assert!(error.contains("--target"));
+    }
+
+    #[test]
+    fn test_removed_project_kubernetes_has_migration_error() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project.kubernetes]
+context = "project-cluster"
+
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+        let error = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(error.contains("[project.kubernetes] is no longer supported"));
+        assert!(error.contains("Cluster resource"));
+    }
+
+    #[test]
+    fn test_removed_profile_invalid_shape_still_has_migration_error() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+
+[profile.dev]
+replicas = 1
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("[profile.*] is no longer supported"));
+    }
+
+    #[test]
+    fn test_invalid_strip_empty_metadata_labels_mode_rejected() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+
+        let toml_content = r#"
+[project]
+strip_empty_metadata_labels = "sometimes"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("Failed to parse TOML config"));
+        assert!(err.contains("strip_empty_metadata_labels"));
+    }
+}

@@ -651,7 +651,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::gitops::tree=debug")
+        .env("RUST_LOG", "nyl_render::gitops::tree=debug")
         .args([
             "render-tree",
             ".",
@@ -1077,7 +1077,7 @@ metadata:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::render::session=debug")
+        .env("RUST_LOG", "nyl_render::render::session=debug")
         .args(args)
         .assert()
         .success()
@@ -1143,7 +1143,7 @@ data:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::helm::template=debug")
+        .env("RUST_LOG", "nyl_render::helm::template=debug")
         .args(args)
         .assert()
         .success()

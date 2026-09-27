@@ -75,7 +75,12 @@ fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
 }
 
 fn write_all_schemas(output_dir: &Path) -> Result<()> {
-    for (path, schema) in schema_artifacts() {
+    let mut artifacts = schema_artifacts();
+    artifacts.insert(
+        "nyl.schema.json".into(),
+        crate::config::schema::generate_project_config_schema(),
+    );
+    for (path, schema) in artifacts {
         let path = output_dir.join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

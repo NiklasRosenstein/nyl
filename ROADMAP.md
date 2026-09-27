@@ -28,16 +28,16 @@ about Nyl's current CLI.
 | ID | Milestone | Status | Depends on |
 | --- | --- | --- | --- |
 | M1 | Unit, input, state, and promotion contract | Done | — |
-| M2 | Release inputs without orchestration | Planned | M1 |
+| M2 | Release inputs without orchestration | In progress | M1 |
 | M3 | Orchestration core with a constrained command unit | Planned | M1 |
 | M4 | Container image and Terraform units | Planned | M3 |
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** implement M2 against the
-[Release inputs contract](design/release-inputs.md), starting with the
-extraction of `nyl-core` and `nyl-render`. M3 can start in parallel from the
+**Next step:** implement the Release inputs of M2 against the
+[Release inputs contract](design/release-inputs.md) on top of the extracted
+`nyl-core` and `nyl-render` crates. M3 can start in parallel from the
 [orchestration core contract](design/orchestration-core.md) and its
 executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
 its scenario harness runs first.
@@ -646,8 +646,9 @@ ambiguous command semantics. Met by the
 - [ ] Expand template values (`${ … }`) in fields rendered later than the
   structural pass, starting with `applicationNameTemplate`, keeping the
   `{% raw %}` form working.
-- [ ] Extract `nyl-core` and `nyl-render` from the current crate without
-  behavior change, per the implementation architecture.
+- [x] Extract `nyl-core` and `nyl-render` from the current crate without
+  behavior change, per the implementation architecture. The `nyl` package
+  keeps the CLI role, and no crate is published to crates.io.
 
 **Exit criterion:** a target renders Releases from static, locked external, and
 same-branch publication state inputs, committed or carried, through
@@ -813,14 +814,14 @@ reasons to delay independent work.
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
 
-- [Nyl rendering session and bundle](nyl/src/render/session.rs)
-- [Nyl components](nyl/src/components/mod.rs)
-- [Kubernetes GitOps resource model](nyl/src/resources/gitops.rs)
+- [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
+- [Nyl components](crates/nyl-render/src/components/mod.rs)
+- [Kubernetes GitOps resource model](crates/nyl-core/src/resources/gitops.rs)
 - [Source-lock updates](nyl/src/cli/commands/source.rs)
-- [Rendered-file ownership reconciliation](nyl/src/gitops/reconcile.rs)
+- [Rendered-file ownership reconciliation](crates/nyl-render/src/gitops/reconcile.rs)
 - [Rendered-tree publication](nyl/src/cli/commands/publish_tree.rs)
-- [Git worktrees](nyl/src/git/worktree.rs)
+- [Git worktrees](crates/nyl-render/src/git/worktree.rs)
 - [Direct Kubernetes application](nyl/src/cli/commands/apply.rs)
-- [Kubernetes release state](nyl/src/kubernetes/state.rs)
+- [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
 
 These are navigation aids, not frozen API guarantees.

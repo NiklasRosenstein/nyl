@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nyl is now a Cargo workspace: resource types and schemas live in
+  `nyl-core`, rendering and rendered GitOps in `nyl-render`, and the `nyl`
+  package keeps the command line. Behavior and published schemas are
+  unchanged. Nyl is no longer published to crates.io; install it from the
+  release binaries, the shell installer, or the container image. Module-level
+  `RUST_LOG` filters for rendering name the new crate, for example
+  `RUST_LOG=nyl_render::helm=debug` instead of `nyl::helm=debug`.
+
 - **BREAKING**: Kubernetes GitOps kinds (`Cluster`, `DeploymentTarget`,
   `ArgoCDInstance`, `ApplicationGroup`, `AppProjectDefinition`, and `Release`)
   require `k8s.gitops.nyl/v1` instead of `gitops.nyl/v1`. `GitRepository` retains

@@ -94,7 +94,7 @@ fn test_render_reuses_the_shared_bundle_cache() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
         .current_dir(temp.path())
-        .env("RUST_LOG", "nyl::render::session=debug")
+        .env("RUST_LOG", "nyl_render::render::session=debug")
         .args(["render", "app.yaml", "--offline"])
         .assert()
         .success()
