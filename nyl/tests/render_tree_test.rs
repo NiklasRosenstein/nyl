@@ -4316,3 +4316,22 @@ fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_
     let worktrees = Repository::open(root).unwrap().worktrees().unwrap();
     assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
 }
+
+#[test]
+fn test_validate_rejects_application_name_templates_without_an_expression() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectRef: workloads\n  applicationNameTemplate: '{% raw %}{{ release.metadata.name }}{% endraw %}'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", "--target", "production", "--check", "--output-dir"])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must contain at least one ${ … } expression"));
+}

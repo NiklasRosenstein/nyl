@@ -67,8 +67,10 @@ spec:
 The field is a template value: the structural pass leaves `${ … }` untouched,
 and Nyl evaluates each expression once per Release with the target context and
 `release`. Expressions and filters work as in `{{ … }}`; blocks do not. An
-undefined variable or attribute is an error. Write `$${` for a literal `${`. A value protected with `{% raw %}` that still contains
-`{{ … }}` renders as before; mixing both forms is an error.
+undefined variable or attribute is an error. Write `$${` for a literal `${`.
+All other text is literal, including `{{ … }}`. The field must contain at least
+one `${ … }` expression; the former `{% raw %}{{ … }}{% endraw %}` form is no
+longer expanded and fails validation, so rewrite it with `${ … }`.
 
 ## Source selection
 
