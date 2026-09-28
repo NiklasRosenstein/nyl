@@ -80,7 +80,8 @@ lfs_threshold_bytes = 1048576
 - `path` defaults to `vendor` and must remain beneath the directory containing
   `nyl.toml`. Nyl excludes this subtree from GitOps YAML discovery.
 - `lfs_threshold_bytes` defaults to 1 MiB. Helm and Git archives always use Git
-  LFS rules; RemoteManifest blobs use LFS at or above this threshold.
+  LFS rules; RemoteManifest blobs and the files `fromGit` Release input
+  bindings lock use LFS at or above this threshold.
 
 `nyl init --vendor <MODE>` writes this section with the selected mode when it
 creates `nyl.toml`.

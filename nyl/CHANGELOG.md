@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ApplicationGroup locks and gains `--target` to select one DeploymentTarget.
   A lock reading a file in a target's publication prefix moves to that
   target's newest publication commit; every other lock moves to the branch
-  head. Filters choose which locks move, never where.
+  head. Filters choose which locks move, never where. Locked files follow the
+  vendor policy: `nyl vendor` captures them as `git-blob` artifacts and mode
+  `required` renders them only from the snapshot.
 
 - Releases may declare typed inputs in `spec.inputs` (`string`, `integer`,
   `number`, `boolean`, `object`, `array`, with optional `default` and scalar

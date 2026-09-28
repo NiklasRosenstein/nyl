@@ -180,78 +180,88 @@ fn branch_name(revision: &str) -> &str {
 pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
-    fn read_blob(
-        &self,
-        url: &str,
-        commit: &str,
-        path: &str,
-    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError>;
+    /// Locked `fromGit` files go through the vendor policy.
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
+
+    /// A file of the publication branch at `commit`, read from Git and never
+    /// vendored: publication state moves with every publication.
+    fn read_publication_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
 
     /// The commit `branch` of `url` names, or `None` when it does not exist,
     /// refreshing refs first when `refresh` is set.
-    fn branch_head(
-        &self,
-        url: &str,
-        branch: &str,
-        refresh: bool,
-    ) -> std::result::Result<Option<String>, crate::git::GitError>;
+    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> Result<Option<String>>;
 }
 
-/// [`GitBlobSource`] over the shared bare-repository cache.
+/// [`GitBlobSource`] over the project's remote artifacts: the vendor snapshot,
+/// then the exact source cache, then the shared bare-repository cache.
+///
+/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
+/// A locked file is a remote renderer input like a remote group source, so
+/// `nyl vendor` captures it, `nyl vendor --check` requires it, and vendor mode
+/// `required` never reads it from the network.
 pub struct CachedGitBlobSource {
     manager: RefCell<Option<crate::git::GitManager>>,
-    cache: Option<crate::render::cache::RenderCache>,
+    artifacts: crate::render::artifact::ArtifactResolver,
 }
 
 impl CachedGitBlobSource {
     /// Reuse `manager` when one exists; otherwise one is created on first use
     /// in the cache's external root, or the default Git cache.
-    pub fn new(manager: Option<crate::git::GitManager>, cache: Option<crate::render::cache::RenderCache>) -> Self {
+    pub fn new(manager: Option<crate::git::GitManager>, artifacts: crate::render::artifact::ArtifactResolver) -> Self {
         Self {
             manager: RefCell::new(manager),
-            cache,
+            artifacts,
         }
     }
-}
 
-impl CachedGitBlobSource {
     fn with_manager<T>(
         &self,
         operation: impl FnOnce(&mut crate::git::GitManager) -> crate::git::Result<T>,
-    ) -> std::result::Result<T, crate::git::GitError> {
+    ) -> Result<T> {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
-            let created = match self
-                .cache
-                .as_ref()
-                .and_then(crate::render::cache::RenderCache::external_cache_root)
-            {
+            let cache = self.artifacts.render_cache();
+            let created = match cache.and_then(crate::render::cache::RenderCache::external_cache_root) {
                 Some(root) => crate::git::GitManager::with_cache_dir(root),
                 None => crate::git::GitManager::new()?,
             }
-            .with_render_cache(self.cache.clone());
+            .with_render_cache(cache.cloned());
             *manager = Some(created);
         }
-        operation(manager.as_mut().expect("manager was created above"))
+        Ok(operation(manager.as_mut().expect("manager was created above"))?)
     }
 }
 
 impl GitBlobSource for CachedGitBlobSource {
-    fn read_blob(
-        &self,
-        url: &str,
-        commit: &str,
-        path: &str,
-    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        use crate::render::artifact::{ArtifactFormat, ArtifactRequest};
+        let request = ArtifactRequest::GitBlob {
+            repository: credential_free_url(url),
+            commit: commit.to_owned(),
+            path: path.to_owned(),
+        };
+        if let Some(artifact) = self.artifacts.lookup(&request)? {
+            return Ok(Some(std::fs::read(&artifact.path)?));
+        }
+        let Some(bytes) = self.read_publication_blob(url, commit, path)? else {
+            return Ok(None);
+        };
+        let staged = tempfile::NamedTempFile::new()?;
+        std::fs::write(staged.path(), &bytes)?;
+        self.artifacts.store(
+            &request,
+            staged.path(),
+            ArtifactFormat::GitBlob,
+            Some(commit.to_owned()),
+        )?;
+        Ok(Some(bytes))
+    }
+
+    fn read_publication_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
         self.with_manager(|manager| manager.read_blob(url, commit, path))
     }
 
-    fn branch_head(
-        &self,
-        url: &str,
-        branch: &str,
-        refresh: bool,
-    ) -> std::result::Result<Option<String>, crate::git::GitError> {
+    fn branch_head(&self, url: &str, branch: &str, refresh: bool) -> Result<Option<String>> {
         self.with_manager(|manager| manager.branch_head(url, branch, refresh))
     }
 }
@@ -700,7 +710,7 @@ fn resolve_publication(
     };
     let Some(bytes) = sources
         .git
-        .read_blob(&base.url, commit, &base.repository_path(&source.path))
+        .read_publication_blob(&base.url, commit, &base.repository_path(&source.path))
         .map_err(|error| {
             format!(
                 "{field}: cannot read {} at publication commit {commit}: {error}",
@@ -738,7 +748,7 @@ fn owned_at(
 ) -> std::result::Result<bool, String> {
     let index_path = base.repository_path(super::reconcile::DEFAULT_INDEX_PATH);
     let Some(bytes) = git
-        .read_blob(&base.url, commit, &index_path)
+        .read_publication_blob(&base.url, commit, &index_path)
         .map_err(|error| format!("cannot read {index_path} at publication commit {commit}: {error}"))?
     else {
         return Ok(false);
@@ -1062,12 +1072,16 @@ mod tests {
     struct NoGit;
 
     impl GitBlobSource for NoGit {
-        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
-            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Err(NylError::config("no Git in this test"))
         }
 
-        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, crate::git::GitError> {
-            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
+        fn read_publication_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Err(NylError::config("no Git in this test"))
+        }
+
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> Result<Option<String>> {
+            Err(NylError::config("no Git in this test"))
         }
     }
 
@@ -1160,19 +1174,18 @@ mod tests {
     struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);
 
     impl GitBlobSource for FakeGit {
-        fn read_blob(
-            &self,
-            url: &str,
-            commit: &str,
-            path: &str,
-        ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
+        fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
             Ok(self
                 .0
                 .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))
                 .cloned())
         }
 
-        fn branch_head(&self, _: &str, _: &str, _: bool) -> std::result::Result<Option<String>, crate::git::GitError> {
+        fn read_publication_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+            self.read_blob(url, commit, path)
+        }
+
+        fn branch_head(&self, _: &str, _: &str, _: bool) -> Result<Option<String>> {
             Ok(None)
         }
     }
