@@ -150,10 +150,11 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     );
     reconcile_rendered_tree_with_options(
         &output_root,
-        &compiled.files,
+        &compiled.owned_files(),
         index,
         ReconcileOptions {
             force_owned: args.force,
+            adopt: compiled.adoptable_paths(),
         },
     )?;
     report_render_result(

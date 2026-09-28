@@ -777,19 +777,23 @@ pub fn carry_paths(inventory: &super::GitOpsInventory, target_name: &str) -> Res
     Ok(carried)
 }
 
-/// Check the placement of `fromPublication` state files and add the carried
-/// ones to the target's owned files.
+/// Check the placement of `fromPublication` state files and return the ones
+/// this target writes: carried bytes, or the base copy written back.
 ///
 /// Contract: [`fromPublication`](../../../../design/release-inputs.md#binding-kinds),
 /// Placement. Every state path lies outside the directories generated Argo CD
 /// Applications sync (workload Release directories and `_nyl`, which holds the
 /// catalog), so Argo CD never applies a state file as a manifest. A committed
 /// state file must not be owned by this target; a carried one is.
+///
+/// State files are owned and published like rendered files but are not
+/// Kubernetes manifests, so they stay out of `files` and never reach manifest
+/// provenance or validation.
 pub fn place_state_files(
     resolved: &ResolvedTargetInputs,
     release_directories: &[PathBuf],
-    files: &mut BTreeMap<PathBuf, Vec<u8>>,
-) -> Result<()> {
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let carried = resolved.carried_files();
     for path in resolved.committed_state_paths().iter().chain(carried.keys()) {
         let relative = Path::new(path);
@@ -815,14 +819,18 @@ pub fn place_state_files(
             )));
         }
     }
+    let mut state = BTreeMap::new();
     for (path, bytes) in carried {
-        if files.insert(PathBuf::from(&path), bytes).is_some() {
+        let path = PathBuf::from(&path);
+        if files.contains_key(&path) {
             return Err(NylError::config(format!(
-                "Carried fromPublication state file {path} collides with a rendered file"
+                "Carried fromPublication state file {} collides with a rendered file",
+                path.display()
             )));
         }
+        state.insert(path, bytes);
     }
-    Ok(())
+    Ok(state)
 }
 
 /// After rendering, a Release's `spec.inputs` must equal its static

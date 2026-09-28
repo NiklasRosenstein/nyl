@@ -131,10 +131,11 @@ enum ResolvedBaseline {
 }
 
 impl ResolvedBaseline {
-    fn files(&self) -> &BTreeMap<PathBuf, Vec<u8>> {
+    /// Every owned file of the baseline, rendered files and state files.
+    fn files(&self) -> std::borrow::Cow<'_, BTreeMap<PathBuf, Vec<u8>>> {
         match self {
-            Self::Published(baseline) => &baseline.files,
-            Self::Source(baseline) => &baseline.compiled.files,
+            Self::Published(baseline) => std::borrow::Cow::Borrowed(&baseline.files),
+            Self::Source(baseline) => std::borrow::Cow::Owned(baseline.compiled.owned_files()),
         }
     }
 
@@ -353,8 +354,10 @@ fn comparison_files(
 ) -> Result<ComparisonFiles> {
     match selection {
         DiffSelection::Tree => {
-            let mut base = baseline.files().clone();
-            let mut desired_files = desired.files.clone();
+            let mut base = baseline.files().into_owned();
+            // State files are owned plain files, shown as file diffs next to
+            // the manifest changes they cause.
+            let mut desired_files = desired.owned_files();
             if let ResolvedBaseline::Source(source) = baseline {
                 let marker = PathBuf::from("_nyl/publication.json");
                 base.insert(marker.clone(), publication_marker(&source.compiled)?);
@@ -366,12 +369,12 @@ fn comparison_files(
             })
         }
         DiffSelection::Catalog => Ok(ComparisonFiles {
-            base: files_beneath(baseline.files(), Path::new("_nyl/catalog")),
+            base: files_beneath(&baseline.files(), Path::new("_nyl/catalog")),
             desired: files_beneath(&desired.files, Path::new("_nyl/catalog")),
         }),
         DiffSelection::Applications(selectors) => application_comparison_files(
             selectors,
-            baseline.files(),
+            &baseline.files(),
             baseline.publication_path_prefix(desired),
             &desired.files,
             desired.target.publication_path_prefix(),
@@ -813,11 +816,14 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
         });
     }
     let index_path = root.join(crate::gitops::reconcile::DEFAULT_INDEX_PATH);
+    // A prefix without an index owns nothing yet. It may already hold state
+    // files another tool committed for fromPublication bindings; they are not
+    // Nyl's, so the published tree is empty until the first publication.
     if !index_path.is_file() {
-        return Err(NylError::config(format!(
-            "Published rendered tree {} has no ownership index",
-            root.display()
-        )));
+        return Ok(PublishedRenderedTree {
+            files: BTreeMap::new(),
+            index: None,
+        });
     }
     reject_published_symlink(root, &index_path)?;
     let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
@@ -1026,6 +1032,7 @@ mod tests {
             files: BTreeMap::new(),
             inputs: BTreeSet::new(),
             input_digests: BTreeMap::new(),
+            state_files: BTreeMap::new(),
             publication_base: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
@@ -1039,11 +1046,12 @@ mod tests {
     }
 
     #[test]
-    fn published_tree_requires_an_ownership_index() {
+    fn published_tree_without_an_ownership_index_owns_nothing() {
         let temp = tempfile::TempDir::new().unwrap();
-        std::fs::write(temp.path().join("unrelated.yaml"), "kind: ConfigMap\n").unwrap();
-        let error = read_rendered_tree(temp.path()).unwrap_err();
-        assert!(error.to_string().contains("no ownership index"));
+        std::fs::write(temp.path().join("state.json"), "{\"image\": \"web:1\"}\n").unwrap();
+        let published = read_rendered_tree(temp.path()).unwrap();
+        assert!(published.index.is_none());
+        assert!(published.files.is_empty());
     }
 
     #[cfg(unix)]

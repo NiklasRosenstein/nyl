@@ -38,7 +38,9 @@ pub struct TreeRenderOptions {
     pub allow_secret_inputs: bool,
     /// Read `fromPublication` state at the cached publication branch head
     /// instead of refreshing it.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    /// Not part of the render-cache key: the publication state it reads is
+    /// recorded through the resolved inputs' digests.
+    #[serde(skip)]
     pub offline: bool,
 }
 
@@ -57,10 +59,31 @@ pub struct CompiledTargetTree {
     /// `@input/<group>/<release>/<input>` digests of resolved Release inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_digests: BTreeMap<String, String>,
+    /// `fromPublication` state files this target writes, keyed by path
+    /// relative to the prefix. They are owned and published with `files` but
+    /// are not Kubernetes manifests.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub state_files: BTreeMap<PathBuf, Vec<u8>>,
     /// Publication branch head that `fromPublication` bindings read; `None`
     /// when the target has none. Never cached: it is re-resolved every run.
     #[serde(skip)]
     pub publication_base: Option<super::inputs::PublicationBase>,
+}
+
+impl CompiledTargetTree {
+    /// Every file this target owns in its prefix: rendered files and state
+    /// files. Reconciliation, the ownership index, and tree comparisons use it.
+    pub fn owned_files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut owned = self.files.clone();
+        owned.extend(self.state_files.clone());
+        owned
+    }
+
+    /// State files this target may adopt when they already exist unowned in
+    /// the publication tree: declaring `carry` makes the target their owner.
+    pub fn adoptable_paths(&self) -> BTreeSet<PathBuf> {
+        self.state_files.keys().cloned().collect()
+    }
 }
 
 /// Stable source identity for one Release as it enters tree compilation.
@@ -751,7 +774,7 @@ async fn compile_target_tree_inner(
         )?;
     }
 
-    super::inputs::place_state_files(&release_inputs, &release_directories, &mut files)?;
+    let state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
 
     let provenance = files
         .iter()
@@ -786,6 +809,7 @@ async fn compile_target_tree_inner(
         provenance,
         inputs,
         input_digests,
+        state_files,
         publication_base,
     };
     store_cached_target(

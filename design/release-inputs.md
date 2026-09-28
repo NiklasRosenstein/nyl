@@ -351,8 +351,13 @@ releaseInputs:
 - **Ownership.** With `carry`, `path` is a file owned by this target and listed
   in the ownership index, so a commit to it by another writer is rejected as a
   modification outside Nyl. A path is either carried by Nyl or committed by
-  another tool, never both. The placement rule otherwise applies unchanged:
-  the path lies outside every Argo CD-synced directory.
+  another tool, never both: every binding of the target that names a path
+  carries the same file, or none does. Declaring `carry` makes the target the
+  owner, so the first publication with `carry` adopts a file another tool
+  already committed at `path`. State files are owned and published like
+  rendered files but are not manifests: they are never validated as
+  Kubernetes resources. The placement rule otherwise applies unchanged: the
+  path lies outside every Argo CD-synced directory.
 - **Working-tree rules.** `carry` is a normalized project-relative path that must
   not be tracked by Git; a tracked file is source and uses `fromFile`. It
   should normally be ignored through `.gitignore`. Declared `carry` paths are

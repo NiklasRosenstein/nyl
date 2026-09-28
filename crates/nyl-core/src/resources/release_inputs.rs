@@ -325,12 +325,33 @@ impl InputBinding {
 
 /// Validate the static form of `spec.releaseInputs`.
 pub fn validate_bindings(bindings: &ReleaseInputBindings) -> Result<()> {
+    // A state path is either committed by another tool or carried by Nyl from
+    // one working-tree file, so every binding naming it must agree on `carry`.
+    let mut state_paths = BTreeMap::<&str, (String, Option<&str>)>::new();
     for (key, inputs) in bindings {
         ReleaseKey::parse(key)?;
         for (name, binding) in inputs {
             let field = format!("spec.releaseInputs.{key:?}.{name}");
             validate_input_name(&field, name)?;
             binding.validate(&field)?;
+            let Some(source) = &binding.from_publication else {
+                continue;
+            };
+            let carry = source.carry.as_deref();
+            match state_paths.get(source.path.as_str()) {
+                Some((previous, previous_carry)) if *previous_carry != carry => {
+                    return Err(CoreError::config(format!(
+                        "{previous} and {field} both name fromPublication path {:?} but disagree on carry ({} and {}); bindings of one state path must all carry the same file or none",
+                        source.path,
+                        previous_carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                        carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    state_paths.insert(source.path.as_str(), (field, carry));
+                }
+            }
         }
     }
     Ok(())
@@ -700,6 +721,28 @@ mod tests {
                 serde_json::from_value(json!({"g/r": {"image": {"fromPublication": source.clone()}}})).unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
             assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_state_paths_agree_on_carry() {
+        let agree: ReleaseInputBindings = serde_json::from_value(json!({
+            "g/a": {"image": {"fromPublication": {"path": "state.json", "pointer": "/a", "carry": "build/state.json"}}},
+            "g/b": {"image": {"fromPublication": {"path": "state.json", "pointer": "/b", "carry": "build/state.json"}}},
+        }))
+        .unwrap();
+        validate_bindings(&agree).unwrap();
+        for other in [
+            json!({"path": "state.json"}),
+            json!({"path": "state.json", "carry": "other.json"}),
+        ] {
+            let bindings: ReleaseInputBindings = serde_json::from_value(json!({
+                "g/a": {"image": {"fromPublication": {"path": "state.json", "carry": "build/state.json"}}},
+                "g/b": {"image": {"fromPublication": other.clone()}},
+            }))
+            .unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains("disagree on carry"), "{other}: {error}");
         }
     }
 

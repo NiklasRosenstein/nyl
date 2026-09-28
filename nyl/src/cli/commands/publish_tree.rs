@@ -9,9 +9,9 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Sig
 use crate::git::CredentialProvider;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, reconcile_rendered_tree,
-    resolve_deployment_target_name, CompiledTargetTree, GitOpsCache, GitOpsInventory, RenderIndex,
-    RenderIndexPublication, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
+    reconcile_rendered_tree_with_options, resolve_deployment_target_name, CompiledTargetTree, GitOpsCache,
+    GitOpsInventory, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
 };
 use crate::{NylError, Result};
 
@@ -352,6 +352,13 @@ async fn compile_clean_head(
             format!("could not select the committed target: {error}"),
         )
     })?;
+    copy_carried_files(working_inventory, &inventory, target_name).map_err(|error| {
+        dirty_verification_failure(
+            target_name,
+            source_commit,
+            format!("could not provide carried files to the committed project: {error}"),
+        )
+    })?;
     let mut observer = SilentTreeRenderObserver;
     let compiled = compile_target_tree_cached_with_observer_and_options(
         &inventory,
@@ -404,13 +411,13 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
             committed.cluster.metadata.name, working.cluster.metadata.name
         ));
     }
-    for path in working
-        .files
+    let (working_files, committed_files) = (working.owned_files(), committed.owned_files());
+    for path in working_files
         .keys()
-        .chain(committed.files.keys())
+        .chain(committed_files.keys())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        match (working.files.get(path), committed.files.get(path)) {
+        match (working_files.get(path), committed_files.get(path)) {
             (Some(_), None) => differences.push(format!(
                 "added {}",
                 crate::resources::relative_path_to_posix("rendered output path", path)?
@@ -441,9 +448,9 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         .repository_name
         .clone()
         .unwrap_or_else(|| input.compiled.repository.repo_url.clone());
-    reconcile_rendered_tree(
+    reconcile_rendered_tree_with_options(
         input.output_root,
-        &input.compiled.files,
+        &input.compiled.owned_files(),
         RenderIndex::new(
             input.target_name.to_owned(),
             input.compiled.cluster.metadata.name.clone(),
@@ -456,6 +463,10 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
             input.source_dirty,
             inputs,
         ),
+        crate::gitops::ReconcileOptions {
+            adopt: input.compiled.adoptable_paths(),
+            ..crate::gitops::ReconcileOptions::default()
+        },
     )?;
     let author_repository = Repository::discover(&input.inventory.project_root)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;
@@ -481,6 +492,30 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         input.output_root,
         &message,
     )
+}
+
+/// Give the clean-`HEAD` render the same carried bytes as the working render.
+///
+/// Carried files are untracked outputs of this run, so a checkout of `HEAD`
+/// never contains them. Each `carry` path of the committed target is copied
+/// from the same worktree-relative location of the working tree, when present.
+fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, target_name: &str) -> Result<()> {
+    for destination in crate::gitops::inputs::carry_paths(committed, target_name)? {
+        let relative = destination.strip_prefix(&committed.worktree_root).map_err(|_| {
+            NylError::config(format!(
+                "Carried file {} is outside the committed worktree",
+                destination.display()
+            ))
+        })?;
+        let source = working.worktree_root.join(relative);
+        if std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_file()) {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source, &destination)?;
+        }
+    }
+    Ok(())
 }
 
 /// The state `fromPublication` bindings read must be the state at the base
@@ -551,7 +586,7 @@ fn publication_current_commit(
         return Ok(None);
     }
     let desired = compiled
-        .files
+        .owned_files()
         .iter()
         .map(|(path, bytes)| {
             crate::resources::relative_path_to_posix("rendered output path", path)
