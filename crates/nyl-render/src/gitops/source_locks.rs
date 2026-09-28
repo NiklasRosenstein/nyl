@@ -4,7 +4,10 @@
 //! Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
 //!
 //! - Locks are grouped by repository and `revision`. Each group is resolved
-//!   once, and every lock in it moves to the same new commit.
+//!   once, and every lock in it moves to the same new commit. Groups are formed
+//!   from every lock in the project; the `--group`/`--target` filter selects
+//!   only which locks are reported and edited, so a filtered run moves a lock
+//!   to the same commit as an unfiltered run.
 //! - A group whose `fromGit` files lie inside one DeploymentTarget's
 //!   publication prefix on that branch moves to that target's newest
 //!   publication commit, never to a later commit another tool made on the
@@ -53,6 +56,9 @@ pub struct SourceLock {
     pub commit: String,
     /// Repository-relative file a `fromGit` binding reads.
     pub path: Option<String>,
+    /// Whether the invocation's filters select this lock for reporting and
+    /// editing. Unselected locks still decide where their group moves.
+    pub selected: bool,
 }
 
 /// A lock and the commit it should name.
@@ -74,9 +80,9 @@ impl LockResolution {
     }
 }
 
-/// Collect the locks selected by the ApplicationGroup and DeploymentTarget
-/// filters. Without filters every lock is selected; with one or both, only
-/// the named resources' locks are.
+/// Collect every lock of the project, marking those selected by the
+/// ApplicationGroup and DeploymentTarget filters. Without filters every lock
+/// is selected; with one or both, only the named resources' locks are.
 pub fn collect_source_locks(
     inventory: &GitOpsInventory,
     group: Option<&str>,
@@ -101,13 +107,12 @@ pub fn collect_source_locks(
     let mut target_found = false;
     for discovered in inventory.resources.values() {
         match &discovered.resource {
-            Some(GitOpsResource::ApplicationGroup(resource))
-                if groups_selected && group.is_none_or(|requested| requested == resource.metadata.name) =>
-            {
+            Some(GitOpsResource::ApplicationGroup(resource)) => {
                 let Some(source) = resource.spec.source.as_ref().filter(|source| source.is_remote()) else {
                     continue;
                 };
-                group_found = true;
+                let selected = groups_selected && group.is_none_or(|requested| requested == resource.metadata.name);
+                group_found |= selected;
                 let repository = inventory
                     .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
                     .0;
@@ -120,12 +125,12 @@ pub fn collect_source_locks(
                     revision: source.revision.clone().expect("validated remote source has revision"),
                     commit: source.commit.clone().expect("validated remote source has commit"),
                     path: None,
+                    selected,
                 });
             }
-            Some(GitOpsResource::DeploymentTarget(resource))
-                if targets_selected && target.is_none_or(|requested| requested == resource.metadata.name) =>
-            {
-                target_found = true;
+            Some(GitOpsResource::DeploymentTarget(resource)) => {
+                let selected = targets_selected && target.is_none_or(|requested| requested == resource.metadata.name);
+                target_found |= selected;
                 for (key, inputs) in &resource.spec.release_inputs {
                     for (input, binding) in inputs {
                         let Some(source) = &binding.from_git else {
@@ -145,6 +150,7 @@ pub fn collect_source_locks(
                             revision: source.revision.clone(),
                             commit: source.commit.clone(),
                             path: Some(source.path.clone()),
+                            selected,
                         });
                     }
                 }
@@ -193,11 +199,17 @@ pub fn resolve_source_locks(
         );
         groups.entry(group).or_default().push(lock);
     }
+    // Track fetches by the exact URL handed to the Git manager: equal
+    // repositories may be spelled differently, and each spelling can map to
+    // its own cached copy.
     let mut fetched = BTreeSet::new();
     let mut resolutions = Vec::new();
     for ((url, revision), locks) in groups {
+        if !locks.iter().any(|lock| lock.selected) {
+            continue;
+        }
         let repository_url = locks[0].repository_url.clone();
-        if fetched.insert(url.clone()) {
+        if fetched.insert(repository_url.clone()) {
             manager.fetch_refs(&repository_url).map_err(NylError::Git)?;
         }
         let head = manager
@@ -251,11 +263,16 @@ pub fn resolve_source_locks(
                 )));
             }
         };
-        resolutions.extend(locks.into_iter().map(|lock| LockResolution {
-            lock,
-            resolved: resolved.clone(),
-            note: note.clone(),
-        }));
+        resolutions.extend(
+            locks
+                .into_iter()
+                .filter(|lock| lock.selected)
+                .map(|lock| LockResolution {
+                    lock,
+                    resolved: resolved.clone(),
+                    note: note.clone(),
+                }),
+        );
     }
     resolutions.sort_by_key(|resolution| resolution.lock.owner.to_string());
     Ok(resolutions)

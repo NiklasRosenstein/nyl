@@ -4940,3 +4940,51 @@ fn test_validate_rejects_application_name_templates_without_an_expression() {
         .failure()
         .stderr(predicate::str::contains("must contain at least one ${ … } expression"));
 }
+
+#[test]
+fn test_update_source_locks_moves_filtered_groups_like_unfiltered_runs() {
+    let fixture = fixture();
+    let state = StateRepository::new();
+    let published = state.commit(
+        "dev/state/images.json",
+        r#"{"api": "published"}"#,
+        "Publish\n\nNyl-Deployment-Target: dev\n",
+        "deploy/dev",
+    );
+    state.commit("releases/placeholder.txt", "x", "Write back", "deploy/dev");
+    let url = state.url();
+    let zero = "0".repeat(40);
+    fs::write(
+        fixture.path().join("config/targets/dev.yaml"),
+        format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: kasoku\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("config/application-groups/workloads.yaml"),
+        format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd\n  source:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    commit: '{zero}'\n    path: releases\n"
+        ),
+    )
+    .unwrap();
+    with_image_binding(
+        &fixture,
+        &format!(
+            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n"
+        ),
+    );
+    let cache = TempDir::new().unwrap();
+
+    // The group shares its repository and revision with a binding that reads
+    // dev's published state, so it follows dev's publication even when the
+    // filter selects the group alone.
+    update_source_locks(&fixture, &cache, &["workloads"]).success();
+    let group = fs::read_to_string(fixture.path().join("config/application-groups/workloads.yaml")).unwrap();
+    assert!(group.contains(&published), "{group}");
+    let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
+    assert!(target.contains(&format!("commit: '{zero}'")), "{target}");
+
+    update_source_locks(&fixture, &cache, &["--target", "production"]).success();
+    update_source_locks(&fixture, &cache, &["--check"]).success();
+}
