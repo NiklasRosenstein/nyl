@@ -169,7 +169,7 @@
 <p><a id="field-spec.applicationNameTemplate"></a></p>
 <h3 id="specapplicationnametemplate">spec.applicationNameTemplate</h3>
 <p><strong>Optional</strong> · string or null</p>
-<p>Generated workload Application name template, with <code>release</code> context. Defaults to the <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> name; use target-qualified templates when targets share an Argo CD namespace.</p>
+<p>Generated workload Application name, as a template value expanded once per <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/release/">Release</a>. It must contain at least one <code>${ expression }</code>, evaluated with the target context plus <code>release</code>, the rendered <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/release/">Release</a>; <code>$${</code> writes a literal <code>${</code>, and all other text, including <code>{{ … }}</code>, is literal. Defaults to the <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> name; use target-qualified names such as <code>${ target.metadata.name }-${ release.metadata.name }</code> when targets share an Argo CD namespace.</p>
 <p><a id="field-spec.applicationNamespace"></a></p>
 <h3 id="specapplicationnamespace">spec.applicationNamespace</h3>
 <p><strong>Required</strong> · string</p>
