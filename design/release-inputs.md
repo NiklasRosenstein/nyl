@@ -108,10 +108,14 @@ spec:
   together with the extra variables it provides. Units follow the same rule
   when they add such fields.
 - `$${` writes a literal `${`.
-- For compatibility, a template value that still contains `{{ … }}` after the
-  structural pass, because it was protected with `{% raw %}`, is expanded as
-  before. A value that mixes both forms is an error. The validation hint for
-  colliding Application names suggests the `${ … }` form.
+- All other text is literal, including `{{ … }}` that survived the structural
+  pass, for example through `{% raw %}`. Template values have one form; `{{ … }}`
+  is never expanded in them.
+- A template value needs no expression in general. A field may require one:
+  `applicationNameTemplate` must contain at least one `${ … }` expression, so
+  every Release gets its own name and a value written in the retired
+  `{% raw %}{{ … }}{% endraw %}` form fails validation instead of becoming a
+  literal name.
 
 ## Bindings
 
