@@ -49,8 +49,8 @@ impl TemplateEngine {
         Ok(result)
     }
 
-    /// An expander for template values: `${ … }` expressions, or `{{ … }}`
-    /// syntax protected from the structural pass with `{% raw %}`.
+    /// An expander for template values: `${ … }` expressions in otherwise
+    /// literal text.
     pub fn template_values(&self) -> TemplateValueExpander {
         TemplateValueExpander::new(&self.env)
     }
