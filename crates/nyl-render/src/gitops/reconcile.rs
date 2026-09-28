@@ -23,6 +23,10 @@ pub struct ReconcileOptions {
     /// Unowned existing paths the target may take over, such as a state file
     /// that a `fromPublication` binding newly declares with `carry`.
     pub adopt: BTreeSet<PathBuf>,
+    /// Previously owned paths that leave ownership without being deleted, such
+    /// as a state file whose `fromPublication` binding no longer declares
+    /// `carry` and which other tools now commit.
+    pub release: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,7 +205,7 @@ pub fn reconcile_rendered_tree_with_options(
     }
     for stale in previous_files
         .keys()
-        .filter(|path| !next_index.files.contains_key(*path))
+        .filter(|path| !next_index.files.contains_key(*path) && !options.release.contains(Path::new(path)))
     {
         let stale_path = output_root.join(stale);
         reject_symlink_components(output_root, &stale_path)?;
@@ -311,6 +315,9 @@ fn verify_owned_files(
 ) -> Result<()> {
     for (relative, expected) in &index.files {
         crate::resources::validate_relative_path("owned rendered path", relative, false, false)?;
+        if options.release.contains(Path::new(relative)) && !desired.contains_key(Path::new(relative)) {
+            continue;
+        }
         let path = output_root.join(relative);
         reject_symlink_components(output_root, &path)?;
         let actual = match fs::read(&path) {

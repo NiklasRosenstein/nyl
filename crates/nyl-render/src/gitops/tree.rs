@@ -64,6 +64,11 @@ pub struct CompiledTargetTree {
     /// are not Kubernetes manifests.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state_files: BTreeMap<PathBuf, Vec<u8>>,
+    /// `fromPublication` state paths declared without `carry`. Other tools
+    /// commit them, so reconciliation never deletes them, even when a previous
+    /// generation owned them through `carry`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub committed_state_paths: BTreeSet<PathBuf>,
     /// Publication branch head that `fromPublication` bindings read; `None`
     /// when the target has none. Never cached: it is re-resolved every run.
     #[serde(skip)]
@@ -83,6 +88,16 @@ impl CompiledTargetTree {
     /// the publication tree: declaring `carry` makes the target their owner.
     pub fn adoptable_paths(&self) -> BTreeSet<PathBuf> {
         self.state_files.keys().cloned().collect()
+    }
+
+    /// Reconciliation options for this tree: adopt carried state files and
+    /// release committed ones instead of deleting them.
+    pub fn reconcile_options(&self, force_owned: bool) -> super::reconcile::ReconcileOptions {
+        super::reconcile::ReconcileOptions {
+            force_owned,
+            adopt: self.adoptable_paths(),
+            release: self.committed_state_paths.clone(),
+        }
     }
 }
 
@@ -810,6 +825,11 @@ async fn compile_target_tree_inner(
         inputs,
         input_digests,
         state_files,
+        committed_state_paths: release_inputs
+            .committed_state_paths()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         publication_base,
     };
     store_cached_target(

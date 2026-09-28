@@ -310,8 +310,14 @@ impl GitManager {
 
     /// The commit `branch` of `url` names, or `None` when the branch does not
     /// exist. With `refresh`, the refs are fetched first and a failed fetch is
-    /// an error; without it, the cached refs are used.
+    /// an error; without it, the cached refs are used and a repository with no
+    /// cached copy is an error rather than a clone.
     pub fn branch_head(&mut self, url: &str, branch: &str, refresh: bool) -> Result<Option<String>> {
+        if !refresh && !self.bare_repos.contains_key(url) && !self.cache.bare_repo_path(url).exists() {
+            return Err(GitError::NotCached {
+                url: crate::util::sanitize_url(url),
+            });
+        }
         let bare_repo = self.get_or_create_bare_repo(url)?;
         let repo = bare_repo.lock().unwrap();
         if refresh {
@@ -435,6 +441,17 @@ mod tests {
             }
             other => panic!("Expected FetchFailedNoCachedRef, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_branch_head_without_refresh_never_clones_an_uncached_repository() {
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = cache_dir.path().join("remote").to_string_lossy().to_string();
+
+        let err = manager.branch_head(&url, "main", false).unwrap_err();
+        assert!(matches!(err, GitError::NotCached { .. }), "{err:?}");
+        assert!(!manager.cache.bare_repo_path(&url).exists());
     }
 
     #[test]

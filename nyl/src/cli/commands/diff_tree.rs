@@ -358,6 +358,10 @@ fn comparison_files(
             // State files are owned plain files, shown as file diffs next to
             // the manifest changes they cause.
             let mut desired_files = desired.owned_files();
+            // Committed state leaves ownership without being deleted.
+            for path in &desired.committed_state_paths {
+                base.remove(path);
+            }
             if let ResolvedBaseline::Source(source) = baseline {
                 let marker = PathBuf::from("_nyl/publication.json");
                 base.insert(marker.clone(), publication_marker(&source.compiled)?);
@@ -1033,6 +1037,7 @@ mod tests {
             inputs: BTreeSet::new(),
             input_digests: BTreeMap::new(),
             state_files: BTreeMap::new(),
+            committed_state_paths: BTreeSet::new(),
             publication_base: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();

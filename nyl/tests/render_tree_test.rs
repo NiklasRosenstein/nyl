@@ -5010,6 +5010,11 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
 /// Commit `contents` at `path` on the publication branch `deploy/production`
 /// through the seed clone and push it, as a tool outside Nyl would.
 fn push_publication_state(seed: &TempDir, path: &str, contents: &str) -> git2::Oid {
+    push_publication_change(seed, path, Some(contents))
+}
+
+/// Commit `contents` at `path`, or its deletion, on `deploy/production`.
+fn push_publication_change(seed: &TempDir, path: &str, contents: Option<&str>) -> git2::Oid {
     let repository = Repository::open(seed.path()).unwrap();
     let branch = "deploy/production";
     let remote_branch = repository
@@ -5036,8 +5041,12 @@ fn push_publication_state(seed: &TempDir, path: &str, contents: &str) -> git2::O
         .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
         .unwrap();
     let file = seed.path().join(path);
-    fs::create_dir_all(file.parent().unwrap()).unwrap();
-    fs::write(file, contents).unwrap();
+    if let Some(contents) = contents {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, contents).unwrap();
+    } else {
+        fs::remove_file(file).unwrap();
+    }
     commit_all(&repository, "Write state");
     repository
         .find_remote("origin")
@@ -5162,6 +5171,60 @@ fn test_publish_tree_adopts_an_existing_state_file_when_carry_is_declared() {
         serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
     assert!(index["files"].get("state/images.json").is_some(), "{index}");
     assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:existing"));
+}
+
+#[test]
+fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
+    fs::write(fixture.path().join("build/images.json"), carried).unwrap();
+    publish_production(&fixture).success();
+
+    // Without carry the file is committed state that other tools maintain:
+    // the target renders from it and releases ownership instead of deleting it.
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    fs::write(&target_path, target.replace("          carry: build/images.json\n", "")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Stop carrying state");
+    publish_production(&fixture).success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        carried.as_bytes()
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_none(), "{index}");
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:carried"));
+}
+
+#[test]
+fn test_publish_tree_rejects_an_owned_state_file_deleted_outside_nyl() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(
+        fixture.path().join("build/images.json"),
+        r#"{"api": "registry.example.com/api@sha256:carried"}"#,
+    )
+    .unwrap();
+    publish_production(&fixture).success();
+
+    push_publication_change(&seed, "production/state/images.json", None);
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+    publish_production(&fixture).failure().stderr(predicate::str::contains(
+        "deleted from the publication branch outside Nyl",
+    ));
 }
 
 #[test]

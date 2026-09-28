@@ -176,7 +176,9 @@ With `carry`, the state file comes from this run's working tree instead:
 When the carry file exists, Nyl renders from it and writes its bytes to `path`
 in the publication commit; otherwise it writes the branch copy back, so the
 last carried value persists. The target owns `path`, adopting a file another
-tool committed there before. The carry file must not be tracked by Git; it is
+tool committed there before, and rejects a change or deletion of it by another
+writer. Removing `carry` keeps the file as committed state that the target no
+longer owns. The carry file must not be tracked by Git; it is
 excluded from the dirty-worktree check, and the clean-`HEAD` verification of
 `publish-tree` renders with the same bytes. Bindings naming one path must all
 carry the same file, or none.

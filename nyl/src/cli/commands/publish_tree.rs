@@ -463,10 +463,7 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
             input.source_dirty,
             inputs,
         ),
-        crate::gitops::ReconcileOptions {
-            adopt: input.compiled.adoptable_paths(),
-            ..crate::gitops::ReconcileOptions::default()
-        },
+        input.compiled.reconcile_options(false),
     )?;
     let author_repository = Repository::discover(&input.inventory.project_root)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;

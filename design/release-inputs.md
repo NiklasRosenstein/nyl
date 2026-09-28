@@ -308,7 +308,9 @@ releaseInputs:
   target's prefix but outside every directory synced by a generated Argo CD
   Application: workload Release directories, `_nyl`, and the catalog.
   Otherwise Argo CD would try to apply the state file as a manifest. Nyl
-  validates both. Reconciliation already preserves files it does not own.
+  validates both for every declared path, before the file exists, so another
+  tool never commits state where Argo CD syncs it. Reconciliation already
+  preserves files it does not own.
 - **Bootstrap.** When the publication branch or the file does not exist, the
   input is treated as unbound: its Release default applies, or rendering fails
   as for any required input. A file that exists but does not resolve `pointer`
@@ -350,11 +352,13 @@ releaseInputs:
   rule applies.
 - **Ownership.** With `carry`, `path` is a file owned by this target and listed
   in the ownership index, so a commit to it by another writer is rejected as a
-  modification outside Nyl. A path is either carried by Nyl or committed by
+  modification outside Nyl. A deletion by another writer is rejected too: an
+  owned path missing at B is an error, not the bootstrap case. A path is either carried by Nyl or committed by
   another tool, never both: every binding of the target that names a path
   carries the same file, or none does. Declaring `carry` makes the target the
   owner, so the first publication with `carry` adopts a file another tool
-  already committed at `path`. State files are owned and published like
+  already committed at `path`. Dropping `carry` releases it: the file stays
+  in the tree as committed state and leaves the ownership index. State files are owned and published like
   rendered files but are not manifests: they are never validated as
   Kubernetes resources. The placement rule otherwise applies unchanged: the
   path lies outside every Argo CD-synced directory.

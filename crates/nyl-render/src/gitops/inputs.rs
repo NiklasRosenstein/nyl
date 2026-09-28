@@ -294,6 +294,9 @@ impl ResolvedReleaseInputs {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedTargetInputs {
     pub releases: BTreeMap<ReleaseKey, ResolvedReleaseInputs>,
+    /// Every `fromPublication` path the target's enabled bindings name, bound
+    /// or not, to whether its binding declares `carry`.
+    pub state_paths: BTreeMap<String, bool>,
 }
 
 impl ResolvedTargetInputs {
@@ -330,17 +333,13 @@ impl ResolvedTargetInputs {
             .collect()
     }
 
-    /// State paths other tools commit, read from the publication base commit.
+    /// State paths other tools commit: declared without `carry`, so the
+    /// target never owns them.
     pub fn committed_state_paths(&self) -> BTreeSet<String> {
-        self.origins()
-            .filter_map(|origin| match origin {
-                InputOrigin::Publication {
-                    path,
-                    carried_back: None,
-                    ..
-                } => Some(path.clone()),
-                _ => None,
-            })
+        self.state_paths
+            .iter()
+            .filter(|(_, carry)| !**carry)
+            .map(|(path, _)| path.clone())
             .collect()
     }
 
@@ -448,6 +447,13 @@ pub fn resolve_target_inputs(
     }
 
     let mut resolved = ResolvedTargetInputs::default();
+    for bindings in bound.values() {
+        for binding in bindings.values() {
+            if let Some(source) = &binding.from_publication {
+                resolved.state_paths.insert(source.path.clone(), source.carry.is_some());
+            }
+        }
+    }
     for (key, release) in &declared {
         if release.declarations.is_empty() {
             continue;
@@ -621,6 +627,12 @@ fn resolve_publication(
             )
         })?
     else {
+        if source.carry.is_some() && owned_at(sources.git, base, commit, &source.path)? {
+            return Err(format!(
+                "{field}: {} is owned by this target but was deleted from the publication branch outside Nyl; restore it, or provide its carry file",
+                source.path
+            ));
+        }
         return Ok(None);
     };
     let document = parse_single_document(&bytes).map_err(|reason| format!("{field}: {} {reason}", source.path))?;
@@ -634,6 +646,25 @@ fn resolve_publication(
             carried_back: source.carry.is_some().then_some(bytes),
         },
     }))
+}
+
+/// Whether the ownership index at `commit` records `path` as owned.
+fn owned_at(
+    git: &dyn GitBlobSource,
+    base: &PublicationBase,
+    commit: &str,
+    path: &str,
+) -> std::result::Result<bool, String> {
+    let index_path = base.repository_path(super::reconcile::DEFAULT_INDEX_PATH);
+    let Some(bytes) = git
+        .read_blob(&base.url, commit, &index_path)
+        .map_err(|error| format!("cannot read {index_path} at publication commit {commit}: {error}"))?
+    else {
+        return Ok(false);
+    };
+    let index: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{index_path} at publication commit {commit} is not valid JSON: {error}"))?;
+    Ok(index.get("files").and_then(|files| files.get(path)).is_some())
 }
 
 /// Whether Git tracks `path` in the index of the repository containing it.
@@ -795,7 +826,7 @@ pub fn place_state_files(
     files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let carried = resolved.carried_files();
-    for path in resolved.committed_state_paths().iter().chain(carried.keys()) {
+    for path in resolved.state_paths.keys() {
         let relative = Path::new(path);
         if relative.starts_with("_nyl") {
             return Err(NylError::config(format!(
@@ -1153,5 +1184,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("has no value at JSON Pointer \"/port\""), "{error}");
+    }
+
+    #[test]
+    fn test_state_placement_is_checked_before_the_state_file_exists() {
+        let unbound = ResolvedTargetInputs {
+            state_paths: BTreeMap::from([("_nyl/state.json".to_owned(), false)]),
+            ..ResolvedTargetInputs::default()
+        };
+        let error = place_state_files(&unbound, &[], &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lies inside _nyl"), "{error}");
+
+        let unbound = ResolvedTargetInputs {
+            state_paths: BTreeMap::from([("workloads/api/state.json".to_owned(), true)]),
+            ..ResolvedTargetInputs::default()
+        };
+        let error = place_state_files(&unbound, &[PathBuf::from("workloads/api")], &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inside workload Release directory"), "{error}");
     }
 }

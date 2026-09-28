@@ -9,7 +9,7 @@ use git2::{Repository, StatusOptions};
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
     reconcile_rendered_tree_with_options, resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache,
-    ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
+    RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -152,10 +152,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         &output_root,
         &compiled.owned_files(),
         index,
-        ReconcileOptions {
-            force_owned: args.force,
-            adopt: compiled.adoptable_paths(),
-        },
+        compiled.reconcile_options(args.force),
     )?;
     report_render_result(
         &target_name,
