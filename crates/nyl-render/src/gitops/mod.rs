@@ -2,6 +2,7 @@
 
 pub mod argocd;
 pub mod discovery;
+pub mod inputs;
 pub mod layout;
 pub mod reconcile;
 pub mod tree;

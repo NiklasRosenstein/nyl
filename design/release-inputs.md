@@ -187,6 +187,9 @@ Each binding sets exactly one of these fields:
   relative to the directory containing `nyl.toml`, with leading `..` segments
   allowed, or from the Git worktree root with a leading `/`. Paths that leave
   the worktree or traverse a symbolic link are rejected.
+- The file must be visible to Git under the discovery rule: tracked or
+  untracked but not ignored, and outside the output and vendor subtrees, so
+  published output reproduces from committed source.
 - The file is a rendering input like any other: it enters the dependency
   recorder and the ownership index under its path.
 - A file containing several YAML documents is rejected.
@@ -468,8 +471,10 @@ the same way as a local group: no opt-in field exists.
   - Both publication forms use the prefix-relative path, like the index's
     `files` entries.
 - Today only remote source files use an `@`-prefixed key (`@remote/<path>`).
-  M2 reserves every key starting with `@` for entries that are not project
-  paths, so project-file hashing never interprets them. They are new entries of
+  M2 reserves the prefixes above for entries that are not project paths.
+  Project files keep their path keys even when a directory name starts with
+  `@`, and a project file whose key equals an input entry fails the render
+  instead of being overwritten. They are new entries of
   the existing `inputs` map, which readers already accept as arbitrary keys, so
   the index keeps format version 2 and projects without inputs publish
   byte-identical indexes.

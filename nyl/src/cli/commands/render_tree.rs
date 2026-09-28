@@ -316,6 +316,8 @@ pub(super) fn hash_inputs(
     let mut hashes = BTreeMap::new();
     let paths = inventory.paths();
     for relative in &compiled.inputs {
+        // `@remote/…` keys name files of remote ApplicationGroup sources,
+        // which are not project paths.
         if relative.starts_with("@remote") {
             continue;
         }
@@ -344,6 +346,13 @@ pub(super) fn hash_inputs(
                 relative.to_string_lossy().replace('\\', "/"),
                 nyl_core::digest::sha256_hex(&bytes),
             );
+        }
+    }
+    for (key, digest) in &compiled.input_digests {
+        if hashes.insert(key.clone(), digest.clone()).is_some() {
+            return Err(NylError::config(format!(
+                "Project file {key} collides with the ownership-index key of a resolved Release input; rename or move the file"
+            )));
         }
     }
     Ok(hashes)

@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::release_inputs::InputDeclaration;
 use crate::constants::API_VERSION_K8S_GITOPS;
 use crate::settings::StripEmptyMetadataLabelsMode;
 use crate::{CoreError, Result};
@@ -71,6 +72,10 @@ pub struct ReleaseSpec {
     /// ArgoCD-specific options.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argocd: Option<ReleaseArgoCdSpec>,
+
+    /// Typed inputs, read by templates as `inputs.<name>` and bound per target in `DeploymentTarget.spec.releaseInputs`. A Release that declares inputs needs a literal `metadata.name` and a literal `spec.inputs` block.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, InputDeclaration>,
 }
 
 /// ArgoCD-specific options for Release.
@@ -137,6 +142,7 @@ impl Release {
         for pattern in &self.spec.include {
             validate_include_pattern(pattern)?;
         }
+        super::release_inputs::validate_declarations(&self.spec.inputs)?;
         Ok(())
     }
 }

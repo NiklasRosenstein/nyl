@@ -53,6 +53,8 @@ pub struct RenderRequest<'a> {
     pub max_depth: usize,
     pub track_parent: bool,
     pub strip_empty_metadata_labels_default: bool,
+    /// Resolved inputs of a Release that declares inputs, exposed as `inputs.*`.
+    pub inputs: Option<&'a serde_json::Map<String, Value>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +74,7 @@ impl<'a> RenderRequest<'a> {
             max_depth: 10,
             track_parent: false,
             strip_empty_metadata_labels_default: false,
+            inputs: None,
         }
     }
 }
@@ -242,6 +245,7 @@ impl RenderSession {
                 env: serde_json::Map::new(),
                 cluster: None,
                 target: None,
+                inputs: None,
             }
         }
         .with_gitops_context(cluster_context, target_context);
@@ -336,8 +340,21 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None)
+            .await
+    }
+
+    /// Render one Release entry file of a target with its resolved inputs.
+    pub async fn render_release_file_with_inputs(
+        &self,
+        path: &Path,
+        provenance_root: &Path,
+        worktree_root: Option<&Path>,
+        inputs: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<RenderedBundle> {
         let mut request = RenderRequest::new(path, Some(provenance_root));
         request.provenance_worktree_root = worktree_root;
+        request.inputs = inputs;
         self.render(request).await
     }
 
@@ -352,13 +369,25 @@ impl RenderSession {
             RenderPathMode::ProjectRootRelative => &path,
             RenderPathMode::AsProvided => request.path,
         };
+        // A Release that declares inputs sees them as `inputs.*` in its entry
+        // file, its includes, and everything rendered from them.
+        let input_context;
+        let template_context = match request.inputs {
+            Some(inputs) => {
+                let mut context = self.template_context.clone();
+                context.inputs = Some(Value::Object(inputs.clone()));
+                input_context = context;
+                &input_context
+            }
+            None => &self.template_context,
+        };
         let source_path_text = source_path
             .to_str()
             .ok_or_else(|| NylError::config(format!("Release path is not valid UTF-8: {}", path.display())))?;
 
         let bundle = load_release_bundle_with_root(
             Path::new(source_path_text),
-            &self.template_context,
+            template_context,
             ProvenanceRoots {
                 root: request.provenance_root,
                 worktree: request.provenance_worktree_root,
@@ -372,6 +401,7 @@ impl RenderSession {
             cached,
         } = if cacheable {
             self.prepare_release_cache(
+                template_context,
                 &path,
                 &bundle.inputs,
                 &bundle.dependency_directories,
@@ -419,7 +449,7 @@ impl RenderSession {
                 }
                 for manifest in generate_render_resource(
                     &resource,
-                    &self.template_context,
+                    template_context,
                     &self.project_config,
                     &kube_version,
                     &api_versions,
@@ -522,6 +552,7 @@ impl RenderSession {
 
     fn prepare_release_cache(
         &self,
+        template_context: &TemplateContext,
         path: &Path,
         inputs: &[PathBuf],
         dependency_directories: &[PathBuf],
@@ -564,7 +595,7 @@ impl RenderSession {
                 &std::fs::read(lock).unwrap_or_else(|_| b"missing".to_vec()),
             );
         }
-        recorder.record_template_context(&self.template_context.to_json())?;
+        recorder.record_template_context(&template_context.to_json())?;
         recorder.record_value(
             "request",
             &serde_json::json!({
@@ -817,6 +848,8 @@ fn push_rendered_manifest(
 fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> Result<Value> {
     let mut target = target.clone();
     target.apply_defaults();
+    // Templates see only the resolved, declared inputs of their own Release.
+    target.spec.release_inputs.clear();
     let mut context = serde_json::to_value(target)?;
     if !trusted_source {
         let publication = context

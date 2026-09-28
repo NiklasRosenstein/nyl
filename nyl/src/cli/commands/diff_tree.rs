@@ -1016,6 +1016,7 @@ mod tests {
             },
             files: BTreeMap::new(),
             inputs: BTreeSet::new(),
+            input_digests: BTreeMap::new(),
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;

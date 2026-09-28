@@ -132,6 +132,16 @@
           "$ref": "#/$defs/GitPublication",
           "description": "Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes."
         },
+        "releaseInputs": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/InputBinding"
+            },
+            "type": "object"
+          },
+          "description": "Release input bindings, keyed by `<applicationGroup>/<release>` and then input name. Each binding sets exactly one source and replaces the Release default whole. Keys of selected but disabled groups are ignored; other keys must name a rendered Release and inputs it declares. Not visible to templates as `target.spec.releaseInputs`.",
+          "type": "object"
+        },
         "values": {
           "additionalProperties": true,
           "description": "Target values recursively overlaid on Cluster values and exposed as template inputs.",
@@ -140,6 +150,24 @@
       },
       "required": [
         "publication"
+      ],
+      "type": "object"
+    },
+    "FileInputSource": {
+      "additionalProperties": false,
+      "description": "A value read from a YAML or JSON file of this repository.",
+      "properties": {
+        "path": {
+          "description": "File path relative to the directory containing `nyl.toml`, or from the Git worktree root with a leading `/`. The file must contain a single YAML or JSON document.",
+          "type": "string"
+        },
+        "pointer": {
+          "description": "JSON Pointer selecting the value inside the document; the whole document when empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
       ],
       "type": "object"
     },
@@ -336,6 +364,267 @@
       ],
       "type": "object"
     },
+    "InputBinding": {
+      "additionalProperties": false,
+      "description": "Where one Release input's value comes from. Set exactly one field.",
+      "oneOf": [
+        {
+          "description": "Binds an inline literal value.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "fromFile": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromUnit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromUnit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPromotion": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPromotion"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "value": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "title": "value"
+        },
+        {
+          "description": "Reads the value from a YAML or JSON file of this repository.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "value": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "properties": {
+                  "fromUnit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromUnit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPromotion": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPromotion"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "fromFile": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "fromFile"
+          ],
+          "title": "fromFile"
+        },
+        {
+          "description": "Reserved for orchestration: reads a recorded unit output or artifact field.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "value": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "properties": {
+                  "fromFile": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPromotion": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPromotion"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "fromUnit": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "fromUnit"
+          ],
+          "title": "fromUnit"
+        },
+        {
+          "description": "Reserved for orchestration: reads a value recorded through a PromotionPath.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "value": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "properties": {
+                  "fromFile": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromUnit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromUnit"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "fromPromotion": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "fromPromotion"
+          ],
+          "title": "fromPromotion"
+        }
+      ],
+      "properties": {
+        "fromFile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileInputSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A YAML or JSON file of this repository."
+        },
+        "fromPromotion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotionInputSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reserved for orchestration: a value recorded through a PromotionPath. Rejected outside orchestrated execution."
+        },
+        "fromUnit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitInputSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reserved for orchestration: a recorded unit output or artifact field. Rejected outside orchestrated execution."
+        },
+        "value": {
+          "description": "Inline literal value. DeploymentTargets are static, so it is never templated."
+        }
+      },
+      "type": "object"
+    },
     "LabelSelector": {
       "additionalProperties": false,
       "properties": {
@@ -380,6 +669,90 @@
           "type": "string"
         }
       ]
+    },
+    "PromotionInputSource": {
+      "additionalProperties": false,
+      "description": "Reserved orchestration reference to a promoted value.",
+      "properties": {
+        "path": {
+          "description": "PromotionPath the value must come from.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "Promoted value name, as declared by a PromotionPath.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "UnitInputSource": {
+      "additionalProperties": false,
+      "description": "Reserved orchestration reference to a unit output or artifact field.",
+      "properties": {
+        "artifact": {
+          "description": "Published artifact name. Set exactly one of `output` and `artifact`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attestations": {
+          "description": "Required attestations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "description": "Environment of the unit, for cross-environment references.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "description": "Required evidence level: `published` or `attested`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Expected artifact kind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "Declared output name. Set exactly one of `output` and `artifact`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the output or artifact.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "description": "Producing unit name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

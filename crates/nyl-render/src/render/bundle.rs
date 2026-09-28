@@ -1,14 +1,16 @@
 //! Release bundle and include loading.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use glob::Pattern;
 
 use super::{best_effort_parse_yaml_documents, RenderProvenance, RenderResource};
+use crate::resources::release_inputs::InputDeclaration;
 use crate::resources::{extract_release, Release};
 use crate::template::{TemplateContext, TemplateEngine};
 use crate::{NylError, Result};
+use nyl_core::template_syntax::has_template_syntax;
 
 #[derive(Debug)]
 pub(crate) struct LoadedReleaseBundle {
@@ -91,24 +93,65 @@ pub(crate) fn load_release_bundle_with_root(
 /// Literal Release metadata discovered without rendering the candidate file.
 pub(crate) struct StaticReleaseEnvelope {
     pub(crate) name: Option<String>,
+    /// Literal input declarations. Empty when the Release declares none.
+    pub(crate) inputs: BTreeMap<String, InputDeclaration>,
 }
 
 /// Find a literal Release envelope without rendering the candidate file.
+///
+/// A Release that declares inputs must have a literal `metadata.name` and a
+/// literal, parseable `spec.inputs` block, so declarations are known before
+/// rendering. Contract: [Declarations](../../../../design/release-inputs.md#declarations).
 pub(crate) fn static_release_envelope(path: &Path) -> Result<Option<StaticReleaseEnvelope>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|error| NylError::config(format!("Failed to read {}: {error}", path.display())))?;
-    for document in best_effort_parse_yaml_documents(&raw) {
-        crate::resources::schema::validate_resource_api(&document)?;
+    let documents = best_effort_parse_yaml_documents(&raw);
+    for document in &documents {
+        crate::resources::schema::validate_resource_api(document)?;
     }
-    Ok(best_effort_parse_yaml_documents(&raw)
-        .iter()
-        .find(|document| Release::is_release(document))
-        .map(|release| StaticReleaseEnvelope {
-            name: release
-                .pointer("/metadata/name")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
-        }))
+    let Some(release) = documents.iter().find(|document| Release::is_release(document)) else {
+        return Ok(None);
+    };
+    let name = release
+        .pointer("/metadata/name")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let inputs = match release.pointer("/spec/inputs") {
+        None => BTreeMap::new(),
+        Some(declarations) => {
+            let location = path.display();
+            if contains_template_syntax(declarations) {
+                return Err(NylError::config(format!(
+                    "Release in {location} must declare spec.inputs literally, without template syntax"
+                )));
+            }
+            if name.as_deref().is_none_or(has_template_syntax) {
+                return Err(NylError::config(format!(
+                    "Release in {location} declares spec.inputs and must have a literal metadata.name"
+                )));
+            }
+            let inputs: BTreeMap<String, InputDeclaration> =
+                serde_json::from_value(declarations.clone()).map_err(|error| {
+                    NylError::config(format!("Invalid spec.inputs of the Release in {location}: {error}"))
+                })?;
+            crate::resources::release_inputs::validate_declarations(&inputs).map_err(|error| {
+                NylError::config(format!("Invalid spec.inputs of the Release in {location}: {error}"))
+            })?;
+            inputs
+        }
+    };
+    Ok(Some(StaticReleaseEnvelope { name, inputs }))
+}
+
+fn contains_template_syntax(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => has_template_syntax(text),
+        serde_json::Value::Array(values) => values.iter().any(contains_template_syntax),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| has_template_syntax(key) || contains_template_syntax(value)),
+        _ => false,
+    }
 }
 
 fn resolve_release_includes(path: &Path, release: &Release) -> Result<Vec<PathBuf>> {
