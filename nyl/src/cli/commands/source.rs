@@ -131,6 +131,7 @@ mod tests {
                 revision: "main".to_owned(),
                 commit: "aaaa".to_owned(),
                 path: None,
+                selected: true,
             },
             resolved: Some("bbbb".to_owned()),
             note: None,
