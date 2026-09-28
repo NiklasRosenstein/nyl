@@ -234,7 +234,7 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
     Ok(())
 }
 
-fn normalize_branch_revision(revision: &str) -> &str {
+pub(super) fn normalize_branch_revision(revision: &str) -> &str {
     revision.strip_prefix("refs/heads/").unwrap_or(revision)
 }
 
@@ -407,16 +407,20 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let git_blobs = super::inputs::CachedGitBlobSource::new(
+    // Boxed: it holds the lazy artifact resolver across the compile's awaits.
+    let git_blobs = Box::new(super::inputs::CachedGitBlobSource::new(
         git_manager.take(),
-        crate::render::artifact::ArtifactResolver::new(
-            &inventory.project_root,
-            &inventory.project_config,
-            cache.cloned(),
-        )?,
-    );
-    let release_inputs =
-        resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups, &git_blobs)?;
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    ));
+    let release_inputs = resolve_prepared_release_inputs(
+        inventory,
+        &target,
+        &prepared_groups,
+        &disabled_groups,
+        git_blobs.as_ref(),
+    )?;
 
     let target_cache_inputs = TargetCacheInputs {
         options,
@@ -2218,13 +2222,7 @@ fn resolve_remote_group_source(
         let manager = if let Some(manager) = git_manager {
             manager
         } else {
-            let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
-                GitManager::with_cache_dir(cache_root)
-            } else {
-                GitManager::new().map_err(NylError::Git)?
-            }
-            .with_render_cache(cache.cloned());
-            git_manager.insert(manager)
+            git_manager.insert(GitManager::for_cache(cache).map_err(NylError::Git)?)
         };
         let checkout = manager
             .resolve_ref(&repository.repo_url, Some(commit), None)

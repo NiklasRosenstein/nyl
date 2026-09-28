@@ -219,9 +219,9 @@ pub fn resolve_source_locks(
         });
         if let (Some(owner), LockOwner::ReleaseInput { target, .. }) = (&owner, &lock.owner) {
             if owner == target {
-                return Err(NylError::config(format!(
-                    "{} locks a file in the publication of DeploymentTarget {target} itself; every publication would make the lock stale, so read the target's own state with fromPublication",
-                    lock.owner
+                return Err(NylError::config(super::inputs::self_lock_error(
+                    &lock.owner.to_string(),
+                    target,
                 )));
             }
         }
