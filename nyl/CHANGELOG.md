@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ApplicationGroup.spec.applicationNameTemplate` accepts template values:
   `${ expression }` is evaluated once per Release with `release` in scope, an
   undefined variable or attribute is an error, and `$${` writes a literal `${`.
-  The `{% raw %}` form keeps working.
 
 - `nyl.toml` may live beside the configuration in `nyl/` at the Git worktree
   root; Nyl finds `nyl/nyl.toml` when the worktree root has no `nyl.toml` of
@@ -63,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same. The report names the baseline project directory.
 
 ### Changed
+
+- **BREAKING**: `ApplicationGroup.spec.applicationNameTemplate` no longer
+  expands `{{ … }}` protected with `{% raw %}`. It must contain at least one
+  `${ … }` expression; other text is literal. Rewrite
+  `{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}`
+  as `'${ target.metadata.name }-${ release.metadata.name }'`.
 
 - Generated Argo CD names (catalog Applications, default workload Application
   names, and AppProjects) must be unique across every pair of targets whose

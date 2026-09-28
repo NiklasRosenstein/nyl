@@ -644,8 +644,8 @@ ambiguous command semantics. Met by the
   an actionable message.
 - [ ] Document the feature and regenerate resource schemas.
 - [x] Expand template values (`${ … }`) in fields rendered later than the
-  structural pass, starting with `applicationNameTemplate`, keeping the
-  `{% raw %}` form working.
+  structural pass, starting with `applicationNameTemplate`, which requires at
+  least one expression and no longer expands the `{% raw %}` form.
 - [x] Extract `nyl-core` and `nyl-render` from the current crate without
   behavior change, per the implementation architecture. The `nyl` package
   keeps the CLI role, and no crate is published to crates.io.
