@@ -115,6 +115,9 @@ file paths.
 human-readable branch or tag; `commit` is the full 40-character lowercase
 commit ID rendering reads. Rendering never resolves `revision`. A commit missing from the local Git cache
 is fetched by ID; offline rendering fails with a message naming the lock.
+Locked files follow the [vendor policy](/nyl/configuration/#remote-artifact-vendoring):
+`nyl vendor` captures each one, and mode `required` renders them only from the
+snapshot.
 
 ```yaml
 releaseInputs:

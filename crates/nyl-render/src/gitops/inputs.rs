@@ -107,55 +107,72 @@ fn branch_name(revision: &str) -> &str {
 pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
-    fn read_blob(
-        &self,
-        url: &str,
-        commit: &str,
-        path: &str,
-    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError>;
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
 }
 
-/// [`GitBlobSource`] over the shared bare-repository cache.
+/// [`GitBlobSource`] over the project's remote artifacts: the vendor snapshot,
+/// then the exact source cache, then the shared bare-repository cache.
+///
+/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
+/// A locked file is a remote renderer input like a remote group source, so
+/// `nyl vendor` captures it, `nyl vendor --check` requires it, and vendor mode
+/// `required` never reads it from the network.
 pub struct CachedGitBlobSource {
     manager: RefCell<Option<crate::git::GitManager>>,
-    cache: Option<crate::render::cache::RenderCache>,
+    artifacts: crate::render::artifact::ArtifactResolver,
 }
 
 impl CachedGitBlobSource {
     /// Reuse `manager` when one exists; otherwise one is created on first use
     /// in the cache's external root, or the default Git cache.
-    pub fn new(manager: Option<crate::git::GitManager>, cache: Option<crate::render::cache::RenderCache>) -> Self {
+    pub fn new(manager: Option<crate::git::GitManager>, artifacts: crate::render::artifact::ArtifactResolver) -> Self {
         Self {
             manager: RefCell::new(manager),
-            cache,
+            artifacts,
         }
+    }
+
+    fn read_from_git(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let mut manager = self.manager.borrow_mut();
+        if manager.is_none() {
+            let cache = self.artifacts.render_cache();
+            let created = match cache.and_then(crate::render::cache::RenderCache::external_cache_root) {
+                Some(root) => crate::git::GitManager::with_cache_dir(root),
+                None => crate::git::GitManager::new()?,
+            }
+            .with_render_cache(cache.cloned());
+            *manager = Some(created);
+        }
+        Ok(manager
+            .as_mut()
+            .expect("manager was created above")
+            .read_blob(url, commit, path)?)
     }
 }
 
 impl GitBlobSource for CachedGitBlobSource {
-    fn read_blob(
-        &self,
-        url: &str,
-        commit: &str,
-        path: &str,
-    ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
-        let mut manager = self.manager.borrow_mut();
-        if manager.is_none() {
-            let created = match self
-                .cache
-                .as_ref()
-                .and_then(crate::render::cache::RenderCache::external_cache_root)
-            {
-                Some(root) => crate::git::GitManager::with_cache_dir(root),
-                None => crate::git::GitManager::new()?,
-            }
-            .with_render_cache(self.cache.clone());
-            *manager = Some(created);
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        use crate::render::artifact::{ArtifactFormat, ArtifactRequest};
+        let request = ArtifactRequest::GitBlob {
+            repository: credential_free_url(url),
+            commit: commit.to_owned(),
+            path: path.to_owned(),
+        };
+        if let Some(artifact) = self.artifacts.lookup(&request)? {
+            return Ok(Some(std::fs::read(&artifact.path)?));
         }
-        manager
-            .as_mut()
-            .expect("manager was created above")
-            .read_blob(url, commit, path)
+        let Some(bytes) = self.read_from_git(url, commit, path)? else {
+            return Ok(None);
+        };
+        let staged = tempfile::NamedTempFile::new()?;
+        std::fs::write(staged.path(), &bytes)?;
+        self.artifacts.store(
+            &request,
+            staged.path(),
+            ArtifactFormat::GitBlob,
+            Some(commit.to_owned()),
+        )?;
+        Ok(Some(bytes))
     }
 }
 
@@ -643,8 +660,8 @@ mod tests {
     struct NoGit;
 
     impl GitBlobSource for NoGit {
-        fn read_blob(&self, _: &str, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
-            Err(crate::git::GitError::Command("no Git in this test".to_owned()))
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Err(NylError::config("no Git in this test"))
         }
     }
 
@@ -737,12 +754,7 @@ mod tests {
     struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);
 
     impl GitBlobSource for FakeGit {
-        fn read_blob(
-            &self,
-            url: &str,
-            commit: &str,
-            path: &str,
-        ) -> std::result::Result<Option<Vec<u8>>, crate::git::GitError> {
+        fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
             Ok(self
                 .0
                 .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))

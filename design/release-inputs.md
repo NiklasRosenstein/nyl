@@ -203,6 +203,14 @@ Each binding sets exactly one of these fields:
 - The blob is read at `commit:path`. A commit missing from the local cache is
   fetched by commit. Offline rendering fails with an actionable message when the
   commit is not cached.
+- The file is a remote renderer input, so it follows the project's vendor
+  policy like a remote group source: `nyl vendor` captures the bytes of each
+  locked `(repository, commit, path)` as one `git-blob` artifact, `nyl vendor
+  --check` reports a lock without one, and mode `required` never reads the file
+  from the network. After `nyl update source-locks` moves a lock, `nyl vendor`
+  captures the new commit and `--prune` removes the old file. `fromPublication`
+  state is not vendored: it is read at the branch head that publication builds
+  on.
 - `nyl update source-locks` refreshes `fromGit` locks together with
   ApplicationGroup source locks, so CI has one `--check` gate for every Git
   lock. A new `--target` filter selects one DeploymentTarget, alongside the

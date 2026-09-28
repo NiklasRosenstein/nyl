@@ -4731,6 +4731,66 @@ fn test_render_tree_from_git_reads_the_locked_commit() {
 }
 
 #[test]
+fn test_vendor_captures_from_git_locks_for_required_offline_renders() {
+    let fixture = fixture();
+    fs::write(fixture.path().join("nyl.toml"), "[vendor]\nmode='required'\n").unwrap();
+    let state = StateRepository::new();
+    let commit = state.commit(
+        "dev/images.json",
+        r#"{"api": "registry.example.com/api@sha256:vendored"}"#,
+        "Images",
+        "deploy/dev",
+    );
+    let url = state.url();
+    with_image_binding(
+        &fixture,
+        &format!(
+            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {commit}\n          path: dev/images.json\n          pointer: /api\n"
+        ),
+    );
+    let nyl = |cache: &TempDir, args: &[&str]| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(args)
+            .assert()
+    };
+    let output = fixture.path().join("deploy");
+    let render = [
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output.to_str().unwrap(),
+    ];
+
+    // Required mode never reads a locked file from the network.
+    nyl(&TempDir::new().unwrap(), &render)
+        .failure()
+        .stderr(predicate::str::contains(format!("{url}@{commit}#dev/images.json")))
+        .stderr(predicate::str::contains("not present in the required vendor lock"));
+    nyl(&TempDir::new().unwrap(), &["vendor"]).success();
+    let lock = fs::read_to_string(fixture.path().join("vendor/lock.yaml")).unwrap();
+    assert!(lock.contains("kind: git-blob"), "{lock}");
+    nyl(&TempDir::new().unwrap(), &["vendor", "--check"]).success();
+
+    // With the repository gone and an empty cache, the snapshot alone renders.
+    drop(state);
+    nyl(&TempDir::new().unwrap(), &render).success();
+    let rendered = read_tree(&output.join("production"))
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(&bytes).into_owned())
+        .collect::<String>();
+    assert!(
+        rendered.contains("image: registry.example.com/api@sha256:vendored"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn test_update_source_locks_moves_from_git_groups_and_keeps_other_revisions() {
     let fixture = fixture();
     let state = StateRepository::new();

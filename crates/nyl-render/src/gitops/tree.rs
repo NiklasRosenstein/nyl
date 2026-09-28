@@ -407,7 +407,14 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let git_blobs = super::inputs::CachedGitBlobSource::new(git_manager.take(), cache.cloned());
+    let git_blobs = super::inputs::CachedGitBlobSource::new(
+        git_manager.take(),
+        crate::render::artifact::ArtifactResolver::new(
+            &inventory.project_root,
+            &inventory.project_config,
+            cache.cloned(),
+        )?,
+    );
     let release_inputs =
         resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups, &git_blobs)?;
 
