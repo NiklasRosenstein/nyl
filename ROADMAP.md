@@ -223,7 +223,9 @@ spec:
 
 - `fromGit` follows the ApplicationGroup source-lock pattern: rendering reads
   only the locked commit, and `nyl update source-locks` refreshes these locks
-  together with ApplicationGroup locks, grouped by repository and revision.
+  together with ApplicationGroup locks. Each lock's destination depends only
+  on the lock: a file in a target's publication prefix follows that target's
+  newest publication, and every other lock follows the branch head.
 - `fromPublication` supports write-back workflows where an external tool commits
   state to the deploy branch. `publish-tree` reads the file at the branch head it
   builds on and pushes with a compare-and-swap, so the published commit holds

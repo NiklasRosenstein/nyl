@@ -243,7 +243,11 @@ Each binding sets exactly one of these fields:
     write-back the target has not yet published. Every other lock, including
     ApplicationGroup source locks and locks reading files outside every
     prefix, moves to the branch head. Locks reading files of different
-    targets' prefixes on one branch each follow their own target.
+    targets' prefixes on one branch each follow their own target. A target
+    never locks a file in its own publication: every publication would make
+    the lock stale again, so rendering and the updater reject it, and the
+    target reads its own state with `fromPublication`. Repository URLs match
+    regardless of case, a trailing `.git`, or embedded credentials.
 - With `--require healthy`, the updater writes the observation that justified
   the move next to each lock, so the pull request commits the evidence together
   with the lock:

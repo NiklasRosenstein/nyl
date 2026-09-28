@@ -2244,22 +2244,14 @@ fn resolve_prepared_release_inputs(
         })
         .collect::<Vec<_>>();
     let paths = inventory.paths();
-    let repositories = inventory
-        .resources
-        .values()
-        .filter_map(|discovered| match &discovered.resource {
-            Some(GitOpsResource::GitRepository(repository)) => Some(repository.metadata.name.clone()),
-            _ => None,
-        })
-        .map(|name| {
-            let reference = crate::resources::LocalReference { name: name.clone() };
-            let (repository, source) = inventory.resolve_git_repository(Some(&reference), None)?;
-            let source = source.expect("a referenced GitRepository has a source file");
-            // Absolute, like `fromFile` paths, so the cache recorder reads the
-            // file wherever the command runs.
-            Ok((name, (repository, inventory.project_root.join(source))))
-        })
-        .collect::<Result<_>>()?;
+    let repositories = |reference: &crate::resources::LocalReference| {
+        let (repository, source) = inventory.resolve_git_repository(Some(reference), None)?;
+        let source = source.expect("a referenced GitRepository has a source file");
+        // Absolute, like `fromFile` paths, so the cache recorder reads the
+        // file wherever the command runs.
+        Ok((repository, inventory.project_root.join(source)))
+    };
+    let publication_scope = super::inputs::PublicationScope::of(inventory, target)?;
     super::inputs::resolve_target_inputs(
         target,
         &releases,
@@ -2267,6 +2259,7 @@ fn resolve_prepared_release_inputs(
         &super::inputs::InputSources {
             paths: &paths,
             repositories: &repositories,
+            publication_scope: Some(&publication_scope),
             git,
             publication,
             visible_files: &inventory.worktree_data_files,

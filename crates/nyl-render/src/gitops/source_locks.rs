@@ -20,7 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::git::{normalize_git_url_for_equality, GitManager};
+use super::inputs::PublicationScope;
+use crate::git::GitManager;
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
@@ -184,7 +185,7 @@ pub fn resolve_source_locks(
     // Prefixes are needed only to place `fromGit` files, so an unrelated
     // target's publication never blocks an ApplicationGroup-only update.
     let publishers = if locks.iter().any(|lock| lock.path.is_some()) {
-        publication_prefixes(inventory)?
+        publication_scopes(inventory)?
     } else {
         Vec::new()
     };
@@ -210,17 +211,20 @@ pub fn resolve_source_locks(
             heads.insert(head_key, head);
             head
         };
-        let equality_url = normalize_git_url_for_equality(&url);
         let owner = lock.path.as_deref().and_then(|path| {
             publishers
                 .iter()
-                .find(|(publisher_url, publisher_revision, prefix, _)| {
-                    publisher_url == &equality_url
-                        && branch(publisher_revision) == branch(&lock.revision)
-                        && path_within(path, prefix)
-                })
-                .map(|(_, _, _, target)| target.clone())
+                .find(|scope| scope.contains(&url, &lock.revision, path))
+                .map(|scope| scope.target.clone())
         });
+        if let (Some(owner), LockOwner::ReleaseInput { target, .. }) = (&owner, &lock.owner) {
+            if owner == target {
+                return Err(NylError::config(format!(
+                    "{} locks a file in the publication of DeploymentTarget {target} itself; every publication would make the lock stale, so read the target's own state with fromPublication",
+                    lock.owner
+                )));
+            }
+        }
         let (resolved, note) = match owner {
             None => (Some(head.to_string()), None),
             Some(target) => {
@@ -372,33 +376,15 @@ fn key_matches(line: &str, key: &str) -> bool {
 
 /// Every target's publication as (normalized URL, revision, prefix, target).
 /// Both the read and the publish URL identify the repository.
-fn publication_prefixes(inventory: &GitOpsInventory) -> Result<Vec<(String, String, String, String)>> {
-    let mut prefixes = Vec::new();
-    for discovered in inventory.resources.values() {
-        let Some(GitOpsResource::DeploymentTarget(target)) = &discovered.resource else {
-            continue;
-        };
-        let publication = &target.spec.publication;
-        let (repository, _) =
-            inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
-        for url in std::iter::once(&repository.repo_url).chain(repository.publish_url.as_ref()) {
-            prefixes.push((
-                normalize_git_url_for_equality(url),
-                publication.revision.clone(),
-                target.publication_path_prefix().trim_matches('/').to_owned(),
-                target.metadata.name.clone(),
-            ));
-        }
-    }
-    Ok(prefixes)
-}
-
-fn branch(revision: &str) -> &str {
-    revision.strip_prefix("refs/heads/").unwrap_or(revision)
-}
-
-fn path_within(path: &str, prefix: &str) -> bool {
-    prefix.is_empty() || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+fn publication_scopes(inventory: &GitOpsInventory) -> Result<Vec<PublicationScope>> {
+    inventory
+        .resources
+        .values()
+        .filter_map(|discovered| match &discovered.resource {
+            Some(GitOpsResource::DeploymentTarget(target)) => Some(PublicationScope::of(inventory, target)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -518,12 +504,5 @@ spec:
     fn test_group_lock_replaces_only_the_selected_commit_scalar() {
         let updated = replace_single_commit_scalar("revision: main\ncommit: aaaa\n", "aaaa", "bbbb").unwrap();
         assert_eq!(updated, "revision: main\ncommit: bbbb\n");
-    }
-
-    #[test]
-    fn test_path_within_prefix() {
-        assert!(path_within("dev/state/images.json", "dev"));
-        assert!(!path_within("develop/state.json", "dev"));
-        assert!(path_within("state.json", ""));
     }
 }
