@@ -4481,8 +4481,53 @@ fn test_render_rejects_a_binding_for_an_undeclared_input_like_render_tree() {
     nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"])
         .failure()
         .stderr(predicate::str::contains(
-            "binds imagee that Release workloads/api does not declare",
+            "spec.releaseInputs.\"workloads/api\".imagee binds an input Release workloads/api does not declare",
         ));
+}
+
+#[test]
+fn test_render_group_choice_follows_render_tree_file_selection() {
+    let fixture = fixture();
+    with_production_api_bindings(&fixture);
+    // A Git-ignored copy inside the group's source is not rendered by
+    // render-tree, so its bindings do not apply implicitly.
+    fs::write(
+        fixture.path().join(".gitignore"),
+        "applications/workloads/api-local.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("applications/workloads/api-local.yaml"),
+        API_RELEASE_WITH_INPUTS,
+    )
+    .unwrap();
+    nyl_render(
+        &fixture,
+        &["--target", "production", "applications/workloads/api-local.yaml"],
+    )
+    .failure()
+    .stderr(predicate::str::contains("--application-group"));
+    // --defaults-only resolves no group source, so another selected group
+    // with a missing source directory does not fail it.
+    fs::write(
+        fixture.path().join("config/application-groups/broken.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: broken\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd\n  source:\n    path: applications/missing\n",
+    )
+    .unwrap();
+    nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--defaults-only",
+            "--input",
+            "image=\"x\"",
+            "--input",
+            "database={\"host\": \"h\"}",
+            "applications/workloads/api-local.yaml",
+        ],
+    )
+    .success();
 }
 
 #[test]

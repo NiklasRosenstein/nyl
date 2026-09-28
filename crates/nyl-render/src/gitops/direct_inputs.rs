@@ -26,8 +26,6 @@ use super::inputs::{
 };
 use super::GitOpsInventory;
 use crate::resources::release_inputs::{InputBinding, InputDeclaration, ReleaseKey};
-use crate::resources::ApplicationGroupSource;
-use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
 
@@ -87,26 +85,6 @@ impl DirectInputs {
     }
 }
 
-/// One enabled ApplicationGroup a target selects, with its local source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetGroup {
-    pub name: String,
-    /// Canonical local source directory and its file selection; `None` for a
-    /// remote source, which never contains a local file.
-    pub source: Option<(PathBuf, ApplicationGroupSource)>,
-}
-
-impl TargetGroup {
-    /// Whether this group renders `file`, by the same selection as
-    /// `render-tree`: beneath its root and matched by its include, exclude,
-    /// and recursion rules.
-    fn contains(&self, file: &Path) -> bool {
-        self.source
-            .as_ref()
-            .is_some_and(|(root, source)| super::tree::source_matches(root, file, source))
-    }
-}
-
 /// Merge `--inputs` (a YAML or JSON object) under individual `--input` flags,
 /// which win.
 ///
@@ -139,32 +117,25 @@ pub fn parse_overrides(inputs_file: Option<&Path>, input_flags: &[String]) -> Re
     Ok(overrides)
 }
 
-/// Choose the group whose bindings apply to `file`, or `None` for defaults.
+/// Choose the group whose bindings apply, or `None` for defaults.
 ///
-/// `groups` are the target's enabled groups; `disabled` names its selected
-/// but disabled ones, whose bindings `render-tree` ignores.
+/// `enabled` and `disabled` name the target's selected groups. `rendering`
+/// returns the enabled groups that render the Release file; it runs only when
+/// neither `--defaults-only` nor `--application-group` decides, so only then
+/// are group sources resolved.
 ///
 /// Contract: [Direct commands](../../../../design/release-inputs.md#direct-commands).
 pub fn select_group(
     target: &str,
-    groups: &[TargetGroup],
+    enabled: &[String],
     disabled: &BTreeSet<String>,
     file: &Path,
     application_group: Option<&str>,
-    defaults_only: bool,
+    rendering: impl FnOnce() -> Result<Vec<String>>,
 ) -> Result<Option<String>> {
-    if defaults_only {
-        return Ok(None);
-    }
-    let names = || {
-        groups
-            .iter()
-            .map(|group| group.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let names = || enabled.join(", ");
     if let Some(requested) = application_group {
-        return if groups.iter().any(|group| group.name == requested) {
+        return if enabled.iter().any(|name| name == requested) {
             Ok(Some(requested.to_owned()))
         } else if disabled.contains(requested) {
             Err(NylError::config(format!(
@@ -177,13 +148,8 @@ pub fn select_group(
             )))
         };
     }
-    let containing = groups
-        .iter()
-        .filter(|group| group.contains(file))
-        .map(|group| group.name.as_str())
-        .collect::<Vec<_>>();
-    match containing.as_slice() {
-        [group] => Ok(Some((*group).to_owned())),
+    match rendering()?.as_slice() {
+        [group] => Ok(Some(group.clone())),
         [] => Err(NylError::config(format!(
             "No enabled ApplicationGroup of DeploymentTarget {target:?} renders {} from a local source; selected groups: {}. \
              Pass --application-group <name> to apply that group's bindings, or --defaults-only to render with defaults and overrides only",
@@ -198,56 +164,26 @@ pub fn select_group(
     }
 }
 
-/// The target's selected ApplicationGroups: the enabled ones with their local
-/// sources, and the names of the disabled ones.
-pub fn target_groups(
+/// The enabled groups of `groups` whose local source renders `file`, by the
+/// same file selection as `render-tree`.
+fn groups_rendering(
     inventory: &GitOpsInventory,
-    target: &crate::resources::DeploymentTarget,
-) -> Result<(Vec<TargetGroup>, BTreeSet<String>)> {
-    let (cluster, _) = super::tree::resolve_cluster(inventory, target.cluster_name())?;
-    let session =
-        crate::render::RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?;
-    let mut groups = Vec::new();
-    let mut disabled = BTreeSet::new();
-    for discovered in inventory.resources.values() {
-        if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup
-            || !super::tree::target_selects_group(target, &discovered.static_labels)
-        {
-            continue;
-        }
-        let Some(GitOpsResource::ApplicationGroup(group)) =
-            super::tree::render_effective_control(discovered, &session)?
-        else {
+    groups: &[(PathBuf, crate::resources::ApplicationGroup)],
+    file: &Path,
+) -> Result<Vec<String>> {
+    let mut rendering = Vec::new();
+    for (resource_path, group) in groups {
+        let Some((root, source)) = super::tree::local_group_source(inventory, resource_path, group)? else {
             continue;
         };
-        // Like render-tree, a disabled group is skipped before its source is
-        // resolved, so a missing source directory cannot fail the command.
-        if !group.spec.enabled {
-            disabled.insert(group.metadata.name.clone());
-            continue;
+        let renders = super::tree::local_candidate_files(inventory, &root, &source)
+            .iter()
+            .any(|candidate| candidate.canonicalize().is_ok_and(|candidate| candidate == file));
+        if renders {
+            rendering.push(group.metadata.name.clone());
         }
-        let source = match &group.spec.source {
-            Some(source) if source.is_remote() => None,
-            Some(source) => Some((
-                super::tree::local_group_source_root(inventory, &group.metadata.name, &source.path)?,
-                source.clone(),
-            )),
-            None => Some((
-                super::derived_group_source_root(
-                    &inventory.project_root,
-                    &discovered.source_path,
-                    &group.metadata.name,
-                ),
-                super::tree::default_group_source(),
-            )),
-        };
-        groups.push(TargetGroup {
-            name: group.metadata.name.clone(),
-            source: source.map(|(root, source)| (root.canonicalize().unwrap_or(root), source)),
-        });
     }
-    groups.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok((groups, disabled))
+    Ok(rendering)
 }
 
 /// Resolve the inputs of the Release in `file` for a direct command.
@@ -296,15 +232,30 @@ pub fn resolve_direct_inputs(
     };
     let target_name = &target.metadata.name;
     let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    let (groups, disabled) = target_groups(inventory, target)?;
-    let group = select_group(
-        target_name,
-        &groups,
-        &disabled,
-        &file,
-        selection.application_group.as_deref(),
-        selection.defaults_only,
-    )?;
+    let group = if selection.defaults_only {
+        None
+    } else {
+        let (cluster, _) = super::tree::resolve_cluster(inventory, target.cluster_name())?;
+        let session = crate::render::RenderSession::for_target(
+            &inventory.project_root,
+            &inventory.project_config,
+            target,
+            &cluster,
+        )?;
+        let (groups, disabled) = super::tree::selected_groups(inventory, target, &session)?;
+        let enabled = groups
+            .iter()
+            .map(|(_, group)| group.metadata.name.clone())
+            .collect::<Vec<_>>();
+        select_group(
+            target_name,
+            &enabled,
+            &disabled,
+            &file,
+            selection.application_group.as_deref(),
+            || groups_rendering(inventory, &groups, &file),
+        )?
+    };
     let key = group.map(|group| ReleaseKey {
         group,
         release: release_name.clone(),
@@ -313,14 +264,15 @@ pub fn resolve_direct_inputs(
         .as_ref()
         .and_then(|key| target.spec.release_inputs.get(&key.to_string()));
     if let (Some(key), Some(bindings)) = (&key, bindings) {
-        // render-tree rejects a binding for an undeclared input; so does this.
-        let unknown = undeclared(&mut bindings.keys());
-        if !unknown.is_empty() {
+        let issues = super::inputs::undeclared_binding_issues(key, bindings, &declarations);
+        if !issues.is_empty() {
             return Err(NylError::config(format!(
-                "DeploymentTarget {target_name:?} spec.releaseInputs.{:?} binds {} that Release {key} does not declare; declared inputs: {}",
-                key.to_string(),
-                unknown.join(", "),
-                declarations.keys().cloned().collect::<Vec<_>>().join(", ")
+                "DeploymentTarget {target_name:?} has invalid Release inputs:\n{}",
+                issues
+                    .iter()
+                    .map(|issue| format!("  - {issue}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )));
         }
     }
@@ -481,112 +433,46 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    fn local(root: &Path, dir: &str) -> Option<(PathBuf, ApplicationGroupSource)> {
-        Some((root.join(dir), super::super::tree::default_group_source()))
-    }
-
-    fn groups(root: &Path) -> Vec<TargetGroup> {
-        let mut flat = super::super::tree::default_group_source();
-        flat.recursive = false;
-        flat.exclude = vec!["legacy-*".to_owned()];
-        vec![
-            TargetGroup {
-                name: "platform".to_owned(),
-                source: local(root, "platform"),
-            },
-            TargetGroup {
-                name: "workloads".to_owned(),
-                source: Some((root.join("apps"), flat)),
-            },
-            TargetGroup {
-                name: "wide".to_owned(),
-                source: local(root, "apps/shared"),
-            },
-            TargetGroup {
-                name: "remote".to_owned(),
-                source: None,
-            },
-        ]
-    }
-
-    fn select(file: &str, requested: Option<&str>, defaults_only: bool) -> Result<Option<String>> {
-        let root = Path::new("/p");
+    fn select(requested: Option<&str>, rendering: Vec<&str>) -> (Result<Option<String>>, bool) {
+        let enabled = ["platform", "workloads"].map(ToOwned::to_owned);
         let disabled = BTreeSet::from(["retired".to_owned()]);
-        select_group(
-            "dev",
-            &groups(root),
-            &disabled,
-            &root.join(file),
-            requested,
-            defaults_only,
-        )
+        let mut asked = false;
+        let selected = select_group("dev", &enabled, &disabled, Path::new("/p/api.yaml"), requested, || {
+            asked = true;
+            Ok(rendering.into_iter().map(ToOwned::to_owned).collect())
+        });
+        (selected, asked)
     }
 
     #[test]
-    fn test_select_group_uses_the_group_render_tree_renders_the_file_in() {
-        assert_eq!(
-            select("apps/web.yaml", None, false).unwrap(),
-            Some("workloads".to_owned())
-        );
-        // workloads is not recursive, so only wide renders a nested file.
-        assert_eq!(
-            select("apps/shared/db.yaml", None, false).unwrap(),
-            Some("wide".to_owned())
-        );
+    fn test_select_group_uses_the_one_group_rendering_the_file() {
+        let (selected, asked) = select(None, vec!["workloads"]);
+        assert_eq!(selected.unwrap(), Some("workloads".to_owned()));
+        assert!(asked);
     }
 
     #[test]
-    fn test_select_group_requires_a_choice_when_no_group_renders_the_file() {
-        // Excluded by workloads' source, so no group renders it.
-        let excluded = select("apps/legacy-web.yaml", None, false).unwrap_err().to_string();
-        assert!(excluded.contains("--defaults-only"), "{excluded}");
-        let none = select("elsewhere/web.yaml", None, false).unwrap_err().to_string();
-        assert!(none.contains("platform, workloads, wide, remote"), "{none}");
-    }
-
-    #[test]
-    fn test_select_group_requires_a_choice_when_several_groups_render_the_file() {
-        let root = Path::new("/p");
-        let groups = vec![
-            TargetGroup {
-                name: "a".to_owned(),
-                source: local(root, "apps"),
-            },
-            TargetGroup {
-                name: "b".to_owned(),
-                source: local(root, "apps/shared"),
-            },
-        ];
-        let error = select_group(
-            "dev",
-            &groups,
-            &BTreeSet::new(),
-            &root.join("apps/shared/db.yaml"),
-            None,
-            false,
-        )
-        .unwrap_err()
-        .to_string();
+    fn test_select_group_requires_a_choice_when_several_or_no_groups_render_the_file() {
+        let several = select(None, vec!["platform", "workloads"]).0.unwrap_err().to_string();
         assert!(
-            error.contains("a, b") && error.contains("--application-group"),
-            "{error}"
+            several.contains("platform, workloads") && several.contains("--application-group"),
+            "{several}"
+        );
+        let none = select(None, vec![]).0.unwrap_err().to_string();
+        assert!(
+            none.contains("--defaults-only") && none.contains("selected groups: platform, workloads"),
+            "{none}"
         );
     }
 
     #[test]
-    fn test_select_group_honours_explicit_choices() {
-        assert_eq!(
-            select("elsewhere/web.yaml", Some("remote"), false).unwrap(),
-            Some("remote".to_owned())
-        );
-        assert_eq!(select("elsewhere/web.yaml", None, true).unwrap(), None);
-        let disabled = select("elsewhere/web.yaml", Some("retired"), false)
-            .unwrap_err()
-            .to_string();
+    fn test_select_group_resolves_no_sources_for_an_explicit_group() {
+        let (selected, asked) = select(Some("platform"), vec![]);
+        assert_eq!(selected.unwrap(), Some("platform".to_owned()));
+        assert!(!asked, "an explicit group needs no source resolution");
+        let disabled = select(Some("retired"), vec![]).0.unwrap_err().to_string();
         assert!(disabled.contains("is disabled"), "{disabled}");
-        let unknown = select("elsewhere/web.yaml", Some("other"), false)
-            .unwrap_err()
-            .to_string();
+        let unknown = select(Some("other"), vec![]).0.unwrap_err().to_string();
         assert!(unknown.contains("is not an ApplicationGroup"), "{unknown}");
     }
 
