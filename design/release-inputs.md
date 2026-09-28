@@ -208,14 +208,20 @@ Each binding sets exactly one of these fields:
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
   existing ApplicationGroup name argument.
 - One target can hold many `fromGit` locks, and several bindings often lock the
-  same repository at the same commit. The updater therefore groups locks by
-  repository and `revision`: it resolves each group once and moves every lock
-  in it to the same new commit. Bindings that share a current commit but name
-  different revisions are addressed individually by their position in the
-  document, never by matching the commit text alone.
+  same repository at the same commit. Each lock's destination depends only on
+  the lock itself, so the result never depends on which other locks exist or
+  are selected. The updater fetches each repository once and resolves each
+  revision once, and locks of one repository and revision that share a
+  destination rule move to the same commit. Bindings that share a current
+  commit but name different revisions are addressed individually by their
+  position in the document, never by matching the commit text alone.
+- The ApplicationGroup name argument and `--target` select which locks move,
+  never where they move. A filtered update therefore agrees with an
+  unfiltered `--check`, and the locks it leaves alone stay as they are until
+  they are updated themselves.
 - `--require healthy` follows the per-value promotion rule in the
   [health evidence](promotion.md#health-evidence) contract, so locks of one group may move to different
-  commits. It reads the source target's recorded observation, written by
+  commits for the same reason. It reads the source target's recorded observation, written by
   `nyl verify --target <source>` into
   `<prefix>/_nyl/observations/health.yaml` on the source's publication branch
   (see [Kubernetes publications](promotion.md#kubernetes-publications)), so it needs no cluster
@@ -231,14 +237,13 @@ Each binding sets exactly one of these fields:
     commits it names the oldest, per the recorded-commit rule. If covered
     Applications run different values of the same file and pointer, the lock
     does not move and the updater reports the conflict.
-  - Without `--require healthy`, a group moves to one new commit as described
-    above. When the group's locked files lie inside one target's prefix on
-    that branch, that commit is the target's newest publication commit, never
-    a later commit made by another tool, such as a state file write-back the
-    target has not yet published; locks of the group that read files outside
-    every prefix move with it. When no locked file lies inside a prefix, it is
-    the branch head. A group whose files lie inside several targets' prefixes
-    has no single commit to move to and is an error.
+  - Without `--require healthy`, a `fromGit` lock whose file lies inside a
+    target's prefix on that branch moves to that target's newest publication
+    commit, never to a later commit made by another tool, such as a state file
+    write-back the target has not yet published. Every other lock, including
+    ApplicationGroup source locks and locks reading files outside every
+    prefix, moves to the branch head. Locks reading files of different
+    targets' prefixes on one branch each follow their own target.
 - With `--require healthy`, the updater writes the observation that justified
   the move next to each lock, so the pull request commits the evidence together
   with the lock:

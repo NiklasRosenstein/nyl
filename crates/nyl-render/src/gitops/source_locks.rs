@@ -3,16 +3,17 @@
 //!
 //! Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
 //!
-//! - Locks are grouped by repository and `revision`. Each group is resolved
-//!   once, and every lock in it moves to the same new commit. Groups are formed
-//!   from every lock in the project; the `--group`/`--target` filter selects
-//!   only which locks are reported and edited, so a filtered run moves a lock
-//!   to the same commit as an unfiltered run.
-//! - A group whose `fromGit` files lie inside one DeploymentTarget's
-//!   publication prefix on that branch moves to that target's newest
-//!   publication commit, never to a later commit another tool made on the
-//!   branch. A group with no such file moves to the branch head, and a group
-//!   reading several targets' publications is an error.
+//! - Each lock's destination depends only on the lock. A `fromGit` lock whose
+//!   file lies inside a DeploymentTarget's publication prefix on that branch
+//!   moves to that target's newest publication commit, never to a later commit
+//!   another tool made on the branch. Every other lock moves to the branch
+//!   head.
+//! - The `--group`/`--target` filter selects which locks move, never where
+//!   they move, so a filtered update agrees with an unfiltered `--check`.
+//!   Locks of one repository and revision that share an owner, or have none,
+//!   agree after an unfiltered update.
+//! - Each repository is fetched once per run, and each branch head and
+//!   publication commit is looked up once.
 //! - Locks are addressed by their position in the document, never by matching
 //!   the commit text alone, so bindings that share a commit but name different
 //!   revisions stay independent.
@@ -56,9 +57,6 @@ pub struct SourceLock {
     pub commit: String,
     /// Repository-relative file a `fromGit` binding reads.
     pub path: Option<String>,
-    /// Whether the invocation's filters select this lock for reporting and
-    /// editing. Unselected locks still decide where their group moves.
-    pub selected: bool,
 }
 
 /// A lock and the commit it should name.
@@ -80,9 +78,9 @@ impl LockResolution {
     }
 }
 
-/// Collect every lock of the project, marking those selected by the
-/// ApplicationGroup and DeploymentTarget filters. Without filters every lock
-/// is selected; with one or both, only the named resources' locks are.
+/// Collect the locks selected by the ApplicationGroup and DeploymentTarget
+/// filters. Without filters every lock is selected; with one or both, only
+/// the named resources' locks are.
 pub fn collect_source_locks(
     inventory: &GitOpsInventory,
     group: Option<&str>,
@@ -107,12 +105,13 @@ pub fn collect_source_locks(
     let mut target_found = false;
     for discovered in inventory.resources.values() {
         match &discovered.resource {
-            Some(GitOpsResource::ApplicationGroup(resource)) => {
+            Some(GitOpsResource::ApplicationGroup(resource))
+                if groups_selected && group.is_none_or(|requested| requested == resource.metadata.name) =>
+            {
                 let Some(source) = resource.spec.source.as_ref().filter(|source| source.is_remote()) else {
                     continue;
                 };
-                let selected = groups_selected && group.is_none_or(|requested| requested == resource.metadata.name);
-                group_found |= selected;
+                group_found = true;
                 let repository = inventory
                     .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
                     .0;
@@ -125,12 +124,12 @@ pub fn collect_source_locks(
                     revision: source.revision.clone().expect("validated remote source has revision"),
                     commit: source.commit.clone().expect("validated remote source has commit"),
                     path: None,
-                    selected,
                 });
             }
-            Some(GitOpsResource::DeploymentTarget(resource)) => {
-                let selected = targets_selected && target.is_none_or(|requested| requested == resource.metadata.name);
-                target_found |= selected;
+            Some(GitOpsResource::DeploymentTarget(resource))
+                if targets_selected && target.is_none_or(|requested| requested == resource.metadata.name) =>
+            {
+                target_found = true;
                 for (key, inputs) in &resource.spec.release_inputs {
                     for (input, binding) in inputs {
                         let Some(source) = &binding.from_git else {
@@ -150,7 +149,6 @@ pub fn collect_source_locks(
                             revision: source.revision.clone(),
                             commit: source.commit.clone(),
                             path: Some(source.path.clone()),
-                            selected,
                         });
                     }
                 }
@@ -172,13 +170,12 @@ pub fn collect_source_locks(
     Ok(locks)
 }
 
-/// Resolve every lock, one repository and revision at a time.
+/// Resolve every lock to the commit it should name.
 ///
-/// Each repository's refs are fetched once. A group whose `fromGit` files lie
-/// inside one DeploymentTarget's publication prefix moves to that target's
-/// newest publication commit; a group with no such file moves to the branch
-/// head. A group reading files of several targets' publications has no single
-/// commit to move to and is an error.
+/// A `fromGit` lock reading a file inside a DeploymentTarget's publication
+/// prefix on its branch follows that target's newest publication commit;
+/// every other lock follows the branch head. Refs are fetched once per
+/// repository URL, and heads and publication commits are looked up once.
 pub fn resolve_source_locks(
     inventory: &GitOpsInventory,
     locks: Vec<SourceLock>,
@@ -191,53 +188,54 @@ pub fn resolve_source_locks(
     } else {
         Vec::new()
     };
-    let mut groups = BTreeMap::<(String, String), Vec<SourceLock>>::new();
-    for lock in locks {
-        let group = (
-            normalize_git_url_for_equality(&lock.repository_url),
-            lock.revision.clone(),
-        );
-        groups.entry(group).or_default().push(lock);
-    }
-    // Track fetches by the exact URL handed to the Git manager: equal
-    // repositories may be spelled differently, and each spelling can map to
-    // its own cached copy.
+    // Key fetches and lookups by the exact URL handed to the Git manager:
+    // equal repositories may be spelled differently, and each spelling can
+    // map to its own cached copy.
     let mut fetched = BTreeSet::new();
+    let mut heads = BTreeMap::<(String, String), git2::Oid>::new();
+    let mut publications = BTreeMap::<(String, String, String), Option<git2::Oid>>::new();
     let mut resolutions = Vec::new();
-    for ((url, revision), locks) in groups {
-        if !locks.iter().any(|lock| lock.selected) {
-            continue;
+    for lock in locks {
+        let url = lock.repository_url.clone();
+        if fetched.insert(url.clone()) {
+            manager.fetch_refs(&url).map_err(NylError::Git)?;
         }
-        let repository_url = locks[0].repository_url.clone();
-        if fetched.insert(repository_url.clone()) {
-            manager.fetch_refs(&repository_url).map_err(NylError::Git)?;
-        }
-        let head = manager
-            .resolve_cached_ref(&repository_url, &revision)
-            .map_err(NylError::Git)?;
-        let owners = locks
-            .iter()
-            .filter_map(|lock| lock.path.as_deref())
-            .filter_map(|path| {
-                publishers
-                    .iter()
-                    .find(|(publisher_url, publisher_revision, prefix, _)| {
-                        publisher_url == &url
-                            && branch(publisher_revision) == branch(&revision)
-                            && path_within(path, prefix)
-                    })
-                    .map(|(_, _, _, target)| target.clone())
-            })
-            .collect::<BTreeSet<_>>();
-        let (resolved, note) = match owners.len() {
-            0 => (Some(head.to_string()), None),
-            1 => {
-                let target = owners.first().expect("one owner");
-                let trailer = format!("{DEPLOYMENT_TARGET_TRAILER}: {target}");
-                match manager
-                    .newest_commit_with_message_line(&repository_url, head, &trailer)
-                    .map_err(NylError::Git)?
-                {
+        let head_key = (url.clone(), lock.revision.clone());
+        let head = if let Some(head) = heads.get(&head_key) {
+            *head
+        } else {
+            let head = manager
+                .resolve_cached_ref(&url, &lock.revision)
+                .map_err(NylError::Git)?;
+            heads.insert(head_key, head);
+            head
+        };
+        let equality_url = normalize_git_url_for_equality(&url);
+        let owner = lock.path.as_deref().and_then(|path| {
+            publishers
+                .iter()
+                .find(|(publisher_url, publisher_revision, prefix, _)| {
+                    publisher_url == &equality_url
+                        && branch(publisher_revision) == branch(&lock.revision)
+                        && path_within(path, prefix)
+                })
+                .map(|(_, _, _, target)| target.clone())
+        });
+        let (resolved, note) = match owner {
+            None => (Some(head.to_string()), None),
+            Some(target) => {
+                let key = (url.clone(), lock.revision.clone(), target.clone());
+                let publication = if let Some(publication) = publications.get(&key) {
+                    *publication
+                } else {
+                    let trailer = format!("{DEPLOYMENT_TARGET_TRAILER}: {target}");
+                    let publication = manager
+                        .newest_commit_with_message_line(&url, head, &trailer)
+                        .map_err(NylError::Git)?;
+                    publications.insert(key, publication);
+                    publication
+                };
+                match publication {
                     Some(commit) => (
                         Some(commit.to_string()),
                         Some(format!("newest publication of DeploymentTarget {target}")),
@@ -245,34 +243,14 @@ pub fn resolve_source_locks(
                     None => (
                         None,
                         Some(format!(
-                            "{revision} has no publication commit of DeploymentTarget {target} yet"
+                            "{} has no publication commit of DeploymentTarget {target} yet",
+                            lock.revision
                         )),
                     ),
                 }
             }
-            _ => {
-                let owners = owners.into_iter().collect::<Vec<_>>().join(", ");
-                let bindings = locks
-                    .iter()
-                    .map(|lock| lock.owner.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(NylError::config(format!(
-                    "Locks of {}@{revision} ({bindings}) read files published by DeploymentTargets {owners}; every lock of one repository and revision moves to one commit, so bind each target's published files from a revision that only that target publishes",
-                    crate::util::sanitize_url(&repository_url)
-                )));
-            }
         };
-        resolutions.extend(
-            locks
-                .into_iter()
-                .filter(|lock| lock.selected)
-                .map(|lock| LockResolution {
-                    lock,
-                    resolved: resolved.clone(),
-                    note: note.clone(),
-                }),
-        );
+        resolutions.push(LockResolution { lock, resolved, note });
     }
     resolutions.sort_by_key(|resolution| resolution.lock.owner.to_string());
     Ok(resolutions)

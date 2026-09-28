@@ -130,13 +130,11 @@ releaseInputs:
 
 `nyl update source-locks` refreshes these locks together with ApplicationGroup
 source locks, so CI has one `--check` gate for every Git lock. `--target
-production` selects one target's locks. Locks of one repository and revision
-move to the same commit. When their locked files lie inside another target's
-publication prefix on that branch, the locks move to that target's newest
-publication commit, so a production target can promote the state a dev target
-published by moving its lock in a reviewed change. Locks of one revision that
-read several targets' publications are rejected, because they cannot move to
-one commit.
+production` selects one target's locks; filters choose which locks move,
+never where. A lock whose file lies inside another target's publication prefix
+on that branch moves to that target's newest publication commit, so a
+production target can promote the state a dev target published by moving its
+lock in a reviewed change. Other locks move to the branch head.
 
 ## Provenance
 
