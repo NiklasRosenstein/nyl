@@ -12,7 +12,7 @@ Examples:
 
 Behavior:
   1. Verifies git working tree is clean
-  2. Updates version in nyl/Cargo.toml and Cargo.lock
+  2. Updates the workspace version in Cargo.toml and Cargo.lock
   3. Commits the version bump
   4. Creates a git tag (default: v<version>)
   5. Pushes current branch and the tag to origin
@@ -73,13 +73,20 @@ if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; t
   exit 1
 fi
 
+# Restore the manifest and lockfile if any step before the commit fails, so
+# the clean-tree check does not block a re-run.
+restore_manifests() {
+  git checkout -- Cargo.toml Cargo.lock
+}
+trap restore_manifests ERR
+
 tmp_file="$(mktemp)"
 
-# Update nyl/Cargo.toml package version
+# Update the shared workspace package version in Cargo.toml
 awk -v v="$version" '
 BEGIN { in_pkg = 0; updated = 0 }
 {
-  if ($0 == "[package]") {
+  if ($0 == "[workspace.package]") {
     in_pkg = 1
     print
     next
@@ -94,49 +101,21 @@ BEGIN { in_pkg = 0; updated = 0 }
 }
 END {
   if (!updated) {
-    print "error: failed to update version in nyl/Cargo.toml" > "/dev/stderr"
+    print "error: failed to update the workspace version in Cargo.toml" > "/dev/stderr"
     exit 1
   }
 }
-' nyl/Cargo.toml > "${tmp_file}"
-mv "${tmp_file}" nyl/Cargo.toml
+' Cargo.toml > "${tmp_file}"
+mv "${tmp_file}" Cargo.toml
 
-# Update Cargo.lock root package entry for nyl
-tmp_file="$(mktemp)"
-awk -v v="$version" '
-BEGIN { in_pkg = 0; is_nyl = 0; updated = 0 }
-{
-  if ($0 == "[[package]]") {
-    in_pkg = 1
-    is_nyl = 0
-    print
-    next
-  }
-  if (in_pkg && $0 == "name = \"nyl\"") {
-    is_nyl = 1
-    print
-    next
-  }
-  if (in_pkg && is_nyl && $0 ~ /^version = "/ && !updated) {
-    print "version = \"" v "\""
-    updated = 1
-    in_pkg = 0
-    is_nyl = 0
-    next
-  }
-  print
-}
-END {
-  if (!updated) {
-    print "error: failed to update version in Cargo.lock" > "/dev/stderr"
-    exit 1
-  }
-}
-' Cargo.lock > "${tmp_file}"
-mv "${tmp_file}" Cargo.lock
+# Refresh the Cargo.lock entries of every workspace member from the bumped
+# manifest, then confirm the lockfile is consistent with it.
+cargo update --workspace --offline
+cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null
 
-git add nyl/Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock
 git commit -m "chore(release): bump nyl to ${version}"
+trap - ERR
 git tag "${tag}"
 git push origin "${branch}"
 git push origin "${tag}"

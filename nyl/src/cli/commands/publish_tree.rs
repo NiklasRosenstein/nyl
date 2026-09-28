@@ -528,7 +528,8 @@ fn publication_current_commit(
         .iter()
         .map(|(path, bytes)| {
             crate::resources::relative_path_to_posix("rendered output path", path)
-                .map(|path| (path, crate::gitops::reconcile::sha256(bytes)))
+                .map(|path| (path, nyl_core::digest::sha256_hex(bytes)))
+                .map_err(NylError::from)
         })
         .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
     Ok((index.files == desired).then_some(published_commit))

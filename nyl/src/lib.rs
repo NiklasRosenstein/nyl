@@ -17,28 +17,16 @@
 
 //! Nyl - Kubernetes manifest generator with Helm integration
 //!
-//! This is the Rust rewrite of the Python-based nyl tool, focusing on
-//! performance and clean architecture.
+//! This crate is the `nyl` command line. It parses arguments, formats output,
+//! and wires the rendering crates together; the rendering pipeline lives in
+//! `nyl-render` and the shared resource types in `nyl-core`.
 
 pub mod cli;
-pub mod components;
-pub mod config;
-pub mod constants;
-pub mod error;
-pub mod generator;
-pub mod git;
-pub mod gitops;
-pub mod helm;
-pub mod kubernetes;
-pub mod postprocess;
-pub mod render;
-pub mod resources;
-pub mod secrets;
-pub mod template;
-pub mod util;
-#[doc(hidden)]
-pub mod validation;
-pub mod yaml;
+
+pub use nyl_render::{
+    components, config, constants, error, generator, git, gitops, helm, kubernetes, postprocess, render, resources,
+    secrets, template, util, validation, yaml,
+};
 
 // Re-export commonly used types
 pub use error::{NylError, Result};

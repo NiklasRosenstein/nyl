@@ -342,7 +342,7 @@ pub(super) fn hash_inputs(
             };
             hashes.insert(
                 relative.to_string_lossy().replace('\\', "/"),
-                crate::gitops::reconcile::sha256(&bytes),
+                nyl_core::digest::sha256_hex(&bytes),
             );
         }
     }

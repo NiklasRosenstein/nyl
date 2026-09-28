@@ -1,10 +1,7 @@
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 
-use crate::{
-    resources::schema::{schema_artifacts, ResourceKind},
-    NylError, Result,
-};
+use crate::{resources::schema::ResourceKind, NylError, Result};
 
 /// Resource selector accepted by the schema CLI.
 pub type SchemaResourceKind = ResourceKind;
@@ -75,7 +72,7 @@ fn serialize_schema(schema: &serde_json::Value) -> Result<String> {
 }
 
 fn write_all_schemas(output_dir: &Path) -> Result<()> {
-    for (path, schema) in schema_artifacts() {
+    for (path, schema) in crate::config::schema::published_schema_artifacts() {
         let path = output_dir.join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

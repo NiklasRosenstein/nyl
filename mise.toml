@@ -20,27 +20,27 @@ node = "22"
 [tasks.fmt]
 description = "Format Rust code"
 dir = "nyl"
-run = "cargo fmt && cargo clippy --all-targets --fix --allow-dirty"
+run = "cargo fmt --all && cargo clippy --workspace --all-targets --fix --allow-dirty"
 
 [tasks.fmt-check]
 description = "Check Rust formatting"
 dir = "nyl"
-run = "cargo fmt --check"
+run = "cargo fmt --all --check"
 
 [tasks.lint]
 description = "Run Rust clippy"
 dir = "nyl"
-run = "cargo clippy --all-targets --all-features -- -D warnings"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.test]
 description = "Run Rust tests"
 dir = "nyl"
-run = "cargo test --all-features"
+run = "cargo test --workspace --all-features"
 
 [tasks.test-verbose]
 description = "Run Rust tests with output"
 dir = "nyl"
-run = "cargo test --all-features -- --nocapture"
+run = "cargo test --workspace --all-features -- --nocapture"
 
 [tasks.bench]
 description = "Run Rust benchmarks"
@@ -61,9 +61,9 @@ run = "cargo build --profile dist"
 description = "Run all checks"
 dir = "nyl"
 run = [
-  "cargo fmt --check",
-  "cargo clippy --all-targets --all-features -- -D warnings",
-  "cargo test --all-features",
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo test --workspace --all-features",
 ]
 
 [tasks.pre-commit]
@@ -73,7 +73,7 @@ depends = ["fmt-check", "lint", "test"]
 [tasks.coverage]
 description = "Generate coverage report"
 dir = "nyl"
-run = "cargo tarpaulin --out Html --output-dir coverage"
+run = "cargo tarpaulin --workspace --out Html --output-dir coverage"
 
 [tasks.security-audit]
 description = "Run security audit"
@@ -108,7 +108,7 @@ run = "npm run dev"
 [tasks.docs-rustdoc]
 description = "Generate API docs"
 dir = "nyl"
-run = "cargo doc --no-deps --open"
+run = "cargo doc --workspace --no-deps --open"
 
 [tasks.clean]
 description = "Clean build artifacts"

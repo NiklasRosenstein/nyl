@@ -651,7 +651,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::gitops::tree=debug")
+        .env("RUST_LOG", "nyl_render::gitops::tree=debug")
         .args([
             "render-tree",
             ".",
@@ -1077,7 +1077,7 @@ metadata:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::render::session=debug")
+        .env("RUST_LOG", "nyl_render::render::session=debug")
         .args(args)
         .assert()
         .success()
@@ -1143,7 +1143,7 @@ data:
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
-        .env("RUST_LOG", "nyl::helm::template=debug")
+        .env("RUST_LOG", "nyl_render::helm::template=debug")
         .args(args)
         .assert()
         .success()
@@ -2805,7 +2805,7 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     fs::write(path, &quoted).unwrap();
     let index_path = root.join("_nyl/index.json");
     let mut index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-    index["files"]["workloads/api/resources.yaml"] = nyl::gitops::reconcile::sha256(quoted.as_bytes()).into();
+    index["files"]["workloads/api/resources.yaml"] = nyl_core::digest::sha256_hex(quoted.as_bytes()).into();
     fs::write(index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
     commit_all(&repository, "Quoted publication configuration");
     repository

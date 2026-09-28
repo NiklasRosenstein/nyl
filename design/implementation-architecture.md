@@ -11,8 +11,9 @@ so each rule has one home, one test, and no way to drift from the others.
 
 ## Crates
 
-Nyl is currently one crate. Orchestration is split into crates whose dependency
-direction the compiler enforces:
+Nyl is a Cargo workspace whose crates' dependency direction the compiler
+enforces. `nyl-core` and `nyl-render` live under `crates/`; the orchestration
+crates join them from M3:
 
 ```text
 nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
@@ -31,6 +32,13 @@ nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` |
 | `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
 
+- The `nyl` package in `nyl/` plays the `nyl-cli` role. Keeping its name keeps
+  the binary, `cargo install --path nyl`, and the release artifacts unchanged.
+  Its library re-exports the `nyl-render` modules and `nyl_core::resources`, so
+  integration tests and benches use `nyl::…` paths.
+- No crate is published to crates.io. Nyl ships as release binaries and
+  container images, so crate boundaries can move without a public library
+  API to keep stable.
 - Crate boundaries are the only boundaries the compiler enforces; module
   boundaries inside one crate erode.
 - `nyl-render` compiles without any orchestration crate, which keeps
@@ -152,9 +160,13 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 
 ## Getting there
 
-- **M2** stays in today's rendering code and extracts `nyl-core` and
-  `nyl-render` from the current crate with no behavior change, using the
-  existing tests as the safety net.
+- **M2** stays in today's rendering code. `nyl-core` and `nyl-render` are
+  extracted with no behavior change: `nyl-core` holds the resource types and
+  their schemas, the shared settings they reference, the static local-path
+  rule, canonical JSON and digests, and JSON Pointer helpers; `nyl-render`
+  holds the rest of the former crate apart from the CLI. The Release input
+  types and their pure rules join `nyl-core`; their resolution joins
+  `nyl-render`.
 - **M3** starts `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as new
   crates, never inside `gitops/`, with the scenario harness and property tests
   from the first commit.

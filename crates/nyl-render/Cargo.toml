@@ -1,0 +1,44 @@
+[package]
+name = "nyl-render"
+description = "Nyl Kubernetes rendering and rendered GitOps"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+nyl-core = { workspace = true }
+
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+colored = { workspace = true }
+flate2 = { workspace = true }
+getrandom = { workspace = true }
+git2 = { workspace = true }
+glob = { workspace = true }
+hex = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+minijinja = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+same-file = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+similar = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+unicode-width = { workspace = true }
+walkdir = { workspace = true }
+zstd = { workspace = true }

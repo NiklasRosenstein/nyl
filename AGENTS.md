@@ -75,8 +75,12 @@ These rules keep it maintainable:
 
 ```
 /
-├── nyl/               # Main Rust crate (the nyl tool)
-│   ├── src/          # Source code
+├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
+├── crates/
+│   ├── nyl-core/      # Resource types, schemas, canonical JSON, digests (no effects)
+│   └── nyl-render/    # Kubernetes rendering and rendered GitOps
+├── nyl/               # The `nyl` command line (plays the nyl-cli role)
+│   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
 │   ├── benches/      # Benchmarks
 │   ├── book/         # Astro/Starlight documentation
@@ -85,6 +89,10 @@ These rules keep it maintainable:
 ├── examples/         # Top-level examples
 └── .github/          # CI/CD workflows
 ```
+
+The `nyl` package re-exports the `nyl-render` modules and `nyl_core::resources`,
+so integration tests and benches keep using `nyl::…` paths. None of the crates is
+published to crates.io; Nyl ships as release binaries and container images.
 
 ## Development Workflow
 
@@ -98,22 +106,22 @@ These rules keep it maintainable:
 
 ```bash
 # Format code (REQUIRED before commit)
-mise run fmt              # or: cd nyl && cargo fmt && cargo clippy --all-targets --fix --allow-dirty
+mise run fmt              # or: cargo fmt --all && cargo clippy --workspace --all-targets --fix --allow-dirty
 
 # Lint code
-mise run lint             # or: cd nyl && cargo clippy -- -D warnings
+mise run lint             # or: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Run tests
-mise run test             # or: cd nyl && cargo test
+mise run test             # or: cargo test --workspace --all-features
 
 # Pre-commit checks (REQUIRED)
 mise run pre-commit       # Runs: fmt-check, lint, test
 
 # Build release binary
-mise run build            # or: cd nyl && cargo build --release
+mise run build            # or: cargo build --release -p nyl
 
 # Run benchmarks
-mise run bench            # or: cd nyl && cargo bench
+mise run bench            # or: cargo bench -p nyl
 
 # Documentation
 mise run docs-serve       # Serve mdbook docs
@@ -122,7 +130,7 @@ mise run docs-rustdoc     # Generate API docs
 
 ### Commit Guidelines
 
-1. **Formatting and linting MUST pass before committing or creating PRs.** Run `cargo fmt` and `cargo clippy -- -D warnings` (or `mise run fmt` and `mise run lint`) and fix all issues before committing. CI will reject PRs that fail these checks.
+1. **Formatting and linting MUST pass before committing or creating PRs.** Run `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` (or `mise run fmt` and `mise run lint`) and fix all issues before committing. CI will reject PRs that fail these checks.
 2. **Always run `mise pre-commit` before committing** (runs fmt-check, lint, and tests)
 3. Commit at regular intervals with descriptive messages
 4. Ensure all tests pass
@@ -317,6 +325,11 @@ fn test_operation() -> Result<()> {
   rewriting user-facing Application or AppProject names.
 
 ### Module Organization
+
+`crates/nyl-core/src/` holds `resources/`, `constants`, `digest`, `json_pointer`,
+`local_path`, and `settings`. `crates/nyl-render/src/` holds the rest, and
+`nyl/src/cli/` the command line:
+
 ```
 src/
 ├── cli/          # Command-line interface (clap)
@@ -350,7 +363,8 @@ src/
   nearest one above the working directory, or `nyl/nyl.toml` at a worktree
   root without its own.
 - Local paths in this repository follow one rule, owned by
-  `util::project_path`: relative to the `nyl.toml` directory with leading `..`
+  `nyl_core::local_path` for the authored string and nyl-render's
+  `util::project_path` for resolution: relative to the `nyl.toml` directory with leading `..`
   allowed, or `/`-rooted at the Git worktree, never leaving it or traversing a
   symlink. Recorded paths are project-relative beneath the `nyl.toml`
   directory and `/`-prefixed elsewhere, so projects with `nyl.toml` at the root
@@ -385,24 +399,24 @@ src/
 ## Common Tasks
 
 ### Adding a New CLI Command
-1. Create command module in `src/cli/commands/`
+1. Create command module in `nyl/src/cli/commands/`
 2. Define command struct with `clap` derives
 3. Implement command logic in the module
-4. Register command in `src/cli/mod.rs`
+4. Register command in `nyl/src/cli/mod.rs`
 5. Add integration test in `tests/`
 6. Update documentation in `book/src/commands/`
 
 ### Adding a Template Filter
-1. Add filter function in `src/template/filters.rs`
+1. Add filter function in `crates/nyl-render/src/template/mod.rs`
 2. Register in `TemplateEngine::new()`
 3. Add unit test
 4. Document in `book/src/templating.md`
 
 ### Adding a New Resource Type
-1. Define resource struct in `src/resources/`
+1. Define resource struct in `crates/nyl-core/src/resources/`
 2. Implement `Serialize`, `Deserialize` traits
-3. Add parsing logic in `src/config/`
-4. Add validation in `src/config/validate.rs`
+3. Add parsing logic in `crates/nyl-render/src/config/`
+4. Add validation in the resource type's `validate` method
 5. Add tests
 6. Document in `book/src/reference/resources/`
 
@@ -493,12 +507,11 @@ mise run docs-rustdoc      # Opens in browser
 - **release.yml:** Binary releases with cargo-dist
 
 ### Release Process
-1. Update version in `Cargo.toml`
-2. Update `CHANGELOG.md`
-3. Commit: `chore: bump version to X.Y.Z`
-4. Tag: `git tag vX.Y.Z`
-5. Push tag: `git push --tags`
-6. GitHub Actions builds and publishes binaries
+1. Update `CHANGELOG.md`
+2. Run `scripts/release.sh X.Y.Z`: it bumps the shared workspace version in the
+   root `Cargo.toml` and `Cargo.lock`, commits, tags `vX.Y.Z`, and pushes
+3. GitHub Actions builds and publishes binaries and images; nothing is published
+   to crates.io
 
 See `.github/RELEASE_TESTING.md` for release testing checklist.
 

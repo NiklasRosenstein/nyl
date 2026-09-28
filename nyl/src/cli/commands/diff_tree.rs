@@ -830,7 +830,7 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
                 path.display()
             ))
         })?;
-        if crate::gitops::reconcile::sha256(&bytes) != *expected_hash {
+        if nyl_core::digest::sha256_hex(&bytes) != *expected_hash {
             return Err(NylError::config(format!(
                 "Published owned file {} does not match its ownership index",
                 path.display()
