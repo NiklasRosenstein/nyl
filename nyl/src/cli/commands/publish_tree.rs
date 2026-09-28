@@ -175,7 +175,6 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let render_options = TreeRenderOptions {
         allow_secret_inputs: args.source.allow_secret_inputs,
-        offline: false,
         ..TreeRenderOptions::default()
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(

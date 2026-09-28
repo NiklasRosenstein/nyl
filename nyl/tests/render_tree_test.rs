@@ -5186,6 +5186,42 @@ fn published_api_manifests(destination: &TempDir) -> String {
 }
 
 #[test]
+fn test_vendor_check_reads_cached_publication_state_offline() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:state"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    fs::write(fixture.path().join("nyl.toml"), "[vendor]\nmode='required'\n").unwrap();
+    let nyl = |cache: &TempDir, args: &[&str]| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(args)
+            .assert()
+    };
+    let cache = TempDir::new().unwrap();
+    nyl(&cache, &["vendor"]).success();
+    // Nothing from the publication branch enters the snapshot.
+    let lock = fs::read_to_string(fixture.path().join("vendor/lock.yaml")).unwrap();
+    assert!(!lock.contains("images.json"), "{lock}");
+
+    // Offline, the check renders the cached state the next render reads.
+    fs::remove_dir_all(destination.path()).unwrap();
+    nyl(&cache, &["vendor", "--check"])
+        .success()
+        .stderr(predicate::str::contains("(cached head; the refresh failed)"));
+    // With no cached copy either, the bootstrap rule applies and names why.
+    nyl(&TempDir::new().unwrap(), &["vendor", "--check"])
+        .failure()
+        .stderr(predicate::str::contains("state file state/images.json is unavailable"));
+}
+
+#[test]
 fn test_publish_tree_renders_committed_publication_state_at_the_base_commit() {
     let (fixture, destination, seed, _) = publication_fixture();
     push_publication_state(

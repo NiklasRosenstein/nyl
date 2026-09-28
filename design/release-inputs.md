@@ -209,8 +209,7 @@ Each binding sets exactly one of these fields:
   --check` reports a lock without one, and mode `required` never reads the file
   from the network. After `nyl update source-locks` moves a lock, `nyl vendor`
   captures the new commit and `--prune` removes the old file. `fromPublication`
-  state is not vendored: it is read at the branch head that publication builds
-  on.
+  state is never vendored; see its Vendoring rule.
 - `nyl update source-locks` refreshes `fromGit` locks together with
   ApplicationGroup source locks, so CI has one `--check` gate for every Git
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
@@ -344,6 +343,18 @@ releaseInputs:
 - **Concurrent writers.** Other writers must also push with a compare-and-swap.
   Nyl preserves unowned files but cannot merge a concurrent state change into
   its own commit.
+- **Vendoring.** State is never written to the vendor snapshot: it moves with
+  every publication and belongs to the publication branch. Vendor commands
+  still read it, because input values can decide which remote artifacts a
+  render needs. `nyl vendor` refreshes the branch like `render-tree`.
+  `nyl vendor --check` renders the state the next render reads: it refreshes
+  when it can, otherwise uses the cached head, otherwise treats the state as
+  unavailable so the bootstrap rule applies, and it reports which one it used.
+  The check therefore works as an offline pre-step to a reconciling render.
+  Under vendor mode `required`, state that selects a remote artifact the
+  snapshot lacks fails the render until `nyl vendor` captures it in a source
+  commit, so state written back by other tools should not change a render's
+  remote dependencies.
 
 **Carried state.** A state file does not have to be committed by another tool.
 With `carryFileFromWorktree`, a file produced in the working tree during this run, and left

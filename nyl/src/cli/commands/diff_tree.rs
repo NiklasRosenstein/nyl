@@ -266,7 +266,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let mut progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
-        offline: args.offline,
+        publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
         ..TreeRenderOptions::default()
     };
     let rendered = compile_target_tree_cached_with_observer_and_options(
@@ -340,7 +340,7 @@ async fn resolve_baseline(
         DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(
             desired,
             cache,
-            options.offline,
+            options.publication_read == crate::gitops::inputs::PublicationRead::Cached,
         )?)),
         DiffTreeBase::Source => {
             let source_ref = args

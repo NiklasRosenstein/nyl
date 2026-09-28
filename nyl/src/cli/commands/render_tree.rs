@@ -110,7 +110,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         &mut progress,
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
-            offline: args.offline,
+            publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
             ..TreeRenderOptions::default()
         },
     )

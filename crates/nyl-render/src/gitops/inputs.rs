@@ -38,6 +38,47 @@ pub const INDEX_PUBLICATION_PREFIX: &str = "@publication/";
 /// Ownership-index key prefix of state files carried from the working tree.
 pub const INDEX_CARRIED_PREFIX: &str = "@carried/";
 
+/// How a command reads the publication branch head for `fromPublication`.
+///
+/// Contract: [`fromPublication`](../../../../design/release-inputs.md#binding-kinds),
+/// Local commands and vendoring.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublicationRead {
+    /// Refresh the refs; a failed refresh is an error.
+    #[default]
+    Fresh,
+    /// Use the cached refs only (`--offline`).
+    Cached,
+    /// Refresh when possible, otherwise use the cached refs, otherwise treat
+    /// the state as unavailable so the bootstrap rule applies. `nyl vendor
+    /// --check` reads this way, so it works as an offline pre-step.
+    FreshOrCached,
+}
+
+impl PublicationRead {
+    /// [`Self::Cached`] for `--offline`, otherwise [`Self::Fresh`].
+    pub fn from_offline(offline: bool) -> Self {
+        if offline {
+            Self::Cached
+        } else {
+            Self::Fresh
+        }
+    }
+}
+
+/// Where a [`PublicationBase`] head came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicationBaseOrigin {
+    /// Refreshed from the remote.
+    Refreshed,
+    /// Read from the cached refs, as requested.
+    Cached,
+    /// Read from the cached refs because the refresh failed.
+    CachedAfterFailedRefresh,
+    /// Neither refreshable nor cached; the state reads as not existing yet.
+    Unavailable,
+}
+
 /// The publication branch head that `fromPublication` bindings read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationBase {
@@ -47,46 +88,83 @@ pub struct PublicationBase {
     pub branch: String,
     /// Target publication path prefix; state paths are relative to it.
     pub prefix: String,
-    /// Branch head, or `None` when the branch does not exist yet.
+    /// Branch head, or `None` when the branch does not exist yet or its
+    /// state is [unavailable](PublicationBaseOrigin::Unavailable).
     pub commit: Option<String>,
-    /// Whether the head came from cached refs without a refresh.
-    pub cached: bool,
+    /// Where the head came from.
+    pub origin: PublicationBaseOrigin,
 }
 
 impl PublicationBase {
-    /// Resolve the head of `branch`, refreshing refs unless `offline`.
-    pub fn resolve(git: &dyn GitBlobSource, url: &str, branch: &str, prefix: &str, offline: bool) -> Result<Self> {
+    /// Resolve the head of `branch` as `read` asks.
+    pub fn resolve(
+        git: &dyn GitBlobSource,
+        url: &str,
+        branch: &str,
+        prefix: &str,
+        read: PublicationRead,
+    ) -> Result<Self> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch).to_owned();
-        let commit = git.branch_head(url, &branch, !offline).map_err(|error| {
+        let error = |error: NylError, hint: &str| {
             NylError::config(format!(
-                "Cannot read publication branch {branch} of {} for fromPublication Release inputs: {error}{}",
+                "Cannot read publication branch {branch} of {} for fromPublication Release inputs: {error}{hint}",
                 crate::util::sanitize_url(url),
-                if offline {
-                    ""
-                } else {
-                    "; render-tree and diff-tree accept --offline to read the cached branch head"
-                }
             ))
-        })?;
+        };
+        let (commit, origin) = match read {
+            PublicationRead::Fresh => (
+                git.branch_head(url, &branch, true).map_err(|e| {
+                    error(
+                        e,
+                        "; render-tree and diff-tree accept --offline to read the cached branch head",
+                    )
+                })?,
+                PublicationBaseOrigin::Refreshed,
+            ),
+            PublicationRead::Cached => (
+                git.branch_head(url, &branch, false).map_err(|e| error(e, ""))?,
+                PublicationBaseOrigin::Cached,
+            ),
+            PublicationRead::FreshOrCached => match git.branch_head(url, &branch, true) {
+                Ok(commit) => (commit, PublicationBaseOrigin::Refreshed),
+                Err(refresh_error) => {
+                    tracing::warn!("Cannot refresh publication branch {branch}: {refresh_error}; using cached state");
+                    // Without a refresh, a missing cached branch cannot be
+                    // told apart from one that was never fetched.
+                    match git.branch_head(url, &branch, false) {
+                        Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::CachedAfterFailedRefresh),
+                        Ok(None) | Err(_) => (None, PublicationBaseOrigin::Unavailable),
+                    }
+                }
+            },
+        };
         Ok(Self {
             url: url.to_owned(),
             branch,
             prefix: prefix.trim_matches('/').to_owned(),
             commit,
-            cached: offline,
+            origin,
         })
     }
 
     /// Human-readable description of the state this render read.
     pub fn describe(&self) -> String {
         let url = crate::util::sanitize_url(&self.url);
-        match &self.commit {
-            Some(commit) => format!(
+        match (&self.commit, self.origin) {
+            (_, PublicationBaseOrigin::Unavailable) => format!(
+                "Publication branch {} of {url} could not be refreshed and has no cached copy; fromPublication inputs are unbound",
+                self.branch
+            ),
+            (Some(commit), origin) => format!(
                 "Read publication state from {url}@{} at {commit}{}",
                 self.branch,
-                if self.cached { " (cached head, --offline)" } else { "" }
+                match origin {
+                    PublicationBaseOrigin::Cached => " (cached head, --offline)",
+                    PublicationBaseOrigin::CachedAfterFailedRefresh => " (cached head; the refresh failed)",
+                    _ => "",
+                }
             ),
-            None => format!(
+            (None, _) => format!(
                 "Publication branch {} of {url} does not exist yet; fromPublication inputs are unbound",
                 self.branch
             ),
@@ -621,7 +699,14 @@ pub fn resolve_release_inputs(
                     .as_deref()
                     .map(|description| format!(" ({description})"))
                     .unwrap_or_default();
+                let unavailable = sources
+                    .publication
+                    .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable);
                 issues.push(match binding.and_then(|binding| binding.from_publication.as_ref()) {
+                    Some(source) if unavailable => format!(
+                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} is unavailable: the publication branch could not be refreshed and has no cached copy, and the input has no default; run once with network access or declare a default",
+                        source.path
+                    ),
                     Some(source) => format!(
                         "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default",
                         source.path
@@ -1368,7 +1453,7 @@ mod tests {
             branch: "deploy".to_owned(),
             prefix: "dev".to_owned(),
             commit: None,
-            cached: false,
+            origin: PublicationBaseOrigin::Refreshed,
         };
         let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());
         let releases = [ReleaseDeclaration {
@@ -1400,5 +1485,72 @@ mod tests {
             error.contains("state file state/images.json does not exist on the publication branch yet"),
             "{error}"
         );
+    }
+
+    /// Answers `branch_head` from fixed refresh and cache outcomes.
+    struct Heads {
+        refreshed: std::result::Result<Option<String>, &'static str>,
+        cached: std::result::Result<Option<String>, &'static str>,
+    }
+
+    impl GitBlobSource for Heads {
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn read_publication_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn branch_head(&self, _: &str, _: &str, refresh: bool) -> Result<Option<String>> {
+            let outcome = if refresh { &self.refreshed } else { &self.cached };
+            outcome.clone().map_err(NylError::config)
+        }
+    }
+
+    #[test]
+    fn test_fresh_or_cached_falls_back_to_the_cache_then_to_unavailable() {
+        let resolve = |heads: Heads| {
+            let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::FreshOrCached).unwrap();
+            (base.commit, base.origin)
+        };
+        let head = Some("a".repeat(40));
+        assert_eq!(
+            resolve(Heads {
+                refreshed: Ok(head.clone()),
+                cached: Err("unused")
+            }),
+            (head.clone(), PublicationBaseOrigin::Refreshed)
+        );
+        assert_eq!(
+            resolve(Heads {
+                refreshed: Err("offline"),
+                cached: Ok(head.clone())
+            }),
+            (head.clone(), PublicationBaseOrigin::CachedAfterFailedRefresh)
+        );
+        // An empty or missing cache cannot tell a new branch from an unfetched one.
+        for cached in [Ok(None), Err("not cached")] {
+            assert_eq!(
+                resolve(Heads {
+                    refreshed: Err("offline"),
+                    cached
+                }),
+                (None, PublicationBaseOrigin::Unavailable)
+            );
+        }
+        let error = PublicationBase::resolve(
+            &Heads {
+                refreshed: Err("offline"),
+                cached: Ok(head),
+            },
+            "u",
+            "deploy",
+            "dev",
+            PublicationRead::Fresh,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("accept --offline"), "{error}");
     }
 }

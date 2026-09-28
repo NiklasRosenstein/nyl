@@ -36,12 +36,11 @@ pub struct TreeRenderOptions {
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
-    /// Read `fromPublication` state at the cached publication branch head
-    /// instead of refreshing it.
+    /// How `fromPublication` state is read from the publication branch.
     /// Not part of the render-cache key: the publication state it reads is
     /// recorded through the resolved inputs' digests.
     #[serde(skip)]
-    pub offline: bool,
+    pub publication_read: super::inputs::PublicationRead,
     /// Read `fromPublication` state at this base instead of resolving the
     /// branch head, so a second compile of the same publication, such as the
     /// clean-`HEAD` verification, reads the same state.
@@ -482,7 +481,7 @@ async fn compile_target_tree_inner(
                 repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
                 &target.spec.publication.revision,
                 target.publication_path_prefix(),
-                options.offline,
+                options.publication_read,
             )?),
         }
     } else {

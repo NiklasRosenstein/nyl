@@ -188,6 +188,11 @@ excluded from the dirty-worktree check, and the clean-`HEAD` verification of
 `publish-tree` renders with the same bytes. Bindings naming one path must all
 carry the same file, or none.
 
+Publication state is never vendored. `nyl vendor --check` reads it like the
+next render would, and falls back to the cached branch head offline. With
+vendor mode `required`, keep state from choosing remote artifacts such as
+chart versions: a new artifact needs `nyl vendor` and a source commit first.
+
 ## Provenance
 
 Resolved inputs are part of the render-cache key. The ownership index records
