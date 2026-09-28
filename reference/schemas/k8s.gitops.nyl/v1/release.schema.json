@@ -1,5 +1,72 @@
 {
   "$defs": {
+    "InputDeclaration": {
+      "additionalProperties": false,
+      "description": "One typed input a Release declares. Templates read its effective value as `inputs.<name>`.",
+      "properties": {
+        "default": {
+          "description": "Value used when the target binds none. Makes the input optional; must satisfy `type` and `enum`."
+        },
+        "description": {
+          "description": "Documentation, surfaced in errors and inspection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enum": {
+          "description": "Allowed values, for scalar types only. A non-empty list of values of the declared type.",
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "description": "Value type: `string`, `integer`, `number`, `boolean`, `object`, or `array`."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "InputType": {
+      "description": "Declared input type. Every type is a subset of JSON Schema.",
+      "oneOf": [
+        {
+          "const": "string",
+          "description": "A JSON string.",
+          "type": "string"
+        },
+        {
+          "const": "integer",
+          "description": "A JSON integer; numbers with a fractional part are rejected.",
+          "type": "string"
+        },
+        {
+          "const": "number",
+          "description": "Any JSON number.",
+          "type": "string"
+        },
+        {
+          "const": "boolean",
+          "description": "`true` or `false`.",
+          "type": "string"
+        },
+        {
+          "const": "object",
+          "description": "A JSON object. Only the top-level type is checked.",
+          "type": "string"
+        },
+        {
+          "const": "array",
+          "description": "A JSON array. Only the top-level type is checked.",
+          "type": "string"
+        }
+      ]
+    },
     "ReleaseArgoCdSpec": {
       "additionalProperties": false,
       "description": "ArgoCD-specific options for Release.",
@@ -62,6 +129,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputDeclaration"
+          },
+          "description": "Typed inputs, read by templates as `inputs.<name>` and bound per target in `DeploymentTarget.spec.releaseInputs`. A Release that declares inputs needs a literal `metadata.name` and a literal `spec.inputs` block.",
+          "type": "object"
         },
         "stripEmptyMetadataLabels": {
           "anyOf": [
