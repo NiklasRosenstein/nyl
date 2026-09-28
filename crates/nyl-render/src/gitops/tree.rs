@@ -31,21 +31,11 @@ use super::{
 const TARGET_CACHE_ACTION: &str = "target-provenance-v3";
 
 /// Inputs admitted while compiling a rendered deployment tree.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TreeRenderOptions {
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
-    /// How `fromPublication` state is read from the publication branch.
-    /// Not part of the render-cache key: the publication state it reads is
-    /// recorded through the resolved inputs' digests.
-    #[serde(skip)]
-    pub publication_read: super::inputs::PublicationRead,
-    /// Read `fromPublication` state at this base instead of resolving the
-    /// branch head, so a second compile of the same publication, such as the
-    /// clean-`HEAD` verification, reads the same state.
-    #[serde(skip)]
-    pub publication_base: Option<super::inputs::PublicationBase>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -63,46 +53,6 @@ pub struct CompiledTargetTree {
     /// `@input/<group>/<release>/<input>` digests of resolved Release inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_digests: BTreeMap<String, String>,
-    /// `fromPublication` state files this target writes, keyed by path
-    /// relative to the prefix. They are owned and published with `files` but
-    /// are not Kubernetes manifests.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub state_files: BTreeMap<PathBuf, Vec<u8>>,
-    /// `fromPublication` state paths declared without `carryFileFromWorktree`. Other tools
-    /// commit them, so reconciliation never deletes them, even when a previous
-    /// generation owned them through `carryFileFromWorktree`.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub committed_state_paths: BTreeSet<PathBuf>,
-    /// Publication branch head that `fromPublication` bindings read; `None`
-    /// when the target has none. Never cached: it is re-resolved every run.
-    #[serde(skip)]
-    pub publication_base: Option<super::inputs::PublicationBase>,
-}
-
-impl CompiledTargetTree {
-    /// Every file this target owns in its prefix: rendered files and state
-    /// files. Reconciliation, the ownership index, and tree comparisons use it.
-    pub fn owned_files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-        let mut owned = self.files.clone();
-        owned.extend(self.state_files.clone());
-        owned
-    }
-
-    /// State files this target may adopt when they already exist unowned in
-    /// the publication tree: declaring `carryFileFromWorktree` makes the target their owner.
-    pub fn adoptable_paths(&self) -> BTreeSet<PathBuf> {
-        self.state_files.keys().cloned().collect()
-    }
-
-    /// Reconciliation options for this tree: adopt carried state files and
-    /// release committed ones instead of deleting them.
-    pub fn reconcile_options(&self, force_owned: bool) -> super::reconcile::ReconcileOptions {
-        super::reconcile::ReconcileOptions {
-            force_owned,
-            adopt: self.adoptable_paths(),
-            release: self.committed_state_paths.clone(),
-        }
-    }
 }
 
 /// Stable source identity for one Release as it enters tree compilation.
@@ -367,7 +317,7 @@ async fn compile_target_tree_inner(
     observer: &mut dyn TreeRenderObserver,
     options: TreeRenderOptions,
 ) -> Result<CompiledTargetTree> {
-    validate_gitops_inventory_with_options(inventory, options.clone())?;
+    validate_gitops_inventory_with_options(inventory, options)?;
     let target_discovered = inventory
         .get(GitOpsResourceKind::DeploymentTarget, target_name)
         .ok_or_else(|| NylError::config(format!("DeploymentTarget {target_name:?} was not found")))?;
@@ -465,36 +415,8 @@ async fn compile_target_tree_inner(
             cache.cloned(),
         )?,
     );
-    let publication_base = if target
-        .spec
-        .release_inputs
-        .values()
-        .flat_map(BTreeMap::values)
-        .any(|binding| binding.from_publication.is_some())
-    {
-        match &options.publication_base {
-            Some(base) => Some(base.clone()),
-            // The state is read where publish-tree pushes, so the base it
-            // verifies against its clone is the commit the state came from.
-            None => Some(super::inputs::PublicationBase::resolve(
-                &git_blobs,
-                repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
-                &target.spec.publication.revision,
-                target.publication_path_prefix(),
-                options.publication_read,
-            )?),
-        }
-    } else {
-        None
-    };
-    let release_inputs = resolve_prepared_release_inputs(
-        inventory,
-        &target,
-        &prepared_groups,
-        &disabled_groups,
-        &git_blobs,
-        publication_base.as_ref(),
-    )?;
+    let release_inputs =
+        resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups, &git_blobs)?;
 
     let target_cache_inputs = TargetCacheInputs {
         options,
@@ -517,8 +439,7 @@ async fn compile_target_tree_inner(
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
-    if let Some(mut compiled) = load_cached_target(cache, cache_probe.as_ref())? {
-        compiled.publication_base = publication_base;
+    if let Some(compiled) = load_cached_target(cache, cache_probe.as_ref())? {
         observer.finished();
         return Ok(compiled);
     }
@@ -707,10 +628,6 @@ async fn compile_target_tree_inner(
     }
 
     resolve_namespace_ownership(&mut pending_workloads, &mut namespace_owners, &cluster)?;
-    let release_directories = pending_workloads
-        .iter()
-        .map(|workload| workload.release_directory.clone())
-        .collect::<Vec<_>>();
 
     for workload in pending_workloads {
         for manifest in &workload.manifests {
@@ -805,8 +722,6 @@ async fn compile_target_tree_inner(
         )?;
     }
 
-    let state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
-
     let provenance = files
         .iter()
         .map(|(path, bytes)| {
@@ -840,13 +755,6 @@ async fn compile_target_tree_inner(
         provenance,
         inputs,
         input_digests,
-        state_files,
-        committed_state_paths: release_inputs
-            .committed_state_paths()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
-        publication_base,
     };
     store_cached_target(
         cache,
@@ -953,10 +861,6 @@ fn prepare_target_cache(
     }
     for path in release_inputs.files() {
         recorder.record_path_file(&path)?;
-    }
-    let provenance = release_inputs.index_entries()?;
-    if !provenance.is_empty() {
-        recorder.record_value("input-provenance", &provenance)?;
     }
     cache.record_renderer_tools(&mut recorder)?;
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
@@ -2242,7 +2146,6 @@ fn resolve_prepared_release_inputs(
     groups: &[PreparedGroup],
     disabled_groups: &BTreeSet<String>,
     git: &dyn super::inputs::GitBlobSource,
-    publication: Option<&super::inputs::PublicationBase>,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2277,7 +2180,6 @@ fn resolve_prepared_release_inputs(
             repositories: &repositories,
             publication_scope: Some(&publication_scope),
             git,
-            publication,
             visible_files: &inventory.worktree_data_files,
         },
     )

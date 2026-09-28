@@ -7,11 +7,7 @@ use clap::Args;
 use colored::Colorize;
 
 use crate::cli::tree_progress::{TreeProgressArgs, TreeProgressReporter};
-use crate::gitops::inputs::PublicationRead;
-use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, CacheMode, GitOpsCache,
-    TreeRenderOptions,
-};
+use crate::gitops::{compile_target_tree_cached_with_observer, discover_gitops_inventory, CacheMode, GitOpsCache};
 use crate::render::artifact::DirectoryVendorWriter;
 use crate::resources::GitOpsResourceKind;
 use crate::{NylError, Result};
@@ -86,14 +82,7 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
     let _reporter = cache.reporter();
-    let compiled = compile_targets(
-        &inventory,
-        &targets,
-        &cache,
-        args.progress,
-        TreeRenderOptions::default(),
-    )
-    .await?;
+    let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
     crate::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
     let result = writer.sync(&cache.observed_artifacts(), !args.target.is_empty())?;
     let count = result.artifacts.to_string().cyan().bold();
@@ -109,14 +98,7 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
     let writer = DirectoryVendorWriter::from_config(&inventory.project_config)?;
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_check();
-    // Publication state is never vendored. The check renders the state the
-    // next render reads, falling back to the cached head so it works as an
-    // offline pre-step.
-    let options = TreeRenderOptions {
-        publication_read: PublicationRead::FreshOrCached,
-        ..TreeRenderOptions::default()
-    };
-    let compiled = compile_targets(&inventory, &targets, &cache, args.progress, options).await?;
+    let compiled = compile_targets(&inventory, &targets, &cache, args.progress).await?;
     crate::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
     let schema_root = crate::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;
@@ -143,23 +125,11 @@ async fn compile_targets(
     targets: &[String],
     cache: &GitOpsCache,
     progress: TreeProgressArgs,
-    options: TreeRenderOptions,
 ) -> Result<Vec<crate::gitops::CompiledTargetTree>> {
     let mut compiled = Vec::new();
     for target in targets {
         let mut observer = TreeProgressReporter::new(progress, (targets.len() > 1).then(|| target.clone()));
-        let tree = compile_target_tree_cached_with_observer_and_options(
-            inventory,
-            target,
-            cache,
-            &mut observer,
-            options.clone(),
-        )
-        .await?;
-        if let Some(base) = &tree.publication_base {
-            eprintln!("{target}: {}", base.describe());
-        }
-        compiled.push(tree);
+        compiled.push(compile_target_tree_cached_with_observer(inventory, target, cache, &mut observer).await?);
     }
     Ok(compiled)
 }

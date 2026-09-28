@@ -209,7 +209,8 @@ Each binding sets exactly one of these fields:
   --check` reports a lock without one, and mode `required` never reads the file
   from the network. After `nyl update source-locks` moves a lock, `nyl vendor`
   captures the new commit and `--prune` removes the old file. `fromPublication`
-  state is never vendored; see its Vendoring rule.
+  state is not vendored: it is read at the branch head that publication builds
+  on.
 - `nyl update source-locks` refreshes `fromGit` locks together with
   ApplicationGroup source locks, so CI has one `--check` gate for every Git
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
@@ -314,14 +315,12 @@ releaseInputs:
   and `publish-tree` creates no commit for an unchanged tree. A CI job
   triggered by pushes to the deploy branch therefore stops after Nyl's own
   publication.
-- **Placement.** Without `carryFileFromWorktree`, the path must not be a file owned by this
-  target; with `carryFileFromWorktree`, this target owns it. Either way it lies inside the
+- **Placement.** Without `carry`, the path must not be a file owned by this
+  target; with `carry`, this target owns it. Either way it lies inside the
   target's prefix but outside every directory synced by a generated Argo CD
   Application: workload Release directories, `_nyl`, and the catalog.
   Otherwise Argo CD would try to apply the state file as a manifest. Nyl
-  validates both for every declared path, before the file exists, so another
-  tool never commits state where Argo CD syncs it. Reconciliation already
-  preserves files it does not own.
+  validates both. Reconciliation already preserves files it does not own.
 - **Bootstrap.** When the publication branch or the file does not exist, the
   input is treated as unbound: its Release default applies, or rendering fails
   as for any required input. A file that exists but does not resolve `pointer`
@@ -329,12 +328,7 @@ releaseInputs:
 - **Local commands.** `render-tree` and `diff-tree` fetch the publication
   branch and read the file at its current head. They report which commit they
   used, because their output is reproducible only together with it. `--offline`
-  uses the cached head and says so. Every command reads the state from the
-  URL `publish-tree` pushes to (`publishURL`, otherwise `repoURL`), so the base
-  commit is the one publication builds on. One command reads one base: the
-  clean-`HEAD` verification of `publish-tree` and a `diff-tree` baseline, the
-  published tree or another source revision, reuse the base of the desired
-  render.
+  uses the cached head and says so.
 - **Scope.** Only the target's own prefix on its own publication branch can be
   read. Another target's prefix or branch, or another repository, uses
   `fromGit`.
@@ -343,21 +337,9 @@ releaseInputs:
 - **Concurrent writers.** Other writers must also push with a compare-and-swap.
   Nyl preserves unowned files but cannot merge a concurrent state change into
   its own commit.
-- **Vendoring.** State is never written to the vendor snapshot: it moves with
-  every publication and belongs to the publication branch. Vendor commands
-  still read it, because input values can decide which remote artifacts a
-  render needs. `nyl vendor` refreshes the branch like `render-tree`.
-  `nyl vendor --check` renders the state the next render reads: it refreshes
-  when it can, otherwise uses the cached head, otherwise treats the state as
-  unavailable so the bootstrap rule applies, and it reports which one it used.
-  The check therefore works as an offline pre-step to a reconciling render.
-  Under vendor mode `required`, state that selects a remote artifact the
-  snapshot lacks fails the render until `nyl vendor` captures it in a source
-  commit, so state written back by other tools should not change a render's
-  remote dependencies.
 
 **Carried state.** A state file does not have to be committed by another tool.
-With `carryFileFromWorktree`, a file produced in the working tree during this run, and left
+With `carry`, a file produced in the working tree during this run, and left
 uncommitted, is written by `publish-tree` into the same commit as the manifests
 derived from it:
 
@@ -368,36 +350,24 @@ releaseInputs:
       fromPublication:
         path: state/web.json       # location in the publication branch
         pointer: /image
-        carryFileFromWorktree: build/web.json      # optional working-tree file from this run
+        carry: build/web.json      # optional working-tree file from this run
 ```
 
-- **File present.** Nyl reads `carryFileFromWorktree`, renders from it, and writes its bytes to
+- **File present.** Nyl reads `carry`, renders from it, and writes its bytes to
   `path` in the compare-and-swap publication commit. Every published commit
   thereby contains the input its manifests were rendered from.
 - **File absent.** Nyl reads `path` at the base commit B and writes the same
   bytes back. The last carried value persists across source-only publications,
   and unchanged bytes produce no commit. When neither exists, the bootstrap
   rule applies.
-- **Ownership.** With `carryFileFromWorktree`, `path` is a file owned by this target and listed
+- **Ownership.** With `carry`, `path` is a file owned by this target and listed
   in the ownership index, so a commit to it by another writer is rejected as a
-  modification outside Nyl. A deletion by another writer is rejected too: an
-  owned path missing at B is an error, not the bootstrap case. A path is either carried by Nyl or committed by
-  another tool, never both: every binding of the target that names a path
-  carries the same file, or none does. Declaring `carryFileFromWorktree` makes the target the
-  owner, so the first publication with `carryFileFromWorktree` adopts a file another tool
-  already committed at `path`. Removing only `carryFileFromWorktree` releases
-  it: the binding still reads `path`, so the file stays in the tree as
-  committed state and leaves the ownership index. Removing every binding that
-  names `path` deletes the file, like any owned file the target stops
-  producing. Disabling the ApplicationGroup of a carrying binding is not a
-  removal: the file is kept unowned while the group is disabled, and
-  re-enabling it adopts the file again, so the last carried value persists. State files are owned and published like
-  rendered files but are not manifests: they are never validated as
-  Kubernetes resources. The placement rule otherwise applies unchanged: the
-  path lies outside every Argo CD-synced directory.
-- **Working-tree rules.** `carryFileFromWorktree` is a normalized project-relative path that must
+  modification outside Nyl. A path is either carried by Nyl or committed by
+  another tool, never both. The placement rule otherwise applies unchanged:
+  the path lies outside every Argo CD-synced directory.
+- **Working-tree rules.** `carry` is a normalized project-relative path that must
   not be tracked by Git; a tracked file is source and uses `fromFile`. It
-  should normally be ignored through `.gitignore`. Declared `carryFileFromWorktree` paths are
+  should normally be ignored through `.gitignore`. Declared `carry` paths are
   excluded from the source dirty check, and the clean-`HEAD` verification
   render receives the same carried bytes, so a carried file never forces
   `--allow-dirty`.
@@ -437,7 +407,7 @@ releaseInputs:
       fromPublication:
         path: state/images.json    # relative to the prefix: dev/state/images.json
         pointer: /web
-        carryFileFromWorktree: build/images.json
+        carry: build/images.json
 ---
 # DeploymentTarget production
 releaseInputs:
@@ -517,7 +487,7 @@ the same way as a local group: no opt-in field exists.
   - `@publication/<path>` → blob digest for each `fromPublication` value read
     from the base commit, which is the published commit's parent
   - `@carried/<path>` → blob digest for each `fromPublication` value taken
-    from a `carryFileFromWorktree` file in this run
+    from a `carry` file in this run
   - Both publication forms use the prefix-relative path, like the index's
     `files` entries.
 - Today only remote source files use an `@`-prefixed key (`@remote/<path>`).

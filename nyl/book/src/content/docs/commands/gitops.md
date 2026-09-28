@@ -22,12 +22,7 @@ nyl render-tree --target production --output-dir deploy --check
 nyl render-tree --target production --output-dir deploy --force
 nyl render-tree --target production --output-dir deploy --refresh
 nyl render-tree --target production --output-dir deploy --no-cache
-nyl render-tree --target production --output-dir deploy --offline
 ```
-
-When a target has `fromPublication` Release inputs, `render-tree` fetches its
-publication branch and reports the commit it read the state from; `--offline`
-reads the cached branch head instead and says so.
 
 `--target` may be omitted when exactly one DeploymentTarget is configured. With
 multiple targets, Nyl requires an explicit selection and lists the available
@@ -70,13 +65,9 @@ nyl diff-tree --target production --against published
 nyl diff-tree --target production --against published --refresh
 ```
 
-Every indexed file of the published target prefix must match its recorded
-digest. A prefix without an ownership index owns nothing yet, for example when
-another tool has committed `fromPublication` state before the first
-publication. Unindexed repository content is never treated as target-owned
-baseline data. `--offline` reads `fromPublication` state at the cached branch
-head, as for `render-tree`, and compares against the published tree at that
-same commit.
+An existing published target prefix must contain a valid ownership index, and
+every indexed file must match its recorded digest. Unindexed repository content
+is never treated as target-owned baseline data.
 
 Compare with a render from a source revision:
 

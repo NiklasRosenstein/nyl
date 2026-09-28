@@ -138,9 +138,7 @@ origin. `--refresh` forces upstream retrieval; when an old extracted Helm cache
 contains the exact chart, Nyl can package and import it before contacting the
 origin.
 
-`nyl vendor --check` performs no network access except refreshing the
-publication branch of targets with `fromPublication` inputs, which falls back
-to the cached head offline. It compiles the selected targets
+`nyl vendor --check` performs no network access. It compiles the selected targets
 through the normal rendering pipeline, verifies every required coordinate and
 digest, reports unreferenced lock entries, and verifies the managed
 `.gitattributes`. A matching but missing, corrupt, or unmaterialized Git LFS

@@ -175,7 +175,7 @@ spec:
 Every run of an environment works in one worktree at one source commit S:
 discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
 are all read there, and nothing else in the entry worktree is read again. The
-one exception is a `carryFileFromWorktree` file for a `fromPublication` binding: it exists only
+one exception is a `carry` file for a `fromPublication` binding: it exists only
 in the worktree of the job that produced it, so it is read from the entry
 worktree and recorded as carried, as release-inputs.md describes. The Environment's `source` field decides S:
 

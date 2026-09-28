@@ -34,11 +34,7 @@ nyl vendor --check
 nyl vendor --check --target production
 ```
 
-The check is network-free, with one exception: targets with `fromPublication`
-Release inputs refresh their publication branch when they can and otherwise use
-the cached head, so the check covers the state the next render reads. Without
-either, those inputs are unbound and fall back to their defaults. Publication
-state is never written to the snapshot. The check validates artifact digests and sizes, detects Git
+The check is network-free. It validates artifact digests and sizes, detects Git
 LFS pointer files that have not been materialized, and checks the generated
 `.gitattributes` file. An untargeted check also reports lock entries that are
 not referenced by any configured target; a targeted check leaves entries for

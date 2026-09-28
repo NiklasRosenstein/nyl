@@ -502,7 +502,7 @@ its members share, such as common values and the state repository.
 
 `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from `value`,
-`fromGit`, or `fromPublication` bindings (including `carryFileFromWorktree`) feed an
+`fromGit`, or `fromPublication` bindings (including `carry`) feed an
 orchestrated environment without being orchestrated itself:
 
 ```yaml

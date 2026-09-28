@@ -9,9 +9,9 @@ use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Sig
 use crate::git::CredentialProvider;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::{
-    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
-    reconcile_rendered_tree_with_options, resolve_deployment_target_name, CompiledTargetTree, GitOpsCache,
-    GitOpsInventory, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
+    compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, reconcile_rendered_tree,
+    resolve_deployment_target_name, CompiledTargetTree, GitOpsCache, GitOpsInventory, RenderIndex,
+    RenderIndexPublication, TreeCacheArgs, TreeRenderObserver, TreeRenderOptions,
 };
 use crate::{NylError, Result};
 
@@ -158,8 +158,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-    let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
-    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
+    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
     let Some(source_commit) = source_commit else {
         return Err(NylError::config(
             "publish-tree requires the source worktree to have a committed revision",
@@ -175,14 +174,13 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let render_options = TreeRenderOptions {
         allow_secret_inputs: args.source.allow_secret_inputs,
-        ..TreeRenderOptions::default()
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(
         &inventory,
         &target_name,
         &cache,
         &mut progress,
-        render_options.clone(),
+        render_options,
     )
     .await?;
     let clean = if dirty && !args.source.allow_dirty {
@@ -193,12 +191,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
                 &target_name,
                 &source_commit,
                 &cache,
-                // The clean render reads the same publication state, so only
-                // the source difference can make the two compiles disagree.
-                TreeRenderOptions {
-                    publication_base: compiled.publication_base.clone(),
-                    ..render_options
-                },
+                render_options,
             )
             .await?,
         )
@@ -262,7 +255,6 @@ fn publish_compiled(
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
-    verify_publication_base(compiled, expected, publication_url, branch)?;
 
     let output_root = if compiled.target.publication_path_prefix().is_empty() {
         temp.path().to_path_buf()
@@ -357,13 +349,6 @@ async fn compile_clean_head(
             format!("could not select the committed target: {error}"),
         )
     })?;
-    copy_carried_files(working_inventory, &inventory, target_name).map_err(|error| {
-        dirty_verification_failure(
-            target_name,
-            source_commit,
-            format!("could not provide carried files to the committed project: {error}"),
-        )
-    })?;
     let mut observer = SilentTreeRenderObserver;
     let compiled = compile_target_tree_cached_with_observer_and_options(
         &inventory,
@@ -416,13 +401,13 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
             committed.cluster.metadata.name, working.cluster.metadata.name
         ));
     }
-    let (working_files, committed_files) = (working.owned_files(), committed.owned_files());
-    for path in working_files
+    for path in working
+        .files
         .keys()
-        .chain(committed_files.keys())
+        .chain(committed.files.keys())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        match (working_files.get(path), committed_files.get(path)) {
+        match (working.files.get(path), committed.files.get(path)) {
             (Some(_), None) => differences.push(format!(
                 "added {}",
                 crate::resources::relative_path_to_posix("rendered output path", path)?
@@ -453,9 +438,9 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         .repository_name
         .clone()
         .unwrap_or_else(|| input.compiled.repository.repo_url.clone());
-    reconcile_rendered_tree_with_options(
+    reconcile_rendered_tree(
         input.output_root,
-        &input.compiled.owned_files(),
+        &input.compiled.files,
         RenderIndex::new(
             input.target_name.to_owned(),
             input.compiled.cluster.metadata.name.clone(),
@@ -468,7 +453,6 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
             input.source_dirty,
             inputs,
         ),
-        input.compiled.reconcile_options(false),
     )?;
     let author_repository = Repository::discover(&input.inventory.project_root)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git identity: {error}")))?;
@@ -494,54 +478,6 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
         input.output_root,
         &message,
     )
-}
-
-/// Give the clean-`HEAD` render the same carried bytes as the working render.
-///
-/// Carried files are untracked outputs of this run, so a checkout of `HEAD`
-/// never contains them. Each `carryFileFromWorktree` path of the committed target is copied
-/// from the same worktree-relative location of the working tree, when present.
-fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, target_name: &str) -> Result<()> {
-    for destination in crate::gitops::inputs::carry_paths(committed, target_name)? {
-        let relative = destination.strip_prefix(&committed.worktree_root).map_err(|_| {
-            NylError::config(format!(
-                "Carried file {} is outside the committed worktree",
-                destination.display()
-            ))
-        })?;
-        let source = working.worktree_root.join(relative);
-        if std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_file()) {
-            if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&source, &destination)?;
-        }
-    }
-    Ok(())
-}
-
-/// The state `fromPublication` bindings read must be the state at the base
-/// commit this publication builds on, so the published commit holds the
-/// state and the manifests rendered from it.
-fn verify_publication_base(
-    compiled: &CompiledTargetTree,
-    expected: Option<git2::Oid>,
-    publication_url: &str,
-    branch: &str,
-) -> Result<()> {
-    let Some(base) = &compiled.publication_base else {
-        return Ok(());
-    };
-    let expected = expected.map(|oid| oid.to_string());
-    if base.commit == expected {
-        return Ok(());
-    }
-    Err(NylError::config(format!(
-        "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
-        crate::util::sanitize_url(publication_url),
-        expected.as_deref().unwrap_or("no commit"),
-        base.commit.as_deref().unwrap_or("no commit"),
-    )))
 }
 
 fn publication_current_commit(
@@ -588,7 +524,7 @@ fn publication_current_commit(
         return Ok(None);
     }
     let desired = compiled
-        .owned_files()
+        .files
         .iter()
         .map(|(path, bytes)| {
             crate::resources::relative_path_to_posix("rendered output path", path)

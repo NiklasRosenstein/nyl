@@ -241,39 +241,21 @@ impl BareRepository {
             self.fetch_objects(commit)?;
         }
         let tree = self.repo.find_commit(commit)?.tree()?;
-        // Check every component, so a symbolic link to a directory is refused
-        // rather than read as a missing file.
-        let mut prefix = std::path::PathBuf::new();
-        let mut entry = None;
-        for component in Path::new(path).components() {
-            prefix.push(component);
-            let found = match tree.get_path(&prefix) {
-                Ok(found) => found,
-                Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
-                Err(error) => return Err(GitError::Repository(error)),
-            };
-            if found.filemode() == 0o120_000 {
-                return Err(GitError::Command(format!(
-                    "{} at {commit} is a symbolic link; Nyl reads only regular files",
-                    prefix.display()
-                )));
-            }
-            entry = Some(found);
-        }
-        let Some(entry) = entry else {
-            return Ok(None);
+        let entry = match tree.get_path(Path::new(path)) {
+            Ok(entry) => entry,
+            Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(GitError::Repository(error)),
         };
+        if entry.filemode() == 0o120_000 {
+            return Err(GitError::Command(format!(
+                "{path} at {commit} is a symbolic link; Nyl reads only regular files"
+            )));
+        }
         let object = entry.to_object(&self.repo)?;
         let blob = object
             .as_blob()
             .ok_or_else(|| GitError::Command(format!("{path} at {commit} is not a file")))?;
         Ok(Some(blob.content().to_vec()))
-    }
-
-    /// The commit a branch names, or `None` when the branch does not exist.
-    pub fn branch_commit(&self, branch: &str) -> Result<Option<Oid>> {
-        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        self.resolve_reference_to_commit_oid(&format!("refs/heads/{branch}"))
     }
 
     /// The newest commit reachable from `head`, in topological and time
