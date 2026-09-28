@@ -250,8 +250,15 @@ impl PublicationScope {
     }
 }
 
+/// The rejection of a `fromGit` lock on its own target's publication.
+pub fn self_lock_error(lock: &str, target: &str) -> String {
+    format!(
+        "{lock} locks a file in the publication of DeploymentTarget {target} itself; every publication would make the lock stale, so read the target's own state with fromPublication"
+    )
+}
+
 fn branch_name(revision: &str) -> &str {
-    revision.strip_prefix("refs/heads/").unwrap_or(revision)
+    super::tree::normalize_branch_revision(revision)
 }
 
 /// Reads a file at an immutable commit.
@@ -279,17 +286,42 @@ pub trait GitBlobSource {
 /// `required` never reads it from the network.
 pub struct CachedGitBlobSource {
     manager: RefCell<Option<crate::git::GitManager>>,
-    artifacts: crate::render::artifact::ArtifactResolver,
+    project_root: PathBuf,
+    project_config: crate::config::ProjectConfig,
+    cache: Option<crate::render::cache::RenderCache>,
+    /// Created on first use, so targets without `fromGit` bindings never
+    /// load the vendor lock.
+    artifacts: std::cell::OnceCell<crate::render::artifact::ArtifactResolver>,
 }
 
 impl CachedGitBlobSource {
     /// Reuse `manager` when one exists; otherwise one is created on first use
     /// in the cache's external root, or the default Git cache.
-    pub fn new(manager: Option<crate::git::GitManager>, artifacts: crate::render::artifact::ArtifactResolver) -> Self {
+    pub fn new(
+        manager: Option<crate::git::GitManager>,
+        project_root: &Path,
+        project_config: &crate::config::ProjectConfig,
+        cache: Option<crate::render::cache::RenderCache>,
+    ) -> Self {
         Self {
             manager: RefCell::new(manager),
-            artifacts,
+            project_root: project_root.to_path_buf(),
+            project_config: project_config.clone(),
+            cache,
+            artifacts: std::cell::OnceCell::new(),
         }
+    }
+
+    fn artifacts(&self) -> Result<&crate::render::artifact::ArtifactResolver> {
+        if let Some(artifacts) = self.artifacts.get() {
+            return Ok(artifacts);
+        }
+        let artifacts = crate::render::artifact::ArtifactResolver::new(
+            &self.project_root,
+            &self.project_config,
+            self.cache.clone(),
+        )?;
+        Ok(self.artifacts.get_or_init(|| artifacts))
     }
 
     fn with_manager<T>(
@@ -298,13 +330,7 @@ impl CachedGitBlobSource {
     ) -> Result<T> {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
-            let cache = self.artifacts.render_cache();
-            let created = match cache.and_then(crate::render::cache::RenderCache::external_cache_root) {
-                Some(root) => crate::git::GitManager::with_cache_dir(root),
-                None => crate::git::GitManager::new()?,
-            }
-            .with_render_cache(cache.cloned());
-            *manager = Some(created);
+            *manager = Some(crate::git::GitManager::for_cache(self.cache.as_ref())?);
         }
         Ok(operation(manager.as_mut().expect("manager was created above"))?)
     }
@@ -318,7 +344,8 @@ impl GitBlobSource for CachedGitBlobSource {
             commit: commit.to_owned(),
             path: path.to_owned(),
         };
-        if let Some(artifact) = self.artifacts.lookup(&request)? {
+        let artifacts = self.artifacts()?;
+        if let Some(artifact) = artifacts.lookup(&request)? {
             return Ok(Some(std::fs::read(&artifact.path)?));
         }
         let Some(bytes) = self.read_publication_blob(url, commit, path)? else {
@@ -326,7 +353,7 @@ impl GitBlobSource for CachedGitBlobSource {
         };
         let staged = tempfile::NamedTempFile::new()?;
         std::fs::write(staged.path(), &bytes)?;
-        self.artifacts.store(
+        artifacts.store(
             &request,
             staged.path(),
             ArtifactFormat::GitBlob,
@@ -344,20 +371,7 @@ impl GitBlobSource for CachedGitBlobSource {
     }
 }
 
-/// A repository URL without userinfo, for provenance keys.
-///
-/// A parseable URL is always re-serialized, so a key does not depend on
-/// whether credentials are embedded in the configured URL.
-pub fn credential_free_url(url: &str) -> String {
-    match reqwest::Url::parse(url) {
-        Ok(mut parsed) => {
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-            parsed.to_string()
-        }
-        Err(_) => url.to_owned(),
-    }
-}
+pub use crate::util::credential_free_url;
 
 /// A Release the target renders, with its literal input declarations.
 pub struct ReleaseDeclaration<'a> {
@@ -912,22 +926,28 @@ fn resolve_bound(
                 .publication_scope
                 .filter(|scope| scope.contains(&repository.repo_url, &source.revision, &source.path))
             {
-                return Err(format!(
-                    "{field}.fromGit locks {} in the publication of DeploymentTarget {} itself; every publication would make the lock stale, so read the target's own state with fromPublication",
-                    source.path, scope.target
-                ));
+                return Err(self_lock_error(&format!("{field}.fromGit ({})", source.path), &scope.target));
             }
             let bytes = sources
                 .git
                 .read_blob(&repository.repo_url, &source.commit, &source.path)
-                .map_err(|error| {
-                    format!(
+                .map_err(|error| match error {
+                    NylError::Git(_) => format!(
                         "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                         source.path,
                         source.commit,
                         crate::util::sanitize_url(&repository.repo_url),
                         crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
-                    )
+                    ),
+                    // Vendor policy errors carry their own fix.
+                    NylError::Config(message) => format!(
+                        "{field}.fromGit: {}",
+                        crate::util::redact_url_credentials(&message, &repository.repo_url)
+                    ),
+                    other => format!(
+                        "{field}.fromGit: {}",
+                        crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
+                    ),
                 })?
                 .ok_or_else(|| {
                     format!(

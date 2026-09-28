@@ -284,7 +284,7 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
     Ok(())
 }
 
-fn normalize_branch_revision(revision: &str) -> &str {
+pub(super) fn normalize_branch_revision(revision: &str) -> &str {
     revision.strip_prefix("refs/heads/").unwrap_or(revision)
 }
 
@@ -457,19 +457,23 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let git_blobs = super::inputs::CachedGitBlobSource::new(
+    // Boxed: it holds the lazy artifact resolver across the compile's awaits.
+    let git_blobs = Box::new(super::inputs::CachedGitBlobSource::new(
         git_manager.take(),
-        crate::render::artifact::ArtifactResolver::new(
-            &inventory.project_root,
-            &inventory.project_config,
-            cache.cloned(),
-        )?,
-    );
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    ));
     let publication_base = if target
         .spec
         .release_inputs
-        .values()
-        .flat_map(BTreeMap::values)
+        .iter()
+        // Keys of disabled groups are ignored, so they never need the branch.
+        .filter(|(key, _)| {
+            crate::resources::release_inputs::ReleaseKey::parse(key)
+                .map_or(true, |key| !disabled_groups.contains(&key.group))
+        })
+        .flat_map(|(_, bindings)| bindings.values())
         .any(|binding| binding.from_publication.is_some())
     {
         match &options.publication_base {
@@ -477,7 +481,7 @@ async fn compile_target_tree_inner(
             // The state is read where publish-tree pushes, so the base it
             // verifies against its clone is the commit the state came from.
             None => Some(super::inputs::PublicationBase::resolve(
-                &git_blobs,
+                git_blobs.as_ref(),
                 repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
                 &target.spec.publication.revision,
                 target.publication_path_prefix(),
@@ -492,7 +496,7 @@ async fn compile_target_tree_inner(
         &target,
         &prepared_groups,
         &disabled_groups,
-        &git_blobs,
+        git_blobs.as_ref(),
         publication_base.as_ref(),
     )?;
 
@@ -2316,13 +2320,7 @@ fn resolve_remote_group_source(
         let manager = if let Some(manager) = git_manager {
             manager
         } else {
-            let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
-                GitManager::with_cache_dir(cache_root)
-            } else {
-                GitManager::new().map_err(NylError::Git)?
-            }
-            .with_render_cache(cache.cloned());
-            git_manager.insert(manager)
+            git_manager.insert(GitManager::for_cache(cache).map_err(NylError::Git)?)
         };
         let checkout = manager
             .resolve_ref(&repository.repo_url, Some(commit), None)

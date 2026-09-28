@@ -69,7 +69,7 @@ pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
             }
         }
     }
-    normalized = crate::gitops::inputs::credential_free_url(&normalized);
+    normalized = crate::util::credential_free_url(&normalized);
 
     if normalized.ends_with('/') {
         normalized.truncate(normalized.len() - 1);
@@ -130,6 +130,18 @@ impl GitManager {
             credential_provider,
             render_cache: None,
         }
+    }
+
+    /// A manager in `cache`'s external root when it has one, otherwise in the
+    /// default Git cache, observed by `cache`.
+    pub fn for_cache(cache: Option<&crate::render::cache::RenderCache>) -> Result<Self> {
+        Ok(
+            match cache.and_then(crate::render::cache::RenderCache::external_cache_root) {
+                Some(root) => Self::with_cache_dir(root),
+                None => Self::new()?,
+            }
+            .with_render_cache(cache.cloned()),
+        )
     }
 
     #[must_use]

@@ -4769,8 +4769,9 @@ fn test_vendor_captures_from_git_locks_for_required_offline_renders() {
     // Required mode never reads a locked file from the network.
     nyl(&TempDir::new().unwrap(), &render)
         .failure()
-        .stderr(predicate::str::contains(format!("{url}@{commit}#dev/images.json")))
-        .stderr(predicate::str::contains("not present in the required vendor lock"));
+        .stderr(predicate::str::contains(format!(
+            ".fromGit: Remote artifact {url}@{commit}#dev/images.json is not present in the required vendor lock; run 'nyl vendor'"
+        )));
     nyl(&TempDir::new().unwrap(), &["vendor"]).success();
     let lock = fs::read_to_string(fixture.path().join("vendor/lock.yaml")).unwrap();
     assert!(lock.contains("kind: git-blob"), "{lock}");
