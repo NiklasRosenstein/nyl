@@ -4376,6 +4376,144 @@ fn render_production(fixture: &TempDir) -> assert_cmd::assert::Assert {
         .assert()
 }
 
+fn nyl_render(fixture: &TempDir, args: &[&str]) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .arg("render")
+        .args(args)
+        .assert()
+}
+
+fn with_production_api_bindings(fixture: &TempDir) {
+    fs::create_dir_all(fixture.path().join("environments")).unwrap();
+    fs::write(
+        fixture.path().join("environments/database.yaml"),
+        "database:\n  host: db.production.internal\n",
+    )
+    .unwrap();
+    with_api_inputs(
+        fixture,
+        "    workloads/api:\n      image:\n        value: registry.example.com/api@sha256:4f0c\n      database:\n        fromFile:\n          path: environments/database.yaml\n          pointer: /database\n",
+    );
+}
+
+#[test]
+fn test_render_with_target_applies_the_bindings_render_tree_applies() {
+    let fixture = fixture();
+    with_production_api_bindings(&fixture);
+    let output = nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"]).success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+    for expected in [
+        "image: registry.example.com/api@sha256:4f0c",
+        "replicas: \"2\"",
+        "host: db.production.internal",
+    ] {
+        assert!(stdout.contains(expected), "{expected}: {stdout}");
+    }
+}
+
+#[test]
+fn test_render_overrides_win_over_input_files_and_bindings() {
+    let fixture = fixture();
+    with_production_api_bindings(&fixture);
+    fs::write(fixture.path().join("overrides.yaml"), "image: from-file\nreplicas: 5\n").unwrap();
+    let output = nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--inputs",
+            "overrides.yaml",
+            "--input",
+            "image=\"from-flag\"",
+            "applications/workloads/api.yaml",
+        ],
+    )
+    .success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+    for expected in ["image: from-flag", "replicas: \"5\"", "host: db.production.internal"] {
+        assert!(stdout.contains(expected), "{expected}: {stdout}");
+    }
+    nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--input",
+            "unknown=1",
+            "applications/workloads/api.yaml",
+        ],
+    )
+    .failure()
+    .stderr(predicate::str::contains(
+        "set unknown that Release \"api\" does not declare",
+    ));
+}
+
+#[test]
+fn test_render_without_target_uses_defaults_and_overrides_only() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("scratch")).unwrap();
+    fs::write(
+        fixture.path().join("scratch/local.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: local\n  namespace: local\nspec:\n  inputs:\n    image: {type: string}\n    replicas: {type: integer, default: 2}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: local\n  namespace: local\ndata:\n  image: '{{ inputs.image }}'\n  replicas: '{{ inputs.replicas }}'\n",
+    )
+    .unwrap();
+    nyl_render(&fixture, &["scratch/local.yaml"])
+        .failure()
+        .stderr(predicate::str::contains("requires input \"image\""));
+    let output = nyl_render(&fixture, &["--input", "image=\"local\"", "scratch/local.yaml"]).success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("image: local") && stdout.contains("replicas: \"2\""),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn test_render_requires_a_group_choice_for_a_release_outside_the_targets_groups() {
+    let fixture = fixture();
+    with_production_api_bindings(&fixture);
+    fs::create_dir_all(fixture.path().join("scratch")).unwrap();
+    fs::write(fixture.path().join("scratch/api.yaml"), API_RELEASE_WITH_INPUTS).unwrap();
+    fs::write(
+        fixture.path().join("scratch/extra.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api-extra\n  namespace: api\n",
+    )
+    .unwrap();
+    nyl_render(&fixture, &["--target", "production", "scratch/api.yaml"])
+        .failure()
+        .stderr(predicate::str::contains("--defaults-only"));
+    // The group's bindings apply when it is named.
+    let output = nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--application-group",
+            "workloads",
+            "scratch/api.yaml",
+        ],
+    )
+    .success();
+    assert!(String::from_utf8_lossy(&output.get_output().stdout).contains("host: db.production.internal"));
+    nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--defaults-only",
+            "--input",
+            "image=\"x\"",
+            "--input",
+            "database={\"host\": \"h\"}",
+            "scratch/api.yaml",
+        ],
+    )
+    .success();
+}
+
 #[test]
 fn release_inputs_render_from_values_files_and_defaults() {
     let fixture = fixture();

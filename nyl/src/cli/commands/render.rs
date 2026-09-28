@@ -46,6 +46,23 @@ pub struct RenderOptions {
     #[arg(long)]
     pub target: Option<String>,
 
+    /// Set one Release input as `<name>=<json>`, for example `--input replicas=3` or `--input image='"app@sha256:…"'`.
+    /// Wins over `--inputs` and target bindings. Repeatable.
+    #[arg(long = "input", value_name = "NAME=JSON")]
+    pub inputs: Vec<String>,
+
+    /// Read Release inputs from a YAML or JSON object. Individual `--input` flags win over it.
+    #[arg(long = "inputs", value_name = "FILE")]
+    pub inputs_file: Option<PathBuf>,
+
+    /// ApplicationGroup whose target bindings apply to the Release, when its file is not in exactly one selected group's source.
+    #[arg(long, value_name = "NAME", requires = "target", conflicts_with = "defaults_only")]
+    pub application_group: Option<String>,
+
+    /// Render with Release defaults and overrides only, applying no target binding.
+    #[arg(long, requires = "target")]
+    pub defaults_only: bool,
+
     /// Maximum evaluation depth for recursive resource expansion (default: 10)
     #[arg(long, default_value = "10")]
     pub max_depth: usize,
@@ -193,13 +210,42 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .as_deref()
         .and_then(Path::parent)
         .or_else(|| path.is_absolute().then(|| path.parent()).flatten());
+    let direct_inputs = crate::gitops::direct_inputs::resolve_direct_inputs(
+        &project_root,
+        &project_config,
+        path,
+        &crate::gitops::direct_inputs::DirectInputSelection {
+            target: resolved_target
+                .as_ref()
+                .map(|resolved| resolved.target.metadata.name.clone()),
+            application_group: options.common.application_group.clone(),
+            defaults_only: options.common.defaults_only,
+            overrides: crate::gitops::direct_inputs::parse_overrides(
+                options.common.inputs_file.as_deref(),
+                &options.common.inputs,
+            )?,
+        },
+    )?;
+    if let Some(base) = direct_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.publication_base.as_ref())
+    {
+        eprintln!("{}", base.describe());
+    }
+    let input_values = direct_inputs
+        .as_ref()
+        .map(crate::gitops::direct_inputs::DirectInputs::values);
     let mut request = RenderRequest::new(path, provenance_root);
+    request.inputs = input_values.as_ref();
     request.path_mode = RenderPathMode::AsProvided;
     request.only_source_kind = options.common.only_source_kind.as_deref();
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
     let rendered = session.render(request).await?;
+    if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
+        crate::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
+    }
     let mut protected = rendered.inputs.clone();
     protected.extend(project_config.file.iter().cloned());
     options.common.validation.validate_outputs(

@@ -1572,7 +1572,7 @@ fn register_namespace_owner(
     Ok(())
 }
 
-fn target_selects_group(target: &DeploymentTarget, group_labels: &BTreeMap<String, String>) -> bool {
+pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTreeMap<String, String>) -> bool {
     target
         .spec
         .application_group_selector
@@ -1911,7 +1911,7 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
     Ok(())
 }
 
-fn resolve_git_publication(
+pub(super) fn resolve_git_publication(
     inventory: &GitOpsInventory,
     publication: &GitPublication,
 ) -> Result<(Option<String>, InlineGitRepository, Option<PathBuf>)> {
@@ -1924,7 +1924,7 @@ fn resolve_git_publication(
     Ok((name.filter(|_| path.is_some()), repository, path))
 }
 
-fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
+pub(super) fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, name)
         .ok_or_else(|| NylError::config(format!("Cluster {name:?} was not found")))?;
@@ -2177,7 +2177,7 @@ fn app_project_name(project: &AppProjectDefinition) -> Result<String> {
         .ok_or_else(|| NylError::config("AppProjectDefinition spec.manifest.metadata.name must be a string"))
 }
 
-fn render_effective_control(
+pub(super) fn render_effective_control(
     discovered: &super::DiscoveredGitOpsResource,
     session: &RenderSession,
 ) -> Result<Option<GitOpsResource>> {

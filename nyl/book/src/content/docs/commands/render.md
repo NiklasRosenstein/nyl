@@ -28,6 +28,10 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
 - `--target <TARGET>` - DeploymentTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
+- `--input <NAME=JSON>` - Set one Release input, for example `--input replicas=3` or `--input image='"registry.example.com/api@sha256:…"'`. Repeatable; wins over `--inputs` and target bindings.
+- `--inputs <FILE>` - Read Release inputs from a YAML or JSON object.
+- `--application-group <NAME>` - With `--target`, apply this ApplicationGroup's bindings when the Release file is not in exactly one selected group's local source.
+- `--defaults-only` - With `--target`, apply no target binding: only Release defaults and overrides.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--refresh` - Bypass cached rendering results and replace successful entries.
@@ -87,6 +91,12 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 ```
 
 ## Notes
+
+- A Release that declares `spec.inputs` renders with the same values as
+  `render-tree`: overrides, then the target binding of the selected
+  ApplicationGroup whose source contains the file, then defaults. See
+  [Release inputs](/nyl/deployment-workflows/rendered-manifests/release-inputs/#direct-commands).
+  `nyl diff` and `nyl apply` accept the same input options.
 
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.

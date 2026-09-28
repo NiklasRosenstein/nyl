@@ -193,6 +193,37 @@ next render would, and falls back to the cached branch head offline. With
 vendor mode `required`, keep state from choosing remote artifacts such as
 chart versions: a new artifact needs `nyl vendor` and a source commit first.
 
+## Direct commands
+
+`nyl render`, `nyl diff`, and `nyl apply` resolve a Release's inputs the way
+`render-tree` does, so `nyl render --target production api.yaml` matches the
+published manifests:
+
+```text
+effective input = --input / --inputs override
+                  otherwise the target binding
+                  otherwise the Release default
+```
+
+With a target, the binding comes from the selected ApplicationGroup whose local
+source contains the Release file. When several or none do, for example a
+Release of a remote group rendered from a local checkout, the command fails and
+names the target's groups: pass `--application-group <name>` to apply that
+group's bindings, or `--defaults-only` to render with defaults and overrides
+only. A target never falls back to defaults silently. Without a target, only
+defaults and overrides apply.
+
+```bash
+nyl render --target production applications/workloads/api.yaml
+nyl render --input image='"registry.example.com/api@sha256:4f0c"' --inputs local.yaml api.yaml
+```
+
+`--input <name>=<json>` takes a JSON value, so strings are quoted; `--inputs`
+reads a YAML or JSON object, and individual `--input` flags win over it.
+Overrides must name declared inputs and are type-checked like bindings. Tree
+commands accept no overrides: published output reproduces from committed
+source and the publication state.
+
 ## Provenance
 
 Resolved inputs are part of the render-cache key. The ownership index records

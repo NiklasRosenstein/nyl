@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `nyl render`, `diff`, and `apply` resolve Release inputs like `render-tree`:
+  `--input <name>=<json>` and `--inputs <file>` override, then the binding of
+  the target's ApplicationGroup whose source contains the Release file, then
+  defaults. `--application-group` chooses the group when the file is in
+  several or none; `--defaults-only` applies no binding.
+
 - Release inputs read state files from the target's own publication branch
   with `fromPublication`, at the commit `publish-tree` builds on, so a
   concurrent state push fails publication instead of interleaving. With
