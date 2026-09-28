@@ -4483,6 +4483,20 @@ fn release_input_bindings_of_disabled_groups_are_ignored() {
 }
 
 #[test]
+fn publication_bindings_of_disabled_groups_never_read_the_branch() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap();
+    fs::write(group_path, format!("{group}  enabled: false\n")).unwrap();
+    // The fixture's publication repository is unreachable.
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {fromPublication: {path: state.json}}\n",
+    );
+    render_production(&fixture).success();
+}
+
+#[test]
 fn release_input_files_under_at_prefixed_directories_enter_the_index() {
     let fixture = fixture();
     fs::create_dir_all(fixture.path().join("@shared")).unwrap();

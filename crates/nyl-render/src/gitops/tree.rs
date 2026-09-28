@@ -46,6 +46,12 @@ pub struct TreeRenderOptions {
     /// clean-`HEAD` verification, reads the same state.
     #[serde(skip)]
     pub publication_base: Option<super::inputs::PublicationBase>,
+    /// State bytes that `carryFileFromWorktree` bindings read instead of the
+    /// worktree, keyed by path relative to the prefix; set with
+    /// `publication_base` for a comparison baseline. Not part of the cache
+    /// key: the state enters it through the resolved inputs.
+    #[serde(skip)]
+    pub pinned_state_files: Option<BTreeMap<PathBuf, Vec<u8>>>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -498,6 +504,7 @@ async fn compile_target_tree_inner(
         &disabled_groups,
         git_blobs.as_ref(),
         publication_base.as_ref(),
+        options.pinned_state_files.as_ref(),
     )?;
 
     let target_cache_inputs = TargetCacheInputs {
@@ -2247,6 +2254,7 @@ fn resolve_prepared_release_inputs(
     disabled_groups: &BTreeSet<String>,
     git: &dyn super::inputs::GitBlobSource,
     publication: Option<&super::inputs::PublicationBase>,
+    pinned_state: Option<&BTreeMap<PathBuf, Vec<u8>>>,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2282,6 +2290,7 @@ fn resolve_prepared_release_inputs(
             publication_scope: Some(&publication_scope),
             git,
             publication,
+            pinned_state,
             visible_files: &inventory.worktree_data_files,
         },
     )

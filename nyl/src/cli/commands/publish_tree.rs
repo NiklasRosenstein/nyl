@@ -251,6 +251,9 @@ fn publish_compiled(
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
     let credentials = Arc::new(CredentialProvider::new());
     if let Some(commit) = publication_current_commit(compiled, publication_url, &credentials, cache)? {
+        // The published tree matching is not enough: state read at an older
+        // base means the branch moved while rendering.
+        verify_publication_base(compiled, Some(commit), publication_url, branch)?;
         print_publication_result(
             &format!("Deployment target {target_name} is already published"),
             publication_url,

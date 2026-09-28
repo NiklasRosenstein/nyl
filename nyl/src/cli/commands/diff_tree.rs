@@ -308,6 +308,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         // shows only what the source change causes.
         let options = TreeRenderOptions {
             publication_base: desired.publication_base.clone(),
+            pinned_state_files: Some(desired.state_files.clone()),
             ..options
         };
         let baseline = resolve_baseline(args, &inventory, &target_name, &desired, &cache, options).await?;

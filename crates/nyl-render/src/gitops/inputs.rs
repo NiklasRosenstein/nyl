@@ -116,21 +116,21 @@ impl PublicationBase {
                 git.branch_head(url, &branch, true).map_err(|e| {
                     error(
                         e,
-                        "; render-tree and diff-tree accept --offline to read the cached branch head",
+                        "; check network access to the publication repository (render-tree and diff-tree can read the cached branch head with --offline)",
                     )
                 })?,
                 PublicationBaseOrigin::Refreshed,
             ),
-            PublicationRead::Cached => (
-                git.branch_head(url, &branch, false).map_err(|e| error(e, ""))?,
-                PublicationBaseOrigin::Cached,
-            ),
+            // Without a refresh, a branch missing from the cache cannot be
+            // told apart from one that was never fetched.
+            PublicationRead::Cached => match git.branch_head(url, &branch, false).map_err(|e| error(e, ""))? {
+                Some(commit) => (Some(commit), PublicationBaseOrigin::Cached),
+                None => (None, PublicationBaseOrigin::Unavailable),
+            },
             PublicationRead::FreshOrCached => match git.branch_head(url, &branch, true) {
                 Ok(commit) => (commit, PublicationBaseOrigin::Refreshed),
                 Err(refresh_error) => {
                     tracing::warn!("Cannot refresh publication branch {branch}: {refresh_error}; using cached state");
-                    // Without a refresh, a missing cached branch cannot be
-                    // told apart from one that was never fetched.
                     match git.branch_head(url, &branch, false) {
                         Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::CachedAfterFailedRefresh),
                         Ok(None) | Err(_) => (None, PublicationBaseOrigin::Unavailable),
@@ -152,7 +152,7 @@ impl PublicationBase {
         let url = crate::util::sanitize_url(&self.url);
         match (&self.commit, self.origin) {
             (_, PublicationBaseOrigin::Unavailable) => format!(
-                "Publication branch {} of {url} could not be refreshed and has no cached copy; fromPublication inputs are unbound",
+                "Publication branch {} of {url} is not in the local Git cache (it was never fetched, or does not exist yet) and was not refreshed; fromPublication inputs are unbound",
                 self.branch
             ),
             (Some(commit), origin) => format!(
@@ -200,6 +200,11 @@ pub struct InputSources<'a> {
     /// Publication branch head, for `fromPublication`. Resolution fails when
     /// a binding needs it and it is absent.
     pub publication: Option<&'a PublicationBase>,
+    /// State bytes of another render of the same command, by path relative
+    /// to the prefix. A binding with `carryFileFromWorktree` reads them instead
+    /// of the worktree, so a comparison baseline sees the desired render's
+    /// carried state.
+    pub pinned_state: Option<&'a BTreeMap<PathBuf, Vec<u8>>>,
 }
 
 /// Resolves a GitRepository name to the repository and its source file.
@@ -718,7 +723,7 @@ pub fn resolve_release_inputs(
                     .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable);
                 issues.push(match binding.and_then(|binding| binding.from_publication.as_ref()) {
                     Some(source) if unavailable => format!(
-                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} is unavailable: the publication branch could not be refreshed and has no cached copy, and the input has no default; run once with network access or declare a default",
+                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default",
                         source.path
                     ),
                     Some(source) => format!(
@@ -783,9 +788,16 @@ fn resolve_publication(
                 "{field}.carryFileFromWorktree {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with fromFile"
             ));
         }
-        if carry_path.is_file() {
-            let bytes = std::fs::read(&carry_path)
-                .map_err(|error| format!("{field}.carryFileFromWorktree: cannot read {carry}: {error}"))?;
+        // A pinned state (a comparison baseline) replaces the worktree file.
+        let carried = match sources.pinned_state {
+            Some(pinned) => pinned.get(Path::new(&source.path)).cloned(),
+            None if carry_path.is_file() => Some(
+                std::fs::read(&carry_path)
+                    .map_err(|error| format!("{field}.carryFileFromWorktree: cannot read {carry}: {error}"))?,
+            ),
+            None => None,
+        };
+        if let Some(bytes) = carried {
             let document = parse_single_document(&bytes)
                 .map_err(|reason| format!("{field}.carryFileFromWorktree: {carry} {reason}"))?;
             let value = select(&document, &source.pointer)
@@ -1169,6 +1181,7 @@ mod tests {
                 publication_scope: None,
                 git: &NoGit,
                 publication: None,
+                pinned_state: None,
                 visible_files: &visible_files,
             },
         )
@@ -1341,6 +1354,7 @@ mod tests {
             publication_scope: None,
             git: &git,
             publication: None,
+            pinned_state: None,
         };
         let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
             .unwrap_err()
@@ -1496,6 +1510,7 @@ mod tests {
                 publication_scope: None,
                 git: &NoGit,
                 publication: Some(&base),
+                pinned_state: None,
                 visible_files: &BTreeSet::new(),
             },
         )
@@ -1571,6 +1586,58 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("accept --offline"), "{error}");
+        assert!(
+            error.contains("can read the cached branch head with --offline"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_cached_read_of_an_empty_cache_is_unavailable() {
+        let heads = Heads {
+            refreshed: Err("unused"),
+            cached: Ok(None),
+        };
+        let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+        assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+    }
+
+    #[test]
+    fn test_pinned_state_replaces_the_worktree_carry_file() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("carried.json"), r#"{"image": "worktree"}"#).unwrap();
+        let declared = declarations(json!({"image": {"type": "string"}}));
+        let target = target(json!({"platform/web": {"image": {"fromPublication": {
+            "path": "state.json", "pointer": "/image", "carryFileFromWorktree": "carried.json"
+        }}}}));
+        let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());
+        let releases = [ReleaseDeclaration {
+            key: ReleaseKey::parse("platform/web").unwrap(),
+            declarations: &declared,
+            source: Path::new("release.yaml"),
+        }];
+        let pinned = BTreeMap::from([(PathBuf::from("state.json"), br#"{"image": "pinned"}"#.to_vec())]);
+        let resolved = resolve_target_inputs(
+            &target,
+            &releases,
+            &BTreeSet::new(),
+            &InputSources {
+                paths: &paths,
+                repositories: &|reference| {
+                    Err(NylError::config(format!(
+                        "GitRepository {:?} was not found",
+                        reference.name
+                    )))
+                },
+                publication_scope: None,
+                git: &NoGit,
+                publication: None,
+                pinned_state: Some(&pinned),
+                visible_files: &BTreeSet::new(),
+            },
+        )
+        .unwrap();
+        let web = &resolved.releases[&ReleaseKey::parse("platform/web").unwrap()];
+        assert_eq!(web.inputs["image"].value, json!("pinned"));
     }
 }
