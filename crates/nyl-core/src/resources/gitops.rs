@@ -468,7 +468,7 @@ pub struct ApplicationGroupSpec {
     /// Relative output directory beneath the target prefix. Defaults to the group name.
     #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
-    /// Generated workload Application name template, with `release` context. Defaults to the Release name; use target-qualified templates when targets share an Argo CD namespace.
+    /// Generated workload Application name, as a template value expanded once per Release. It must contain at least one `${ expression }`, evaluated with the target context plus `release`, the rendered Release; `$${` writes a literal `${`, and all other text, including `{{ … }}`, is literal. Defaults to the Release name; use target-qualified names such as `${ target.metadata.name }-${ release.metadata.name }` when targets share an Argo CD namespace.
     #[serde(rename = "applicationNameTemplate", skip_serializing_if = "Option::is_none")]
     pub application_name_template: Option<String>,
     /// Workload Application sync policy. Generated Applications include apply-only-out-of-sync and server-side apply unless explicitly overridden.
@@ -1165,6 +1165,9 @@ impl ApplicationGroup {
             KIND_APPLICATION_GROUP,
             &self.metadata,
         )?;
+        if let Some(template) = &self.spec.application_name_template {
+            validate_application_name_template(template)?;
+        }
         match (&self.spec.project_ref, &self.spec.project_template) {
             (Some(reference), None) => validate_static_required("spec.projectRef", reference)?,
             (None, Some(template)) => template.validate()?,
@@ -1476,6 +1479,35 @@ pub fn relative_path_to_posix(field: &str, value: &Path) -> Result<String> {
 }
 
 /// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
+/// `applicationNameTemplate` is a template value that must contain at least
+/// one `${ … }` expression, so every Release gets its own name. Text outside
+/// expressions is literal; the `{{ … }}` form is not expanded.
+fn validate_application_name_template(template: &str) -> Result<()> {
+    if has_template_expression(template) {
+        return Ok(());
+    }
+    Err(CoreError::config(format!(
+        "spec.applicationNameTemplate {template:?} must contain at least one ${{ … }} expression, for example '${{ target.metadata.name }}-${{ release.metadata.name }}'; {{{{ … }}}} is not expanded in this field"
+    )))
+}
+
+/// Whether `value` contains a `${` that starts an expression, not counting the
+/// `$${` escape.
+fn has_template_expression(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(start) = rest.find('$') {
+        let after = &rest[start + 1..];
+        if let Some(escaped) = after.strip_prefix("${") {
+            rest = escaped;
+        } else if after.starts_with('{') {
+            return true;
+        } else {
+            rest = after;
+        }
+    }
+    false
+}
+
 pub fn validate_immutable_git_commit(field: &str, value: &str) -> Result<()> {
     validate_static_required(field, value)?;
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1534,6 +1566,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_application_name_template_requires_an_expression() {
+        validate_application_name_template("${ target.metadata.name }-${ release.metadata.name }").unwrap();
+        validate_application_name_template("prefix-${release.metadata.name}").unwrap();
+        for template in [
+            "{{ target.metadata.name }}-{{ release.metadata.name }}",
+            "static-name",
+            "$${ release.metadata.name }",
+        ] {
+            let error = validate_application_name_template(template).unwrap_err().to_string();
+            assert!(error.contains("at least one ${ … } expression"), "{template}: {error}");
+        }
+    }
 
     fn target() -> serde_json::Value {
         json!({

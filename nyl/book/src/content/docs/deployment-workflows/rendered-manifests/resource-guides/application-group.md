@@ -48,6 +48,30 @@ When namespace creation is enabled, Nyl adds Namespace permissions for the
 approved destination patterns. Other cluster-scoped permissions remain
 explicit. Argo CD's AppProject admission remains the authorization boundary.
 
+## Application names
+
+Each Release produces one workload Application named after the Release. When
+several targets place Applications into the same Argo CD namespace on the same
+control-plane Cluster, set `applicationNameTemplate` so their names differ.
+Targets on implicit per-target instances of one Cluster share the `argocd`
+namespace, so they need it too. Clusters count as one control plane when they
+share an Argo CD destination, and `nyl validate` compares the names every
+target generates, so a template without the target, or Releases of the same
+name in different groups, are reported as well:
+
+```yaml
+spec:
+  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'
+```
+
+The field is a template value: the structural pass leaves `${ … }` untouched,
+and Nyl evaluates each expression once per Release with the target context and
+`release`. Expressions and filters work as in `{{ … }}`; blocks do not. An
+undefined variable or attribute is an error. Write `$${` for a literal `${`.
+All other text is literal, including `{{ … }}`. The field must contain at least
+one `${ … }` expression; the former `{% raw %}{{ … }}{% endraw %}` form is no
+longer expanded and fails validation, so rewrite it with `${ … }`.
+
 ## Source selection
 
 `spec.source` is optional. Without it, a central group derives

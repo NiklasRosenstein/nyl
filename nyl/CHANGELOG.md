@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ApplicationGroup.spec.applicationNameTemplate` accepts template values:
+  `${ expression }` is evaluated once per Release with `release` in scope, an
+  undefined variable or attribute is an error, and `$${` writes a literal `${`.
+
 - `nyl.toml` may live beside the configuration in `nyl/` at the Git worktree
   root; Nyl finds `nyl/nyl.toml` when the worktree root has no `nyl.toml` of
   its own.
@@ -49,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same. The report names the baseline project directory.
 
 ### Changed
+
+- **BREAKING**: `ApplicationGroup.spec.applicationNameTemplate` no longer
+  expands `{{ … }}` protected with `{% raw %}`. It must contain at least one
+  `${ … }` expression; other text is literal. Rewrite
+  `{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}`
+  as `'${ target.metadata.name }-${ release.metadata.name }'`.
+
+- Generated Argo CD names (catalog Applications, default workload Application
+  names, and AppProjects) must be unique across every pair of targets whose
+  Argo CD instances resolve to the same Cluster and namespace, including
+  implicit per-target instances. Targets on one Cluster without explicit
+  ArgoCDInstances that select the same ApplicationGroup now need a
+  target-qualified `applicationNameTemplate`. Clusters are compared by their
+  Argo CD destination, and `nyl validate` also compares the names each target
+  actually generates, including templated and namespace-owner Applications.
 
 - Nyl is now a Cargo workspace: resource types and schemas live in
   `nyl-core`, rendering and rendered GitOps in `nyl-render`, and the `nyl`

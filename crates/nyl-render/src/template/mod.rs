@@ -8,6 +8,10 @@ use minijinja::Environment;
 
 use crate::{secrets::SecretsConfig, Result};
 
+mod template_value;
+
+pub use template_value::TemplateValueExpander;
+
 pub struct TemplateEngine {
     env: Environment<'static>,
 }
@@ -43,6 +47,12 @@ impl TemplateEngine {
     pub fn render_named(&self, name: &str, template: &str, context: &serde_json::Value) -> Result<String> {
         let result = self.env.render_named_str(name, template, context)?;
         Ok(result)
+    }
+
+    /// An expander for template values: `${ … }` expressions in otherwise
+    /// literal text.
+    pub fn template_values(&self) -> TemplateValueExpander {
+        TemplateValueExpander::new(&self.env)
     }
 }
 

@@ -1314,6 +1314,200 @@ spec:
         .stderr(predicate::str::contains("applicationNameTemplate"));
 }
 
+const STAGING_TARGET_ON_KASOKU: &str = r#"apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: staging
+  labels:
+    environment: production
+spec:
+  clusterRef:
+    name: kasoku
+  publication:
+    repositoryRef:
+      name: deploy
+    revision: deploy/staging
+    pathPrefix: staging
+"#;
+
+#[test]
+fn test_validate_implicit_argocd_instances_on_one_cluster_require_cross_target_names() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU,
+    )
+    .unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("on Cluster \"kasoku\""))
+        .stderr(predicate::str::contains(
+            "'${ target.metadata.name }-${ release.metadata.name }'",
+        ));
+}
+
+#[test]
+fn test_render_tree_expands_application_name_template_values_per_release() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectRef: workloads\n  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let application: serde_json::Value = serde_saphyr::from_str(
+        &fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/production-api.yaml"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(application["metadata"]["name"], "production-api");
+    assert_eq!(application["metadata"]["namespace"], "argocd-production");
+}
+
+/// Replace the fixture's group with `frontend` and `backend`, each holding a
+/// Release `api`, and add a staging target on Cluster `cluster`; production
+/// selects `frontend` and staging selects `backend`.
+fn two_groups_with_one_release_name(fixture: &TempDir, cluster: &str, application_name_template: Option<&str>) {
+    let root = fixture.path();
+    fs::remove_file(root.join("config/application-groups/workloads.yaml")).unwrap();
+    for group in ["frontend", "backend"] {
+        let template = application_name_template
+            .map(|template| format!("  applicationNameTemplate: '{template}'\n"))
+            .unwrap_or_default();
+        fs::write(
+            root.join(format!("config/application-groups/{group}.yaml")),
+            format!(
+                "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {group}\n  labels:\n    tier: {group}\nspec:\n  applicationNamespace: argocd\n{template}"
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join(format!("applications/{group}"))).unwrap();
+        fs::write(
+            root.join(format!("applications/{group}/api.yaml")),
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n",
+        )
+        .unwrap();
+    }
+    let production_path = root.join("config/targets/production.yaml");
+    let production = fs::read_to_string(&production_path).unwrap().replace(
+        "      environment: production\n  values:",
+        "      tier: frontend\n  values:",
+    );
+    fs::write(production_path, production).unwrap();
+    fs::write(
+        root.join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU
+            .replace("    name: kasoku\n", &format!("    name: {cluster}\n"))
+            .replace(
+                "  publication:\n",
+                "  applicationGroupSelector:\n    matchLabels:\n      tier: backend\n  publication:\n",
+            ),
+    )
+    .unwrap();
+}
+
+fn validate(fixture: &TempDir) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["validate"])
+        .assert()
+}
+
+#[test]
+fn test_validate_rejects_default_application_names_of_different_groups_on_one_cluster() {
+    let fixture = fixture();
+    two_groups_with_one_release_name(&fixture, "kasoku", None);
+    validate(&fixture).failure().stderr(predicate::str::contains(
+        "generate the same Argo CD Application argocd/api on Cluster \"kasoku\"",
+    ));
+}
+
+#[test]
+fn test_validate_rejects_application_name_templates_without_the_target() {
+    let fixture = fixture();
+    two_groups_with_one_release_name(&fixture, "kasoku", Some("${ release.metadata.name }-app"));
+    validate(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("Application argocd/api-app"));
+}
+
+#[test]
+fn test_validate_accepts_target_qualified_application_name_templates() {
+    let fixture = fixture();
+    two_groups_with_one_release_name(
+        &fixture,
+        "kasoku",
+        Some("${ target.metadata.name }-${ release.metadata.name }"),
+    );
+    validate(&fixture).success();
+}
+
+#[test]
+fn test_validate_compares_clusters_by_argocd_destination() {
+    let fixture = fixture();
+    let cluster = fs::read_to_string(fixture.path().join("config/clusters/kasoku.yaml")).unwrap();
+    fs::write(
+        fixture.path().join("config/clusters/kasoku-admin.yaml"),
+        cluster.replace("name: kasoku\n", "name: kasoku-admin\n"),
+    )
+    .unwrap();
+    two_groups_with_one_release_name(&fixture, "kasoku-admin", None);
+    validate(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("Application argocd/api"));
+}
+
+#[test]
+fn test_validate_rejects_distinct_argocd_instances_sharing_a_namespace() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.path().join("config/argocd-instances")).unwrap();
+    for instance in ["argocd-a", "argocd-b"] {
+        fs::write(
+            fixture.path().join(format!("config/argocd-instances/{instance}.yaml")),
+            format!(
+                "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {instance}\nspec:\n  clusterRef:\n    name: kasoku\n"
+            ),
+        )
+        .unwrap();
+    }
+    let production_path = fixture.path().join("config/targets/production.yaml");
+    let production = fs::read_to_string(&production_path).unwrap().replace(
+        "  clusterRef:\n    name: kasoku\n",
+        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: argocd-a\n",
+    );
+    fs::write(production_path, production).unwrap();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU.replace(
+            "  clusterRef:\n    name: kasoku\n",
+            "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: argocd-b\n",
+        ),
+    )
+    .unwrap();
+    validate(&fixture)
+        .failure()
+        .stderr(predicate::str::contains("on Cluster \"kasoku\""))
+        .stderr(predicate::str::contains("applicationNameTemplate"));
+}
+
 #[test]
 fn force_repairs_missing_and_modified_owned_files() {
     let fixture = fixture();
@@ -4121,4 +4315,23 @@ fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_
 
     let worktrees = Repository::open(root).unwrap().worktrees().unwrap();
     assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn test_validate_rejects_application_name_templates_without_an_expression() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectRef: workloads\n  applicationNameTemplate: '{% raw %}{{ release.metadata.name }}{% endraw %}'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", "--target", "production", "--check", "--output-dir"])
+        .arg(fixture.path().join("deploy"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must contain at least one ${ … } expression"));
 }
