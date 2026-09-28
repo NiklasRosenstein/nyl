@@ -316,7 +316,7 @@
           "description": "Argo CD Application finalizer policy: foreground cascade, background cascade, or orphan workloads."
         },
         "applicationNameTemplate": {
-          "description": "Generated workload Application name, as a template value expanded once per Release: `${ expression }` is evaluated with the target context plus `release`, the rendered Release, and `$${` writes a literal `${`. Defaults to the Release name; use target-qualified names such as `${ target.metadata.name }-${ release.metadata.name }` when targets share an Argo CD namespace.",
+          "description": "Generated workload Application name, as a template value expanded once per Release. It must contain at least one `${ expression }`, evaluated with the target context plus `release`, the rendered Release; `$${` writes a literal `${`, and all other text, including `{{ … }}`, is literal. Defaults to the Release name; use target-qualified names such as `${ target.metadata.name }-${ release.metadata.name }` when targets share an Argo CD namespace.",
           "type": [
             "string",
             "null"
