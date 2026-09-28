@@ -322,7 +322,12 @@ releaseInputs:
 - **Local commands.** `render-tree` and `diff-tree` fetch the publication
   branch and read the file at its current head. They report which commit they
   used, because their output is reproducible only together with it. `--offline`
-  uses the cached head and says so.
+  uses the cached head and says so. Every command reads the state from the
+  URL `publish-tree` pushes to (`publishURL`, otherwise `repoURL`), so the base
+  commit is the one publication builds on. One command reads one base: the
+  clean-`HEAD` verification of `publish-tree` and a `diff-tree` baseline, the
+  published tree or another source revision, reuse the base of the desired
+  render.
 - **Scope.** Only the target's own prefix on its own publication branch can be
   read. Another target's prefix or branch, or another repository, uses
   `fromGit`.
@@ -365,7 +370,9 @@ releaseInputs:
   it: the binding still reads `path`, so the file stays in the tree as
   committed state and leaves the ownership index. Removing every binding that
   names `path` deletes the file, like any owned file the target stops
-  producing. State files are owned and published like
+  producing. Disabling the ApplicationGroup of a carrying binding is not a
+  removal: the file is kept unowned while the group is disabled, and
+  re-enabling it adopts the file again, so the last carried value persists. State files are owned and published like
   rendered files but are not manifests: they are never validated as
   Kubernetes resources. The placement rule otherwise applies unchanged: the
   path lies outside every Argo CD-synced directory.

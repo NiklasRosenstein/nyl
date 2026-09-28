@@ -64,7 +64,7 @@ impl PublicationBase {
                 if offline {
                     ""
                 } else {
-                    "; use --offline to read the cached branch head"
+                    "; render-tree and diff-tree accept --offline to read the cached branch head"
                 }
             ))
         })?;
@@ -350,8 +350,9 @@ impl ResolvedReleaseInputs {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedTargetInputs {
     pub releases: BTreeMap<ReleaseKey, ResolvedReleaseInputs>,
-    /// Every `fromPublication` path the target's enabled bindings name, bound
-    /// or not, to whether its binding declares `carryFileFromWorktree`.
+    /// Every `fromPublication` path the target's bindings name, bound or not,
+    /// to whether an enabled binding declares `carryFileFromWorktree`. Paths of
+    /// disabled groups only are not carried, so their files are kept unowned.
     pub state_paths: BTreeMap<String, bool>,
 }
 
@@ -473,9 +474,16 @@ pub fn resolve_target_inputs(
     }
 
     let mut bound = BTreeMap::new();
+    let mut disabled_state_paths = BTreeSet::new();
     for (key_text, bindings) in &target.spec.release_inputs {
         let key = ReleaseKey::parse(key_text)?;
         if disabled_groups.contains(&key.group) {
+            disabled_state_paths.extend(
+                bindings
+                    .values()
+                    .filter_map(|binding| binding.from_publication.as_ref())
+                    .map(|source| source.path.clone()),
+            );
             continue;
         }
         let Some(release) = declared.get(&key) else {
@@ -511,6 +519,11 @@ pub fn resolve_target_inputs(
                     .insert(source.path.clone(), source.carry_file_from_worktree.is_some());
             }
         }
+    }
+    // A disabled group's state persists: its paths are released rather than
+    // deleted, and re-enabling a carried binding adopts the file again.
+    for path in disabled_state_paths {
+        resolved.state_paths.entry(path).or_insert(false);
     }
     for (key, release) in &declared {
         if release.declarations.is_empty() {
@@ -592,14 +605,22 @@ pub fn resolve_release_inputs(
                     describe_origin(&field, &input.origin)
                 )),
             },
-            Ok(None) => issues.push(format!(
-                "Release {release} requires input {name:?}{}, but it has no binding and no default; bind it in {field_prefix}",
-                declaration
+            Ok(None) => {
+                let description = declaration
                     .description
                     .as_deref()
                     .map(|description| format!(" ({description})"))
-                    .unwrap_or_default()
-            )),
+                    .unwrap_or_default();
+                issues.push(match binding.and_then(|binding| binding.from_publication.as_ref()) {
+                    Some(source) => format!(
+                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default",
+                        source.path
+                    ),
+                    None => format!(
+                        "Release {release} requires input {name:?}{description}, but it has no binding and no default; bind it in {field_prefix}"
+                    ),
+                });
+            }
             Err(error) => issues.push(error),
         }
     }
@@ -722,9 +743,9 @@ fn owned_at(
     else {
         return Ok(false);
     };
-    let index: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{index_path} at publication commit {commit} is not valid JSON: {error}"))?;
-    Ok(index.get("files").and_then(|files| files.get(path)).is_some())
+    let index = super::reconcile::parse_index(&bytes, &format!("{index_path} at publication commit {commit}"))
+        .map_err(|error| error.to_string())?;
+    Ok(index.files.contains_key(path))
 }
 
 /// Whether Git tracks `path` in the index of the repository containing it.
@@ -1307,5 +1328,64 @@ mod tests {
             ..scope
         };
         assert!(root.contains("https://git.example.com/deploy.git", "deploy", "state.json"));
+    }
+
+    #[test]
+    fn test_state_paths_of_disabled_groups_are_released_not_deleted() {
+        let temp = TempDir::new().unwrap();
+        let declared = declarations(json!({"image": {"type": "string", "default": "x"}}));
+        let target = target(
+            json!({"platform/web": {"image": {"fromPublication": {"path": "state/images.json", "carryFileFromWorktree": "build/images.json"}}}}),
+        );
+        let resolved = resolve(&target, &[("platform/web", &declared)], &["platform"], temp.path()).unwrap();
+        assert_eq!(
+            resolved.state_paths,
+            BTreeMap::from([("state/images.json".to_owned(), false)])
+        );
+        assert!(resolved.carried_files().is_empty());
+    }
+
+    #[test]
+    fn test_missing_required_publication_state_names_the_state_file() {
+        let temp = TempDir::new().unwrap();
+        let declared = declarations(json!({"image": {"type": "string"}}));
+        let target = target(json!({"platform/web": {"image": {"fromPublication": {"path": "state/images.json"}}}}));
+        let base = PublicationBase {
+            url: "https://example.invalid/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            prefix: "dev".to_owned(),
+            commit: None,
+            cached: false,
+        };
+        let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());
+        let releases = [ReleaseDeclaration {
+            key: ReleaseKey::parse("platform/web").unwrap(),
+            declarations: &declared,
+            source: Path::new("release.yaml"),
+        }];
+        let error = resolve_target_inputs(
+            &target,
+            &releases,
+            &BTreeSet::new(),
+            &InputSources {
+                paths: &paths,
+                repositories: &|reference| {
+                    Err(NylError::config(format!(
+                        "GitRepository {:?} was not found",
+                        reference.name
+                    )))
+                },
+                publication_scope: None,
+                git: &NoGit,
+                publication: Some(&base),
+                visible_files: &BTreeSet::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("state file state/images.json does not exist on the publication branch yet"),
+            "{error}"
+        );
     }
 }

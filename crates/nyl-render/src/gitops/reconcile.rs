@@ -294,16 +294,20 @@ fn load_index(path: &Path) -> Result<Option<RenderIndex>> {
     if !path.exists() {
         return Ok(None);
     }
-    let index: RenderIndex = serde_json::from_slice(&fs::read(path)?)
-        .map_err(|error| NylError::config(format!("Invalid rendered ownership index {}: {error}", path.display())))?;
+    parse_index(&fs::read(path)?, &path.display().to_string()).map(Some)
+}
+
+/// Parse and version-check ownership index bytes read from `origin`.
+pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
+    let index: RenderIndex = serde_json::from_slice(bytes)
+        .map_err(|error| NylError::config(format!("Invalid rendered ownership index {origin}: {error}")))?;
     if index.version != RENDER_INDEX_VERSION {
         return Err(NylError::config(format!(
-            "Unsupported rendered ownership index version {} in {}",
-            index.version,
-            path.display()
+            "Unsupported rendered ownership index version {} in {origin}",
+            index.version
         )));
     }
-    Ok(Some(index))
+    Ok(index)
 }
 
 fn verify_owned_files(

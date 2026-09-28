@@ -5284,6 +5284,44 @@ fn test_publish_tree_deletes_carried_state_when_the_binding_is_removed() {
 }
 
 #[test]
+fn test_publish_tree_keeps_carried_state_while_its_group_is_disabled() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    // The project cache holds Git worktrees once the branch exists.
+    fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
+    fs::write(fixture.path().join("build/images.json"), carried).unwrap();
+    publish_production(&fixture).success();
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap();
+    fs::write(&group_path, format!("{group}  enabled: false\n")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Disable workloads");
+    publish_production(&fixture).success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        carried.as_bytes()
+    );
+
+    // Re-enabled, the carried binding adopts the kept file and renders from it.
+    fs::write(&group_path, group).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Enable workloads");
+    publish_production(&fixture).success();
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:carried"));
+    let commit = published_commit(&repository, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_some(), "{index}");
+}
+
+#[test]
 fn test_publish_tree_rejects_an_owned_state_file_deleted_outside_nyl() {
     let (fixture, _destination, seed, _) = publication_fixture();
     with_publication_binding(

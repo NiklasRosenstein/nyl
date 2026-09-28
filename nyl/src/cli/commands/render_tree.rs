@@ -111,6 +111,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
             offline: args.offline,
+            ..TreeRenderOptions::default()
         },
     )
     .await?;

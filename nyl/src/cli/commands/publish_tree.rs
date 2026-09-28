@@ -176,13 +176,14 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let render_options = TreeRenderOptions {
         allow_secret_inputs: args.source.allow_secret_inputs,
         offline: false,
+        ..TreeRenderOptions::default()
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(
         &inventory,
         &target_name,
         &cache,
         &mut progress,
-        render_options,
+        render_options.clone(),
     )
     .await?;
     let clean = if dirty && !args.source.allow_dirty {
@@ -193,7 +194,12 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
                 &target_name,
                 &source_commit,
                 &cache,
-                render_options,
+                // The clean render reads the same publication state, so only
+                // the source difference can make the two compiles disagree.
+                TreeRenderOptions {
+                    publication_base: compiled.publication_base.clone(),
+                    ..render_options
+                },
             )
             .await?,
         )

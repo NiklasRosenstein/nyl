@@ -75,7 +75,8 @@ digest. A prefix without an ownership index owns nothing yet, for example when
 another tool has committed `fromPublication` state before the first
 publication. Unindexed repository content is never treated as target-owned
 baseline data. `--offline` reads `fromPublication` state at the cached branch
-head, as for `render-tree`.
+head, as for `render-tree`, and compares against the published tree at that
+same commit.
 
 Compare with a render from a source revision:
 

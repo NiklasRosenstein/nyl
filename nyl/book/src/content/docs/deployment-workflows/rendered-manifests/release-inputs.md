@@ -179,7 +179,8 @@ last carried value persists. The target owns `path`, adopting a file another
 tool committed there before, and rejects a change or deletion of it by another
 writer. Removing only `carryFileFromWorktree` keeps the file as committed state
 that the target no longer owns, because the binding still reads it; removing
-the binding deletes the file from the publication branch. The carry file must not be tracked by Git; it is
+the binding deletes the file from the publication branch, while disabling its
+ApplicationGroup keeps the file until the group is enabled again. The carry file must not be tracked by Git; it is
 excluded from the dirty-worktree check, and the clean-`HEAD` verification of
 `publish-tree` renders with the same bytes. Bindings naming one path must all
 carry the same file, or none.

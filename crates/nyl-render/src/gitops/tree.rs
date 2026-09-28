@@ -31,7 +31,7 @@ use super::{
 const TARGET_CACHE_ACTION: &str = "target-provenance-v3";
 
 /// Inputs admitted while compiling a rendered deployment tree.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TreeRenderOptions {
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
@@ -42,6 +42,11 @@ pub struct TreeRenderOptions {
     /// recorded through the resolved inputs' digests.
     #[serde(skip)]
     pub offline: bool,
+    /// Read `fromPublication` state at this base instead of resolving the
+    /// branch head, so a second compile of the same publication, such as the
+    /// clean-`HEAD` verification, reads the same state.
+    #[serde(skip)]
+    pub publication_base: Option<super::inputs::PublicationBase>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -363,7 +368,7 @@ async fn compile_target_tree_inner(
     observer: &mut dyn TreeRenderObserver,
     options: TreeRenderOptions,
 ) -> Result<CompiledTargetTree> {
-    validate_gitops_inventory_with_options(inventory, options)?;
+    validate_gitops_inventory_with_options(inventory, options.clone())?;
     let target_discovered = inventory
         .get(GitOpsResourceKind::DeploymentTarget, target_name)
         .ok_or_else(|| NylError::config(format!("DeploymentTarget {target_name:?} was not found")))?;
@@ -461,13 +466,18 @@ async fn compile_target_tree_inner(
         .flat_map(BTreeMap::values)
         .any(|binding| binding.from_publication.is_some())
     {
-        Some(super::inputs::PublicationBase::resolve(
-            &git_blobs,
-            &repository.repo_url,
-            &target.spec.publication.revision,
-            target.publication_path_prefix(),
-            options.offline,
-        )?)
+        match &options.publication_base {
+            Some(base) => Some(base.clone()),
+            // The state is read where publish-tree pushes, so the base it
+            // verifies against its clone is the commit the state came from.
+            None => Some(super::inputs::PublicationBase::resolve(
+                &git_blobs,
+                repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
+                &target.spec.publication.revision,
+                target.publication_path_prefix(),
+                options.offline,
+            )?),
+        }
     } else {
         None
     };

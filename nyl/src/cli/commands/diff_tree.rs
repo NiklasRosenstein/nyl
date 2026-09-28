@@ -267,10 +267,16 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
         offline: args.offline,
+        ..TreeRenderOptions::default()
     };
-    let rendered =
-        compile_target_tree_cached_with_observer_and_options(&inventory, &target_name, &cache, &mut progress, options)
-            .await;
+    let rendered = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut progress,
+        options.clone(),
+    )
+    .await;
     report.render = Some(cache.stats());
     let desired = match rendered {
         Ok(desired) => desired,
@@ -298,6 +304,12 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         },
     );
     let compared = async {
+        // A source baseline reads the same publication state, so the diff
+        // shows only what the source change causes.
+        let options = TreeRenderOptions {
+            publication_base: desired.publication_base.clone(),
+            ..options
+        };
         let baseline = resolve_baseline(args, &inventory, &target_name, &desired, &cache, options).await?;
         report.baseline(&baseline, &desired);
         let selection = DiffSelection::from_args(args);
@@ -325,7 +337,11 @@ async fn resolve_baseline(
     options: TreeRenderOptions,
 ) -> Result<ResolvedBaseline> {
     match args.against {
-        DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(desired, cache)?)),
+        DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(
+            desired,
+            cache,
+            options.offline,
+        )?)),
         DiffTreeBase::Source => {
             let source_ref = args
                 .source_ref
@@ -650,15 +666,26 @@ fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn published_tree(compiled: &crate::gitops::CompiledTargetTree, cache: &GitOpsCache) -> Result<PublishedBaseline> {
+/// The published tree to compare against: the commit `fromPublication` state
+/// was read at, so both sides see one publication; otherwise the branch head,
+/// refreshed unless `offline`.
+fn published_tree(
+    compiled: &crate::gitops::CompiledTargetTree,
+    cache: &GitOpsCache,
+    offline: bool,
+) -> Result<PublishedBaseline> {
     let mut manager = git_manager(cache)?;
-    let checkout = manager
-        .resolve_ref_fresh(
-            &compiled.repository.repo_url,
-            Some(&compiled.target.spec.publication.revision),
-            None,
-        )
-        .map_err(NylError::Git)?;
+    let revision = &compiled.target.spec.publication.revision;
+    let checkout = match compiled
+        .publication_base
+        .as_ref()
+        .and_then(|base| Some((base.url.as_str(), base.commit.as_deref()?)))
+    {
+        Some((url, commit)) => manager.resolve_ref(url, Some(commit), None),
+        None if offline => manager.resolve_ref(&compiled.repository.repo_url, Some(revision), None),
+        None => manager.resolve_ref_fresh(&compiled.repository.repo_url, Some(revision), None),
+    }
+    .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
     let root = checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
     let published = read_rendered_tree(&root)?;
@@ -1051,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn published_tree_without_an_ownership_index_owns_nothing() {
+    fn test_read_rendered_tree_without_an_ownership_index_owns_nothing() {
         let temp = tempfile::TempDir::new().unwrap();
         std::fs::write(temp.path().join("state.json"), "{\"image\": \"web:1\"}\n").unwrap();
         let published = read_rendered_tree(temp.path()).unwrap();
