@@ -56,11 +56,12 @@ pub struct RenderOptions {
     pub inputs_file: Option<PathBuf>,
 
     /// ApplicationGroup whose target bindings apply to the Release, when its file is not in exactly one selected group's source.
-    #[arg(long, value_name = "NAME", requires = "target", conflicts_with = "defaults_only")]
+    /// Needs a target, given with `--target` or inferred by `diff` and `apply`.
+    #[arg(long, value_name = "NAME", conflicts_with = "defaults_only")]
     pub application_group: Option<String>,
 
-    /// Render with Release defaults and overrides only, applying no target binding.
-    #[arg(long, requires = "target")]
+    /// Render with Release defaults and overrides only, applying no target binding. Needs a target.
+    #[arg(long)]
     pub defaults_only: bool,
 
     /// Maximum evaluation depth for recursive resource expansion (default: 10)
@@ -152,25 +153,32 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .validate_outputs(false, &[PathBuf::from(&options.common.path)], &[])?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target_required = options.cluster_client_requirement == ClusterClientRequirement::Required;
-    let (project_config, project_root, resolved_target) = if options.common.target.is_some() || target_required {
-        let inventory = discover_gitops_inventory(&current_dir, None)?;
-        let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
-        let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
-        (
-            inventory.project_config.clone(),
-            inventory.project_root.clone(),
-            Some(resolved_target),
-        )
-    } else {
-        let project_config = ProjectConfig::load_with_warning(None)?;
-        let project_root = project_config
-            .file
-            .as_deref()
-            .and_then(Path::parent)
-            .unwrap_or(&current_dir)
-            .to_path_buf();
-        (project_config, project_root, None)
-    };
+    let (project_config, project_root, resolved_target, inventory) =
+        if options.common.target.is_some() || target_required {
+            let inventory = discover_gitops_inventory(&current_dir, None)?;
+            let target_name = resolve_deployment_target_name(&inventory, options.common.target.as_deref())?;
+            let resolved_target = resolve_target_cluster_from_inventory(&inventory, &target_name)?;
+            (
+                inventory.project_config.clone(),
+                inventory.project_root.clone(),
+                Some(resolved_target),
+                Some(inventory),
+            )
+        } else {
+            let project_config = ProjectConfig::load_with_warning(None)?;
+            let project_root = project_config
+                .file
+                .as_deref()
+                .and_then(Path::parent)
+                .unwrap_or(&current_dir)
+                .to_path_buf();
+            (project_config, project_root, None, None)
+        };
+    if resolved_target.is_none() && (options.common.application_group.is_some() || options.common.defaults_only) {
+        return Err(NylError::config(
+            "--application-group and --defaults-only choose among a target's bindings; pass --target",
+        ));
+    }
 
     if resolved_target.is_some() && (options.kube_version.is_some() || !options.kube_api_versions.is_empty()) {
         return Err(NylError::config(
@@ -203,7 +211,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     )?;
     let render_cache = cache::RenderCache::new(&project_root, options.common.cache.mode())?;
     let _cache_reporter = render_cache.reporter();
-    session.set_cache(Some(render_cache));
+    session.set_cache(Some(render_cache.clone()));
     let path = Path::new(&options.common.path);
     let provenance_root = project_config
         .file
@@ -211,13 +219,17 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .and_then(Path::parent)
         .or_else(|| path.is_absolute().then(|| path.parent()).flatten());
     let direct_inputs = crate::gitops::direct_inputs::resolve_direct_inputs(
-        &project_root,
-        &project_config,
+        &crate::gitops::direct_inputs::DirectInputContext {
+            project_root: &project_root,
+            project_config: &project_config,
+            target: inventory
+                .as_ref()
+                .zip(resolved_target.as_ref())
+                .map(|(inventory, resolved)| (inventory, &resolved.target)),
+            cache: Some(&render_cache),
+        },
         path,
         &crate::gitops::direct_inputs::DirectInputSelection {
-            target: resolved_target
-                .as_ref()
-                .map(|resolved| resolved.target.metadata.name.clone()),
             application_group: options.common.application_group.clone(),
             defaults_only: options.common.defaults_only,
             overrides: crate::gitops::direct_inputs::parse_overrides(
@@ -248,6 +260,13 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     }
     let mut protected = rendered.inputs.clone();
     protected.extend(project_config.file.iter().cloned());
+    // Files inputs were read from are sources too.
+    protected.extend(options.common.inputs_file.iter().cloned());
+    protected.extend(
+        direct_inputs
+            .iter()
+            .flat_map(crate::gitops::direct_inputs::DirectInputs::files),
+    );
     options.common.validation.validate_outputs(
         false,
         &protected,

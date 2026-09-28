@@ -21,10 +21,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::inputs::{
-    CachedGitBlobSource, InputSources, PublicationBase, PublicationRead, PublicationScope, ResolvedReleaseInputs,
+    CachedGitBlobSource, InputOrigin, InputSources, PublicationBase, PublicationRead, PublicationScope,
+    ResolvedReleaseInputs,
 };
 use super::GitOpsInventory;
-use crate::resources::release_inputs::{InputDeclaration, ReleaseKey};
+use crate::resources::release_inputs::{InputBinding, InputDeclaration, ReleaseKey};
+use crate::resources::ApplicationGroupSource;
 use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
@@ -32,9 +34,6 @@ use crate::{NylError, Result};
 /// Which target bindings a direct command applies.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectInputSelection {
-    /// DeploymentTarget whose bindings apply; `None` renders defaults and
-    /// overrides only.
-    pub target: Option<String>,
     /// `--application-group`: the group whose bindings apply.
     pub application_group: Option<String>,
     /// `--defaults-only`: apply no target binding.
@@ -43,11 +42,20 @@ pub struct DirectInputSelection {
     pub overrides: BTreeMap<String, Value>,
 }
 
+/// What a direct command has already loaded, shared with input resolution.
+pub struct DirectInputContext<'a> {
+    pub project_root: &'a Path,
+    pub project_config: &'a crate::config::ProjectConfig,
+    /// The project inventory and the DeploymentTarget whose bindings apply;
+    /// `None` renders defaults and overrides only.
+    pub target: Option<(&'a GitOpsInventory, &'a crate::resources::DeploymentTarget)>,
+    /// The command's render cache, for `fromGit` reads and cache modes.
+    pub cache: Option<&'a crate::render::cache::RenderCache>,
+}
+
 /// Resolved inputs of the Release a direct command renders.
 #[derive(Debug)]
 pub struct DirectInputs {
-    /// `<group>/<release>` whose target bindings applied, if any.
-    pub key: Option<ReleaseKey>,
     pub declarations: BTreeMap<String, InputDeclaration>,
     pub resolved: ResolvedReleaseInputs,
     /// The publication base `fromPublication` bindings read, if any.
@@ -59,14 +67,44 @@ impl DirectInputs {
     pub fn values(&self) -> Map<String, Value> {
         self.resolved.values()
     }
+
+    /// Project files the inputs were read from: `fromFile` files, carry files,
+    /// and referenced GitRepository resources.
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.resolved
+            .inputs
+            .values()
+            .filter_map(|input| match &input.origin {
+                InputOrigin::File(path)
+                | InputOrigin::Carried { source: path, .. }
+                | InputOrigin::Git {
+                    repository_source: Some(path),
+                    ..
+                } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
-/// One selected ApplicationGroup of a target and its local source root.
+/// One enabled ApplicationGroup a target selects, with its local source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetGroup {
     pub name: String,
-    /// Canonical local source directory; `None` for a remote source.
-    pub root: Option<PathBuf>,
+    /// Canonical local source directory and its file selection; `None` for a
+    /// remote source, which never contains a local file.
+    pub source: Option<(PathBuf, ApplicationGroupSource)>,
+}
+
+impl TargetGroup {
+    /// Whether this group renders `file`, by the same selection as
+    /// `render-tree`: beneath its root and matched by its include, exclude,
+    /// and recursion rules.
+    fn contains(&self, file: &Path) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|(root, source)| super::tree::source_matches(root, file, source))
+    }
 }
 
 /// Merge `--inputs` (a YAML or JSON object) under individual `--input` flags,
@@ -103,10 +141,14 @@ pub fn parse_overrides(inputs_file: Option<&Path>, input_flags: &[String]) -> Re
 
 /// Choose the group whose bindings apply to `file`, or `None` for defaults.
 ///
+/// `groups` are the target's enabled groups; `disabled` names its selected
+/// but disabled ones, whose bindings `render-tree` ignores.
+///
 /// Contract: [Direct commands](../../../../design/release-inputs.md#direct-commands).
 pub fn select_group(
     target: &str,
     groups: &[TargetGroup],
+    disabled: &BTreeSet<String>,
     file: &Path,
     application_group: Option<&str>,
     defaults_only: bool,
@@ -124,6 +166,10 @@ pub fn select_group(
     if let Some(requested) = application_group {
         return if groups.iter().any(|group| group.name == requested) {
             Ok(Some(requested.to_owned()))
+        } else if disabled.contains(requested) {
+            Err(NylError::config(format!(
+                "--application-group {requested:?} is disabled on DeploymentTarget {target:?}, so render-tree ignores its bindings; enable it, or pass --defaults-only"
+            )))
         } else {
             Err(NylError::config(format!(
                 "--application-group {requested:?} is not an ApplicationGroup DeploymentTarget {target:?} selects; selected groups: {}",
@@ -133,34 +179,36 @@ pub fn select_group(
     }
     let containing = groups
         .iter()
-        .filter(|group| group.root.as_ref().is_some_and(|root| file.starts_with(root)))
+        .filter(|group| group.contains(file))
         .map(|group| group.name.as_str())
         .collect::<Vec<_>>();
     match containing.as_slice() {
         [group] => Ok(Some((*group).to_owned())),
         [] => Err(NylError::config(format!(
-            "No ApplicationGroup of DeploymentTarget {target:?} has a local source containing {}; selected groups: {}. \
+            "No enabled ApplicationGroup of DeploymentTarget {target:?} renders {} from a local source; selected groups: {}. \
              Pass --application-group <name> to apply that group's bindings, or --defaults-only to render with defaults and overrides only",
             file.display(),
             names()
         ))),
         several => Err(NylError::config(format!(
-            "ApplicationGroups {} of DeploymentTarget {target:?} all contain {}; pass --application-group <name> to choose whose bindings apply",
+            "ApplicationGroups {} of DeploymentTarget {target:?} all render {}; pass --application-group <name> to choose whose bindings apply",
             several.join(", "),
             file.display()
         ))),
     }
 }
 
-/// The target's selected ApplicationGroups with their local source roots.
+/// The target's selected ApplicationGroups: the enabled ones with their local
+/// sources, and the names of the disabled ones.
 pub fn target_groups(
     inventory: &GitOpsInventory,
     target: &crate::resources::DeploymentTarget,
-) -> Result<Vec<TargetGroup>> {
+) -> Result<(Vec<TargetGroup>, BTreeSet<String>)> {
     let (cluster, _) = super::tree::resolve_cluster(inventory, target.cluster_name())?;
     let session =
         crate::render::RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)?;
     let mut groups = Vec::new();
+    let mut disabled = BTreeSet::new();
     for discovered in inventory.resources.values() {
         if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup
             || !super::tree::target_selects_group(target, &discovered.static_labels)
@@ -172,26 +220,34 @@ pub fn target_groups(
         else {
             continue;
         };
-        let root = match &group.spec.source {
+        // Like render-tree, a disabled group is skipped before its source is
+        // resolved, so a missing source directory cannot fail the command.
+        if !group.spec.enabled {
+            disabled.insert(group.metadata.name.clone());
+            continue;
+        }
+        let source = match &group.spec.source {
             Some(source) if source.is_remote() => None,
-            Some(source) => Some(super::tree::local_group_source_root(
-                inventory,
-                &group.metadata.name,
-                &source.path,
-            )?),
-            None => Some(super::derived_group_source_root(
-                &inventory.project_root,
-                &discovered.source_path,
-                &group.metadata.name,
+            Some(source) => Some((
+                super::tree::local_group_source_root(inventory, &group.metadata.name, &source.path)?,
+                source.clone(),
+            )),
+            None => Some((
+                super::derived_group_source_root(
+                    &inventory.project_root,
+                    &discovered.source_path,
+                    &group.metadata.name,
+                ),
+                super::tree::default_group_source(),
             )),
         };
         groups.push(TargetGroup {
             name: group.metadata.name.clone(),
-            root: root.map(|root| root.canonicalize().unwrap_or(root)),
+            source: source.map(|(root, source)| (root.canonicalize().unwrap_or(root), source)),
         });
     }
     groups.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(groups)
+    Ok((groups, disabled))
 }
 
 /// Resolve the inputs of the Release in `file` for a direct command.
@@ -199,8 +255,7 @@ pub fn target_groups(
 /// Returns `None` when the file holds no Release that declares inputs and no
 /// override is given, so such Releases render exactly as before.
 pub fn resolve_direct_inputs(
-    project_root: &Path,
-    project_config: &crate::config::ProjectConfig,
+    context: &DirectInputContext<'_>,
     file: &Path,
     selection: &DirectInputSelection,
 ) -> Result<Option<DirectInputs>> {
@@ -220,45 +275,32 @@ pub fn resolve_direct_inputs(
         }
     };
     let release_name = name.expect("a Release that declares inputs has a literal name");
-    let undeclared = selection
-        .overrides
-        .keys()
-        .filter(|name| !declarations.contains_key(*name))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !undeclared.is_empty() {
+    let undeclared = |names: &mut dyn Iterator<Item = &String>| {
+        names
+            .filter(|name| !declarations.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let unknown = undeclared(&mut selection.overrides.keys());
+    if !unknown.is_empty() {
         return Err(NylError::config(format!(
             "--input/--inputs set {} that Release {release_name:?} does not declare; declared inputs: {}",
-            undeclared.join(", "),
+            unknown.join(", "),
             declarations.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
 
-    let Some(target_name) = &selection.target else {
-        return resolve_with(
-            &release_name,
-            None,
-            declarations,
-            &selection.overrides,
-            &Sources::without_target(project_root, project_config),
-        )
-        .map(Some);
+    let Some((inventory, target)) = context.target else {
+        let sources = Sources::without_target(context);
+        return resolve_with(&release_name, None, declarations, &selection.overrides, &sources).map(Some);
     };
-    let inventory = super::discover_gitops_inventory(project_root, None)?;
-    let Some(super::DiscoveredGitOpsResource {
-        resource: Some(GitOpsResource::DeploymentTarget(target)),
-        ..
-    }) = inventory.get(GitOpsResourceKind::DeploymentTarget, target_name)
-    else {
-        return Err(NylError::config(format!(
-            "DeploymentTarget {target_name:?} was not found"
-        )));
-    };
+    let target_name = &target.metadata.name;
     let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    let groups = target_groups(&inventory, target)?;
+    let (groups, disabled) = target_groups(inventory, target)?;
     let group = select_group(
         target_name,
         &groups,
+        &disabled,
         &file,
         selection.application_group.as_deref(),
         selection.defaults_only,
@@ -267,70 +309,99 @@ pub fn resolve_direct_inputs(
         group,
         release: release_name.clone(),
     });
-    let sources = Sources::for_target(&inventory, target, key.as_ref())?;
-    let mut inputs = resolve_with(
+    let bindings = key
+        .as_ref()
+        .and_then(|key| target.spec.release_inputs.get(&key.to_string()));
+    if let (Some(key), Some(bindings)) = (&key, bindings) {
+        // render-tree rejects a binding for an undeclared input; so does this.
+        let unknown = undeclared(&mut bindings.keys());
+        if !unknown.is_empty() {
+            return Err(NylError::config(format!(
+                "DeploymentTarget {target_name:?} spec.releaseInputs.{:?} binds {} that Release {key} does not declare; declared inputs: {}",
+                key.to_string(),
+                unknown.join(", "),
+                declarations.keys().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    let sources = Sources::for_target(context, inventory, target, bindings, &selection.overrides)?;
+    resolve_with(
         &release_name,
-        key.as_ref().map(|key| (key, target)),
+        key.as_ref().map(|key| (key, bindings)),
         declarations,
         &selection.overrides,
         &sources,
-    )?;
-    inputs.key = key;
-    Ok(Some(inputs))
+    )
+    .map(Some)
 }
 
-/// Everything [`InputSources`] borrows, owned for one direct command.
-struct Sources {
+/// Everything [`InputSources`] borrows for one direct command.
+struct Sources<'a> {
     paths: ProjectPaths,
-    visible_files: BTreeSet<PathBuf>,
-    inventory: Option<GitOpsInventory>,
+    visible_files: std::borrow::Cow<'a, BTreeSet<PathBuf>>,
+    inventory: Option<&'a GitOpsInventory>,
+    target_name: Option<&'a str>,
     publication_scope: Option<PublicationScope>,
     git: Box<CachedGitBlobSource>,
     publication_base: Option<PublicationBase>,
 }
 
-impl Sources {
-    fn without_target(project_root: &Path, project_config: &crate::config::ProjectConfig) -> Self {
+impl<'a> Sources<'a> {
+    fn without_target(context: &DirectInputContext<'a>) -> Self {
         Self {
-            paths: ProjectPaths::new(project_root.to_path_buf(), project_root.to_path_buf()),
-            visible_files: BTreeSet::new(),
+            paths: ProjectPaths::new(context.project_root.to_path_buf(), context.project_root.to_path_buf()),
+            visible_files: std::borrow::Cow::Owned(BTreeSet::new()),
             inventory: None,
+            target_name: None,
             publication_scope: None,
-            git: Box::new(CachedGitBlobSource::new(None, project_root, project_config, None)),
+            git: Box::new(CachedGitBlobSource::new(
+                None,
+                context.project_root,
+                context.project_config,
+                context.cache.cloned(),
+            )),
             publication_base: None,
         }
     }
 
     fn for_target(
-        inventory: &GitOpsInventory,
-        target: &crate::resources::DeploymentTarget,
-        key: Option<&ReleaseKey>,
+        context: &DirectInputContext<'a>,
+        inventory: &'a GitOpsInventory,
+        target: &'a crate::resources::DeploymentTarget,
+        bindings: Option<&BTreeMap<String, InputBinding>>,
+        overrides: &BTreeMap<String, Value>,
     ) -> Result<Self> {
         let git = Box::new(CachedGitBlobSource::new(
             None,
             &inventory.project_root,
             &inventory.project_config,
-            None,
+            context.cache.cloned(),
         ));
-        let bindings = key.and_then(|key| target.spec.release_inputs.get(&key.to_string()));
-        let publication_base =
-            if bindings.is_some_and(|bindings| bindings.values().any(|binding| binding.from_publication.is_some())) {
-                let (_, repository, _) = super::tree::resolve_git_publication(inventory, &target.spec.publication)?;
-                Some(PublicationBase::resolve(
-                    git.as_ref(),
-                    repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
-                    &target.spec.publication.revision,
-                    target.publication_path_prefix(),
-                    PublicationRead::Fresh,
-                )?)
-            } else {
-                None
-            };
+        // The branch is read only when a fromPublication binding decides an
+        // input, not when an override replaces every such input.
+        let reads_publication = bindings.is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|(name, binding)| binding.from_publication.is_some() && !overrides.contains_key(name))
+        });
+        let publication_base = if reads_publication {
+            let (_, repository, _) = super::tree::resolve_git_publication(inventory, &target.spec.publication)?;
+            Some(PublicationBase::resolve(
+                git.as_ref(),
+                repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
+                &target.spec.publication.revision,
+                target.publication_path_prefix(),
+                PublicationRead::Fresh,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             paths: inventory.paths(),
-            visible_files: inventory.worktree_data_files.clone(),
+            visible_files: std::borrow::Cow::Borrowed(&inventory.worktree_data_files),
             publication_scope: Some(PublicationScope::of(inventory, target)?),
-            inventory: Some(inventory.clone()),
+            inventory: Some(inventory),
+            target_name: Some(&target.metadata.name),
             git,
             publication_base,
         })
@@ -339,12 +410,12 @@ impl Sources {
 
 fn resolve_with(
     release_name: &str,
-    bound: Option<(&ReleaseKey, &crate::resources::DeploymentTarget)>,
+    bound: Option<(&ReleaseKey, Option<&BTreeMap<String, InputBinding>>)>,
     declarations: BTreeMap<String, InputDeclaration>,
     overrides: &BTreeMap<String, Value>,
-    sources: &Sources,
+    sources: &Sources<'_>,
 ) -> Result<DirectInputs> {
-    let inventory = sources.inventory.as_ref();
+    let inventory = sources.inventory;
     let repositories = |reference: &crate::resources::LocalReference| {
         let inventory = inventory.ok_or_else(|| {
             NylError::config(format!(
@@ -365,17 +436,17 @@ fn resolve_with(
         publication: sources.publication_base.as_ref(),
         pinned_state: None,
     };
-    let (label, bindings) = match bound {
-        Some((key, target)) => (key.to_string(), target.spec.release_inputs.get(&key.to_string())),
-        None => (release_name.to_owned(), None),
-    };
-    let field_prefix = match bound {
-        Some((key, target)) => format!(
-            "DeploymentTarget {:?} spec.releaseInputs.{:?}",
-            target.metadata.name,
-            key.to_string()
+    let (label, bindings, field_prefix) = match bound {
+        Some((key, bindings)) => (
+            key.to_string(),
+            bindings,
+            format!(
+                "DeploymentTarget {:?} spec.releaseInputs.{:?}",
+                sources.target_name.unwrap_or_default(),
+                key.to_string()
+            ),
         ),
-        None => "--input/--inputs".to_owned(),
+        None => (release_name.to_owned(), None, "--input/--inputs".to_owned()),
     };
     let mut issues = Vec::new();
     let resolved = super::inputs::resolve_release_inputs(
@@ -398,7 +469,6 @@ fn resolve_with(
         )));
     }
     Ok(DirectInputs {
-        key: None,
         declarations,
         resolved,
         publication_base: sources.publication_base.clone(),
@@ -411,65 +481,110 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    fn local(root: &Path, dir: &str) -> Option<(PathBuf, ApplicationGroupSource)> {
+        Some((root.join(dir), super::super::tree::default_group_source()))
+    }
+
     fn groups(root: &Path) -> Vec<TargetGroup> {
+        let mut flat = super::super::tree::default_group_source();
+        flat.recursive = false;
+        flat.exclude = vec!["legacy-*".to_owned()];
         vec![
             TargetGroup {
                 name: "platform".to_owned(),
-                root: Some(root.join("platform")),
+                source: local(root, "platform"),
             },
             TargetGroup {
                 name: "workloads".to_owned(),
-                root: Some(root.join("apps")),
+                source: Some((root.join("apps"), flat)),
             },
             TargetGroup {
                 name: "wide".to_owned(),
-                root: Some(root.join("apps/shared")),
+                source: local(root, "apps/shared"),
             },
             TargetGroup {
                 name: "remote".to_owned(),
-                root: None,
+                source: None,
             },
         ]
     }
 
-    #[test]
-    fn test_select_group_uses_the_one_group_containing_the_file() {
+    fn select(file: &str, requested: Option<&str>, defaults_only: bool) -> Result<Option<String>> {
         let root = Path::new("/p");
+        let disabled = BTreeSet::from(["retired".to_owned()]);
+        select_group(
+            "dev",
+            &groups(root),
+            &disabled,
+            &root.join(file),
+            requested,
+            defaults_only,
+        )
+    }
+
+    #[test]
+    fn test_select_group_uses_the_group_render_tree_renders_the_file_in() {
         assert_eq!(
-            select_group("dev", &groups(root), &root.join("apps/web.yaml"), None, false).unwrap(),
+            select("apps/web.yaml", None, false).unwrap(),
             Some("workloads".to_owned())
+        );
+        // workloads is not recursive, so only wide renders a nested file.
+        assert_eq!(
+            select("apps/shared/db.yaml", None, false).unwrap(),
+            Some("wide".to_owned())
         );
     }
 
     #[test]
-    fn test_select_group_requires_a_choice_when_several_or_none_contain_the_file() {
+    fn test_select_group_requires_a_choice_when_no_group_renders_the_file() {
+        // Excluded by workloads' source, so no group renders it.
+        let excluded = select("apps/legacy-web.yaml", None, false).unwrap_err().to_string();
+        assert!(excluded.contains("--defaults-only"), "{excluded}");
+        let none = select("elsewhere/web.yaml", None, false).unwrap_err().to_string();
+        assert!(none.contains("platform, workloads, wide, remote"), "{none}");
+    }
+
+    #[test]
+    fn test_select_group_requires_a_choice_when_several_groups_render_the_file() {
         let root = Path::new("/p");
-        let several = select_group("dev", &groups(root), &root.join("apps/shared/db.yaml"), None, false)
-            .unwrap_err()
-            .to_string();
+        let groups = vec![
+            TargetGroup {
+                name: "a".to_owned(),
+                source: local(root, "apps"),
+            },
+            TargetGroup {
+                name: "b".to_owned(),
+                source: local(root, "apps/shared"),
+            },
+        ];
+        let error = select_group(
+            "dev",
+            &groups,
+            &BTreeSet::new(),
+            &root.join("apps/shared/db.yaml"),
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
-            several.contains("workloads, wide") && several.contains("--application-group"),
-            "{several}"
-        );
-        let none = select_group("dev", &groups(root), &root.join("elsewhere/web.yaml"), None, false)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            none.contains("--defaults-only") && none.contains("platform, workloads, wide, remote"),
-            "{none}"
+            error.contains("a, b") && error.contains("--application-group"),
+            "{error}"
         );
     }
 
     #[test]
     fn test_select_group_honours_explicit_choices() {
-        let root = Path::new("/p");
-        let file = root.join("elsewhere/web.yaml");
         assert_eq!(
-            select_group("dev", &groups(root), &file, Some("remote"), false).unwrap(),
+            select("elsewhere/web.yaml", Some("remote"), false).unwrap(),
             Some("remote".to_owned())
         );
-        assert_eq!(select_group("dev", &groups(root), &file, None, true).unwrap(), None);
-        let unknown = select_group("dev", &groups(root), &file, Some("other"), false)
+        assert_eq!(select("elsewhere/web.yaml", None, true).unwrap(), None);
+        let disabled = select("elsewhere/web.yaml", Some("retired"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(disabled.contains("is disabled"), "{disabled}");
+        let unknown = select("elsewhere/web.yaml", Some("other"), false)
             .unwrap_err()
             .to_string();
         assert!(unknown.contains("is not an ApplicationGroup"), "{unknown}");

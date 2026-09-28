@@ -2375,22 +2375,7 @@ fn resolve_group_source(
                 group_resource_path,
                 &group.metadata.name,
             );
-            (
-                root,
-                ApplicationGroupSource {
-                    repository_ref: None,
-                    repository: None,
-                    revision: None,
-                    commit: None,
-                    path: String::new(),
-                    include: vec!["*.yaml".to_string(), "*.yml".to_string()],
-                    exclude: Vec::new(),
-                    recursive: true,
-                    renderer_config: RendererConfig::default(),
-                },
-                None,
-                None,
-            )
+            (root, default_group_source(), None, None)
         }
     };
     if !root.is_dir() {
@@ -2549,6 +2534,22 @@ fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// The source of an ApplicationGroup that declares none: every YAML file
+/// beneath its derived root.
+pub(super) fn default_group_source() -> ApplicationGroupSource {
+    ApplicationGroupSource {
+        repository_ref: None,
+        repository: None,
+        revision: None,
+        commit: None,
+        path: String::new(),
+        include: vec!["*.yaml".to_string(), "*.yml".to_string()],
+        exclude: Vec::new(),
+        recursive: true,
+        renderer_config: RendererConfig::default(),
+    }
 }
 
 /// Whether an ApplicationGroup source selects a file below its root.

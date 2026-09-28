@@ -4472,6 +4472,53 @@ fn test_render_without_target_uses_defaults_and_overrides_only() {
 }
 
 #[test]
+fn test_render_rejects_a_binding_for_an_undeclared_input_like_render_tree() {
+    let fixture = fixture();
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      imagee: {value: typo}\n      image: {value: x}\n      database: {value: {host: h}}\n",
+    );
+    nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"])
+        .failure()
+        .stderr(predicate::str::contains(
+            "binds imagee that Release workloads/api does not declare",
+        ));
+}
+
+#[test]
+fn test_render_group_flags_need_a_target() {
+    let fixture = fixture();
+    with_production_api_bindings(&fixture);
+    nyl_render(&fixture, &["--defaults-only", "applications/workloads/api.yaml"])
+        .failure()
+        .stderr(predicate::str::contains(
+            "choose among a target's bindings; pass --target",
+        ));
+}
+
+#[test]
+fn test_render_does_not_read_the_publication_branch_for_overridden_inputs() {
+    let fixture = fixture();
+    // The fixture's publication repository is unreachable.
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {fromPublication: {path: state.json}}\n      database: {value: {host: h}}\n",
+    );
+    let output = nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--input",
+            "image=\"override\"",
+            "applications/workloads/api.yaml",
+        ],
+    )
+    .success();
+    assert!(String::from_utf8_lossy(&output.get_output().stdout).contains("image: override"));
+}
+
+#[test]
 fn test_render_requires_a_group_choice_for_a_release_outside_the_targets_groups() {
     let fixture = fixture();
     with_production_api_bindings(&fixture);
