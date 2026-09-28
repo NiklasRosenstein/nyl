@@ -4829,6 +4829,42 @@ fn test_update_source_locks_follows_the_newest_publication_of_the_owning_target(
 }
 
 #[test]
+fn test_from_git_rejects_a_lock_on_the_targets_own_publication() {
+    let fixture = fixture();
+    let state = StateRepository::new();
+    let published = state.commit(
+        "production/state/images.json",
+        r#"{"api": "published"}"#,
+        "Publish\n\nNyl-Deployment-Target: production\n",
+        "deploy/production",
+    );
+    let url = state.url();
+    fs::write(
+        fixture.path().join("config/repositories/deploy.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: '{url}'\n"
+        ),
+    )
+    .unwrap();
+    with_image_binding(
+        &fixture,
+        &format!(
+            "      image:\n        fromGit:\n          repositoryRef: {{name: deploy}}\n          revision: deploy/production\n          commit: '{published}'\n          path: production/state/images.json\n          pointer: /api\n"
+        ),
+    );
+    // Each publication would move the lock again, so neither rendering nor
+    // the lock update accepts it; the target's own state uses fromPublication.
+    render_production(&fixture).failure().stderr(predicate::str::contains(
+        "read the target's own state with fromPublication",
+    ));
+    update_source_locks(&fixture, &TempDir::new().unwrap(), &["--target", "production"])
+        .failure()
+        .stderr(predicate::str::contains(
+            "read the target's own state with fromPublication",
+        ));
+}
+
+#[test]
 fn test_update_source_locks_moves_each_lock_to_its_own_targets_publication() {
     let fixture = fixture();
     let state = StateRepository::new();

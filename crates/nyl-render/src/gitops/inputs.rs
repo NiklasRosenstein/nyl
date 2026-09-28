@@ -40,11 +40,67 @@ pub struct InputSources<'a> {
     /// `fromFile` binding reads only these, so published output reproduces
     /// from committed source.
     pub visible_files: &'a BTreeSet<PathBuf>,
-    /// Project GitRepository resources by name, with their source files, for
-    /// `fromGit` `repositoryRef`.
-    pub repositories: &'a BTreeMap<String, (InlineGitRepository, PathBuf)>,
+    /// Resolves a `fromGit` `repositoryRef` to the GitRepository it names and
+    /// that resource's absolute source file, through
+    /// [`GitOpsInventory::resolve_git_repository`](super::GitOpsInventory::resolve_git_repository).
+    pub repositories: &'a RepositoryResolver<'a>,
+    /// The target's own publication location. `fromGit` must not lock a file
+    /// there; that state is read with `fromPublication`.
+    pub publication_scope: Option<&'a PublicationScope>,
     /// Reader of files at locked commits, for `fromGit`.
     pub git: &'a dyn GitBlobSource,
+}
+
+/// Resolves a GitRepository name to the repository and its source file.
+pub type RepositoryResolver<'a> =
+    dyn Fn(&crate::resources::LocalReference) -> Result<(InlineGitRepository, PathBuf)> + 'a;
+
+/// Where a DeploymentTarget publishes: its repository URLs, branch, and prefix.
+///
+/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds),
+/// source locks. A lock on a file inside a target's publication moves to that
+/// target's newest publication; a target cannot lock its own publication,
+/// because each publication would make the lock stale again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationScope {
+    pub target: String,
+    /// Read and publish URLs, normalized for equality.
+    urls: Vec<String>,
+    branch: String,
+    prefix: String,
+}
+
+impl PublicationScope {
+    /// The publication location of `target`.
+    pub fn of(inventory: &super::GitOpsInventory, target: &DeploymentTarget) -> Result<Self> {
+        let publication = &target.spec.publication;
+        let (repository, _) =
+            inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
+        Ok(Self {
+            target: target.metadata.name.clone(),
+            urls: std::iter::once(&repository.repo_url)
+                .chain(repository.publish_url.as_ref())
+                .map(|url| crate::git::normalize_git_url_for_equality(url))
+                .collect(),
+            branch: branch_name(&publication.revision).to_owned(),
+            prefix: target.publication_path_prefix().trim_matches('/').to_owned(),
+        })
+    }
+
+    /// Whether `path` at `revision` of `url` lies inside this publication.
+    pub fn contains(&self, url: &str, revision: &str, path: &str) -> bool {
+        let url = crate::git::normalize_git_url_for_equality(url);
+        self.urls.contains(&url)
+            && branch_name(revision) == self.branch
+            && (self.prefix.is_empty()
+                || path
+                    .strip_prefix(&self.prefix)
+                    .is_some_and(|rest| rest.starts_with('/')))
+    }
+}
+
+fn branch_name(revision: &str) -> &str {
+    revision.strip_prefix("refs/heads/").unwrap_or(revision)
 }
 
 /// Reads a file at an immutable commit.
@@ -422,25 +478,31 @@ fn resolve_binding(
             let (repository, repository_source) = match (&source.repository, &source.repository_ref) {
                 (Some(repository), _) => (repository.clone(), None),
                 (None, Some(reference)) => {
-                    let (repository, path) = sources.repositories.get(&reference.name).ok_or_else(|| {
-                        format!(
-                            "{field}.fromGit.repositoryRef names GitRepository {:?}, which was not found",
-                            reference.name
-                        )
-                    })?;
-                    (repository.clone(), Some(path.clone()))
+                    let (repository, path) = (sources.repositories)(reference)
+                        .map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
+                    (repository, Some(path))
                 }
                 (None, None) => unreachable!("validated fromGit names a repository"),
             };
+            if let Some(scope) = sources
+                .publication_scope
+                .filter(|scope| scope.contains(&repository.repo_url, &source.revision, &source.path))
+            {
+                return Err(format!(
+                    "{field}.fromGit locks {} in the publication of DeploymentTarget {} itself; every publication would make the lock stale, so read the target's own state with fromPublication",
+                    source.path, scope.target
+                ));
+            }
             let bytes = sources
                 .git
                 .read_blob(&repository.repo_url, &source.commit, &source.path)
                 .map_err(|error| {
                     format!(
-                        "{field}.fromGit cannot read {} at locked commit {} of {}: {error}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
+                        "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                         source.path,
                         source.commit,
-                        crate::util::sanitize_url(&repository.repo_url)
+                        crate::util::sanitize_url(&repository.repo_url),
+                        crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
                     )
                 })?
                 .ok_or_else(|| {
@@ -565,7 +627,13 @@ mod tests {
             &disabled.iter().map(|name| (*name).to_owned()).collect(),
             &InputSources {
                 paths: &paths,
-                repositories: &BTreeMap::new(),
+                repositories: &|reference| {
+                    Err(NylError::config(format!(
+                        "GitRepository {:?} was not found",
+                        reference.name
+                    )))
+                },
+                publication_scope: None,
                 git: &NoGit,
                 visible_files: &visible_files,
             },
@@ -719,7 +787,13 @@ mod tests {
         let sources = InputSources {
             paths: &paths,
             visible_files: &BTreeSet::new(),
-            repositories: &repositories,
+            repositories: &|reference| {
+                repositories
+                    .get(&reference.name)
+                    .cloned()
+                    .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))
+            },
+            publication_scope: None,
             git: &git,
         };
         let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
@@ -781,5 +855,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("has no value at JSON Pointer \"/port\""), "{error}");
+    }
+
+    #[test]
+    fn test_publication_scope_matches_prefix_branch_and_credential_free_url() {
+        let scope = PublicationScope {
+            target: "dev".to_owned(),
+            urls: vec![crate::git::normalize_git_url_for_equality(
+                "https://git.example.com/deploy.git",
+            )],
+            branch: "deploy".to_owned(),
+            prefix: "dev".to_owned(),
+        };
+        assert!(scope.contains(
+            "https://ci-token@git.example.com/deploy",
+            "refs/heads/deploy",
+            "dev/state.json"
+        ));
+        assert!(!scope.contains("https://git.example.com/deploy.git", "deploy", "develop/state.json"));
+        assert!(!scope.contains("https://git.example.com/deploy.git", "main", "dev/state.json"));
+        let root = PublicationScope {
+            prefix: String::new(),
+            ..scope
+        };
+        assert!(root.contains("https://git.example.com/deploy.git", "deploy", "state.json"));
     }
 }

@@ -55,6 +55,8 @@ pub use worktree::WorktreeManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+/// A repository URL spelling for equality: case, trailing `/` and `.git`, the
+/// scp-like SSH form, and embedded credentials do not distinguish repositories.
 pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
     let mut normalized = url.trim().to_lowercase();
 
@@ -67,6 +69,7 @@ pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
             }
         }
     }
+    normalized = crate::gitops::inputs::credential_free_url(&normalized);
 
     if normalized.ends_with('/') {
         normalized.truncate(normalized.len() - 1);
