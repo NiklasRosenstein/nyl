@@ -64,9 +64,9 @@ pub struct CompiledTargetTree {
     /// are not Kubernetes manifests.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state_files: BTreeMap<PathBuf, Vec<u8>>,
-    /// `fromPublication` state paths declared without `carry`. Other tools
+    /// `fromPublication` state paths declared without `carryFileFromWorktree`. Other tools
     /// commit them, so reconciliation never deletes them, even when a previous
-    /// generation owned them through `carry`.
+    /// generation owned them through `carryFileFromWorktree`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub committed_state_paths: BTreeSet<PathBuf>,
     /// Publication branch head that `fromPublication` bindings read; `None`
@@ -85,7 +85,7 @@ impl CompiledTargetTree {
     }
 
     /// State files this target may adopt when they already exist unowned in
-    /// the publication tree: declaring `carry` makes the target their owner.
+    /// the publication tree: declaring `carryFileFromWorktree` makes the target their owner.
     pub fn adoptable_paths(&self) -> BTreeSet<PathBuf> {
         self.state_files.keys().cloned().collect()
     }

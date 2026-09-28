@@ -251,10 +251,10 @@ pub enum InputOrigin {
         path: String,
         commit: String,
         blob_digest: String,
-        /// The bytes to write back to `path`, when the binding declares `carry`.
+        /// The bytes to write back to `path`, when the binding declares `carryFileFromWorktree`.
         carried_back: Option<Vec<u8>>,
     },
-    /// A `fromPublication` binding reading its `carry` file from the working tree.
+    /// A `fromPublication` binding reading its `carryFileFromWorktree` file from the working tree.
     Carried {
         /// Path relative to the publication prefix that receives the bytes.
         path: String,
@@ -295,7 +295,7 @@ impl ResolvedReleaseInputs {
 pub struct ResolvedTargetInputs {
     pub releases: BTreeMap<ReleaseKey, ResolvedReleaseInputs>,
     /// Every `fromPublication` path the target's enabled bindings name, bound
-    /// or not, to whether its binding declares `carry`.
+    /// or not, to whether its binding declares `carryFileFromWorktree`.
     pub state_paths: BTreeMap<String, bool>,
 }
 
@@ -333,7 +333,7 @@ impl ResolvedTargetInputs {
             .collect()
     }
 
-    /// State paths other tools commit: declared without `carry`, so the
+    /// State paths other tools commit: declared without `carryFileFromWorktree`, so the
     /// target never owns them.
     pub fn committed_state_paths(&self) -> BTreeSet<String> {
         self.state_paths
@@ -450,7 +450,9 @@ pub fn resolve_target_inputs(
     for bindings in bound.values() {
         for binding in bindings.values() {
             if let Some(source) = &binding.from_publication {
-                resolved.state_paths.insert(source.path.clone(), source.carry.is_some());
+                resolved
+                    .state_paths
+                    .insert(source.path.clone(), source.carry_file_from_worktree.is_some());
             }
         }
     }
@@ -555,7 +557,9 @@ fn describe_origin(field: &str, origin: &InputOrigin) -> String {
         InputOrigin::File(path) => format!("{field}.fromFile ({})", path.display()),
         InputOrigin::Git { url, commit, path, .. } => format!("{field}.fromGit ({url}@{commit}/{path})"),
         InputOrigin::Publication { path, commit, .. } => format!("{field}.fromPublication ({path} at {commit})"),
-        InputOrigin::Carried { source, .. } => format!("{field}.fromPublication carry ({})", source.display()),
+        InputOrigin::Carried { source, .. } => {
+            format!("{field}.fromPublication carryFileFromWorktree ({})", source.display())
+        }
         InputOrigin::Override => "The --input/--inputs override".to_owned(),
     }
 }
@@ -583,23 +587,23 @@ fn resolve_publication(
         .as_ref()
         .expect("kind agrees with the set field");
     let field = format!("{field}.fromPublication");
-    if let Some(carry) = &source.carry {
+    if let Some(carry) = &source.carry_file_from_worktree {
         let carry_path = sources
             .paths
-            .resolve(&format!("{field}.carry"), carry)
+            .resolve(&format!("{field}.carryFileFromWorktree"), carry)
             .map_err(|error| error.to_string())?;
         if is_tracked(&carry_path) {
             return Err(format!(
-                "{field}.carry {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with fromFile"
+                "{field}.carryFileFromWorktree {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with fromFile"
             ));
         }
         if carry_path.is_file() {
-            let bytes =
-                std::fs::read(&carry_path).map_err(|error| format!("{field}.carry: cannot read {carry}: {error}"))?;
-            let document =
-                parse_single_document(&bytes).map_err(|reason| format!("{field}.carry: {carry} {reason}"))?;
-            let value =
-                select(&document, &source.pointer).map_err(|reason| format!("{field}.carry: {carry} {reason}"))?;
+            let bytes = std::fs::read(&carry_path)
+                .map_err(|error| format!("{field}.carryFileFromWorktree: cannot read {carry}: {error}"))?;
+            let document = parse_single_document(&bytes)
+                .map_err(|reason| format!("{field}.carryFileFromWorktree: {carry} {reason}"))?;
+            let value = select(&document, &source.pointer)
+                .map_err(|reason| format!("{field}.carryFileFromWorktree: {carry} {reason}"))?;
             return Ok(Some(ResolvedInput {
                 value,
                 origin: InputOrigin::Carried {
@@ -627,7 +631,7 @@ fn resolve_publication(
             )
         })?
     else {
-        if source.carry.is_some() && owned_at(sources.git, base, commit, &source.path)? {
+        if source.carry_file_from_worktree.is_some() && owned_at(sources.git, base, commit, &source.path)? {
             return Err(format!(
                 "{field}: {} is owned by this target but was deleted from the publication branch outside Nyl; restore it, or provide its carry file",
                 source.path
@@ -643,7 +647,7 @@ fn resolve_publication(
             path: source.path.clone(),
             commit: commit.clone(),
             blob_digest: nyl_core::digest::sha256_hex(&bytes),
-            carried_back: source.carry.is_some().then_some(bytes),
+            carried_back: source.carry_file_from_worktree.is_some().then_some(bytes),
         },
     }))
 }
@@ -796,10 +800,10 @@ pub fn carry_paths(inventory: &super::GitOpsInventory, target_name: &str) -> Res
             if let Some(carry) = binding
                 .from_publication
                 .as_ref()
-                .and_then(|source| source.carry.as_ref())
+                .and_then(|source| source.carry_file_from_worktree.as_ref())
             {
                 carried.push(paths.resolve(
-                    &format!("spec.releaseInputs.{key:?}.{name}.fromPublication.carry"),
+                    &format!("spec.releaseInputs.{key:?}.{name}.fromPublication.carryFileFromWorktree"),
                     carry,
                 )?);
             }

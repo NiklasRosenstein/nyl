@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release inputs read state files from the target's own publication branch
   with `fromPublication`, at the commit `publish-tree` builds on, so a
   concurrent state push fails publication instead of interleaving. With
-  `carry`, an untracked working-tree file of the run is rendered from and
+  `carryFileFromWorktree`, an untracked working-tree file of the run is rendered from and
   published into the same commit; the target owns and adopts the state path,
   and the file never makes the worktree dirty. The ownership index records
   `@publication/…` and `@carried/…` digests. `render-tree` and `diff-tree`

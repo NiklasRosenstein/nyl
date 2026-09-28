@@ -21,11 +21,11 @@ pub struct ReconcileOptions {
     /// Recreate missing owned files and replace owned files modified outside Nyl.
     pub force_owned: bool,
     /// Unowned existing paths the target may take over, such as a state file
-    /// that a `fromPublication` binding newly declares with `carry`.
+    /// that a `fromPublication` binding newly declares with `carryFileFromWorktree`.
     pub adopt: BTreeSet<PathBuf>,
     /// Previously owned paths that leave ownership without being deleted, such
     /// as a state file whose `fromPublication` binding no longer declares
-    /// `carry` and which other tools now commit.
+    /// `carryFileFromWorktree` and which other tools now commit.
     pub release: BTreeSet<PathBuf>,
 }
 

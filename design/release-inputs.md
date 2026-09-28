@@ -303,8 +303,8 @@ releaseInputs:
   and `publish-tree` creates no commit for an unchanged tree. A CI job
   triggered by pushes to the deploy branch therefore stops after Nyl's own
   publication.
-- **Placement.** Without `carry`, the path must not be a file owned by this
-  target; with `carry`, this target owns it. Either way it lies inside the
+- **Placement.** Without `carryFileFromWorktree`, the path must not be a file owned by this
+  target; with `carryFileFromWorktree`, this target owns it. Either way it lies inside the
   target's prefix but outside every directory synced by a generated Argo CD
   Application: workload Release directories, `_nyl`, and the catalog.
   Otherwise Argo CD would try to apply the state file as a manifest. Nyl
@@ -329,7 +329,7 @@ releaseInputs:
   its own commit.
 
 **Carried state.** A state file does not have to be committed by another tool.
-With `carry`, a file produced in the working tree during this run, and left
+With `carryFileFromWorktree`, a file produced in the working tree during this run, and left
 uncommitted, is written by `publish-tree` into the same commit as the manifests
 derived from it:
 
@@ -340,31 +340,34 @@ releaseInputs:
       fromPublication:
         path: state/web.json       # location in the publication branch
         pointer: /image
-        carry: build/web.json      # optional working-tree file from this run
+        carryFileFromWorktree: build/web.json      # optional working-tree file from this run
 ```
 
-- **File present.** Nyl reads `carry`, renders from it, and writes its bytes to
+- **File present.** Nyl reads `carryFileFromWorktree`, renders from it, and writes its bytes to
   `path` in the compare-and-swap publication commit. Every published commit
   thereby contains the input its manifests were rendered from.
 - **File absent.** Nyl reads `path` at the base commit B and writes the same
   bytes back. The last carried value persists across source-only publications,
   and unchanged bytes produce no commit. When neither exists, the bootstrap
   rule applies.
-- **Ownership.** With `carry`, `path` is a file owned by this target and listed
+- **Ownership.** With `carryFileFromWorktree`, `path` is a file owned by this target and listed
   in the ownership index, so a commit to it by another writer is rejected as a
   modification outside Nyl. A deletion by another writer is rejected too: an
   owned path missing at B is an error, not the bootstrap case. A path is either carried by Nyl or committed by
   another tool, never both: every binding of the target that names a path
-  carries the same file, or none does. Declaring `carry` makes the target the
-  owner, so the first publication with `carry` adopts a file another tool
-  already committed at `path`. Dropping `carry` releases it: the file stays
-  in the tree as committed state and leaves the ownership index. State files are owned and published like
+  carries the same file, or none does. Declaring `carryFileFromWorktree` makes the target the
+  owner, so the first publication with `carryFileFromWorktree` adopts a file another tool
+  already committed at `path`. Removing only `carryFileFromWorktree` releases
+  it: the binding still reads `path`, so the file stays in the tree as
+  committed state and leaves the ownership index. Removing every binding that
+  names `path` deletes the file, like any owned file the target stops
+  producing. State files are owned and published like
   rendered files but are not manifests: they are never validated as
   Kubernetes resources. The placement rule otherwise applies unchanged: the
   path lies outside every Argo CD-synced directory.
-- **Working-tree rules.** `carry` is a normalized project-relative path that must
+- **Working-tree rules.** `carryFileFromWorktree` is a normalized project-relative path that must
   not be tracked by Git; a tracked file is source and uses `fromFile`. It
-  should normally be ignored through `.gitignore`. Declared `carry` paths are
+  should normally be ignored through `.gitignore`. Declared `carryFileFromWorktree` paths are
   excluded from the source dirty check, and the clean-`HEAD` verification
   render receives the same carried bytes, so a carried file never forces
   `--allow-dirty`.
@@ -404,7 +407,7 @@ releaseInputs:
       fromPublication:
         path: state/images.json    # relative to the prefix: dev/state/images.json
         pointer: /web
-        carry: build/images.json
+        carryFileFromWorktree: build/images.json
 ---
 # DeploymentTarget production
 releaseInputs:
@@ -484,7 +487,7 @@ the same way as a local group: no opt-in field exists.
   - `@publication/<path>` → blob digest for each `fromPublication` value read
     from the base commit, which is the published commit's parent
   - `@carried/<path>` → blob digest for each `fromPublication` value taken
-    from a `carry` file in this run
+    from a `carryFileFromWorktree` file in this run
   - Both publication forms use the prefix-relative path, like the index's
     `files` entries.
 - Today only remote source files use an `@`-prefixed key (`@remote/<path>`).

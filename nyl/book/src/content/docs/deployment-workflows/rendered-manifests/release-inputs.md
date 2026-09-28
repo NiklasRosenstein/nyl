@@ -89,7 +89,7 @@ Each binding sets exactly one source:
 | `value` | An inline literal. Targets are static, so it is never templated. |
 | `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
 | `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
-| `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carry`, a working-tree file of this run is rendered from and written into the publication. |
+| `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
 | `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
 
 The effective value is the target binding if there is one, otherwise the
@@ -164,21 +164,22 @@ releaseInputs:
 - The path must lie outside every directory a generated Argo CD Application
   syncs: workload Release directories and `_nyl`.
 
-With `carry`, the state file comes from this run's working tree instead:
+With `carryFileFromWorktree`, the state file comes from this run's working tree instead:
 
 ```yaml
       fromPublication:
         path: state/images.json
         pointer: /web
-        carry: build/images.json   # untracked output of this CI run
+        carryFileFromWorktree: build/images.json   # untracked output of this CI run
 ```
 
 When the carry file exists, Nyl renders from it and writes its bytes to `path`
 in the publication commit; otherwise it writes the branch copy back, so the
 last carried value persists. The target owns `path`, adopting a file another
 tool committed there before, and rejects a change or deletion of it by another
-writer. Removing `carry` keeps the file as committed state that the target no
-longer owns. The carry file must not be tracked by Git; it is
+writer. Removing only `carryFileFromWorktree` keeps the file as committed state
+that the target no longer owns, because the binding still reads it; removing
+the binding deletes the file from the publication branch. The carry file must not be tracked by Git; it is
 excluded from the dirty-worktree check, and the clean-`HEAD` verification of
 `publish-tree` renders with the same bytes. Bindings naming one path must all
 carry the same file, or none.

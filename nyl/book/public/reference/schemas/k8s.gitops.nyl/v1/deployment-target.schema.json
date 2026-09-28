@@ -1081,8 +1081,8 @@
       "additionalProperties": false,
       "description": "A value read from a state file in the target's own publication branch.\n\nThe file is read at the publication base commit, the branch head that\n`publish-tree` builds on, so a published commit holds the state and the\nmanifests rendered from it.",
       "properties": {
-        "carry": {
-          "description": "Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carry`, `path` is owned by this target.",
+        "carryFileFromWorktree": {
+          "description": "Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carryFileFromWorktree`, `path` is owned by this target.",
           "type": [
             "string",
             "null"

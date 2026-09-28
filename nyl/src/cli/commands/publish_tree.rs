@@ -494,7 +494,7 @@ fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<gi
 /// Give the clean-`HEAD` render the same carried bytes as the working render.
 ///
 /// Carried files are untracked outputs of this run, so a checkout of `HEAD`
-/// never contains them. Each `carry` path of the committed target is copied
+/// never contains them. Each `carryFileFromWorktree` path of the committed target is copied
 /// from the same worktree-relative location of the working tree, when present.
 fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, target_name: &str) -> Result<()> {
     for destination in crate::gitops::inputs::carry_paths(committed, target_name)? {

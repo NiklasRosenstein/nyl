@@ -5125,7 +5125,7 @@ fn test_publish_tree_carries_state_through_a_dirty_worktree_check() {
     let (fixture, destination, _seed, _) = publication_fixture();
     with_publication_binding(
         &fixture,
-        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
     );
     fs::create_dir_all(fixture.path().join("build")).unwrap();
     let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
@@ -5156,7 +5156,7 @@ fn test_publish_tree_adopts_an_existing_state_file_when_carry_is_declared() {
     push_publication_state(&seed, "production/state/images.json", existing);
     with_publication_binding(
         &fixture,
-        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
     );
 
     // No carry file: the base copy is written back and becomes owned.
@@ -5178,7 +5178,7 @@ fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
     let (fixture, destination, _seed, _) = publication_fixture();
     with_publication_binding(
         &fixture,
-        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
     );
     fs::create_dir_all(fixture.path().join("build")).unwrap();
     let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
@@ -5190,7 +5190,11 @@ fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
     fs::remove_file(fixture.path().join("build/images.json")).unwrap();
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path).unwrap();
-    fs::write(&target_path, target.replace("          carry: build/images.json\n", "")).unwrap();
+    fs::write(
+        &target_path,
+        target.replace("          carryFileFromWorktree: build/images.json\n", ""),
+    )
+    .unwrap();
     commit_all(&Repository::open(fixture.path()).unwrap(), "Stop carrying state");
     publish_production(&fixture).success();
     let repository = Repository::open_bare(destination.path()).unwrap();
@@ -5206,11 +5210,49 @@ fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
 }
 
 #[test]
+fn test_publish_tree_deletes_carried_state_when_the_binding_is_removed() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(
+        fixture.path().join("build/images.json"),
+        r#"{"api": "registry.example.com/api@sha256:carried"}"#,
+    )
+    .unwrap();
+    publish_production(&fixture).success();
+
+    // No binding names the path any more, so the target stops producing it.
+    with_image_binding(
+        &fixture,
+        "      image:\n        value: registry.example.com/api@sha256:fixed\n",
+    );
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    let (before, after) = target.split_once("  releaseInputs:\n").unwrap();
+    let (_, replacement) = after.split_once("  releaseInputs:\n").unwrap();
+    fs::write(&target_path, format!("{before}  releaseInputs:\n{replacement}")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Drop publication binding");
+    publish_production(&fixture).success();
+
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert!(commit
+        .tree()
+        .unwrap()
+        .get_path(std::path::Path::new("production/state/images.json"))
+        .is_err());
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:fixed"));
+}
+
+#[test]
 fn test_publish_tree_rejects_an_owned_state_file_deleted_outside_nyl() {
     let (fixture, _destination, seed, _) = publication_fixture();
     with_publication_binding(
         &fixture,
-        "          path: state/images.json\n          pointer: /api\n          carry: build/images.json\n",
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
     );
     fs::create_dir_all(fixture.path().join("build")).unwrap();
     fs::write(

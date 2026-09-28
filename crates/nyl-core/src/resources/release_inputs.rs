@@ -326,7 +326,7 @@ impl InputBinding {
 /// Validate the static form of `spec.releaseInputs`.
 pub fn validate_bindings(bindings: &ReleaseInputBindings) -> Result<()> {
     // A state path is either committed by another tool or carried by Nyl from
-    // one working-tree file, so every binding naming it must agree on `carry`.
+    // one working-tree file, so every binding naming it must agree on `carryFileFromWorktree`.
     let mut state_paths = BTreeMap::<&str, (String, Option<&str>)>::new();
     for (key, inputs) in bindings {
         ReleaseKey::parse(key)?;
@@ -337,11 +337,11 @@ pub fn validate_bindings(bindings: &ReleaseInputBindings) -> Result<()> {
             let Some(source) = &binding.from_publication else {
                 continue;
             };
-            let carry = source.carry.as_deref();
+            let carry = source.carry_file_from_worktree.as_deref();
             match state_paths.get(source.path.as_str()) {
                 Some((previous, previous_carry)) if *previous_carry != carry => {
                     return Err(CoreError::config(format!(
-                        "{previous} and {field} both name fromPublication path {:?} but disagree on carry ({} and {}); bindings of one state path must all carry the same file or none",
+                        "{previous} and {field} both name fromPublication path {:?} but disagree on carryFileFromWorktree ({} and {}); bindings of one state path must all carry the same file or none",
                         source.path,
                         previous_carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
                         carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
@@ -439,9 +439,10 @@ pub struct PublicationInputSource {
     /// JSON Pointer selecting the value inside the document; the whole document when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pointer: String,
-    /// Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carry`, `path` is owned by this target.
+    /// Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carryFileFromWorktree`, `path` is owned by this target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub carry: Option<String>,
+    #[serde(rename = "carryFileFromWorktree")]
+    pub carry_file_from_worktree: Option<String>,
 }
 
 impl PublicationInputSource {
@@ -449,8 +450,8 @@ impl PublicationInputSource {
     pub fn validate(&self, field: &str) -> Result<()> {
         super::validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
         crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)?;
-        if let Some(carry) = &self.carry {
-            crate::local_path::validate_local_path(&format!("{field}.carry"), carry)?;
+        if let Some(carry) = &self.carry_file_from_worktree {
+            crate::local_path::validate_local_path(&format!("{field}.carryFileFromWorktree"), carry)?;
         }
         Ok(())
     }
@@ -713,8 +714,8 @@ mod tests {
             (json!({"path": "../other/state.json"}), "fromPublication.path"),
             (json!({"path": "/state.json"}), "fromPublication.path"),
             (
-                json!({"path": "state.json", "carry": "build/./images.json"}),
-                "fromPublication.carry",
+                json!({"path": "state.json", "carryFileFromWorktree": "build/./images.json"}),
+                "fromPublication.carryFileFromWorktree",
             ),
         ] {
             let bindings: ReleaseInputBindings =
@@ -727,22 +728,22 @@ mod tests {
     #[test]
     fn test_state_paths_agree_on_carry() {
         let agree: ReleaseInputBindings = serde_json::from_value(json!({
-            "g/a": {"image": {"fromPublication": {"path": "state.json", "pointer": "/a", "carry": "build/state.json"}}},
-            "g/b": {"image": {"fromPublication": {"path": "state.json", "pointer": "/b", "carry": "build/state.json"}}},
+            "g/a": {"image": {"fromPublication": {"path": "state.json", "pointer": "/a", "carryFileFromWorktree": "build/state.json"}}},
+            "g/b": {"image": {"fromPublication": {"path": "state.json", "pointer": "/b", "carryFileFromWorktree": "build/state.json"}}},
         }))
         .unwrap();
         validate_bindings(&agree).unwrap();
         for other in [
             json!({"path": "state.json"}),
-            json!({"path": "state.json", "carry": "other.json"}),
+            json!({"path": "state.json", "carryFileFromWorktree": "other.json"}),
         ] {
             let bindings: ReleaseInputBindings = serde_json::from_value(json!({
-                "g/a": {"image": {"fromPublication": {"path": "state.json", "carry": "build/state.json"}}},
+                "g/a": {"image": {"fromPublication": {"path": "state.json", "carryFileFromWorktree": "build/state.json"}}},
                 "g/b": {"image": {"fromPublication": other.clone()}},
             }))
             .unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
-            assert!(error.contains("disagree on carry"), "{other}: {error}");
+            assert!(error.contains("disagree on carryFileFromWorktree"), "{other}: {error}");
         }
     }
 
