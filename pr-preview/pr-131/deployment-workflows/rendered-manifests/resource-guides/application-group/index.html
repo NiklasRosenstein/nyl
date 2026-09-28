@@ -111,8 +111,10 @@ name in different groups, are reported as well:</p>
 <p>The field is a template value: the structural pass leaves <code dir="auto">${ … }</code> untouched,
 and Nyl evaluates each expression once per Release with the target context and
 <code dir="auto">release</code>. Expressions and filters work as in <code dir="auto">{{ … }}</code>; blocks do not. An
-undefined variable or attribute is an error. Write <code dir="auto">$${</code> for a literal <code dir="auto">${</code>. A value protected with <code dir="auto">{% raw %}</code> that still contains
-<code dir="auto">{{ … }}</code> renders as before; mixing both forms is an error.</p>
+undefined variable or attribute is an error. Write <code dir="auto">$${</code> for a literal <code dir="auto">${</code>.
+All other text is literal, including <code dir="auto">{{ … }}</code>. The field must contain at least
+one <code dir="auto">${ … }</code> expression; the former <code dir="auto">{% raw %}{{ … }}{% endraw %}</code> form is no
+longer expanded and fails validation, so rewrite it with <code dir="auto">${ … }</code>.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="source-selection">Source selection</h2><a class="sl-anchor-link" href="#source-selection"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Source selection”</span></a></div>
 <p><code dir="auto">spec.source</code> is optional. Without it, a central group derives
 <code dir="auto">applications/&#x3C;group-name></code>, while <code dir="auto">_application-group.yaml</code> derives its
