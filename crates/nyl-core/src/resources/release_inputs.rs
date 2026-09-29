@@ -24,7 +24,7 @@ use crate::{CoreError, Result};
 
 /// Validate the static form of `spec.inputs`.
 pub fn validate_declarations(declarations: &BTreeMap<String, InputDeclaration>) -> Result<()> {
-    crate::bindings::validate_declarations("spec.inputs", declarations)
+    crate::bindings::validate_declarations_at("spec.inputs", declarations)
 }
 
 /// A Release's identity on a target: `<applicationGroup>/<release>`.

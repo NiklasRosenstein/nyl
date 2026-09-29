@@ -107,11 +107,16 @@ impl InputBinding {
             BindingKind::FromUnit => {
                 let source = self.from_unit.as_ref().expect("kind agrees with the set field");
                 match (&source.output, &source.artifact) {
-                    (Some(_), None) | (None, Some(_)) => Ok(()),
-                    _ => Err(CoreError::config(format!(
-                        "{field}.fromUnit must set exactly one of output and artifact"
-                    ))),
+                    (Some(_), None) | (None, Some(_)) => {}
+                    _ => {
+                        return Err(CoreError::config(format!(
+                            "{field}.fromUnit must set exactly one of output and artifact"
+                        )))
+                    }
                 }
+                source.pointer.as_deref().map_or(Ok(()), |pointer| {
+                    crate::json_pointer::validate(&format!("{field}.fromUnit.pointer"), pointer)
+                })
             }
             BindingKind::FromFile => {
                 let source = self.from_file.as_ref().expect("kind agrees with the set field");

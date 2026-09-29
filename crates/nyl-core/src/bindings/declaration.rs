@@ -119,7 +119,7 @@ fn same_value(left: &Value, right: &Value) -> bool {
 }
 
 /// Validate the static form of the declarations at `field_prefix`, such as `spec.inputs`.
-pub fn validate_declarations(field_prefix: &str, declarations: &BTreeMap<String, InputDeclaration>) -> Result<()> {
+pub fn validate_declarations_at(field_prefix: &str, declarations: &BTreeMap<String, InputDeclaration>) -> Result<()> {
     for (name, declaration) in declarations {
         let field = format!("{field_prefix}.{name}");
         validate_input_name(&field, name)?;
@@ -243,13 +243,13 @@ mod tests {
         ];
         for (value, expected) in cases {
             let declarations = BTreeMap::from([("tier".to_owned(), declaration(value.clone()))]);
-            let error = validate_declarations("spec.inputs", &declarations)
+            let error = validate_declarations_at("spec.inputs", &declarations)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{value}: {error}");
         }
         let declarations = BTreeMap::from([("Tier".to_owned(), declaration(json!({"type": "string"})))]);
-        assert!(validate_declarations("spec.inputs", &declarations)
+        assert!(validate_declarations_at("spec.inputs", &declarations)
             .unwrap_err()
             .to_string()
             .contains("^[a-z][a-zA-Z0-9]*$"));

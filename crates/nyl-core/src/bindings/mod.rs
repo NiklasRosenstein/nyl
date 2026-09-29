@@ -1,6 +1,6 @@
 //! One resolver for typed value bindings and references.
 //!
-//! Contract: [Bindings](../../../design/release-inputs.md#bindings) and the
+//! Contract: [Bindings](../../../../design/release-inputs.md#bindings) and the
 //! effective-value rule, and the orchestration core contract's References.
 //! Release inputs are its first user; unit `values` and `variables`,
 //! PromotionPath selectors, and `nyl get` value forms reuse it, so they cannot
@@ -27,13 +27,14 @@ mod declaration;
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 pub use binding::{
     BindingKind, FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource,
     UnitInputSource,
 };
-pub use declaration::{json_type_name, validate_declarations, validate_input_name, InputDeclaration, InputType};
+pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
 
 /// An effective value and where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,7 +63,9 @@ pub type Provided<O> = std::result::Result<Provision<O>, String>;
 pub struct Blocked {
     /// Location in messages, such as `spec.variables.vpc_id`.
     pub field: String,
-    /// JSON Pointer of the value, such as `/variables/vpc_id`.
+    /// JSON Pointer of the value: for [`resolve_document`], below the pointer
+    /// the caller passes, such as `/variables/vpc_id`; for [`resolve`], the
+    /// slot name, such as `/image`.
     pub pointer: String,
     pub reason: String,
 }
@@ -261,12 +264,15 @@ pub struct ResolvedDocument<O> {
 /// Replace every reference object in `document`, at any depth of its objects
 /// and arrays, by the value it stands for.
 ///
-/// A reference object has exactly one field, naming a reference kind:
-/// `fromFile`, `fromGit`, `fromPublication`, `fromUnit`, or `fromPromotion`. It
-/// replaces the whole value it stands for. A reference whose source holds no
-/// value is an issue, because a document declares no defaults.
+/// Contract: orchestration core, References. A reference object has exactly
+/// one field, `fromUnit` or `fromPromotion`, and replaces the whole value it
+/// stands for; every other object is data. `field` and `pointer` locate
+/// `document` itself, such as `spec.variables` and `/variables`. A reference
+/// that resolves to no value is an issue, because a document declares no
+/// defaults.
 pub fn resolve_document<P: Providers>(
     field: &str,
+    pointer: &str,
     document: &Value,
     providers: &P,
     issues: &mut Vec<String>,
@@ -276,7 +282,7 @@ pub fn resolve_document<P: Providers>(
         provenance: BTreeMap::new(),
         blocked: Vec::new(),
     };
-    walk(field, "", &mut value, providers, &mut found, issues);
+    walk(field, pointer, &mut value, providers, &mut found, issues);
     ResolvedDocument {
         value,
         provenance: found.provenance,
@@ -289,52 +295,46 @@ struct Found<O> {
     blocked: Vec<Blocked>,
 }
 
+/// Fields that make an object a reference.
+const REFERENCE_KINDS: [&str; 2] = ["fromUnit", "fromPromotion"];
+
 fn walk<P: Providers>(
     field: &str,
     pointer: &str,
     value: &mut Value,
     providers: &P,
-    resolved: &mut Found<P::Origin>,
+    found: &mut Found<P::Origin>,
     issues: &mut Vec<String>,
 ) {
-    if let Some(binding) = reference(value) {
-        let binding = match serde_json::from_value::<InputBinding>(binding) {
-            Ok(binding) => binding,
-            Err(error) => {
-                issues.push(format!("{field} is not a valid reference: {error}"));
-                return;
-            }
-        };
-        if let Err(error) = binding.validate(field) {
-            issues.push(error.to_string());
-            return;
-        }
-        match resolve_binding(field, &binding, providers) {
-            Ok(Provision::Value(input)) => {
-                *value = input.value;
-                resolved.provenance.insert(pointer.to_owned(), input.origin);
-            }
-            Ok(Provision::Unbound) => issues.push(format!("{field} references a value that does not exist yet")),
-            Ok(Provision::Blocked(reason)) => resolved.blocked.push(Blocked {
-                field: field.to_owned(),
-                pointer: pointer.to_owned(),
-                reason,
-            }),
-            Err(error) => issues.push(error),
-        }
-        return;
-    }
     match value {
         Value::Object(fields) => {
-            for (key, child) in fields.iter_mut() {
-                walk(
-                    &format!("{field}.{key}"),
-                    &crate::json_pointer::child(pointer, key),
-                    child,
-                    providers,
-                    resolved,
-                    issues,
-                );
+            let references = fields
+                .keys()
+                .filter(|key| REFERENCE_KINDS.contains(&key.as_str()))
+                .collect::<Vec<_>>();
+            match references.as_slice() {
+                [] => {
+                    for (key, child) in fields.iter_mut() {
+                        walk(
+                            &format!("{field}.{key}"),
+                            &crate::json_pointer::child(pointer, key),
+                            child,
+                            providers,
+                            found,
+                            issues,
+                        );
+                    }
+                }
+                [kind] if fields.len() == 1 => {
+                    let kind = (*kind).clone();
+                    if let Some(input) = resolve_reference(field, pointer, &kind, value, providers, found, issues) {
+                        *value = input;
+                    }
+                }
+                _ => issues.push(format!(
+                    "{field} mixes {} with other fields; a reference object holds only its reference, and replaces the whole value",
+                    references.iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(" and ")
+                )),
             }
         }
         Value::Array(items) => {
@@ -344,7 +344,7 @@ fn walk<P: Providers>(
                     &format!("{pointer}/{index}"),
                     child,
                     providers,
-                    resolved,
+                    found,
                     issues,
                 );
             }
@@ -353,18 +353,58 @@ fn walk<P: Providers>(
     }
 }
 
-/// Fields that make a one-field object a reference.
-const REFERENCE_KINDS: [&str; 5] = ["fromFile", "fromGit", "fromPublication", "fromUnit", "fromPromotion"];
-
-/// The value as a reference object, when it is one.
-fn reference(value: &Value) -> Option<Value> {
-    let Value::Object(fields) = value else {
+/// Resolve one reference object; `Some` is the value that replaces it.
+fn resolve_reference<P: Providers>(
+    field: &str,
+    pointer: &str,
+    kind: &str,
+    reference: &Value,
+    providers: &P,
+    found: &mut Found<P::Origin>,
+    issues: &mut Vec<String>,
+) -> Option<Value> {
+    if !reference[kind].is_object() {
+        issues.push(format!("{field}.{kind} must be an object"));
         return None;
+    }
+    let binding = match InputBinding::deserialize(reference) {
+        Ok(binding) => binding,
+        Err(error) => {
+            issues.push(format!("{field} is not a valid reference: {error}"));
+            return None;
+        }
     };
-    let [(key, _)] = fields.iter().collect::<Vec<_>>()[..] else {
+    if let Err(error) = binding.validate(field) {
+        issues.push(error.to_string());
         return None;
-    };
-    REFERENCE_KINDS.contains(&key.as_str()).then(|| value.clone())
+    }
+    match resolve_binding(field, &binding, providers) {
+        Ok(Provision::Value(input)) => {
+            found.provenance.insert(pointer.to_owned(), input.origin);
+            Some(input.value)
+        }
+        Ok(Provision::Unbound) => {
+            let requirement = format!("{field} needs a value");
+            issues.push(
+                providers
+                    .unbound(field, &binding, &requirement)
+                    .unwrap_or_else(|| format!("{requirement}, but its {kind} reference has none yet")),
+            );
+            None
+        }
+        Ok(Provision::Blocked(reason)) => {
+            found.blocked.push(Blocked {
+                field: field.to_owned(),
+                pointer: pointer.to_owned(),
+                reason,
+            });
+            None
+        }
+        Err(error) => {
+            issues.push(error);
+            None
+        }
+    }
 }
 
 /// Select `pointer` inside `document`.
@@ -569,16 +609,17 @@ mod tests {
         let document = json!({
             "vpc_id": {"fromUnit": {"unit": "network", "output": "vpcId"}},
             "db": {"hosts": [{"fromUnit": {"unit": "database", "output": "host"}}, "static"]},
-            "value": {"literal": true},
+            "literal": {"fromGit": "main"},
         });
         let mut issues = Vec::new();
-        let resolved = resolve_document("spec.variables", &document, &providers, &mut issues);
+        let resolved = resolve_document("spec.variables", "/variables", &document, &providers, &mut issues);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(resolved.value["vpc_id"], json!("vpc-0abc123"));
-        assert_eq!(resolved.value["value"], json!({"literal": true}));
+        // Only fromUnit and fromPromotion are references in a document.
+        assert_eq!(resolved.value["literal"], json!({"fromGit": "main"}));
         assert_eq!(
             resolved.provenance,
-            BTreeMap::from([("/vpc_id".to_owned(), TestOrigin::Unit("network".to_owned()))])
+            BTreeMap::from([("/variables/vpc_id".to_owned(), TestOrigin::Unit("network".to_owned()))])
         );
         // The blocked reference stays in place, and is named by its location.
         assert_eq!(resolved.value["db"]["hosts"][0], document["db"]["hosts"][0]);
@@ -586,24 +627,34 @@ mod tests {
             resolved.blocked,
             [Blocked {
                 field: "spec.variables.db.hosts[0]".to_owned(),
-                pointer: "/db/hosts/0".to_owned(),
+                pointer: "/variables/db/hosts/0".to_owned(),
                 reason: "database has no current receipt".to_owned(),
             }]
         );
     }
 
     #[test]
-    fn test_resolve_document_reports_invalid_and_unsupported_references() {
+    fn test_resolve_document_reports_invalid_references() {
         let document = json!({
             "a": {"fromUnit": {"unit": "network"}},
-            "b": {"fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+            "b": {"fromUnit": {"unit": "network", "output": "vpcId"}, "pointer": "/id"},
             "c": {"fromUnit": {"unit": "network", "output": "vpcId", "extra": 1}},
+            "d": {"fromUnit": null},
+            "e": {"fromPromotion": {"value": "image"}},
         });
         let mut issues = Vec::new();
-        resolve_document("values", &document, &TestProviders::default(), &mut issues);
-        assert_eq!(issues.len(), 3, "{issues:?}");
-        assert!(issues[0].starts_with("values.a"), "{issues:?}");
-        assert_eq!(issues[1], "values.b.fromGit is not supported here");
+        resolve_document("values", "", &document, &TestProviders::default(), &mut issues);
+        assert_eq!(issues.len(), 5, "{issues:?}");
+        assert_eq!(
+            issues[0],
+            "values.a.fromUnit must set exactly one of output and artifact"
+        );
+        assert!(
+            issues[1].starts_with("values.b mixes fromUnit with other fields"),
+            "{issues:?}"
+        );
         assert!(issues[2].starts_with("values.c is not a valid reference"), "{issues:?}");
+        assert_eq!(issues[3], "values.d.fromUnit must be an object");
+        assert_eq!(issues[4], "values.e.fromPromotion is not supported here");
     }
 }

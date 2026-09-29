@@ -647,8 +647,13 @@ pub fn resolve_release_inputs(
         sources,
         issues,
     );
-    // Release input sources never block; the tree renders or fails at once.
-    debug_assert!(slots.blocked.is_empty());
+    // Rendering has no later wave to wait for, so a blocked input fails.
+    issues.extend(
+        slots
+            .blocked
+            .into_iter()
+            .map(|blocked| format!("{} is not available yet: {}", blocked.field, blocked.reason)),
+    );
     ResolvedReleaseInputs { inputs: slots.values }
 }
 
