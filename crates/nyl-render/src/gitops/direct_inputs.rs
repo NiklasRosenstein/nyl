@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::inputs::{
-    CachedGitBlobSource, InputOrigin, InputSources, PublicationBase, PublicationRead, PublicationScope,
-    ResolvedReleaseInputs,
+    CachedGitBlobSource, InputOrigin, InputSources, PublicationBase, PublicationRead, ResolvedReleaseInputs,
 };
 use super::GitOpsInventory;
 use crate::resources::release_inputs::{InputBinding, InputDeclaration, ReleaseKey};
@@ -296,7 +295,6 @@ struct Sources<'a> {
     visible_files: std::borrow::Cow<'a, BTreeSet<PathBuf>>,
     inventory: Option<&'a GitOpsInventory>,
     target_name: Option<&'a str>,
-    publication_scope: Option<PublicationScope>,
     git: Box<CachedGitBlobSource>,
     publication_base: Option<PublicationBase>,
 }
@@ -308,7 +306,6 @@ impl<'a> Sources<'a> {
             visible_files: std::borrow::Cow::Owned(BTreeSet::new()),
             inventory: None,
             target_name: None,
-            publication_scope: None,
             git: Box::new(CachedGitBlobSource::new(
                 None,
                 context.project_root,
@@ -354,7 +351,6 @@ impl<'a> Sources<'a> {
         Ok(Self {
             paths: inventory.paths(),
             visible_files: std::borrow::Cow::Borrowed(&inventory.worktree_data_files),
-            publication_scope: Some(PublicationScope::of(inventory, target)?),
             inventory: Some(inventory),
             target_name: Some(&target.metadata.name),
             git,
@@ -386,7 +382,6 @@ fn resolve_with(
         paths: &sources.paths,
         visible_files: &sources.visible_files,
         repositories: &repositories,
-        publication_scope: sources.publication_scope.as_ref(),
         git: sources.git.as_ref(),
         publication: sources.publication_base.as_ref(),
         pinned_state: None,
