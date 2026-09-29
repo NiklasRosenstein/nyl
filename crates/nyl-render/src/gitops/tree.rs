@@ -234,7 +234,7 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
     Ok(())
 }
 
-fn normalize_branch_revision(revision: &str) -> &str {
+pub(super) fn normalize_branch_revision(revision: &str) -> &str {
     revision.strip_prefix("refs/heads/").unwrap_or(revision)
 }
 
@@ -407,7 +407,20 @@ async fn compile_target_tree_inner(
         });
     }
 
-    let release_inputs = resolve_prepared_release_inputs(inventory, &target, &prepared_groups, &disabled_groups)?;
+    // Boxed: it holds the lazy artifact resolver across the compile's awaits.
+    let git_blobs = Box::new(super::inputs::CachedGitBlobSource::new(
+        git_manager.take(),
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    ));
+    let release_inputs = resolve_prepared_release_inputs(
+        inventory,
+        &target,
+        &prepared_groups,
+        &disabled_groups,
+        git_blobs.as_ref(),
+    )?;
 
     let target_cache_inputs = TargetCacheInputs {
         options,
@@ -1799,27 +1812,13 @@ fn resolve_git_publication(
     inventory: &GitOpsInventory,
     publication: &GitPublication,
 ) -> Result<(Option<String>, InlineGitRepository, Option<PathBuf>)> {
-    if let Some(repository) = &publication.repository {
-        return Ok((None, repository.clone(), None));
-    }
-    let reference = publication
+    let (repository, path) =
+        inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
+    let name = publication
         .repository_ref
         .as_ref()
-        .expect("validated publication has a repository reference or inline repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory kind key and resource variant must agree");
-    };
-    Ok((
-        Some(reference.name.clone()),
-        InlineGitRepository {
-            repo_url: repository.spec.repo_url.clone(),
-            publish_url: repository.spec.publish_url.clone(),
-        },
-        Some(discovered.source_path.clone()),
-    ))
+        .map(|reference| reference.name.clone());
+    Ok((name.filter(|_| path.is_some()), repository, path))
 }
 
 fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
@@ -2150,6 +2149,7 @@ fn resolve_prepared_release_inputs(
     target: &DeploymentTarget,
     groups: &[PreparedGroup],
     disabled_groups: &BTreeSet<String>,
+    git: &dyn super::inputs::GitBlobSource,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2167,12 +2167,21 @@ fn resolve_prepared_release_inputs(
         })
         .collect::<Vec<_>>();
     let paths = inventory.paths();
+    let repositories = |reference: &crate::resources::LocalReference| {
+        let (repository, source) = inventory.resolve_git_repository(Some(reference), None)?;
+        let source = source.expect("a referenced GitRepository has a source file");
+        // Absolute, like `fromFile` paths, so the cache recorder reads the
+        // file wherever the command runs.
+        Ok((repository, inventory.project_root.join(source)))
+    };
     super::inputs::resolve_target_inputs(
         target,
         &releases,
         disabled_groups,
         &super::inputs::InputSources {
             paths: &paths,
+            repositories: &repositories,
+            git,
             visible_files: &inventory.worktree_data_files,
         },
     )
@@ -2211,13 +2220,7 @@ fn resolve_remote_group_source(
         let manager = if let Some(manager) = git_manager {
             manager
         } else {
-            let manager = if let Some(cache_root) = cache.and_then(GitOpsCache::external_cache_root) {
-                GitManager::with_cache_dir(cache_root)
-            } else {
-                GitManager::new().map_err(NylError::Git)?
-            }
-            .with_render_cache(cache.cloned());
-            git_manager.insert(manager)
+            git_manager.insert(GitManager::for_cache(cache).map_err(NylError::Git)?)
         };
         let checkout = manager
             .resolve_ref(&repository.repo_url, Some(commit), None)
@@ -2419,26 +2422,7 @@ fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
 ) -> Result<(InlineGitRepository, Option<PathBuf>)> {
-    if let Some(repository) = &source.repository {
-        return Ok((repository.clone(), None));
-    }
-    let reference = source
-        .repository_ref
-        .as_ref()
-        .expect("validated remote source has repositoryRef or repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory kind key and resource variant must agree");
-    };
-    Ok((
-        InlineGitRepository {
-            repo_url: repository.spec.repo_url.clone(),
-            publish_url: repository.spec.publish_url.clone(),
-        },
-        Some(discovered.source_path.clone()),
-    ))
+    inventory.resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {

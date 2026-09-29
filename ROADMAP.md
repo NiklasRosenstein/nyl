@@ -35,9 +35,9 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** implement the Release inputs of M2 against the
-[Release inputs contract](design/release-inputs.md) on top of the extracted
-`nyl-core` and `nyl-render` crates. M3 can start in parallel from the
+**Next step:** move binding resolution into a generic resolver in
+`nyl_core::bindings` (see M2), then finish the Release inputs of M2 against the
+[Release inputs contract](design/release-inputs.md). M3 can start in parallel from the
 [orchestration core contract](design/orchestration-core.md) and its
 executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
 its scenario harness runs first.
@@ -223,7 +223,8 @@ spec:
 
 - `fromGit` follows the ApplicationGroup source-lock pattern: rendering reads
   only the locked commit, and `nyl update source-locks` refreshes these locks
-  together with ApplicationGroup locks, grouped by repository and revision.
+  together with ApplicationGroup locks. Every lock follows the head of its
+  revision; moving a lock to what another target runs belongs to promotion.
 - `fromPublication` supports write-back workflows where an external tool commits
   state to the deploy branch. `publish-tree` reads the file at the branch head it
   builds on and pushes with a compare-and-swap, so the published commit holds
@@ -629,7 +630,7 @@ ambiguous command semantics. Met by the
   defaults.
 - [ ] Support `carry` for `fromPublication`, excluding carried files from the
   dirty check.
-- [ ] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
+- [x] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
   `--target` filter.
 - [ ] Apply target bindings in direct commands and add `--input`/`--inputs`;
   a target that selects no group containing the Release fails unless
@@ -642,6 +643,13 @@ ambiguous command semantics. Met by the
   `@`-prefixed keys, keeping index format version 2.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
+- [ ] Move binding declarations, validation, and resolution into one generic
+  resolver in `nyl_core::bindings`: typed declarations, exactly one source
+  per binding, JSON Pointer selection, effective-value precedence, digests
+  and provenance, and aggregated issues, with each binding kind served by a
+  provider trait. Release input sources become providers in `nyl-render`, so
+  M3's unit `values` and `variables`, PromotionPath selectors, and `nyl get`
+  reuse the same resolver instead of growing their own.
 - [ ] Document the feature and regenerate resource schemas.
 - [x] Expand template values (`${ … }`) in fields rendered later than the
   structural pass, starting with `applicationNameTemplate`, which requires at
@@ -761,14 +769,16 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
   consumer runs.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
+- [ ] Promote into a target outside every environment: `to: {target}`, the
+  record in the target's `spec.promotions`, `fromPromotion` resolution in tree
+  and direct commands, and the ownership index's applied sequence.
 - [ ] Implement attestations: driver-declared names, `spec.attestations` on
   units and environments, `nyl attest` for environments and targets, the
   `published | attested` evidence levels with a path's per-unit
   `attestations`, blocking on failures with `--ignore-attestation`, and
   `maxAttestationAge`.
 - [ ] Gate promotion on fresh recorded attestations for both PromotionPath
-  sources, sourcing each value from the publication its Application runs, and
-  add `nyl update source-locks --require healthy` with an `observed` block.
+  sources, sourcing each value from the publication its Application runs.
 - [ ] Show promotion lineage in `status`.
 
 **Exit criterion:** prod runs exactly the source commit and image digest dev

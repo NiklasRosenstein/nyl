@@ -88,6 +88,7 @@ Each binding sets exactly one source:
 | --- | --- |
 | `value` | An inline literal. Targets are static, so it is never templated. |
 | `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
+| `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
 | `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. |
 
 The effective value is the target binding if there is one, otherwise the
@@ -108,12 +109,44 @@ resolved values like local groups; the binding key on the platform's own target
 is the admission, and the remote session never sees binding definitions or
 file paths.
 
+## Locked Git state
+
+`fromGit` follows the ApplicationGroup source-lock pattern. `revision` is the
+human-readable branch or tag; `commit` is the full 40-character lowercase
+commit ID rendering reads. Rendering never resolves `revision`. A commit missing from the local Git cache
+is fetched by ID; offline rendering fails with a message naming the lock.
+Locked files follow the [vendor policy](/nyl/configuration/#remote-artifact-vendoring):
+`nyl vendor` captures each one, and mode `required` renders them only from the
+snapshot.
+
+```yaml
+releaseInputs:
+  platform/web:
+    tier:
+      fromGit:
+        repositoryRef: {name: platform-state}
+        revision: main
+        commit: 3f1c9a…        # moved by nyl update source-locks
+        path: staging/sizing.json
+        pointer: /web/tier
+```
+
+`nyl update source-locks` refreshes these locks together with ApplicationGroup
+source locks, so CI has one `--check` gate for every Git lock. `--target
+production` selects one target's locks; filters choose which locks move,
+never where. Every lock moves to the head of its revision.
+
+A target should not `fromGit`-lock a file in its own publication: each of its
+publications moves the branch head, so the lock is stale again right after.
+Read the target's own state with `fromPublication` instead.
+
 ## Provenance
 
 Resolved inputs are part of the render-cache key. The ownership index records
-each `fromFile` file under its path, and each effective input as
+each `fromFile` file under its path, each effective input as
 `@input/<group>/<release>/<input>` with the SHA-256 digest of its canonical
-JSON value. Keys under `@input/` are reserved for these entries; a project file
-whose key equals one fails the render instead of being overwritten. Inputs are
-not a secret channel: their digests and the rendered manifests are published,
-so keep secrets in the secrets provider.
+JSON value, and each `fromGit` file as `@git/<url>@<commit>/<path>` with the
+digest of its bytes. Keys under `@input/` and `@git/` are reserved for these
+entries; a project file whose key equals one fails the render instead of being
+overwritten. Inputs are not a secret channel: their digests and the rendered
+manifests are published, so keep secrets in the secrets provider.

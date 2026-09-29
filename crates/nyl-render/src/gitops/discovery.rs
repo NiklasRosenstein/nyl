@@ -88,6 +88,35 @@ impl GitOpsInventory {
         ProjectPaths::new(self.project_root.clone(), self.worktree_root.clone())
     }
 
+    /// The repository a `repositoryRef` or inline `repository` pair names,
+    /// with the project-relative source file of the referenced GitRepository.
+    ///
+    /// This is the one resolution of that pair for ApplicationGroup sources,
+    /// publications, `fromGit` bindings, and source-lock updates.
+    pub fn resolve_git_repository(
+        &self,
+        reference: Option<&crate::resources::LocalReference>,
+        inline: Option<&crate::resources::InlineGitRepository>,
+    ) -> Result<(crate::resources::InlineGitRepository, Option<PathBuf>)> {
+        if let Some(repository) = inline {
+            return Ok((repository.clone(), None));
+        }
+        let reference = reference.expect("validated resource names a repositoryRef or an inline repository");
+        let discovered = self
+            .get(GitOpsResourceKind::GitRepository, &reference.name)
+            .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
+        let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
+            unreachable!("inventory kind key and resource variant must agree");
+        };
+        Ok((
+            crate::resources::InlineGitRepository {
+                repo_url: repository.spec.repo_url.clone(),
+                publish_url: repository.spec.publish_url.clone(),
+            },
+            Some(discovered.source_path.clone()),
+        ))
+    }
+
     /// Repeat discovery with a different output exclusion without re-reading
     /// the project configuration.
     pub fn rediscover(&self, output_subtree: Option<&Path>) -> Result<Self> {

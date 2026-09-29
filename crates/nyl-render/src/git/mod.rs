@@ -55,6 +55,8 @@ pub use worktree::WorktreeManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+/// A repository URL spelling for equality: case, trailing `/` and `.git`, the
+/// scp-like SSH form, and embedded credentials do not distinguish repositories.
 pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
     let mut normalized = url.trim().to_lowercase();
 
@@ -67,6 +69,7 @@ pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
             }
         }
     }
+    normalized = crate::util::credential_free_url(&normalized);
 
     if normalized.ends_with('/') {
         normalized.truncate(normalized.len() - 1);
@@ -127,6 +130,18 @@ impl GitManager {
             credential_provider,
             render_cache: None,
         }
+    }
+
+    /// A manager in `cache`'s external root when it has one, otherwise in the
+    /// default Git cache, observed by `cache`.
+    pub fn for_cache(cache: Option<&crate::render::cache::RenderCache>) -> Result<Self> {
+        Ok(
+            match cache.and_then(crate::render::cache::RenderCache::external_cache_root) {
+                Some(root) => Self::with_cache_dir(root),
+                None => Self::new()?,
+            }
+            .with_render_cache(cache.cloned()),
+        )
     }
 
     #[must_use]
@@ -267,6 +282,34 @@ impl GitManager {
         }
     }
 
+    /// Fetch the current refs of `url` from its remote, without a worktree.
+    pub fn fetch_refs(&mut self, url: &str) -> Result<()> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.fetch_refs()?;
+        self.observe_source(crate::render::cache::SourceOperation::GitRefRefresh);
+        Ok(())
+    }
+
+    /// Resolve `git_ref` against the cached refs of `url` to a commit ID,
+    /// without fetching or creating a worktree.
+    pub fn resolve_cached_ref(&mut self, url: &str, git_ref: &str) -> Result<git2::Oid> {
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.resolve_ref(git_ref)
+    }
+
+    /// Read `path` at the immutable `commit` of `url` without a worktree.
+    ///
+    /// Refs are never resolved. A commit missing from the local cache is
+    /// fetched by ID. Returns `None` when the commit has no such path.
+    pub fn read_blob(&mut self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let oid = git2::Oid::from_str(commit)?;
+        let bare_repo = self.get_or_create_bare_repo(url)?;
+        let repo = bare_repo.lock().unwrap();
+        repo.read_blob(oid, path)
+    }
+
     /// Get or create a bare repository for the given URL
     fn get_or_create_bare_repo(&mut self, url: &str) -> Result<Arc<Mutex<BareRepository>>> {
         // Use the URL as the key (will be normalized internally)
@@ -311,6 +354,7 @@ mod tests {
     use super::*;
     use git2::Repository;
     use repository::BareRepository;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -350,6 +394,33 @@ mod tests {
         let second_path = manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
         assert!(second_path.exists());
         assert!(manager.resolve_ref_fresh(&url, Some("HEAD"), None).is_err());
+    }
+
+    #[test]
+    fn test_read_blob_falls_back_to_fetching_refs_for_a_missing_commit() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        std::fs::write(source_dir.path().join("state.json"), "{}").unwrap();
+        let mut index = source_repo.index().unwrap();
+        index.add_path(Path::new("state.json")).unwrap();
+        let tree = source_repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let commit = source_repo
+            .commit(Some("HEAD"), &sig, &sig, "State", &tree, &[])
+            .unwrap();
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = source_dir.path().to_string_lossy().to_string();
+
+        let bytes = manager.read_blob(&url, &commit.to_string(), "state.json").unwrap();
+        assert_eq!(bytes.as_deref(), Some(b"{}".as_slice()));
+        // A commit on no branch or tag fails both ways, and says so.
+        let unknown = "1".repeat(40);
+        let error = manager.read_blob(&url, &unknown, "state.json").unwrap_err().to_string();
+        assert!(
+            error.contains("not reachable from any branch or tag") || error.contains("fetching refs failed"),
+            "{error}"
+        );
     }
 
     #[test]

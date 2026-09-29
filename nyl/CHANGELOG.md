@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Release inputs bind locked Git state with `fromGit`: a file at a full commit
+  of a GitRepository or inline repository, recorded as an `@git/…` digest in
+  the ownership index. `nyl update source-locks` refreshes `fromGit` locks with
+  ApplicationGroup locks and gains `--target` to select one DeploymentTarget.
+  Every lock moves to the head of its revision; filters choose which locks
+  move, never where. A locked commit the server will not send by ID is found
+  through the refs. Locked files follow the
+  vendor policy: `nyl vendor` captures them as `git-blob` artifacts and mode
+  `required` renders them only from the snapshot.
+
 - Releases may declare typed inputs in `spec.inputs` (`string`, `integer`,
   `number`, `boolean`, `object`, `array`, with optional `default` and scalar
   `enum`), read by templates as `inputs.<name>`. DeploymentTargets bind them

@@ -62,9 +62,39 @@ pub fn sanitize_url(url: &str) -> String {
     url.to_string()
 }
 
+/// A repository URL without userinfo, for provenance keys.
+///
+/// A parseable URL is always re-serialized, so a key does not depend on
+/// whether credentials are embedded in the configured URL.
+pub fn credential_free_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        Err(_) => url.to_owned(),
+    }
+}
+
+/// Replace every occurrence of `url` in `text` with its [`sanitize_url`] form,
+/// for messages that embed errors which may quote a credential-bearing URL.
+pub fn redact_url_credentials(text: &str, url: &str) -> String {
+    text.replace(url, &sanitize_url(url))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_url_credentials_hides_userinfo_in_embedded_urls() {
+        let url = "https://user:token@git.example.com/state.git";
+        assert_eq!(
+            redact_url_credentials(&format!("Failed to clone {url}: timeout"), url),
+            "Failed to clone https://***@git.example.com/state.git: timeout"
+        );
+    }
 
     #[test]
     fn deep_merge_recurses_through_objects_and_replaces_other_values() {

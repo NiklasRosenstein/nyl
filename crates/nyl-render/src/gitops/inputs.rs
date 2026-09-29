@@ -4,9 +4,10 @@
 //!
 //! - [Bindings](../../../../design/release-inputs.md#bindings): the key table and
 //!   `effective input = target binding, otherwise Release default`.
-//! - [Binding kinds](../../../../design/release-inputs.md#binding-kinds): `value`
-//!   and `fromFile` resolve here; `fromUnit` and `fromPromotion` need
-//!   orchestrated execution and are rejected.
+//! - [Binding kinds](../../../../design/release-inputs.md#binding-kinds): `value`,
+//!   `fromFile`, and `fromGit` resolve here; `fromUnit` and `fromPromotion`
+//!   need orchestrated execution and are rejected. `fromGit` reads only its
+//!   locked commit and never resolves `revision`.
 //! - [Provenance, caching, and validation](../../../../design/release-inputs.md#provenance-caching-and-validation):
 //!   failures are reported together per target, before any Release renders,
 //!   and each resolved input is digested for the ownership index.
@@ -14,18 +15,22 @@
 //! The declaration types and their pure rules live in
 //! [`nyl_core::resources::release_inputs`].
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::resources::release_inputs::{BindingKind, InputBinding, InputDeclaration, ReleaseKey};
-use crate::resources::DeploymentTarget;
+use crate::resources::{DeploymentTarget, InlineGitRepository};
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
 
 /// Ownership-index key prefix of resolved input digests.
 pub const INDEX_INPUT_PREFIX: &str = "@input/";
+
+/// Ownership-index key prefix of `fromGit` blob digests.
+pub const INDEX_GIT_PREFIX: &str = "@git/";
 
 /// Where resolution may read binding sources from.
 pub struct InputSources<'a> {
@@ -35,7 +40,112 @@ pub struct InputSources<'a> {
     /// `fromFile` binding reads only these, so published output reproduces
     /// from committed source.
     pub visible_files: &'a BTreeSet<PathBuf>,
+    /// Resolves a `fromGit` `repositoryRef` to the GitRepository it names and
+    /// that resource's absolute source file, through
+    /// [`GitOpsInventory::resolve_git_repository`](super::GitOpsInventory::resolve_git_repository).
+    pub repositories: &'a RepositoryResolver<'a>,
+    /// Reader of files at locked commits, for `fromGit`.
+    pub git: &'a dyn GitBlobSource,
 }
+
+/// Resolves a GitRepository name to the repository and its source file.
+pub type RepositoryResolver<'a> =
+    dyn Fn(&crate::resources::LocalReference) -> Result<(InlineGitRepository, PathBuf)> + 'a;
+
+/// Reads a file at an immutable commit.
+pub trait GitBlobSource {
+    /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
+    /// no such path.
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
+}
+
+/// [`GitBlobSource`] over the project's remote artifacts: the vendor snapshot,
+/// then the exact source cache, then the shared bare-repository cache.
+///
+/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
+/// A locked file is a remote renderer input like a remote group source, so
+/// `nyl vendor` captures it, `nyl vendor --check` requires it, and vendor mode
+/// `required` never reads it from the network.
+pub struct CachedGitBlobSource {
+    manager: RefCell<Option<crate::git::GitManager>>,
+    project_root: PathBuf,
+    project_config: crate::config::ProjectConfig,
+    cache: Option<crate::render::cache::RenderCache>,
+    /// Created on first use, so targets without `fromGit` bindings never
+    /// load the vendor lock.
+    artifacts: std::cell::OnceCell<crate::render::artifact::ArtifactResolver>,
+}
+
+impl CachedGitBlobSource {
+    /// Reuse `manager` when one exists; otherwise one is created on first use
+    /// in the cache's external root, or the default Git cache.
+    pub fn new(
+        manager: Option<crate::git::GitManager>,
+        project_root: &Path,
+        project_config: &crate::config::ProjectConfig,
+        cache: Option<crate::render::cache::RenderCache>,
+    ) -> Self {
+        Self {
+            manager: RefCell::new(manager),
+            project_root: project_root.to_path_buf(),
+            project_config: project_config.clone(),
+            cache,
+            artifacts: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn artifacts(&self) -> Result<&crate::render::artifact::ArtifactResolver> {
+        if let Some(artifacts) = self.artifacts.get() {
+            return Ok(artifacts);
+        }
+        let artifacts = crate::render::artifact::ArtifactResolver::new(
+            &self.project_root,
+            &self.project_config,
+            self.cache.clone(),
+        )?;
+        Ok(self.artifacts.get_or_init(|| artifacts))
+    }
+
+    fn read_from_git(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let mut manager = self.manager.borrow_mut();
+        if manager.is_none() {
+            *manager = Some(crate::git::GitManager::for_cache(self.cache.as_ref())?);
+        }
+        Ok(manager
+            .as_mut()
+            .expect("manager was created above")
+            .read_blob(url, commit, path)?)
+    }
+}
+
+impl GitBlobSource for CachedGitBlobSource {
+    fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        use crate::render::artifact::{ArtifactFormat, ArtifactRequest};
+        let request = ArtifactRequest::GitBlob {
+            repository: credential_free_url(url),
+            commit: commit.to_owned(),
+            path: path.to_owned(),
+        };
+        let artifacts = self.artifacts()?;
+        if let Some(artifact) = artifacts.lookup(&request)? {
+            return Ok(Some(std::fs::read(&artifact.path)?));
+        }
+        let Some(bytes) = self.read_from_git(url, commit, path)? else {
+            return Ok(None);
+        };
+        let staged = tempfile::NamedTempFile::new()?;
+        std::fs::write(staged.path(), &bytes)?;
+        artifacts.store(
+            &request,
+            staged.path(),
+            ArtifactFormat::GitBlob,
+            Some(commit.to_owned()),
+        )?;
+        Ok(Some(bytes))
+    }
+}
+
+pub use crate::util::credential_free_url;
 
 /// A Release the target renders, with its literal input declarations.
 pub struct ReleaseDeclaration<'a> {
@@ -56,6 +166,17 @@ pub enum InputOrigin {
     Value,
     /// A `fromFile` binding reading this project file.
     File(PathBuf),
+    /// A `fromGit` binding reading `path` at `commit` of `url`.
+    Git {
+        /// Repository URL without credentials.
+        url: String,
+        commit: String,
+        path: String,
+        /// SHA-256 of the file bytes.
+        blob_digest: String,
+        /// Source file of the referenced GitRepository resource.
+        repository_source: Option<PathBuf>,
+    },
     /// A `--input` or `--inputs` override of a direct command.
     Override,
 }
@@ -90,13 +211,18 @@ pub struct ResolvedTargetInputs {
 }
 
 impl ResolvedTargetInputs {
-    /// Project files read by `fromFile` bindings.
+    /// Project files the bindings read: `fromFile` files and the resources of
+    /// GitRepositories that `fromGit` names.
     pub fn files(&self) -> BTreeSet<PathBuf> {
         self.releases
             .values()
             .flat_map(|release| release.inputs.values())
             .filter_map(|input| match &input.origin {
-                InputOrigin::File(path) => Some(path.clone()),
+                InputOrigin::File(path)
+                | InputOrigin::Git {
+                    repository_source: Some(path),
+                    ..
+                } => Some(path.clone()),
                 _ => None,
             })
             .collect()
@@ -109,6 +235,16 @@ impl ResolvedTargetInputs {
         for (key, release) in &self.releases {
             for (name, input) in &release.inputs {
                 entries.insert(format!("{INDEX_INPUT_PREFIX}{key}/{name}"), value_digest(&input.value)?);
+                if let InputOrigin::Git {
+                    url,
+                    commit,
+                    path,
+                    blob_digest,
+                    ..
+                } = &input.origin
+                {
+                    entries.insert(format!("{INDEX_GIT_PREFIX}{url}@{commit}/{path}"), blob_digest.clone());
+                }
             }
         }
         Ok(entries)
@@ -271,6 +407,7 @@ fn describe_origin(field: &str, origin: &InputOrigin) -> String {
         InputOrigin::Default => "The default".to_owned(),
         InputOrigin::Value => format!("{field}.value"),
         InputOrigin::File(path) => format!("{field}.fromFile ({})", path.display()),
+        InputOrigin::Git { url, commit, path, .. } => format!("{field}.fromGit ({url}@{commit}/{path})"),
         InputOrigin::Override => "The --input/--inputs override".to_owned(),
     }
 }
@@ -307,6 +444,59 @@ fn resolve_binding(
             Ok(ResolvedInput {
                 value,
                 origin: InputOrigin::File(path),
+            })
+        }
+        BindingKind::FromGit => {
+            let source = binding.from_git.as_ref().expect("kind agrees with the set field");
+            let (repository, repository_source) = match (&source.repository, &source.repository_ref) {
+                (Some(repository), _) => (repository.clone(), None),
+                (None, Some(reference)) => {
+                    let (repository, path) = (sources.repositories)(reference)
+                        .map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
+                    (repository, Some(path))
+                }
+                (None, None) => unreachable!("validated fromGit names a repository"),
+            };
+            let bytes = sources
+                .git
+                .read_blob(&repository.repo_url, &source.commit, &source.path)
+                .map_err(|error| match error {
+                    NylError::Git(_) => format!(
+                        "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
+                        source.path,
+                        source.commit,
+                        crate::util::sanitize_url(&repository.repo_url),
+                        crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
+                    ),
+                    // Vendor policy errors carry their own fix.
+                    NylError::Config(message) => format!(
+                        "{field}.fromGit: {}",
+                        crate::util::redact_url_credentials(&message, &repository.repo_url)
+                    ),
+                    other => format!(
+                        "{field}.fromGit: {}",
+                        crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
+                    ),
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "{field}.fromGit: commit {} of {} has no file {}",
+                        source.commit,
+                        crate::util::sanitize_url(&repository.repo_url),
+                        source.path
+                    )
+                })?;
+            let document = parse_single_document(&bytes).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
+            let value = select(&document, &source.pointer).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
+            Ok(ResolvedInput {
+                value,
+                origin: InputOrigin::Git {
+                    url: credential_free_url(&repository.repo_url),
+                    commit: source.commit.clone(),
+                    path: source.path.clone(),
+                    blob_digest: nyl_core::digest::sha256_hex(&bytes),
+                    repository_source,
+                },
             })
         }
         BindingKind::FromUnit | BindingKind::FromPromotion => Err(format!(
@@ -410,9 +600,24 @@ mod tests {
             &disabled.iter().map(|name| (*name).to_owned()).collect(),
             &InputSources {
                 paths: &paths,
+                repositories: &|reference| {
+                    Err(NylError::config(format!(
+                        "GitRepository {:?} was not found",
+                        reference.name
+                    )))
+                },
+                git: &NoGit,
                 visible_files: &visible_files,
             },
         )
+    }
+
+    struct NoGit;
+
+    impl GitBlobSource for NoGit {
+        fn read_blob(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            Err(NylError::config("no Git in this test"))
+        }
     }
 
     #[test]
@@ -499,6 +704,97 @@ mod tests {
         ] {
             assert!(error.contains(expected), "missing {expected:?} in:\n{error}");
         }
+    }
+
+    struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);
+
+    impl GitBlobSource for FakeGit {
+        fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self
+                .0
+                .get(&(url.to_owned(), commit.to_owned(), path.to_owned()))
+                .cloned())
+        }
+    }
+
+    #[test]
+    fn test_from_git_reads_the_locked_commit_and_records_the_blob() {
+        let temp = TempDir::new().unwrap();
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        let bytes = b"web:\n  tier: large\n".to_vec();
+        let git = FakeGit(BTreeMap::from([(
+            (
+                "https://git.example.com/state.git".to_owned(),
+                commit.to_owned(),
+                "staging/sizing.yaml".to_owned(),
+            ),
+            bytes.clone(),
+        )]));
+        let repositories = BTreeMap::from([(
+            "state".to_owned(),
+            (
+                InlineGitRepository {
+                    repo_url: "https://git.example.com/state.git".to_owned(),
+                    publish_url: None,
+                },
+                PathBuf::from("config/state.yaml"),
+            ),
+        )]);
+        let declared = declarations(json!({"tier": {"type": "string"}, "missing": {"type": "string", "default": "x"}}));
+        let target = target(json!({"platform/web": {
+            "tier": {"fromGit": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
+            "missing": {"fromGit": {"repository": {"repoURL": "https://git.example.com/state.git"}, "revision": "main", "commit": commit, "path": "absent.yaml"}},
+        }}));
+        let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());
+        let releases = [ReleaseDeclaration {
+            key: ReleaseKey::parse("platform/web").unwrap(),
+            declarations: &declared,
+            source: Path::new("release.yaml"),
+        }];
+        let sources = InputSources {
+            paths: &paths,
+            visible_files: &BTreeSet::new(),
+            repositories: &|reference| {
+                repositories
+                    .get(&reference.name)
+                    .cloned()
+                    .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))
+            },
+            git: &git,
+        };
+        let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("has no file absent.yaml"), "{error}");
+
+        let target = super::tests::target(json!({"platform/web": {
+            "tier": {"fromGit": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
+        }}));
+        let resolved = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources).unwrap();
+        let web = &resolved.releases[&ReleaseKey::parse("platform/web").unwrap()];
+        assert_eq!(web.inputs["tier"].value, json!("large"));
+        assert_eq!(resolved.files(), BTreeSet::from([PathBuf::from("config/state.yaml")]));
+        let entries = resolved.index_entries().unwrap();
+        assert_eq!(
+            entries[&format!("@git/https://git.example.com/state.git@{commit}/staging/sizing.yaml")],
+            nyl_core::digest::sha256_hex(&bytes)
+        );
+    }
+
+    #[test]
+    fn test_credential_free_url_drops_userinfo() {
+        assert_eq!(
+            credential_free_url("https://user:token@git.example.com/state.git"),
+            "https://git.example.com/state.git"
+        );
+        assert_eq!(
+            credential_free_url("https://token@Git.Example.com/state.git"),
+            credential_free_url("https://Git.Example.com/state.git")
+        );
+        assert_eq!(
+            credential_free_url("git@github.com:org/repo.git"),
+            "git@github.com:org/repo.git"
+        );
     }
 
     #[test]

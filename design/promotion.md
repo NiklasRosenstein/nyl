@@ -20,7 +20,7 @@ values from one recorded state into another environment's desired state.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `from` | `{environment}` or `{target}` | required | The source: a declared Environment, never a template instance, or a DeploymentTarget (see [Promotion sources](#promotion-sources)) |
-| `to` | `{environment}` | required | The target environment, whose desired state holds the records |
+| `to` | `{environment}` or `{target}` | required | The target environment, whose desired state holds the records, or a DeploymentTarget outside every environment, whose source holds them (see [Promoting into a target](#promoting-into-a-target)) |
 | `evidence` | `published` \| `attested` | `published` | The level every covered unit and the source must reach (see [Promotion paths](#promotion-paths)) |
 | `attestations` | `{units: {<unit>: [name]}, environment: [name]}` | the level's default | Replaces the required attestations per scope; with `published`, adds requirements |
 | `maxAttestationAge` | duration | none | Older attestations do not count |
@@ -539,25 +539,78 @@ spec:
 - The PromotionRecord adds, per value, the source target, publication
   repository, branch, and commit, and the input digest to its lineage, plus the
   observation that proved the set.
-- `to` is always an environment, because the PromotionRecord lives in that
+- `to` may be an environment or a target; a target keeps its records in its
+  own source (see [Promoting into a target](#promoting-into-a-target)).
+
+### Promoting into a target
+
+A DeploymentTarget that belongs to no environment is a promotion target of its
+own. It has no desired state, so its records live in its source, as
+`record: source` does for an environment:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: dev-to-production}
+spec:
+  from: {target: dev}
+  to: {target: production}
+  evidence: attested
+  changeGate: pullRequest
+  values:
+    webImage:
+      select: {input: /releases/platform~1web/image}
+---
+# DeploymentTarget production
+spec:
+  releaseInputs:
+    platform/web:
+      image: {fromPromotion: {path: dev-to-production, value: webImage}}
+  promotions:                        # written by nyl promote, never by hand
+    dev-to-production:
+      sequence: 4                    # increases with every promotion into this target
+      from: {target: dev, repository: https://git.example.com/deploy.git, branch: deploy/dev, commit: 9c1e…}
+      values: {webImage: {value: registry.example.com/web@sha256:4f0c…, inputDigest: sha256:…}}
+      evidence: {level: attested, attestations: [dev/accepted, dev/healthy], observations: […]}
+      artifactsVerified: true
+      superseded: []
+      requested: {by: …, at: 2026-09-25T16:40:00Z, reason: …}
+```
+
+- **Record.** `spec.promotions.<path>` holds the path's PromotionRecord with
+  the fields of [PromotionRecord](#promotionrecord). `nyl promote` writes it
+  into the DeploymentTarget file, addressed by document position as
+  `nyl update source-locks` edits locks, and commits it to source; under
+  `changeGate: pullRequest` it opens that change as a pull request instead.
+  The source commit and the values it renders are then one reviewed change.
+  The record never lives on the publication branch, where rendering would read
+  its own output without review.
+- **Values only.** A target renders the source it is published from, so a path
+  into a target promotes values, never a source commit.
+- **Bindings.** `fromPromotion` bindings of the target read `spec.promotions`,
+  with the rules of [Several paths into one environment](#several-paths-into-one-environment):
+  without `path`, the record with the highest `sequence` that carries the
+  value. `render-tree`, `publish-tree`, `diff-tree`, and direct commands
+  resolve them without orchestration, and a binding whose path has no record
+  yet blocks with a message naming `nyl promote`.
+- **Rollback protection.** The ownership index records each applied record's
+  `sequence`. `publish-tree` refuses a record with a lower sequence than the
+  published tree applied, such as one from an old checkout or a reverted
+  promotion commit, and names `nyl promote --state-revision` as the way to roll
+  back.
+- **Selection and checks.** Evidence, state selection, the supersede check
+  across paths into the target, and artifact verification follow the rules
+  above. `nyl promote` takes no lease: its source commit must fast-forward the
+  branch holding the target file, so a concurrent promotion is refused and
+  retried.
+- **Scope.** A target that a KubernetesPublication unit places into an
+  environment is not a `to` target; it receives promotions through that
   environment's desired state.
 
-### Promotion without orchestration
-
-A target that belongs to no environment
-promotes through a locked `fromGit` binding to the source target's published
-state instead: `nyl update source-locks --target production` moves the lock to
-the newest source publication (with `--require healthy`, to the publication the
-consuming source Application runs), and the pull request that commits the lock is the
-review. The two routes coexist:
-
-| | Locked `fromGit` (M2) | PromotionPath (M6) |
-| --- | --- | --- |
-| Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a value, optionally its path |
-| Promote with | `nyl update source-locks --target …`, then a pull request | `nyl promote <path>` |
-| Health gate | `--require healthy` on the lock update | `evidence: attested` on the path |
-| Record | The lock in source, with an `observed` block under `--require healthy` | A PromotionRecord in target desired state |
-| Adds | — | Evidence gates, atomic multi-value promotion, lineage |
+A target can also follow another target's published state with a locked
+`fromGit` binding. `nyl update source-locks` moves such a lock to the branch
+head, with no health gate and no record: it follows the branch, not what the
+source target runs.
 
 ## Health evidence
 
@@ -676,7 +729,7 @@ same model and is not in the initial scope.
   blocks on mixed revisions.
 - **Decision evidence is always recorded.** The observation behind every
   promotion (time, Application, running revision, health) is stored in the
-  PromotionRecord, and in the lock's `observed` block for the lock route;
+  PromotionRecord, including one kept in a target's `spec.promotions`;
   observations themselves are recorded in observed state or on the target's
   publication branch.
 - **Observation history.** One observation proves what runs now. Promoting a

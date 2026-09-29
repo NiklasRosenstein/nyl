@@ -14,14 +14,18 @@ pub struct UpdateArgs {
 
 #[derive(Subcommand, Debug)]
 enum UpdateCommand {
-    /// Resolve mutable remote source revisions and update their commit locks.
+    /// Resolve mutable revisions and update the commit locks of remote
+    /// ApplicationGroup sources and `fromGit` Release input bindings.
     SourceLocks(SourceLockArgs),
 }
 
 #[derive(Args, Debug)]
 struct SourceLockArgs {
-    /// ApplicationGroup name. All remote groups are updated when omitted.
+    /// ApplicationGroup name. Without it and without `--target`, every lock is updated.
     group: Option<String>,
+    /// Update the `fromGit` locks of this DeploymentTarget's Release input bindings.
+    #[arg(long)]
+    target: Option<String>,
     /// Project directory or a path beneath it.
     #[arg(long, default_value = ".")]
     path: PathBuf,
@@ -32,6 +36,8 @@ struct SourceLockArgs {
 
 pub fn execute(args: UpdateArgs) -> Result<()> {
     match args.command {
-        UpdateCommand::SourceLocks(args) => source::update_locks(&args.path, args.group.as_deref(), args.check),
+        UpdateCommand::SourceLocks(args) => {
+            source::update_locks(&args.path, args.group.as_deref(), args.target.as_deref(), args.check)
+        }
     }
 }

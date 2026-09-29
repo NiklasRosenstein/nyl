@@ -13,6 +13,11 @@ use crate::config::{ProjectConfig, VendorMode};
 use crate::{NylError, Result};
 
 const SOURCE_CACHE_VERSION: &str = "v1";
+/// Version 1 admits new artifact kinds and formats without a new version,
+/// such as `git-blob`: existing entries keep their meaning. A Nyl that does
+/// not know a kind rejects the lock with a parse error, so a project using
+/// one needs a Nyl that supports it. A change to the shape or meaning of
+/// existing entries adds a version and a migration.
 const VENDOR_LOCK_VERSION: u32 = 1;
 
 /// The complete user-controlled selector for one remote renderer input.
@@ -34,6 +39,14 @@ pub enum ArtifactRequest {
         commit: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         subpath: Option<String>,
+    },
+    /// One file at an immutable commit, as a `fromGit` binding reads it. The
+    /// repository is credential-free, and the revision is not part of the
+    /// request because rendering never resolves it.
+    GitBlob {
+        repository: String,
+        commit: String,
+        path: String,
     },
 }
 
@@ -68,6 +81,11 @@ impl ArtifactRequest {
                 }
                 value
             }
+            Self::GitBlob {
+                repository,
+                commit,
+                path,
+            } => format!("{}@{commit}#{path}", crate::util::sanitize_url(repository)),
         }
     }
 
@@ -77,6 +95,7 @@ impl ArtifactRequest {
                 Self::HelmChart { .. } => "helm-chart",
                 Self::RemoteManifest { .. } => "remote-manifest",
                 Self::GitSource { .. } => "git-source",
+                Self::GitBlob { .. } => "git-blob",
             }
             .to_owned(),
             coordinate: self.display(),
@@ -103,6 +122,20 @@ impl ArtifactRequest {
                 (base.trim_end_matches(&format!(".{extension}")).to_owned(), extension)
             }
             Self::GitSource { revision, .. } => (format!("source-{revision}"), "tar.zst"),
+            Self::GitBlob { path, .. } => {
+                let file = Path::new(path);
+                let extension = file
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| matches!(*value, "yaml" | "yml" | "json"))
+                    .unwrap_or("blob");
+                let stem = file
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("file");
+                (stem.to_owned(), extension)
+            }
         };
         Ok(format!("{}-{suffix}.{extension}", sanitize_segment(&base)))
     }
@@ -112,10 +145,14 @@ impl ArtifactRequest {
             Self::HelmChart { .. } => "helm",
             Self::RemoteManifest { .. } => "manifests",
             Self::GitSource { .. } => "git",
+            // Text files, kept out of the LFS-tracked `git` archives.
+            Self::GitBlob { .. } => "git-files",
         };
         let coordinate = match self {
             Self::RemoteManifest { url } => url,
-            Self::HelmChart { repository, .. } | Self::GitSource { repository, .. } => repository,
+            Self::HelmChart { repository, .. }
+            | Self::GitSource { repository, .. }
+            | Self::GitBlob { repository, .. } => repository,
         };
         let host = coordinate_host(coordinate).unwrap_or("remote");
         Ok(PathBuf::from("artifacts")
@@ -129,6 +166,7 @@ impl ArtifactRequest {
             Self::HelmChart { .. } => SourceOperation::HelmChartReuse,
             Self::RemoteManifest { .. } => SourceOperation::RemoteManifestReuse,
             Self::GitSource { .. } => SourceOperation::GitSourceReuse,
+            Self::GitBlob { .. } => SourceOperation::GitBlobReuse,
         }
     }
 }
@@ -139,6 +177,15 @@ pub enum ArtifactFormat {
     HelmArchive,
     Manifest,
     GitArchive,
+    /// The bytes of one file read from a Git commit.
+    GitBlob,
+}
+
+impl ArtifactFormat {
+    /// Text artifacts stay in Git unless they reach the LFS size threshold.
+    fn is_text(self) -> bool {
+        matches!(self, Self::Manifest | Self::GitBlob)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,7 +348,7 @@ impl DirectoryVendorWriter {
         if lock
             .artifacts
             .values()
-            .any(|entry| entry.format != ArtifactFormat::Manifest || entry.size >= self.lfs_threshold_bytes)
+            .any(|entry| !entry.format.is_text() || entry.size >= self.lfs_threshold_bytes)
             && !std::process::Command::new("git")
                 .args(["lfs", "version"])
                 .output()
@@ -412,7 +459,7 @@ impl DirectoryVendorWriter {
         for entry in lock
             .artifacts
             .values()
-            .filter(|entry| entry.format == ArtifactFormat::Manifest && entry.size >= self.lfs_threshold_bytes)
+            .filter(|entry| entry.format.is_text() && entry.size >= self.lfs_threshold_bytes)
         {
             rules.push(format!(
                 "{} filter=lfs diff=lfs merge=lfs -text",

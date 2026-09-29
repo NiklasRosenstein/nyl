@@ -71,6 +71,7 @@ pub enum SourceOperation {
     HelmChartPull,
     HelmChartReuse,
     GitSourceReuse,
+    GitBlobReuse,
     VendorArtifactReuse,
     GitRepositoryClone,
     GitRepositoryReuse,

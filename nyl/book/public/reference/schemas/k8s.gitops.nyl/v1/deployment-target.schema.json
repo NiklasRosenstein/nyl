@@ -171,6 +171,118 @@
       ],
       "type": "object"
     },
+    "GitInputSource": {
+      "additionalProperties": false,
+      "description": "A value read from a file of a Git repository at a locked commit.\n\nRendering reads only `commit` and never resolves `revision`; `nyl update\nsource-locks` moves the lock.",
+      "oneOf": [
+        {
+          "description": "Reads from the named GitRepository.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "repository": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "repository"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "repositoryRef": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "repositoryRef"
+          ],
+          "title": "repositoryRef"
+        },
+        {
+          "description": "Reads from the inline coordinates declared here.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "repositoryRef": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "repositoryRef"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "repository": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "repository"
+          ],
+          "title": "repository"
+        }
+      ],
+      "properties": {
+        "commit": {
+          "description": "Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository-relative path of a YAML or JSON file holding one document.",
+          "type": "string"
+        },
+        "pointer": {
+          "description": "JSON Pointer selecting the value inside the document; the whole document when empty.",
+          "type": "string"
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InlineGitRepository"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inline repository coordinates to read from."
+        },
+        "repositoryRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Project-local `gitops.nyl/v1` GitRepository to read from."
+        },
+        "revision": {
+          "description": "Human-readable branch or tag that `nyl update source-locks` resolves.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "commit",
+        "path"
+      ],
+      "type": "object"
+    },
     "GitOpsAutomatedSyncPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -386,6 +498,18 @@
               },
               {
                 "properties": {
+                  "fromGit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromGit"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -440,6 +564,18 @@
               },
               {
                 "properties": {
+                  "fromGit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromGit"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -477,6 +613,72 @@
           "title": "fromFile"
         },
         {
+          "description": "Reads the value from a file of a Git repository at a locked commit.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "value": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "properties": {
+                  "fromFile": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromUnit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromUnit"
+                ]
+              },
+              {
+                "properties": {
+                  "fromPromotion": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromPromotion"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "fromGit": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "fromGit"
+          ],
+          "title": "fromGit"
+        },
+        {
           "description": "Reserved for orchestration: reads a recorded unit output or artifact field.",
           "not": {
             "anyOf": [
@@ -502,6 +704,18 @@
                 },
                 "required": [
                   "fromFile"
+                ]
+              },
+              {
+                "properties": {
+                  "fromGit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromGit"
                 ]
               },
               {
@@ -560,6 +774,18 @@
               },
               {
                 "properties": {
+                  "fromGit": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "fromGit"
+                ]
+              },
+              {
+                "properties": {
                   "fromUnit": {
                     "not": {
                       "type": "null"
@@ -596,6 +822,17 @@
             }
           ],
           "description": "A YAML or JSON file of this repository."
+        },
+        "fromGit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitInputSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A YAML or JSON file of a Git repository at a locked commit."
         },
         "fromPromotion": {
           "anyOf": [

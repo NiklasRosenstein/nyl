@@ -1,181 +1,178 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
-
-use git2::Repository;
+use std::path::{Path, PathBuf};
 
 use crate::cli::resource_file::{atomic_replace, replace_document};
 use crate::git::GitManager;
-use crate::gitops::{discover_gitops_inventory, DiscoveredGitOpsResource};
-use crate::resources::{ApplicationGroupSource, GitOpsResource, GitOpsResourceKind};
+use crate::gitops::discover_gitops_inventory;
+use crate::gitops::source_locks::{collect_source_locks, replace_lock_commit, resolve_source_locks, LockResolution};
 use crate::{NylError, Result};
 
-pub(crate) fn update_locks(path: &Path, requested_group: Option<&str>, check: bool) -> Result<()> {
+pub(crate) fn update_locks(
+    path: &Path,
+    requested_group: Option<&str>,
+    requested_target: Option<&str>,
+    check: bool,
+) -> Result<()> {
     let inventory = discover_gitops_inventory(path, None)?;
-    if let Some(resource) = inventory.resources.values().find(|resource| {
-        resource.identity.kind == GitOpsResourceKind::ApplicationGroup
-            && resource.resource.is_none()
-            && requested_group.is_none_or(|requested| requested == resource.identity.name)
-    }) {
-        return Err(NylError::config(format!(
-            "ApplicationGroup {:?} must render to a complete static resource for source-lock update",
-            resource.identity.name
-        )));
-    }
-    let mut groups = inventory
-        .resources
-        .values()
-        .filter_map(|discovered| match &discovered.resource {
-            Some(GitOpsResource::ApplicationGroup(group))
-                if requested_group.is_none_or(|requested| requested == group.metadata.name) =>
-            {
-                group
-                    .spec
-                    .source
-                    .as_ref()
-                    .filter(|source| source.is_remote())
-                    .map(|source| (group.metadata.name.as_str(), discovered, source))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    groups.sort_by_key(|(name, _, _)| *name);
-    if let Some(requested_group) = requested_group.filter(|_| groups.is_empty()) {
-        return Err(NylError::config(format!(
-            "Remote ApplicationGroup {:?} was not found",
-            requested_group
-        )));
-    }
-
+    let locks = collect_source_locks(&inventory, requested_group, requested_target)?;
     let mut manager = GitManager::new().map_err(NylError::Git)?;
+    let resolutions = resolve_source_locks(locks, &mut manager)?;
     let mut stale = 0;
-    for (name, discovered, source) in groups {
-        let repository_url = source_repository_url(&inventory, source)?;
-        let revision = source
-            .revision
-            .as_deref()
-            .expect("validated remote source has revision");
-        let checkout = manager
-            .resolve_ref_fresh(repository_url, Some(revision), None)
-            .map_err(NylError::Git)?;
-        let repository = Repository::discover(&checkout)
-            .map_err(|error| NylError::config(format!("Failed to inspect resolved source: {error}")))?;
-        let resolved = repository
-            .head()
-            .ok()
-            .and_then(|head| head.target())
-            .ok_or_else(|| NylError::config(format!("Resolved source {repository_url}@{revision} has no HEAD")))?
-            .to_string();
-        let current = source.commit.as_deref().expect("validated remote source has commit");
-        if resolved == current {
-            println!("✓ {name}: {revision} is locked to {resolved}");
+    for resolution in &resolutions {
+        let LockResolution { lock, resolved } = resolution;
+        if !resolution.is_stale() {
+            println!("✓ {}: {} is locked to {resolved}", lock.owner, lock.revision);
             continue;
         }
         stale += 1;
         if check {
-            println!("✗ {name}: {revision} resolves to {resolved}, lock is {current}");
-        } else {
-            let path = inventory.project_root.join(&discovered.source_path);
-            replace_commit_lock(&path, discovered, current, &resolved)?;
-            println!("✓ {name}: updated {revision} lock to {resolved}");
+            println!(
+                "✗ {}: {} resolves to {resolved}, lock is {}",
+                lock.owner, lock.revision, lock.commit
+            );
         }
     }
-    if check && stale > 0 {
-        return Err(NylError::validation(format!(
-            "{stale} remote ApplicationGroup source lock(s) are stale"
-        )));
+    if check {
+        if stale > 0 {
+            return Err(NylError::validation(format!("{stale} source lock(s) are stale")));
+        }
+        return Ok(());
+    }
+    let edits = plan_lock_edits(&inventory.project_root, &resolutions)?;
+    for (file, (original, contents)) in &edits {
+        atomic_replace(file, original, contents)?;
+    }
+    for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
+        println!(
+            "✓ {}: updated {} lock to {}",
+            resolution.lock.owner, resolution.lock.revision, resolution.resolved
+        );
     }
     Ok(())
 }
 
-fn source_repository_url<'a>(
-    inventory: &'a crate::gitops::GitOpsInventory,
-    source: &'a ApplicationGroupSource,
-) -> Result<&'a str> {
-    if let Some(repository) = &source.repository {
-        return Ok(&repository.repo_url);
+/// The original and updated contents of every file a stale lock lives in.
+///
+/// Every edit is computed before any file is written, so a lock that cannot
+/// be located leaves the project unchanged. Each document is checked against
+/// the text discovery parsed, so a concurrent edit of the resource or a
+/// shifted document index refuses the update.
+fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Result<BTreeMap<PathBuf, (String, String)>> {
+    let mut files = BTreeMap::<PathBuf, (String, String, BTreeMap<usize, String>)>::new();
+    for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
+        let lock = &resolution.lock;
+        let resolved = resolution.resolved.as_str();
+        let file = project_root.join(&lock.resource.source_path);
+        if !files.contains_key(&file) {
+            let contents = fs::read_to_string(&file)?;
+            files.insert(file.clone(), (contents.clone(), contents, BTreeMap::new()));
+        }
+        let (_, contents, documents) = files.get_mut(&file).expect("inserted above");
+        let index = lock.resource.document_index;
+        let expected = documents
+            .get(&index)
+            .cloned()
+            .unwrap_or_else(|| lock.resource.raw_document.clone());
+        let mut current_lock = lock.clone();
+        current_lock.resource.raw_document.clone_from(&expected);
+        let document = replace_lock_commit(&current_lock, resolved)?;
+        *contents = replace_document(contents, index, &expected, &document)?;
+        documents.insert(index, document);
     }
-    let reference = source
-        .repository_ref
-        .as_ref()
-        .expect("validated remote source has repositoryRef or repository");
-    let discovered = inventory
-        .get(GitOpsResourceKind::GitRepository, &reference.name)
-        .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))?;
-    let Some(GitOpsResource::GitRepository(repository)) = &discovered.resource else {
-        unreachable!("inventory key and resource variant must agree");
-    };
-    Ok(&repository.spec.repo_url)
-}
-
-fn replace_commit_lock(
-    path: &Path,
-    discovered: &DiscoveredGitOpsResource,
-    current: &str,
-    resolved: &str,
-) -> Result<()> {
-    let contents = fs::read_to_string(path)?;
-    let document = replace_commit_lock_document(&discovered.raw_document, current, resolved)?;
-    let updated = replace_document(
-        &contents,
-        discovered.document_index,
-        &discovered.raw_document,
-        &document,
-    )?;
-    atomic_replace(path, &contents, &updated)
-}
-
-fn replace_commit_lock_document(document: &str, current: &str, resolved: &str) -> Result<String> {
-    let pattern = regex::Regex::new(&format!(
-        r#"(?m)^([ \t]*commit:[ \t]*)["']?{}["']?([ \t]*(?:#.*)?)$"#,
-        regex::escape(current)
-    ))
-    .expect("escaped commit produces a valid regex");
-    let matches = pattern.find_iter(document).count();
-    if matches != 1 {
-        return Err(NylError::config(format!(
-            "Expected exactly one commit lock {current:?} in the selected document, found {matches}"
-        )));
-    }
-    let replacement = format!("${{1}}{resolved}${{2}}");
-    Ok(pattern.replacen(document, 1, replacement).into_owned())
+    Ok(files
+        .into_iter()
+        .map(|(file, (original, contents, _))| (file, (original, contents)))
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use crate::gitops::source_locks::{LockOwner, SourceLock};
+    use crate::gitops::DiscoveredGitOpsResource;
+    use crate::resources::{GitOpsResourceIdentity, GitOpsResourceKind};
 
-    use crate::resources::GitOpsResourceIdentity;
+    fn group(name: &str) -> String {
+        format!("apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  source:\n    revision: main\n    commit: aaaa\n")
+    }
 
-    #[test]
-    fn replaces_only_the_selected_commit_scalar() {
-        let updated = replace_commit_lock_document("revision: main\ncommit: aaaa\n", "aaaa", "bbbb").unwrap();
-        assert_eq!(updated, "revision: main\ncommit: bbbb\n");
+    fn stale(file: &str, document_index: usize, raw_document: &str, owner: LockOwner) -> LockResolution {
+        LockResolution {
+            lock: SourceLock {
+                owner,
+                resource: DiscoveredGitOpsResource {
+                    source_path: file.into(),
+                    document_index,
+                    raw_document: raw_document.to_owned(),
+                    identity: GitOpsResourceIdentity {
+                        kind: GitOpsResourceKind::ApplicationGroup,
+                        name: "second".to_owned(),
+                    },
+                    static_labels: BTreeMap::default(),
+                    resource: None,
+                },
+                repository_url: "https://git.example.com/apps.git".to_owned(),
+                revision: "main".to_owned(),
+                commit: "aaaa".to_owned(),
+            },
+            resolved: "bbbb".to_owned(),
+        }
     }
 
     #[test]
-    fn updates_only_the_selected_document_in_a_shared_file() {
-        let temporary = tempfile::TempDir::new().unwrap();
-        let path = temporary.path().join("gitops.yaml");
-        let first = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: first\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
-        let second = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: second\nspec:\n  source:\n    revision: main\n    commit: aaaa\n    path: apps\n";
-        fs::write(&path, format!("{first}---\n{second}")).unwrap();
-        let discovered = DiscoveredGitOpsResource {
-            source_path: "gitops.yaml".into(),
-            document_index: 2,
-            raw_document: second.to_owned(),
-            identity: GitOpsResourceIdentity {
-                kind: GitOpsResourceKind::ApplicationGroup,
-                name: "second".to_owned(),
-            },
-            static_labels: BTreeMap::new(),
-            resource: None,
+    fn test_plan_lock_edits_edits_only_the_discovered_document() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (first, second) = (group("first"), group("second"));
+        let owner = LockOwner::ApplicationGroup {
+            name: "second".to_owned(),
         };
-
-        replace_commit_lock(&path, &discovered, "aaaa", "bbbb").unwrap();
+        fs::write(temp.path().join("gitops.yaml"), format!("{first}---\n{second}")).unwrap();
+        let resolutions = [stale("gitops.yaml", 2, &second, owner.clone())];
+        let edits = plan_lock_edits(temp.path(), &resolutions).unwrap();
         assert_eq!(
-            fs::read_to_string(path).unwrap(),
-            format!("{first}---\n{}", second.replace("commit: aaaa", "commit: bbbb"))
+            edits[&temp.path().join("gitops.yaml")].1,
+            format!("{first}---\n{}", second.replace("aaaa", "bbbb"))
         );
+
+        // A document inserted before the resource while the update resolved
+        // shifts its index; the update refuses instead of editing `first`.
+        fs::write(
+            temp.path().join("gitops.yaml"),
+            format!("{first}---\n{first}---\n{second}"),
+        )
+        .unwrap();
+        assert!(plan_lock_edits(temp.path(), &resolutions).is_err());
+    }
+
+    #[test]
+    fn test_plan_lock_edits_fails_when_any_lock_cannot_be_located() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let first = group("first");
+        fs::write(temp.path().join("a.yaml"), &first).unwrap();
+        let unlocatable = "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: b\nspec:\n  releaseInputs:\n    g/r: {image: {fromGit: {commit: aaaa}}}\n";
+        fs::write(temp.path().join("b.yaml"), unlocatable).unwrap();
+        let resolutions = [
+            stale(
+                "a.yaml",
+                1,
+                &first,
+                LockOwner::ApplicationGroup {
+                    name: "first".to_owned(),
+                },
+            ),
+            stale(
+                "b.yaml",
+                1,
+                unlocatable,
+                LockOwner::ReleaseInput {
+                    target: "b".to_owned(),
+                    key: "g/r".to_owned(),
+                    input: "image".to_owned(),
+                },
+            ),
+        ];
+        let error = plan_lock_edits(temp.path(), &resolutions).unwrap_err().to_string();
+        assert!(error.contains("Cannot locate the commit lock"), "{error}");
     }
 }
