@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use nyl_core::bindings::{Provided, Providers, Resolved};
+use nyl_core::bindings::{Provided, Providers, Provision, Resolved};
 
 use crate::resources::release_inputs::{
     FileInputSource, GitInputSource, InputBinding, InputDeclaration, PromotionInputSource, PublicationInputSource,
@@ -500,7 +500,12 @@ impl ResolvedTargetInputs {
     }
 }
 
-pub use nyl_core::bindings::{select, value_digest};
+pub use nyl_core::bindings::select;
+
+/// Digest of an input's canonical JSON value.
+pub fn value_digest(value: &Value) -> Result<String> {
+    Ok(nyl_core::bindings::value_digest(value)?)
+}
 
 /// Resolve the inputs of every rendered Release of `target`.
 ///
@@ -633,17 +638,18 @@ pub fn resolve_release_inputs(
     sources: &InputSources<'_>,
     issues: &mut Vec<String>,
 ) -> ResolvedReleaseInputs {
-    ResolvedReleaseInputs {
-        inputs: nyl_core::bindings::resolve(
-            field_prefix,
-            &format!("Release {release}"),
-            declarations,
-            bindings,
-            overrides,
-            sources,
-            issues,
-        ),
-    }
+    let slots = nyl_core::bindings::resolve(
+        field_prefix,
+        &format!("Release {release}"),
+        declarations,
+        bindings,
+        overrides,
+        sources,
+        issues,
+    );
+    // Release input sources never block; the tree renders or fails at once.
+    debug_assert!(slots.blocked.is_empty());
+    ResolvedReleaseInputs { inputs: slots.values }
 }
 
 impl nyl_core::bindings::Origin for InputOrigin {
@@ -680,15 +686,15 @@ impl Providers for InputSources<'_> {
     type Origin = InputOrigin;
 
     fn file(&self, field: &str, source: &FileInputSource) -> Provided<InputOrigin> {
-        resolve_file(field, source, self).map(Some)
+        resolve_file(field, source, self).map(Provision::Value)
     }
 
     fn git(&self, field: &str, source: &GitInputSource) -> Provided<InputOrigin> {
-        resolve_git(field, source, self).map(Some)
+        resolve_git(field, source, self).map(Provision::Value)
     }
 
     fn publication(&self, field: &str, source: &PublicationInputSource) -> Provided<InputOrigin> {
-        resolve_publication(field, source, self)
+        resolve_publication(field, source, self).map(|input| input.map_or(Provision::Unbound, Provision::Value))
     }
 
     fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<InputOrigin> {
@@ -701,23 +707,22 @@ impl Providers for InputSources<'_> {
 
     /// Only `fromPublication` leaves an input unbound: before its state file
     /// exists, or when its branch is unavailable.
-    fn unbound(&self, field: &str, binding: &InputBinding, requirement: &str) -> String {
-        let path = binding
-            .from_publication
-            .as_ref()
-            .map_or("", |source| source.path.as_str());
-        if self
-            .publication
-            .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable)
-        {
-            format!(
+    fn unbound(&self, field: &str, binding: &InputBinding, requirement: &str) -> Option<String> {
+        let path = &binding.from_publication.as_ref()?.path;
+        Some(
+            if self
+                .publication
+                .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable)
+            {
+                format!(
                 "{requirement}, but {field}.fromPublication state file {path} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default"
             )
-        } else {
-            format!(
+            } else {
+                format!(
                 "{requirement}, but {field}.fromPublication state file {path} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default"
             )
-        }
+            },
+        )
     }
 }
 
