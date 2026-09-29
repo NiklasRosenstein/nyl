@@ -866,6 +866,75 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_publication_base_rejects_a_state_push_while_rendering() {
+        let compiled_at = |commit: Option<&str>| CompiledTargetTree {
+            target: serde_json::from_value(serde_json::json!({
+                "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
+                "kind": "DeploymentTarget",
+                "metadata": {"name": "production"},
+                "spec": {
+                    "clusterRef": {"name": "kasoku"},
+                    "publication": {
+                        "repository": {"repoURL": "https://example.invalid/deploy.git"},
+                        "revision": "deploy",
+                        "pathPrefix": "production"
+                    }
+                }
+            }))
+            .unwrap(),
+            cluster: serde_json::from_value(serde_json::json!({
+                "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
+                "kind": "Cluster",
+                "metadata": {"name": "kasoku"},
+                "spec": {
+                    "destination": {"server": "https://kubernetes.default.svc"},
+                    "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1"]}
+                }
+            }))
+            .unwrap(),
+            repository_name: None,
+            repository: crate::resources::InlineGitRepository {
+                repo_url: "https://example.invalid/deploy.git".to_owned(),
+                publish_url: None,
+            },
+            files: std::collections::BTreeMap::new(),
+            provenance: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeSet::new(),
+            input_digests: std::collections::BTreeMap::new(),
+            state_files: std::collections::BTreeMap::new(),
+            committed_state_paths: std::collections::BTreeSet::new(),
+            publication_base: Some(crate::gitops::inputs::PublicationBase {
+                url: "https://example.invalid/deploy.git".to_owned(),
+                branch: "deploy".to_owned(),
+                prefix: "production".to_owned(),
+                commit: commit.map(str::to_owned),
+                origin: crate::gitops::inputs::PublicationBaseOrigin::Refreshed,
+            }),
+        };
+        let read_at = git2::Oid::from_str(&"a".repeat(40)).unwrap();
+        let pushed = git2::Oid::from_str(&"b".repeat(40)).unwrap();
+        let compiled = compiled_at(Some(&read_at.to_string()));
+        verify_publication_base(&compiled, Some(read_at), "https://example.invalid/deploy.git", "deploy").unwrap();
+
+        // Another writer moved the branch after the state was read: publishing
+        // would mix state from two commits, so it fails instead.
+        let error = verify_publication_base(&compiled, Some(pushed), "https://example.invalid/deploy.git", "deploy")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another writer pushed while rendering"), "{error}");
+        // A branch created while rendering counts as a push too.
+        let error = verify_publication_base(
+            &compiled_at(None),
+            Some(pushed),
+            "https://example.invalid/deploy.git",
+            "deploy",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("another writer pushed while rendering"), "{error}");
+    }
+
+    #[test]
     fn accepts_only_branch_revisions() {
         assert_eq!(writable_branch_name("deploy/main").unwrap(), "deploy/main");
         assert_eq!(writable_branch_name("refs/heads/deploy/main").unwrap(), "deploy/main");

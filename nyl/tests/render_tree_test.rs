@@ -5345,6 +5345,100 @@ fn published_api_manifests(destination: &TempDir) -> String {
     rendered
 }
 
+/// The M2 exit criterion: one target renders from a static value, locked Git
+/// state, and committed and carried publication state, through both tree
+/// commands, and publishes the manifests and state in one commit.
+#[test]
+fn test_tree_commands_render_every_non_orchestrated_input_kind() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    let locked = StateRepository::new();
+    let commit = locked.commit("sizing.json", r#"{"web": {"tier": "large"}}"#, "Sizing", "main");
+    push_publication_state(
+        &seed,
+        "production/state/committed.json",
+        r#"{"api": "committed-value"}"#,
+    );
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        r#"apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+spec:
+  inputs:
+    static: {type: string}
+    locked: {type: string}
+    committed: {type: string}
+    carried: {type: string}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api
+  namespace: api
+data:
+  static: '{{ inputs.static }}'
+  locked: '{{ inputs.locked }}'
+  committed: '{{ inputs.committed }}'
+  carried: '{{ inputs.carried }}'
+"#,
+    )
+    .unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    fs::write(
+        &target_path,
+        format!(
+            "{target}  releaseInputs:\n    workloads/api:\n      static:\n        value: static-value\n      locked:\n        fromGit:\n          repository: {{repoURL: '{}'}}\n          revision: main\n          commit: '{commit}'\n          path: sizing.json\n          pointer: /web/tier\n      committed:\n        fromPublication:\n          path: state/committed.json\n          pointer: /api\n      carried:\n        fromPublication:\n          path: state/carried.json\n          pointer: /api\n          carryFileFromWorktree: build/carried.json\n",
+            locked.url()
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Bind every input kind");
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(fixture.path().join("build/carried.json"), r#"{"api": "carried-value"}"#).unwrap();
+
+    let expected = [
+        "static: static-value",
+        "locked: large",
+        "committed: committed-value",
+        "carried: carried-value",
+    ];
+    render_production(&fixture).success();
+    let rendered = read_tree(&fixture.path().join("deploy/production"))
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(&bytes).into_owned())
+        .collect::<String>();
+    for line in expected {
+        assert!(rendered.contains(line), "{line} missing from:\n{rendered}");
+    }
+
+    publish_production(&fixture).success();
+    let published = published_api_manifests(&destination);
+    for line in expected {
+        assert!(published.contains(line), "{line} missing from:\n{published}");
+    }
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let head = published_commit(&repository, "deploy/production");
+    // The carried state lands in the same commit as the manifests rendered from it.
+    assert_eq!(
+        published_file(&repository, &head, "production/state/carried.json"),
+        br#"{"api": "carried-value"}"#
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &head, "production/_nyl/index.json")).unwrap();
+    for key in [
+        "@input/workloads/api/static",
+        "@input/workloads/api/locked",
+        "@publication/state/committed.json",
+        "@carried/state/carried.json",
+    ] {
+        assert!(index["inputs"].get(key).is_some(), "{key} missing from {index}");
+    }
+}
+
 #[test]
 fn test_vendor_check_reads_cached_publication_state_offline() {
     let (fixture, destination, seed, _) = publication_fixture();
