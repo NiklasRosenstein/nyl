@@ -88,6 +88,10 @@ For detailed shared pipeline behavior (also used by <code dir="auto">diff</code>
 <li><code dir="auto">--only-kind &#x3C;KIND,...></code> - Filter final rendered manifests to only include specific kinds (post-render).</li>
 <li><code dir="auto">--exclude-kind &#x3C;KIND,...></code> - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with <code dir="auto">--only-kind</code>).</li>
 <li><code dir="auto">--target &#x3C;TARGET></code> - DeploymentTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.</li>
+<li><code dir="auto">--input &#x3C;NAME=JSON></code> - Set one Release input, for example <code dir="auto">--input replicas=3</code> or <code dir="auto">--input image='"registry.example.com/api@sha256:…"'</code>. Repeatable; wins over <code dir="auto">--inputs</code> and target bindings.</li>
+<li><code dir="auto">--inputs &#x3C;FILE></code> - Read Release inputs from a YAML or JSON object.</li>
+<li><code dir="auto">--application-group &#x3C;NAME></code> - With <code dir="auto">--target</code>, apply this ApplicationGroup’s bindings when the Release file is not in exactly one selected group’s local source.</li>
+<li><code dir="auto">--defaults-only</code> - With <code dir="auto">--target</code>, apply no target binding: only Release defaults and overrides.</li>
 <li><code dir="auto">--max-depth &#x3C;MAX_DEPTH></code> - Maximum evaluation depth for recursive resource expansion (default: 10)</li>
 <li><code dir="auto">--track-parent</code> - Track parent resource information in annotations</li>
 <li><code dir="auto">--refresh</code> - Bypass cached rendering results and replace successful entries.</li>
@@ -95,7 +99,7 @@ For detailed shared pipeline behavior (also used by <code dir="auto">diff</code>
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="offline-mode-options">Offline Mode Options</h3><a class="sl-anchor-link" href="#offline-mode-options"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Offline Mode Options”</span></a></div>
 <ul>
-<li><code dir="auto">--offline</code> - Skip Kubernetes discovery and use the target Cluster or explicit API information.</li>
+<li><code dir="auto">--offline</code> - Skip Kubernetes discovery and use the target Cluster or explicit API information. <code dir="auto">fromPublication</code> Release inputs read the cached publication branch head, as with <code dir="auto">render-tree --offline</code>.</li>
 <li><code dir="auto">--kube-version &#x3C;KUBE_VERSION></code> - Kubernetes version for a targetless offline render.</li>
 <li><code dir="auto">--kube-api-versions &#x3C;KUBE_API_VERSIONS></code> - Kubernetes API versions for a targetless offline render, comma-separated or repeated.</li>
 </ul>
@@ -116,10 +120,25 @@ For detailed shared pipeline behavior (also used by <code dir="auto">diff</code>
 </div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Combine options</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">render</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">staging</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--max-depth</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">3</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--track-parent</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">manifest.yaml</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl render --max-depth 5 manifest.yamlnyl render --track-parent manifest.yamlnyl render --refresh manifest.yamlnyl render --target staging --max-depth 3 --track-parent manifest.yaml"><div></div></button></div></figure></div>
 <div class="sl-heading-wrapper level-h2"><h2 id="notes">Notes</h2><a class="sl-anchor-link" href="#notes"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Notes”</span></a></div>
 <ul>
-<li>Nyl accepts one entry file. <code dir="auto">Release.spec.include</code> can attach additional relative manifest files and glob matches; directory arguments are not supported.</li>
-<li>Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.</li>
-<li>Bundle and Helm rendering use the shared content-addressed render cache. <code dir="auto">diff</code> and <code dir="auto">apply</code> reuse the same desired-manifest artifacts before performing their live-cluster operations.</li>
-<li>See <a href="/nyl/commands/rendering-pipeline/">Rendering Pipeline</a> for namespace resolution, filter semantics, and online/offline behavior.</li>
+<li>
+<p>A Release that declares <code dir="auto">spec.inputs</code> renders with the same values as
+<code dir="auto">render-tree</code>: overrides, then the target binding of the selected
+ApplicationGroup whose source contains the file, then defaults. See
+<a href="/nyl/deployment-workflows/rendered-manifests/release-inputs/#direct-commands">Release inputs</a>.
+<code dir="auto">nyl diff</code> and <code dir="auto">nyl apply</code> accept the same input options.</p>
+</li>
+<li>
+<p>Nyl accepts one entry file. <code dir="auto">Release.spec.include</code> can attach additional relative manifest files and glob matches; directory arguments are not supported.</p>
+</li>
+<li>
+<p>Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.</p>
+</li>
+<li>
+<p>Bundle and Helm rendering use the shared content-addressed render cache. <code dir="auto">diff</code> and <code dir="auto">apply</code> reuse the same desired-manifest artifacts before performing their live-cluster operations.</p>
+</li>
+<li>
+<p>See <a href="/nyl/commands/rendering-pipeline/">Rendering Pipeline</a> for namespace resolution, filter semantics, and online/offline behavior.</p>
+</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="manifest-validation">Manifest validation</h2><a class="sl-anchor-link" href="#manifest-validation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Manifest validation”</span></a></div>
 <p>Use <code dir="auto">--validate</code> to run project-configured validators. See
