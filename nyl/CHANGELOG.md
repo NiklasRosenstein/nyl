@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published into the same commit; the target owns and adopts the state path,
   and the file never makes the worktree dirty. The ownership index records
   `@publication/…` and `@carried/…` digests. `render-tree` and `diff-tree`
-  report the publication commit they read and accept `--offline`.
+  report the publication commit they read and accept `--offline`. A prefix
+  without an ownership index is accepted only while it holds declared state
+  files. A `diff-tree --against source` baseline that publishes elsewhere
+  reads its own publication state and warns with `publication_moved` that the
+  move needs manual steps.
 
 - Release inputs bind locked Git state with `fromGit`: a file at a full commit
   of a GitRepository or inline repository, recorded as an `@git/…` digest in

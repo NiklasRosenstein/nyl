@@ -147,6 +147,15 @@ impl PublicationBase {
         })
     }
 
+    /// Whether this base reads the publication at `url`, `branch`, and
+    /// `prefix`. Another render reuses a base only for the same publication;
+    /// a target that moved reads its own.
+    pub fn is_for(&self, url: &str, branch: &str, prefix: &str) -> bool {
+        crate::git::normalize_git_url_for_equality(&self.url) == crate::git::normalize_git_url_for_equality(url)
+            && self.branch == branch.strip_prefix("refs/heads/").unwrap_or(branch)
+            && self.prefix == prefix.trim_matches('/')
+    }
+
     /// Human-readable description of the state this render read.
     pub fn describe(&self) -> String {
         let url = crate::util::sanitize_url(&self.url);
@@ -1349,6 +1358,25 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("has no value at JSON Pointer \"/port\""), "{error}");
+    }
+
+    #[test]
+    fn test_publication_base_is_reused_only_for_the_same_publication() {
+        let base = PublicationBase {
+            url: "https://git.example.com/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            prefix: "production".to_owned(),
+            commit: Some("a".repeat(40)),
+            origin: PublicationBaseOrigin::Refreshed,
+        };
+        assert!(base.is_for(
+            "https://ci-token@git.example.com/deploy",
+            "refs/heads/deploy",
+            "/production/"
+        ));
+        assert!(!base.is_for("https://git.example.com/deploy.git", "deploy", "prod"));
+        assert!(!base.is_for("https://git.example.com/deploy.git", "main", "production"));
+        assert!(!base.is_for("https://git.example.com/other.git", "deploy", "production"));
     }
 
     #[test]

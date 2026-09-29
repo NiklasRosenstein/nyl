@@ -411,7 +411,10 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
         || working.repository_name != committed.repository_name
         || working.repository != committed.repository
     {
-        differences.push("publication destination changed".to_owned());
+        differences.push(format!(
+            "publication destination changed; moving a publication needs manual steps, see {}",
+            super::diff_tree::PUBLICATION_MOVE_DOCS
+        ));
     }
     if working.cluster.metadata.name != committed.cluster.metadata.name {
         differences.push(format!(
@@ -574,7 +577,7 @@ fn publication_current_commit(
         .map_err(crate::git::GitError::from)?
         .id();
     let root = super::diff_tree::checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
-    let published = super::diff_tree::read_rendered_tree(&root)?;
+    let published = super::diff_tree::read_rendered_tree(&root, &compiled.declared_state_paths())?;
     let Some(index) = published.index else {
         return Ok(None);
     };

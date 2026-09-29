@@ -94,6 +94,16 @@ impl CompiledTargetTree {
         owned
     }
 
+    /// Every `fromPublication` state path the target declares, carried or
+    /// committed, relative to the prefix.
+    pub fn declared_state_paths(&self) -> BTreeSet<PathBuf> {
+        self.state_files
+            .keys()
+            .chain(&self.committed_state_paths)
+            .cloned()
+            .collect()
+    }
+
     /// State files this target may adopt when they already exist unowned in
     /// the publication tree: declaring `carryFileFromWorktree` makes the target their owner.
     pub fn adoptable_paths(&self) -> BTreeSet<PathBuf> {
@@ -482,21 +492,32 @@ async fn compile_target_tree_inner(
         .flat_map(|(_, bindings)| bindings.values())
         .any(|binding| binding.from_publication.is_some())
     {
+        // The state is read where publish-tree pushes, so the base it
+        // verifies against its clone is the commit the state came from.
+        let url = repository.publish_url.as_deref().unwrap_or(&repository.repo_url);
+        let (branch, prefix) = (&target.spec.publication.revision, target.publication_path_prefix());
         match &options.publication_base {
-            Some(base) => Some(base.clone()),
-            // The state is read where publish-tree pushes, so the base it
-            // verifies against its clone is the commit the state came from.
-            None => Some(super::inputs::PublicationBase::resolve(
+            Some(base) if base.is_for(url, branch, prefix) => Some(base.clone()),
+            // A base passed on for another publication, such as a diff
+            // baseline from before the target moved, is not this target's.
+            _ => Some(super::inputs::PublicationBase::resolve(
                 git_blobs.as_ref(),
-                repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
-                &target.spec.publication.revision,
-                target.publication_path_prefix(),
+                url,
+                branch,
+                prefix,
                 options.publication_read,
             )?),
         }
     } else {
         None
     };
+    // Pinned state is relative to the prefix of the base it came with.
+    let pinned_state_files = options.pinned_state_files.as_ref().filter(|_| {
+        options
+            .publication_base
+            .as_ref()
+            .is_none_or(|passed| publication_base.as_ref() == Some(passed))
+    });
     let release_inputs = resolve_prepared_release_inputs(
         inventory,
         &target,
@@ -504,7 +525,7 @@ async fn compile_target_tree_inner(
         &disabled_groups,
         git_blobs.as_ref(),
         publication_base.as_ref(),
-        options.pinned_state_files.as_ref(),
+        pinned_state_files,
     )?;
 
     let target_cache_inputs = TargetCacheInputs {
