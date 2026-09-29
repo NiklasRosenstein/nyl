@@ -21,6 +21,7 @@
 //! performs no effects: no Git, processes, network, clock, or process
 //! environment. See `design/implementation-architecture.md`.
 
+pub mod bindings;
 pub mod constants;
 pub mod digest;
 pub mod error;

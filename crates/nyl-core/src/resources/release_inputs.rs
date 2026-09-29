@@ -9,8 +9,10 @@
 //!   `<applicationGroup>/<release>`, each setting exactly one source. A binding
 //!   replaces the Release default whole.
 //!
-//! Resolution of the sources, which reads files and Git, lives in the rendering
-//! crate. Everything here is a pure function of the declared values.
+//! Precedence, type checks, and aggregated issues are the shared resolver
+//! [`crate::bindings`]; reading the sources, which touches files and Git, is
+//! its provider in the rendering crate. Everything here is a pure function of
+//! the declared values.
 
 use std::collections::BTreeMap;
 

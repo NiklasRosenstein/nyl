@@ -326,7 +326,7 @@ fn test_operation() -> Result<()> {
 
 ### Module Organization
 
-`crates/nyl-core/src/` holds `resources/`, `constants`, `digest`, `json_pointer`,
+`crates/nyl-core/src/` holds `resources/`, `bindings`, `constants`, `digest`, `json_pointer`,
 `local_path`, and `settings`. `crates/nyl-render/src/` holds the rest, and
 `nyl/src/cli/` the command line:
 

@@ -643,7 +643,7 @@ ambiguous command semantics. Met by the
   `@`-prefixed keys, keeping index format version 2.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
-- [ ] Move binding declarations, validation, and resolution into one generic
+- [x] Move binding declarations, validation, and resolution into one generic
   resolver in `nyl_core::bindings`: typed declarations, exactly one source
   per binding, JSON Pointer selection, effective-value precedence, digests
   and provenance, and aggregated issues, with each binding kind served by a
