@@ -482,8 +482,15 @@ spec:
   publication units never renames another unit's target. `target.name`
   overrides the name; it must be unique like every target name. Changing the
   name, like any change to the target's identity, replaces the unit through
-  teardown. Static DeploymentTargets remain for rendering without
-  orchestration.
+  teardown.
+- **Why both exist.** A DeploymentTarget says what is rendered and where it is
+  published; it is complete without orchestration and is what a project
+  without environments writes. A KubernetesPublication is the
+  environment-independent role an environment executes: one definition, such
+  as `kubernetes`, is instantiated per environment and places one target into
+  each. Promotion selectors and coverage name that shared unit in every
+  environment, templated preview environments need its inline target, and
+  deselecting it starts a teardown, which a plain target never implies.
 - Generated Argo CD Application and AppProject names must be unique among all
   targets whose Argo CD instance resolves to the same cluster and namespace:
   static targets on explicit or implicit instances, and inline targets alike.
