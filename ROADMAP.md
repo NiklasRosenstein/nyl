@@ -38,8 +38,8 @@ about Nyl's current CLI.
 **Next step:** start M3 from the
 [orchestration core contract](design/orchestration-core.md) and its
 executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
-its scenario harness runs first. Unit `values` and `variables` resolve their
-references through `nyl_core::bindings`, which M2 introduced.
+its scenario harness runs first. M3's unit `values` and `variables` will
+resolve their references through `nyl_core::bindings`, which M2 introduced.
 
 ## Product direction
 

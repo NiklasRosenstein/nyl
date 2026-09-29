@@ -109,10 +109,11 @@ defaults.
 ## Inputs
 
 A Release may declare typed `spec.inputs` that templates read as
-`inputs.<name>`, next to `values`. Each DeploymentTarget binds them for its
+`inputs.<name>`, next to `values`. A DeploymentTarget binds them for its
 environment, from an inline value, a project file, locked Git state, or a state
-file in its own publication branch. The declaration must be literal, so
-templating cannot change it. See
+file in its own publication branch; an unbound input takes its declared
+default. A Release that declares inputs needs a literal `metadata.name` and a
+literal `spec.inputs`, so templating cannot change them. See
 [Release inputs](/nyl/deployment-workflows/rendered-manifests/release-inputs/).
 
 ## Direct commands and release history

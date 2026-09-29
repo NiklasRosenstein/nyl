@@ -164,9 +164,9 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   extracted with no behavior change: `nyl-core` holds the resource types and
   their schemas, the shared settings they reference, the static local-path
   rule, canonical JSON and digests, and JSON Pointer helpers; `nyl-render`
-  holds the rest of the former crate apart from the CLI. The Release input
-  types and their pure rules join `nyl-core`; their resolution joins
-  `nyl-render`.
+  holds the rest of the former crate apart from the CLI. Binding
+  declarations, their pure rules, and the generic resolver live in
+  `nyl_core::bindings`; `nyl-render` provides the Release input sources.
 - **M3** starts `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as new
   crates, never inside `gitops/`, with the scenario harness and property tests
   from the first commit.

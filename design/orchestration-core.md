@@ -496,9 +496,9 @@ spec:
   static targets on explicit or implicit instances, and inline targets alike.
   Validation checks this across every target it can see, including every
   instance of an EnvironmentTemplate, whose inline targets must therefore
-  template their names, for example from `environment.name`. Extending today's
-  check, which compares only targets sharing an explicit ArgoCDInstance, is an
-  M2 item.
+  template their names, for example from `environment.name`. M2 extended the
+  check from targets sharing an explicit ArgoCDInstance to this rule; inline
+  targets and template instances join it with M5.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
   referenced by none rejects `fromUnit` bindings and reads `fromPromotion`

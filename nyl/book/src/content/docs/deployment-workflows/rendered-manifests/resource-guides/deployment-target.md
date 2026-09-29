@@ -24,7 +24,8 @@ when another trusted mechanism applies generated catalog resources.
 
 `spec.releaseInputs` binds the typed inputs of the Releases the target renders,
 keyed by `<applicationGroup>/<release>`. Every binding sets exactly one source:
-`value`, `fromFile`, `fromGit`, or `fromPublication`. Nyl resolves and checks
+`value`, `fromFile`, `fromGit`, or `fromPublication`; `fromUnit` and
+`fromPromotion` are reserved for orchestration and rejected here. Nyl resolves and checks
 every binding of the target before rendering, and reports all problems
 together. `target.spec.releaseInputs` is not part of the template context. See
 [Release inputs](/nyl/deployment-workflows/rendered-manifests/release-inputs/).
