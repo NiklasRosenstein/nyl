@@ -17,26 +17,18 @@ pub(crate) fn update_locks(
     let inventory = discover_gitops_inventory(path, None)?;
     let locks = collect_source_locks(&inventory, requested_group, requested_target)?;
     let mut manager = GitManager::new().map_err(NylError::Git)?;
-    let resolutions = resolve_source_locks(&inventory, locks, &mut manager)?;
+    let resolutions = resolve_source_locks(locks, &mut manager)?;
     let mut stale = 0;
     for resolution in &resolutions {
-        let LockResolution { lock, resolved, note } = resolution;
-        let note = note.as_deref().map(|note| format!(" ({note})")).unwrap_or_default();
-        let Some(resolved) = resolved else {
-            println!(
-                "- {}: {} lock stays at {}{note}",
-                lock.owner, lock.revision, lock.commit
-            );
-            continue;
-        };
+        let LockResolution { lock, resolved } = resolution;
         if !resolution.is_stale() {
-            println!("✓ {}: {} is locked to {resolved}{note}", lock.owner, lock.revision);
+            println!("✓ {}: {} is locked to {resolved}", lock.owner, lock.revision);
             continue;
         }
         stale += 1;
         if check {
             println!(
-                "✗ {}: {} resolves to {resolved}, lock is {}{note}",
+                "✗ {}: {} resolves to {resolved}, lock is {}",
                 lock.owner, lock.revision, lock.commit
             );
         }
@@ -52,16 +44,9 @@ pub(crate) fn update_locks(
         atomic_replace(file, original, contents)?;
     }
     for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
-        let note = resolution
-            .note
-            .as_deref()
-            .map(|note| format!(" ({note})"))
-            .unwrap_or_default();
         println!(
-            "✓ {}: updated {} lock to {}{note}",
-            resolution.lock.owner,
-            resolution.lock.revision,
-            resolution.resolved.as_deref().unwrap_or_default()
+            "✓ {}: updated {} lock to {}",
+            resolution.lock.owner, resolution.lock.revision, resolution.resolved
         );
     }
     Ok(())
@@ -77,7 +62,7 @@ fn plan_lock_edits(project_root: &Path, resolutions: &[LockResolution]) -> Resul
     let mut files = BTreeMap::<PathBuf, (String, String, BTreeMap<usize, String>)>::new();
     for resolution in resolutions.iter().filter(|resolution| resolution.is_stale()) {
         let lock = &resolution.lock;
-        let resolved = resolution.resolved.as_deref().expect("stale locks have a resolution");
+        let resolved = resolution.resolved.as_str();
         let file = project_root.join(&lock.resource.source_path);
         if !files.contains_key(&file) {
             let contents = fs::read_to_string(&file)?;
@@ -130,10 +115,8 @@ mod tests {
                 repository_url: "https://git.example.com/apps.git".to_owned(),
                 revision: "main".to_owned(),
                 commit: "aaaa".to_owned(),
-                path: None,
             },
-            resolved: Some("bbbb".to_owned()),
-            note: None,
+            resolved: "bbbb".to_owned(),
         }
     }
 

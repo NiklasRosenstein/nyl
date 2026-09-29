@@ -4859,10 +4859,10 @@ fn test_update_source_locks_moves_from_git_groups_and_keeps_other_revisions() {
 }
 
 #[test]
-fn test_update_source_locks_follows_the_newest_publication_of_the_owning_target() {
+fn test_update_source_locks_moves_publication_prefix_locks_to_the_branch_head() {
     let fixture = fixture();
     let state = StateRepository::new();
-    let published = state.commit(
+    state.commit(
         "dev/state/images.json",
         r#"{"api": "published"}"#,
         "Publish\n\nNyl-Deployment-Target: dev\n",
@@ -4890,96 +4890,11 @@ fn test_update_source_locks_follows_the_newest_publication_of_the_owning_target(
         ),
     );
     let cache = TempDir::new().unwrap();
-    update_source_locks(&fixture, &cache, &["--target", "production"])
-        .success()
-        .stdout(predicate::str::contains("newest publication of DeploymentTarget dev"));
-    let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
-    // The lock reading dev's published file follows dev's newest publication;
-    // the lock reading a file outside every prefix follows the branch head.
-    assert!(target.contains(&format!("commit: '{published}'")), "{target}");
-    assert!(
-        target.contains(&format!("commit: \"{head}\"\n          path: shared/tag.json")),
-        "{target}"
-    );
-}
-
-#[test]
-fn test_from_git_rejects_a_lock_on_the_targets_own_publication() {
-    let fixture = fixture();
-    let state = StateRepository::new();
-    let published = state.commit(
-        "production/state/images.json",
-        r#"{"api": "published"}"#,
-        "Publish\n\nNyl-Deployment-Target: production\n",
-        "deploy/production",
-    );
-    let url = state.url();
-    fs::write(
-        fixture.path().join("config/repositories/deploy.yaml"),
-        format!(
-            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: '{url}'\n"
-        ),
-    )
-    .unwrap();
-    with_image_binding(
-        &fixture,
-        &format!(
-            "      image:\n        fromGit:\n          repositoryRef: {{name: deploy}}\n          revision: deploy/production\n          commit: '{published}'\n          path: production/state/images.json\n          pointer: /api\n"
-        ),
-    );
-    // Each publication would move the lock again, so neither rendering nor
-    // the lock update accepts it; the target's own state uses fromPublication.
-    render_production(&fixture).failure().stderr(predicate::str::contains(
-        "read the target's own state with fromPublication",
-    ));
-    update_source_locks(&fixture, &TempDir::new().unwrap(), &["--target", "production"])
-        .failure()
-        .stderr(predicate::str::contains(
-            "read the target's own state with fromPublication",
-        ));
-}
-
-#[test]
-fn test_update_source_locks_moves_each_lock_to_its_own_targets_publication() {
-    let fixture = fixture();
-    let state = StateRepository::new();
-    let dev = state.commit(
-        "dev/images.json",
-        "{}",
-        "Publish dev\n\nNyl-Deployment-Target: dev\n",
-        "deploy",
-    );
-    let staging = state.commit(
-        "staging/tag.json",
-        "{}",
-        "Publish staging\n\nNyl-Deployment-Target: staging\n",
-        "deploy",
-    );
-    let url = state.url();
-    for (name, prefix) in [("dev", "dev"), ("staging", "staging")] {
-        fs::write(
-            fixture.path().join(format!("config/targets/{name}.yaml")),
-            format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: {name}\nspec:\n  clusterRef:\n    name: kasoku\n  applicationGroupSelector:\n    matchLabels:\n      environment: {name}\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy\n    pathPrefix: {prefix}\n"
-            ),
-        )
-        .unwrap();
-    }
-    let zero = "0".repeat(40);
-    with_image_binding(
-        &fixture,
-        &format!(
-            "      image:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy\n          commit: '{zero}'\n          path: dev/images.json\n      tag:\n        fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy\n          commit: '{zero}'\n          path: staging/tag.json\n"
-        ),
-    );
-    let cache = TempDir::new().unwrap();
     update_source_locks(&fixture, &cache, &["--target", "production"]).success();
     let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
-    assert!(
-        target.contains(&format!("commit: '{dev}'\n          path: dev/images.json")),
-        "{target}"
-    );
-    assert!(target.contains(&format!("commit: '{staging}'")), "{target}");
+    // Choosing what another target runs is promotion's job: a lock on a file
+    // in dev's publication prefix follows the branch head like any lock.
+    assert_eq!(target.matches(&head).count(), 2, "{target}");
 }
 
 #[test]
@@ -5072,7 +4987,7 @@ fn test_validate_rejects_application_name_templates_without_an_expression() {
 fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     let fixture = fixture();
     let state = StateRepository::new();
-    let published = state.commit(
+    state.commit(
         "dev/state/images.json",
         r#"{"api": "published"}"#,
         "Publish\n\nNyl-Deployment-Target: dev\n",
@@ -5103,9 +5018,7 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     );
     let cache = TempDir::new().unwrap();
 
-    // A lock's destination depends only on the lock: the group follows the
-    // branch head even though a binding on the same revision reads dev's
-    // published state, and the filter decides only which locks move.
+    // The filter decides only which locks move; every lock moves to the head.
     update_source_locks(&fixture, &cache, &["workloads"]).success();
     let group = fs::read_to_string(fixture.path().join("config/application-groups/workloads.yaml")).unwrap();
     assert!(group.contains(&head), "{group}");
@@ -5114,7 +5027,7 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
 
     update_source_locks(&fixture, &cache, &["--target", "production"]).success();
     let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
-    assert!(target.contains(&format!("commit: '{published}'")), "{target}");
+    assert!(target.contains(&format!("commit: '{head}'")), "{target}");
     update_source_locks(&fixture, &cache, &["--check"]).success();
 }
 

@@ -302,27 +302,6 @@ impl BareRepository {
         self.resolve_reference_to_commit_oid(&format!("refs/heads/{branch}"))
     }
 
-    /// The newest commit reachable from `head`, in topological and time
-    /// order, whose message has a line equal to `line` after trimming.
-    pub fn newest_commit_with_message_line(&self, head: Oid, line: &str) -> Result<Option<Oid>> {
-        let mut walk = self.repo.revwalk()?;
-        walk.push(head)?;
-        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
-        for oid in walk {
-            let oid = oid?;
-            let commit = self.repo.find_commit(oid)?;
-            if commit
-                .message()
-                .unwrap_or_default()
-                .lines()
-                .any(|candidate| candidate.trim() == line)
-            {
-                return Ok(Some(oid));
-            }
-        }
-        Ok(None)
-    }
-
     /// Get the repository path
     pub fn path(&self) -> &Path {
         self.repo.path()

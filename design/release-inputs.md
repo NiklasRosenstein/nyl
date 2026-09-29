@@ -215,11 +215,11 @@ Each binding sets exactly one of these fields:
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
   existing ApplicationGroup name argument.
 - One target can hold many `fromGit` locks, and several bindings often lock the
-  same repository at the same commit. Each lock's destination depends only on
-  the lock itself, so the result never depends on which other locks exist or
-  are selected. The updater fetches each repository once and resolves each
-  revision once, and locks of one repository and revision that share a
-  destination rule move to the same commit. Bindings that share a current
+  same repository at the same commit. Every lock moves to the head of its
+  revision, so the result never depends on which other locks exist or are
+  selected. The updater fetches each repository once and resolves each
+  revision once, and locks of one repository and revision move to the same
+  commit. Bindings that share a current
   commit but name different revisions are addressed individually by their
   position in the document, never by matching the commit text alone.
 - The ApplicationGroup name argument and `--target` select which locks move,
@@ -244,17 +244,11 @@ Each binding sets exactly one of these fields:
     commits it names the oldest, per the recorded-commit rule. If covered
     Applications run different values of the same file and pointer, the lock
     does not move and the updater reports the conflict.
-  - Without `--require healthy`, a `fromGit` lock whose file lies inside a
-    target's prefix on that branch moves to that target's newest publication
-    commit, never to a later commit made by another tool, such as a state file
-    write-back the target has not yet published. Every other lock, including
-    ApplicationGroup source locks and locks reading files outside every
-    prefix, moves to the branch head. Locks reading files of different
-    targets' prefixes on one branch each follow their own target. A target
-    never locks a file in its own publication: every publication would make
-    the lock stale again, so rendering and the updater reject it, and the
-    target reads its own state with `fromPublication`. Repository URLs match
-    regardless of case, a trailing `.git`, or embedded credentials.
+- Without `--require healthy`, every lock, including one reading a file in
+  another target's publication prefix, moves to the branch head. Moving a lock
+  to what another target runs is a promotion, not a lock refresh. A target that
+  locks a file in its own publication finds the lock stale after each of its
+  publications; it reads its own state with `fromPublication`.
 - With `--require healthy`, the updater writes the observation that justified
   the move next to each lock, so the pull request commits the evidence together
   with the lock:
