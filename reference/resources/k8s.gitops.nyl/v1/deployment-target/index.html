@@ -341,6 +341,7 @@
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.value"><strong>value</strong></a> — Binds an inline literal value.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromFile"><strong>fromFile</strong></a> — Reads the value from a YAML or JSON file of this repository.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit"><strong>fromGit</strong></a> — Reads the value from a file of a Git repository at a locked commit.</li>
+<li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPublication"><strong>fromPublication</strong></a> — Reads the value from a state file in this target’s publication branch.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromUnit"><strong>fromUnit</strong></a> — Reserved for orchestration: reads a recorded unit output or artifact field.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPromotion"><strong>fromPromotion</strong></a> — Reserved for orchestration: reads a value recorded through a PromotionPath.</li>
 </ul>
@@ -418,6 +419,23 @@
 <h3 id="specreleaseinputskeykeyfrompromotionvalue">spec.releaseInputs[key][key].fromPromotion.value</h3>
 <p><strong>Required</strong> · string</p>
 <p>Promoted value name, as declared by a PromotionPath.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPublication"></a></p>
+<h3 id="specreleaseinputskeykeyfrompublication">spec.releaseInputs[key][key].fromPublication</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>A state file in this target’s publication branch, read at the publication base commit.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPublication.carryFileFromWorktree"></a></p>
+<h3 id="specreleaseinputskeykeyfrompublicationcarryfilefromworktree">spec.releaseInputs[key][key].fromPublication.carryFileFromWorktree</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to <code>path</code> in the publication commit; otherwise the base copy is written back. With <code>carryFileFromWorktree</code>, <code>path</code> is owned by this target.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPublication.path"></a></p>
+<h3 id="specreleaseinputskeykeyfrompublicationpath">spec.releaseInputs[key][key].fromPublication.path</h3>
+<p><strong>Required</strong> · string</p>
+<p>State file path relative to the target’s publication path prefix. It must lie outside every directory a generated Argo CD Application syncs: workload <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> directories and <code>_nyl</code>.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPublication.pointer"></a></p>
+<h3 id="specreleaseinputskeykeyfrompublicationpointer">spec.releaseInputs[key][key].fromPublication.pointer</h3>
+<p><strong>Optional</strong> · string</p>
+<p>JSON Pointer selecting the value inside the document; the whole document when empty.</p>
 <p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromUnit"></a></p>
 <h3 id="specreleaseinputskeykeyfromunit">spec.releaseInputs[key][key].fromUnit</h3>
 <p><strong>Optional</strong> · object or null</p>
