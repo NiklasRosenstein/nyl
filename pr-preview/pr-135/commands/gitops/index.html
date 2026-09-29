@@ -114,8 +114,10 @@ has no per-Release work to report.</p>
 <p>Every indexed file of the published target prefix must match its recorded
 digest. A prefix without an ownership index owns nothing yet, for example when
 another tool has committed <code dir="auto">fromPublication</code> state before the first
-publication. Unindexed repository content is never treated as target-owned
-baseline data. <code dir="auto">--offline</code> reads <code dir="auto">fromPublication</code> state at the cached branch
+publication. It may then hold only files the target declares as
+<code dir="auto">fromPublication</code> state paths; any other file fails the comparison, which
+usually means <code dir="auto">pathPrefix</code> names a directory that belongs to something else.
+Unindexed repository content is never treated as target-owned baseline data. <code dir="auto">--offline</code> reads <code dir="auto">fromPublication</code> state at the cached branch
 head, as for <code dir="auto">render-tree</code>, and compares against the published tree at that
 same commit.</p>
 <p>Compare with a render from a source revision:</p>
@@ -136,6 +138,11 @@ holds a project, the command fails and lists every path it tried.</p>
 the commit that performs it: the pull request’s own diff finds the old
 location, and after the merge the entry no longer matters. A
 <code dir="auto">--source-project-path</code> left in a CI job is equally harmless.</p>
+<p>When the baseline’s target publishes to a different repository, branch, or
+path prefix, its <code dir="auto">fromPublication</code> inputs read that publication, not the
+desired one, and the report carries a <code dir="auto">publication_moved</code> warning. Nyl does not
+move state or clean up the old prefix; follow
+<a href="/nyl/pr-preview/pr-135/deployment-workflows/rendered-manifests/rendering-and-publishing/#move-a-publication">Move a publication</a>.</p>
 <p>The command identifies the desired source commit and exact baseline repository,
 revision, resolved commit, project directory, path, selected view, and output
 destination on stderr. By default, stdout contains only multi-file unified diff bytes; a
