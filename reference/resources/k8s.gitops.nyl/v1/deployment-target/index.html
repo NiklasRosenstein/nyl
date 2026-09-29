@@ -340,6 +340,7 @@
 <ul>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.value"><strong>value</strong></a> — Binds an inline literal value.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromFile"><strong>fromFile</strong></a> — Reads the value from a YAML or JSON file of this repository.</li>
+<li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit"><strong>fromGit</strong></a> — Reads the value from a file of a Git repository at a locked commit.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromUnit"><strong>fromUnit</strong></a> — Reserved for orchestration: reads a recorded unit output or artifact field.</li>
 <li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPromotion"><strong>fromPromotion</strong></a> — Reserved for orchestration: reads a value recorded through a PromotionPath.</li>
 </ul>
@@ -356,6 +357,54 @@
 <h3 id="specreleaseinputskeykeyfromfilepointer">spec.releaseInputs[key][key].fromFile.pointer</h3>
 <p><strong>Optional</strong> · string</p>
 <p>JSON Pointer selecting the value inside the document; the whole document when empty.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit"></a></p>
+<h3 id="specreleaseinputskeykeyfromgit">spec.releaseInputs[key][key].fromGit</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>A YAML or JSON file of a Git repository at a locked commit.</p>
+<p>Unknown fields are rejected.</p>
+<p>Choose exactly one variant:</p>
+<ul>
+<li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repositoryRef"><strong>repositoryRef</strong></a> — Reads from the named <a href="/nyl/reference/resources/gitops.nyl/v1/git-repository/">GitRepository</a>.</li>
+<li><a href="#field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository"><strong>repository</strong></a> — Reads from the inline coordinates declared here.</li>
+</ul>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.commit"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitcommit">spec.releaseInputs[key][key].fromGit.commit</h3>
+<p><strong>Required</strong> · string</p>
+<p>Full 40-character lowercase commit ID that rendering reads, refreshed by <code>nyl update source-locks</code>.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.path"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitpath">spec.releaseInputs[key][key].fromGit.path</h3>
+<p><strong>Required</strong> · string</p>
+<p>Repository-relative path of a YAML or JSON file holding one document.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.pointer"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitpointer">spec.releaseInputs[key][key].fromGit.pointer</h3>
+<p><strong>Optional</strong> · string</p>
+<p>JSON Pointer selecting the value inside the document; the whole document when empty.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrepository">spec.releaseInputs[key][key].fromGit.repository</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>Inline repository coordinates to read from.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository.publishURL"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrepositorypublishurl">spec.releaseInputs[key][key].fromGit.repository.publishURL</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional Git write URL. Publication uses <code>repoURL</code> when omitted.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repository.repoURL"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrepositoryrepourl">spec.releaseInputs[key][key].fromGit.repository.repoURL</h3>
+<p><strong>Required</strong> · string</p>
+<p>Credential-free Git read URL used by renderers and generated Applications.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repositoryRef"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrepositoryref">spec.releaseInputs[key][key].fromGit.repositoryRef</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>Project-local <code>gitops.nyl/v1</code> <a href="/nyl/reference/resources/gitops.nyl/v1/git-repository/">GitRepository</a> to read from.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.repositoryRef.name"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrepositoryrefname">spec.releaseInputs[key][key].fromGit.repositoryRef.name</h3>
+<p><strong>Required</strong> · string</p>
+<p>Project-local name of the referenced resource; its kind and API group are determined by the containing field.</p>
+<p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromGit.revision"></a></p>
+<h3 id="specreleaseinputskeykeyfromgitrevision">spec.releaseInputs[key][key].fromGit.revision</h3>
+<p><strong>Required</strong> · string</p>
+<p>Human-readable branch or tag that <code>nyl update source-locks</code> resolves.</p>
 <p><a id="field-spec.releaseInputs%5Bkey%5D%5Bkey%5D.fromPromotion"></a></p>
 <h3 id="specreleaseinputskeykeyfrompromotion">spec.releaseInputs[key][key].fromPromotion</h3>
 <p><strong>Optional</strong> · object or null</p>

@@ -129,7 +129,8 @@ vendored artifact.</li>
 <li><code dir="auto">path</code> defaults to <code dir="auto">vendor</code> and must remain beneath the directory containing
 <code dir="auto">nyl.toml</code>. Nyl excludes this subtree from GitOps YAML discovery.</li>
 <li><code dir="auto">lfs_threshold_bytes</code> defaults to 1 MiB. Helm and Git archives always use Git
-LFS rules; RemoteManifest blobs use LFS at or above this threshold.</li>
+LFS rules; RemoteManifest blobs and the files <code dir="auto">fromGit</code> Release input
+bindings lock use LFS at or above this threshold.</li>
 </ul>
 <p><code dir="auto">nyl init --vendor &#x3C;MODE></code> writes this section with the selected mode when it
 creates <code dir="auto">nyl.toml</code>.</p>
