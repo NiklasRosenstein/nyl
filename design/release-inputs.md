@@ -227,58 +227,13 @@ Each binding sets exactly one of these fields:
   never where they move. A filtered update therefore agrees with an
   unfiltered `--check`, and the locks it leaves alone stay as they are until
   they are updated themselves.
-- `--require healthy` follows the per-value promotion rule in the
-  [health evidence](promotion.md#health-evidence) contract, so locks of one group may move to different
-  commits for the same reason. It reads the source target's recorded observation, written by
-  `nyl verify --target <source>` into
-  `<prefix>/_nyl/observations/health.yaml` on the source's publication branch
-  (see [Kubernetes publications](promotion.md#kubernetes-publications)), so it needs no cluster
-  credentials; `--observe` observes Argo CD directly instead. Each lock is one
-  value:
-  - The file it reads must lie inside one source target's prefix on that
-    branch. A lock that reads a file outside every target prefix is an error
-    that suggests dropping `--require healthy` for it.
-  - Its covered Applications are the source target's Releases whose bindings
-    read the same file and pointer.
-  - The lock moves to a publication commit of the source target at which the
-    value equals the value each covered Application runs; among equivalent
-    commits it names the oldest, per the recorded-commit rule. If covered
-    Applications run different values of the same file and pointer, the lock
-    does not move and the updater reports the conflict.
-- Without `--require healthy`, every lock, including one reading a file in
-  another target's publication prefix, moves to the branch head. Moving a lock
-  to what another target runs is a promotion, not a lock refresh. A target that
-  locks a file in its own publication finds the lock stale after each of its
+- Every lock, including one reading a file in another target's publication
+  prefix, moves to the branch head. `nyl update source-locks` has no health
+  gate and never looks at what a target runs: moving a value to what another
+  target runs, or only once it is healthy, is promotion (see
+  [Promotion sources](promotion.md#promotion-sources)). A target that locks a
+  file in its own publication finds the lock stale after each of its
   publications; it reads its own state with `fromPublication`.
-- With `--require healthy`, the updater writes the observation that justified
-  the move next to each lock, so the pull request commits the evidence together
-  with the lock:
-
-  ```yaml
-  fromGit:
-    revision: deploy/dev
-    commit: 9c1e…
-    path: dev/state/images.json
-    observed:                     # written by source-locks, never authored
-      at: 2026-09-24T10:15:00Z
-      applications:
-        - name: web
-          revision: 4b7d…         # last successful Argo CD sync
-          health: Healthy
-  ```
-
-  - `observed` is a tool-written `fromGit` field in the binding schema; authors
-    never write it. It contributes neither to the `@input` digest nor to the
-    render-cache key, so it never changes rendered output. Like any edit, it
-    changes the DeploymentTarget file and therefore its source provenance.
-  - A lock with an `observed` block is health-gated: it deliberately lags the
-    branch head. Plain `--check` does not compare it with the head; it verifies
-    only that the observed publication commit equals `commit`, and needs no
-    cluster access.
-  - `--check --require healthy` reads the newest recorded observation, or
-    observes directly with `--observe`, and reports a lock as stale when a
-    newer publication is running and healthy, or when a lock without
-    `observed` would move.
 
 `fromPublication`:
 
@@ -376,21 +331,19 @@ releaseInputs:
 **Promoting published state.** A carried or committed state file in one
 target's publication branch can feed another target:
 
-- Without orchestration, the other target binds it with `fromGit`, locked to a
-  source publication commit. `nyl update source-locks --target <name>` promotes
-  by moving the lock, and the pull request that commits it is the review. The
-  targets may share a publication branch under different prefixes or publish to
-  different branches; the lock makes promotion explicit either way. A shared
-  branch cannot be followed with `fromPublication`, because the state path lies
-  in the source target's prefix.
-- `nyl update source-locks --target <name> --require healthy` moves a lock group
-  only to a source publication that is running and healthy, as described in
-  the [health evidence](promotion.md#health-evidence) contract, and writes the observation next to
-  the lock (see `fromGit`).
-- With orchestration, a PromotionPath with `from: {target: <name>}` selects the
-  source target's published inputs; see [Promotion sources](promotion.md#promotion-sources).
+- Without orchestration, the other target can bind it with `fromGit`, locked
+  to a commit of that branch. `nyl update source-locks --target <name>` moves
+  the lock to the branch head, and the pull request that commits it is the
+  review. The targets may share a publication branch under different prefixes
+  or publish to different branches. A shared branch cannot be followed with
+  `fromPublication`, because the state path lies in the source target's
+  prefix. The lock follows the branch, not what the source target runs or
+  whether it is healthy.
+- Promoting what the source target runs, gated on its health, is a
+  PromotionPath with `from: {target: <name>}`, which selects the source
+  target's published inputs; see [Promotion sources](promotion.md#promotion-sources).
 
-Example: dev carries image IDs from its CI build, and production promotes them
+Example: dev carries image IDs from its CI build, and production follows them
 by lock.
 
 ```yaml

@@ -775,8 +775,7 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
   `attestations`, blocking on failures with `--ignore-attestation`, and
   `maxAttestationAge`.
 - [ ] Gate promotion on fresh recorded attestations for both PromotionPath
-  sources, sourcing each value from the publication its Application runs, and
-  add `nyl update source-locks --require healthy` with an `observed` block.
+  sources, sourcing each value from the publication its Application runs.
 - [ ] Show promotion lineage in `status`.
 
 **Exit criterion:** prod runs exactly the source commit and image digest dev
@@ -804,6 +803,7 @@ reasons to delay independent work.
 | Decision | Needed by |
 | --- | --- |
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
+| Health-gated promotion into a target that belongs to no environment; a PromotionPath's `to` is always an environment | M6 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |

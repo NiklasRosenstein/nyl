@@ -542,22 +542,22 @@ spec:
 - `to` is always an environment, because the PromotionRecord lives in that
   environment's desired state.
 
-### Promotion without orchestration
+### Locked state without orchestration
 
-A target that belongs to no environment
-promotes through a locked `fromGit` binding to the source target's published
-state instead: `nyl update source-locks --target production` moves the lock to
-the newest source publication (with `--require healthy`, to the publication the
-consuming source Application runs), and the pull request that commits the lock is the
-review. The two routes coexist:
+A target that belongs to no environment can still read another target's
+published state through a locked `fromGit` binding. `nyl update source-locks
+--target production` moves the lock to the head of the branch, and the pull
+request that commits it is the review. The lock has no health gate and never
+selects what the source target runs; that selection, its evidence, and its
+record belong to a PromotionPath:
 
 | | Locked `fromGit` (M2) | PromotionPath (M6) |
 | --- | --- | --- |
-| Target binding | `fromGit` to a source publication commit | `fromPromotion` naming a value, optionally its path |
-| Promote with | `nyl update source-locks --target …`, then a pull request | `nyl promote <path>` |
-| Health gate | `--require healthy` on the lock update | `evidence: attested` on the path |
-| Record | The lock in source, with an `observed` block under `--require healthy` | A PromotionRecord in target desired state |
-| Adds | — | Evidence gates, atomic multi-value promotion, lineage |
+| Target binding | `fromGit` at a commit of the source branch | `fromPromotion` naming a value, optionally its path |
+| Moves with | `nyl update source-locks --target …`, then a pull request | `nyl promote <path>` |
+| Selects | The branch head | The publication each consuming Application runs, or an exact one |
+| Health gate | None | `evidence: attested` on the path |
+| Record | The lock in source | A PromotionRecord in target desired state |
 
 ## Health evidence
 
@@ -676,8 +676,7 @@ same model and is not in the initial scope.
   blocks on mixed revisions.
 - **Decision evidence is always recorded.** The observation behind every
   promotion (time, Application, running revision, health) is stored in the
-  PromotionRecord, and in the lock's `observed` block for the lock route;
-  observations themselves are recorded in observed state or on the target's
+  PromotionRecord; observations themselves are recorded in observed state or on the target's
   publication branch.
 - **Observation history.** One observation proves what runs now. Promoting a
   commit that no longer runs, requiring a minimum healthy duration, and
