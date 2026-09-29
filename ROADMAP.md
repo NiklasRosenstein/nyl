@@ -769,6 +769,9 @@ reference scenarios, including preview closure and expiry, pass in both tiers.
   consumer runs.
 - [ ] Promote from a non-orchestrated target's published inputs, including a
   carried state file, with values verified against the recorded digests.
+- [ ] Promote into a target outside every environment: `to: {target}`, the
+  record in the target's `spec.promotions`, `fromPromotion` resolution in tree
+  and direct commands, and the ownership index's applied sequence.
 - [ ] Implement attestations: driver-declared names, `spec.attestations` on
   units and environments, `nyl attest` for environments and targets, the
   `published | attested` evidence levels with a path's per-unit
@@ -803,7 +806,6 @@ reasons to delay independent work.
 | Decision | Needed by |
 | --- | --- |
 | Argo CD control-plane credentials for health checks in CI | M5/M6 |
-| Health-gated promotion into a target that belongs to no environment; a PromotionPath's `to` is always an environment | M6 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
