@@ -230,7 +230,7 @@ Each binding sets exactly one of these fields:
   prefix, moves to the branch head. `nyl update source-locks` has no health
   gate and never looks at what a target runs: moving a value to what another
   target runs, or only once it is healthy, is promotion (see
-  [Promotion sources](promotion.md#promotion-sources)). A target that locks a
+  [Promoting into a target](promotion.md#promoting-into-a-target)). A target that locks a
   file in its own publication finds the lock stale after each of its
   publications; it reads its own state with `fromPublication`.
 
@@ -380,7 +380,9 @@ target's publication branch can feed another target:
   whether it is healthy.
 - Promoting what the source target runs, gated on its health, is a
   PromotionPath with `from: {target: <name>}`, which selects the source
-  target's published inputs; see [Promotion sources](promotion.md#promotion-sources).
+  target's published inputs, into an environment or, with `to: {target: …}`,
+  into a target outside every environment; see
+  [Promoting into a target](promotion.md#promoting-into-a-target).
 
 Example: dev carries image IDs from its CI build, and production follows them
 by lock.
@@ -410,9 +412,12 @@ releaseInputs:
 `fromUnit` and `fromPromotion`:
 
 - Their shapes are defined with the orchestration contract.
-- `render-tree`, `publish-tree`, `diff-tree`, and direct commands reject them
-  with a message naming the binding and saying it needs orchestrated
-  execution.
+- `render-tree`, `publish-tree`, `diff-tree`, and direct commands reject
+  `fromUnit`, and `fromPromotion` on a target inside an environment, with a
+  message naming the binding and saying it needs orchestrated execution. A
+  target outside every environment resolves `fromPromotion` from its own
+  `spec.promotions` (M6; see
+  [Promoting into a target](promotion.md#promoting-into-a-target)).
 - Orchestrated execution passes their resolved values to rendering as an
   explicit, pinned input snapshot.
 
@@ -512,8 +517,9 @@ production environment spanning two clusters has two targets.
 A target joins an environment when a Kubernetes publication unit in that
 environment references it. The unit also carries the execution mode (publish
 or observe), and DeploymentTarget itself stays unchanged. A target
-referenced by no publication unit belongs to no environment and rejects
-`fromUnit` and `fromPromotion` bindings; a target referenced by publication
+referenced by no publication unit belongs to no environment, rejects
+`fromUnit` bindings, and reads `fromPromotion` from its own `spec.promotions`
+(see [Promoting into a target](promotion.md#promoting-into-a-target)); a target referenced by publication
 units in two environments is an error.
 
 Environments that share a cluster add risks beyond the current per-target

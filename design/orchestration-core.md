@@ -494,7 +494,9 @@ spec:
   M2 item.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
-  referenced by none rejects `fromUnit` and `fromPromotion` bindings. A
+  referenced by none rejects `fromUnit` bindings and reads `fromPromotion`
+  from its own `spec.promotions` (see
+  [Promoting into a target](promotion.md#promoting-into-a-target)). A
   publication unit that is `deleting` still owns its target until its
   teardown completes or it is forgotten, so deselecting it does not make the
   target's bindings invalid.
