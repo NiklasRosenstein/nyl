@@ -231,14 +231,40 @@ impl BareRepository {
         Ok(())
     }
 
+    /// Fetch `commit` by ID; when the server refuses unadvertised objects,
+    /// fetch the refs instead, which brings any commit reachable from a
+    /// branch or tag.
+    fn fetch_commit(&self, commit: Oid) -> Result<()> {
+        let by_id = match self.fetch_objects(commit) {
+            Ok(()) if self.has_object(commit) => return Ok(()),
+            Ok(()) => None,
+            Err(error) => Some(error),
+        };
+        tracing::debug!("Fetching refs of {} to find {commit}", self.url);
+        match (self.fetch_refs(), by_id) {
+            (Ok(()), _) if self.has_object(commit) => Ok(()),
+            (Ok(()), by_id) => Err(GitError::Command(format!(
+                "commit {commit} is not reachable from any branch or tag of {}{}",
+                crate::util::sanitize_url(&self.url),
+                by_id
+                    .map(|error| format!(", and fetching it by ID failed: {error}"))
+                    .unwrap_or_default()
+            ))),
+            (Err(refs), Some(by_id)) => Err(GitError::Command(format!(
+                "fetching {commit} by ID failed ({by_id}), and fetching refs failed ({refs})"
+            ))),
+            (Err(refs), None) => Err(refs),
+        }
+    }
+
     /// Read the file at `path` in `commit`, fetching the commit by ID when it
-    /// is not cached. Returns `None` when the commit has no such path.
+    /// is not cached, or through the refs when the server refuses that. Returns `None` when the commit has no such path.
     ///
     /// The path is repository-relative. A symbolic link at the path is an
     /// error, and a path through a symbolic link does not resolve.
     pub fn read_blob(&self, commit: Oid, path: &str) -> Result<Option<Vec<u8>>> {
         if !self.has_object(commit) {
-            self.fetch_objects(commit)?;
+            self.fetch_commit(commit)?;
         }
         let tree = self.repo.find_commit(commit)?.tree()?;
         // Check every component, so a symbolic link to a directory is refused

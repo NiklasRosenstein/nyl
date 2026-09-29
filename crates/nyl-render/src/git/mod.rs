@@ -386,6 +386,7 @@ mod tests {
     use super::*;
     use git2::Repository;
     use repository::BareRepository;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -425,6 +426,33 @@ mod tests {
         let second_path = manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
         assert!(second_path.exists());
         assert!(manager.resolve_ref_fresh(&url, Some("HEAD"), None).is_err());
+    }
+
+    #[test]
+    fn test_read_blob_falls_back_to_fetching_refs_for_a_missing_commit() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        std::fs::write(source_dir.path().join("state.json"), "{}").unwrap();
+        let mut index = source_repo.index().unwrap();
+        index.add_path(Path::new("state.json")).unwrap();
+        let tree = source_repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let commit = source_repo
+            .commit(Some("HEAD"), &sig, &sig, "State", &tree, &[])
+            .unwrap();
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = source_dir.path().to_string_lossy().to_string();
+
+        let bytes = manager.read_blob(&url, &commit.to_string(), "state.json").unwrap();
+        assert_eq!(bytes.as_deref(), Some(b"{}".as_slice()));
+        // A commit on no branch or tag fails both ways, and says so.
+        let unknown = "1".repeat(40);
+        let error = manager.read_blob(&url, &unknown, "state.json").unwrap_err().to_string();
+        assert!(
+            error.contains("not reachable from any branch or tag") || error.contains("fetching refs failed"),
+            "{error}"
+        );
     }
 
     #[test]
