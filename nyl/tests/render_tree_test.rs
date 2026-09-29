@@ -5152,6 +5152,34 @@ fn test_vendor_check_reads_cached_publication_state_offline() {
 }
 
 #[test]
+fn test_validate_reads_cached_publication_state_offline() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:state"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let validate = |cache: &TempDir| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .arg("validate")
+            .assert()
+    };
+    let cache = TempDir::new().unwrap();
+    validate(&cache).success();
+
+    // Offline, validation falls back to the cached branch head.
+    fs::remove_dir_all(destination.path()).unwrap();
+    validate(&cache)
+        .success()
+        .stdout(predicate::str::contains("GitOps configuration is valid"));
+}
+
+#[test]
 fn test_publish_tree_renders_committed_publication_state_at_the_base_commit() {
     let (fixture, destination, seed, _) = publication_fixture();
     push_publication_state(
