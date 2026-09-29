@@ -3,17 +3,12 @@
 //!
 //! Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
 //!
-//! - Each lock's destination depends only on the lock. A `fromGit` lock whose
-//!   file lies inside a DeploymentTarget's publication prefix on that branch
-//!   moves to that target's newest publication commit, never to a later commit
-//!   another tool made on the branch. Every other lock moves to the branch
-//!   head.
+//! - Every lock moves to the head of its revision. Moving a lock to what
+//!   another target runs is promotion, not a lock update.
 //! - The `--group`/`--target` filter selects which locks move, never where
 //!   they move, so a filtered update agrees with an unfiltered `--check`.
-//!   Locks of one repository and revision that share an owner, or have none,
-//!   agree after an unfiltered update.
-//! - Each repository is fetched once per run, and each branch head and
-//!   publication commit is looked up once.
+//! - Each repository is fetched once per run, and each branch head is looked
+//!   up once.
 //! - Locks are addressed by their position in the document, never by matching
 //!   the commit text alone, so bindings that share a commit but name different
 //!   revisions stay independent.
