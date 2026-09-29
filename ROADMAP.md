@@ -28,19 +28,18 @@ about Nyl's current CLI.
 | ID | Milestone | Status | Depends on |
 | --- | --- | --- | --- |
 | M1 | Unit, input, state, and promotion contract | Done | — |
-| M2 | Release inputs without orchestration | In progress | M1 |
+| M2 | Release inputs without orchestration | Done | M1 |
 | M3 | Orchestration core with a constrained command unit | Planned | M1 |
 | M4 | Container image and Terraform units | Planned | M3 |
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** document Release inputs and regenerate the resource schemas to
-finish M2 against the [Release inputs contract](design/release-inputs.md). M3
-can start in parallel from the
+**Next step:** start M3 from the
 [orchestration core contract](design/orchestration-core.md) and its
 executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
-its scenario harness runs first.
+its scenario harness runs first. M3's unit `values` and `variables` will
+resolve their references through `nyl_core::bindings`, which M2 introduced.
 
 ## Product direction
 
@@ -625,7 +624,7 @@ ambiguous command semantics. Met by the
 
 ### M2 — Release inputs without orchestration
 
-- [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
+- [x] Implement Release inputs and DeploymentTarget bindings for `value`,
   `fromFile`, `fromGit`, and `fromPublication`, with type validation and
   defaults.
 - [x] Support `carryFileFromWorktree` for `fromPublication`, excluding carried files from the
@@ -638,10 +637,10 @@ ambiguous command semantics. Met by the
 - [x] Require unique generated Argo CD names across every pair of targets whose
   instances resolve to the same cluster and namespace, including implicit
   per-target instances.
-- [ ] Record resolved inputs in the dependency recorder, render-cache key, and
+- [x] Record resolved inputs in the dependency recorder, render-cache key, and
   the existing ownership-index `inputs` map as digests under reserved
   `@`-prefixed keys, keeping index format version 2.
-- [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
+- [x] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
 - [x] Move binding declarations, validation, and resolution into one generic
   resolver in `nyl_core::bindings`: typed declarations, exactly one source
@@ -652,7 +651,7 @@ ambiguous command semantics. Met by the
   reuse the same resolver instead of growing their own: it resolves declared
   slots and references at any depth of a document, records provenance per JSON
   Pointer, and lists blocked references by location.
-- [ ] Document the feature and regenerate resource schemas.
+- [x] Document the feature and regenerate resource schemas.
 - [x] Expand template values (`${ … }`) in fields rendered later than the
   structural pass, starting with `applicationNameTemplate`, which requires at
   least one expression and no longer expands the `{% raw %}` form.
@@ -663,8 +662,11 @@ ambiguous command semantics. Met by the
 **Exit criterion:** a target renders Releases from static, locked external, and
 same-branch publication state inputs, committed or carried, through
 `render-tree` and `publish-tree`;
-a concurrent state push makes publication fail rather than interleave; projects without inputs produce
-byte-identical output to the previous release.
+a concurrent state push makes publication fail rather than interleave; projects
+without inputs that the previous release rendered produce byte-identical
+output, except where the two listed validation changes now reject them: a
+`{% raw %}` `applicationNameTemplate`, and duplicate generated names across
+implicit per-target Argo CD instances.
 
 ### M3 — Orchestration core with a constrained command unit
 

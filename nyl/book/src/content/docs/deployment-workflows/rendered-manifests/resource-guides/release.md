@@ -106,6 +106,16 @@ existing option with the same key, which permits an approved
 `ApplyOutOfSyncOnly=false` or `ServerSideApply=false` exception to the generated
 defaults.
 
+## Inputs
+
+A Release may declare typed `spec.inputs` that templates read as
+`inputs.<name>`, next to `values`. A DeploymentTarget binds them for its
+environment, from an inline value, a project file, locked Git state, or a state
+file in its own publication branch; an unbound input takes its declared
+default. A Release that declares inputs needs a literal `metadata.name` and a
+literal `spec.inputs`, so templating cannot change them. See
+[Release inputs](/nyl/deployment-workflows/rendered-manifests/release-inputs/).
+
 ## Direct commands and release history
 
 `nyl render` removes the Release and emits the rest of its bundle. `nyl apply`
