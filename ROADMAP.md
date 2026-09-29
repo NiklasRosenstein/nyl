@@ -662,8 +662,11 @@ ambiguous command semantics. Met by the
 **Exit criterion:** a target renders Releases from static, locked external, and
 same-branch publication state inputs, committed or carried, through
 `render-tree` and `publish-tree`;
-a concurrent state push makes publication fail rather than interleave; projects without inputs produce
-byte-identical output to the previous release.
+a concurrent state push makes publication fail rather than interleave; projects
+without inputs that the previous release rendered produce byte-identical
+output, except where the two listed validation changes now reject them: a
+`{% raw %}` `applicationNameTemplate`, and duplicate generated names across
+implicit per-target Argo CD instances.
 
 ### M3 — Orchestration core with a constrained command unit
 

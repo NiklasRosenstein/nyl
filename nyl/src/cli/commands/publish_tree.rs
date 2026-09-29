@@ -253,7 +253,12 @@ fn publish_compiled(
     if let Some(commit) = publication_current_commit(compiled, publication_url, &credentials, cache)? {
         // The published tree matching is not enough: state read at an older
         // base means the branch moved while rendering.
-        verify_publication_base(compiled, Some(commit), publication_url, branch)?;
+        verify_publication_base(
+            compiled.publication_base.as_ref(),
+            Some(commit),
+            publication_url,
+            branch,
+        )?;
         print_publication_result(
             &format!("Deployment target {target_name} is already published"),
             publication_url,
@@ -265,7 +270,7 @@ fn publish_compiled(
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
     let expected = remote_branch_oid(&repository, branch);
-    verify_publication_base(compiled, expected, publication_url, branch)?;
+    verify_publication_base(compiled.publication_base.as_ref(), expected, publication_url, branch)?;
 
     let output_root = if compiled.target.publication_path_prefix().is_empty() {
         temp.path().to_path_buf()
@@ -288,7 +293,8 @@ fn publish_compiled(
         let actual = remote_branch_oid(&repository, branch);
         if actual != expected {
             return Err(NylError::config(format!(
-                "Publication {publication_url}@{branch} advanced from {expected:?} to {actual:?}; refusing stale publish"
+                "Publication {}@{branch} advanced from {expected:?} to {actual:?}; refusing stale publish",
+                crate::util::sanitize_url(publication_url)
             )));
         }
     }
@@ -530,12 +536,12 @@ fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, ta
 /// commit this publication builds on, so the published commit holds the
 /// state and the manifests rendered from it.
 fn verify_publication_base(
-    compiled: &CompiledTargetTree,
+    base: Option<&crate::gitops::inputs::PublicationBase>,
     expected: Option<git2::Oid>,
     publication_url: &str,
     branch: &str,
 ) -> Result<()> {
-    let Some(base) = &compiled.publication_base else {
+    let Some(base) = base else {
         return Ok(());
     };
     let expected = expected.map(|oid| oid.to_string());
@@ -867,70 +873,28 @@ mod tests {
 
     #[test]
     fn test_verify_publication_base_rejects_a_state_push_while_rendering() {
-        let compiled_at = |commit: Option<&str>| CompiledTargetTree {
-            target: serde_json::from_value(serde_json::json!({
-                "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
-                "kind": "DeploymentTarget",
-                "metadata": {"name": "production"},
-                "spec": {
-                    "clusterRef": {"name": "kasoku"},
-                    "publication": {
-                        "repository": {"repoURL": "https://example.invalid/deploy.git"},
-                        "revision": "deploy",
-                        "pathPrefix": "production"
-                    }
-                }
-            }))
-            .unwrap(),
-            cluster: serde_json::from_value(serde_json::json!({
-                "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
-                "kind": "Cluster",
-                "metadata": {"name": "kasoku"},
-                "spec": {
-                    "destination": {"server": "https://kubernetes.default.svc"},
-                    "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1"]}
-                }
-            }))
-            .unwrap(),
-            repository_name: None,
-            repository: crate::resources::InlineGitRepository {
-                repo_url: "https://example.invalid/deploy.git".to_owned(),
-                publish_url: None,
-            },
-            files: std::collections::BTreeMap::new(),
-            provenance: std::collections::BTreeMap::new(),
-            inputs: std::collections::BTreeSet::new(),
-            input_digests: std::collections::BTreeMap::new(),
-            state_files: std::collections::BTreeMap::new(),
-            committed_state_paths: std::collections::BTreeSet::new(),
-            publication_base: Some(crate::gitops::inputs::PublicationBase {
-                url: "https://example.invalid/deploy.git".to_owned(),
-                branch: "deploy".to_owned(),
-                prefix: "production".to_owned(),
-                commit: commit.map(str::to_owned),
-                origin: crate::gitops::inputs::PublicationBaseOrigin::Refreshed,
-            }),
+        let base_at = |commit: Option<&str>| crate::gitops::inputs::PublicationBase {
+            url: "https://example.invalid/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            prefix: "production".to_owned(),
+            commit: commit.map(str::to_owned),
+            origin: crate::gitops::inputs::PublicationBaseOrigin::Refreshed,
         };
+        let url = "https://example.invalid/deploy.git";
         let read_at = git2::Oid::from_str(&"a".repeat(40)).unwrap();
         let pushed = git2::Oid::from_str(&"b".repeat(40)).unwrap();
-        let compiled = compiled_at(Some(&read_at.to_string()));
-        verify_publication_base(&compiled, Some(read_at), "https://example.invalid/deploy.git", "deploy").unwrap();
+        let base = base_at(Some(&read_at.to_string()));
+        verify_publication_base(Some(&base), Some(read_at), url, "deploy").unwrap();
+        verify_publication_base(None, Some(pushed), url, "deploy").unwrap();
 
-        // Another writer moved the branch after the state was read: publishing
-        // would mix state from two commits, so it fails instead.
-        let error = verify_publication_base(&compiled, Some(pushed), "https://example.invalid/deploy.git", "deploy")
+        let error = verify_publication_base(Some(&base), Some(pushed), url, "deploy")
             .unwrap_err()
             .to_string();
         assert!(error.contains("another writer pushed while rendering"), "{error}");
         // A branch created while rendering counts as a push too.
-        let error = verify_publication_base(
-            &compiled_at(None),
-            Some(pushed),
-            "https://example.invalid/deploy.git",
-            "deploy",
-        )
-        .unwrap_err()
-        .to_string();
+        let error = verify_publication_base(Some(&base_at(None)), Some(pushed), url, "deploy")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("another writer pushed while rendering"), "{error}");
     }
 

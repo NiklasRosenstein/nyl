@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    environment: production
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+  name: api
+  namespace: argocd-production
+spec:
+  destination:
+    namespace: api
+    server: https://kubernetes.default.svc
+  project: workloads
+  source:
+    directory:
+      recurse: true
+    path: production/workloads/api
+    repoURL: https://example.invalid/deploy.git
+    targetRevision: deploy/production
+  syncPolicy:
+    syncOptions:
+    - ApplyOutOfSyncOnly=true
+    - ServerSideApply=true

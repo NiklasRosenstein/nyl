@@ -5345,12 +5345,13 @@ fn published_api_manifests(destination: &TempDir) -> String {
     rendered
 }
 
-/// The M2 exit criterion: one target renders from a static value, locked Git
-/// state, and committed and carried publication state, through both tree
-/// commands, and publishes the manifests and state in one commit.
+/// One target renders from every non-orchestrated binding kind through both
+/// tree commands, and publishes the carried state with the manifests rendered
+/// from it in one commit on top of the committed state.
 #[test]
 fn test_tree_commands_render_every_non_orchestrated_input_kind() {
     let (fixture, destination, seed, _) = publication_fixture();
+    let cache = TempDir::new().unwrap();
     let locked = StateRepository::new();
     let commit = locked.commit("sizing.json", r#"{"web": {"tier": "large"}}"#, "Sizing", "main");
     push_publication_state(
@@ -5368,6 +5369,7 @@ metadata:
 spec:
   inputs:
     static: {type: string}
+    file: {type: string}
     locked: {type: string}
     committed: {type: string}
     carried: {type: string}
@@ -5379,6 +5381,7 @@ metadata:
   namespace: api
 data:
   static: '{{ inputs.static }}'
+  file: '{{ inputs.file }}'
   locked: '{{ inputs.locked }}'
   committed: '{{ inputs.committed }}'
   carried: '{{ inputs.carried }}'
@@ -5390,22 +5393,46 @@ data:
     fs::write(
         &target_path,
         format!(
-            "{target}  releaseInputs:\n    workloads/api:\n      static:\n        value: static-value\n      locked:\n        fromGit:\n          repository: {{repoURL: '{}'}}\n          revision: main\n          commit: '{commit}'\n          path: sizing.json\n          pointer: /web/tier\n      committed:\n        fromPublication:\n          path: state/committed.json\n          pointer: /api\n      carried:\n        fromPublication:\n          path: state/carried.json\n          pointer: /api\n          carryFileFromWorktree: build/carried.json\n",
+            "{target}  releaseInputs:\n    workloads/api:\n      static:\n        value: static-value\n      file:\n        fromFile:\n          path: config/values/file.json\n          pointer: /api\n      locked:\n        fromGit:\n          repository: {{repoURL: '{}'}}\n          revision: main\n          commit: '{commit}'\n          path: sizing.json\n          pointer: /web/tier\n      committed:\n        fromPublication:\n          path: state/committed.json\n          pointer: /api\n      carried:\n        fromPublication:\n          path: state/carried.json\n          pointer: /api\n          carryFileFromWorktree: build/carried.json\n",
             locked.url()
         ),
     )
     .unwrap();
+    fs::create_dir_all(fixture.path().join("config/values")).unwrap();
+    fs::write(
+        fixture.path().join("config/values/file.json"),
+        r#"{"api": "file-value"}"#,
+    )
+    .unwrap();
     commit_all(&Repository::open(fixture.path()).unwrap(), "Bind every input kind");
+    let nyl = |args: &[&str]| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(args)
+            .assert()
+    };
+    let output_dir = fixture.path().join("deploy");
     fs::create_dir_all(fixture.path().join("build")).unwrap();
     fs::write(fixture.path().join("build/carried.json"), r#"{"api": "carried-value"}"#).unwrap();
 
     let expected = [
         "static: static-value",
+        "file: file-value",
         "locked: large",
         "committed: committed-value",
         "carried: carried-value",
     ];
-    render_production(&fixture).success();
+    nyl(&[
+        "render-tree",
+        "--target",
+        "production",
+        "--output-dir",
+        output_dir.to_str().unwrap(),
+    ])
+    .success();
     let rendered = read_tree(&fixture.path().join("deploy/production"))
         .into_iter()
         .filter(|(path, _)| path.starts_with("workloads/api"))
@@ -5415,14 +5442,21 @@ data:
         assert!(rendered.contains(line), "{line} missing from:\n{rendered}");
     }
 
-    publish_production(&fixture).success();
+    let base = published_commit(&Repository::open_bare(destination.path()).unwrap(), "deploy/production").id();
+    nyl(&["publish-tree", "--target", "production"]).success();
     let published = published_api_manifests(&destination);
     for line in expected {
         assert!(published.contains(line), "{line} missing from:\n{published}");
     }
     let repository = Repository::open_bare(destination.path()).unwrap();
     let head = published_commit(&repository, "deploy/production");
-    // The carried state lands in the same commit as the manifests rendered from it.
+    // One commit on the base holds the manifests, the carried state rendered
+    // into them, and the committed state it left in place.
+    assert_eq!(head.parent_id(0).unwrap(), base);
+    assert_eq!(
+        published_file(&repository, &head, "production/state/committed.json"),
+        br#"{"api": "committed-value"}"#
+    );
     assert_eq!(
         published_file(&repository, &head, "production/state/carried.json"),
         br#"{"api": "carried-value"}"#
@@ -5431,12 +5465,106 @@ data:
         serde_json::from_slice(&published_file(&repository, &head, "production/_nyl/index.json")).unwrap();
     for key in [
         "@input/workloads/api/static",
+        "@input/workloads/api/file",
         "@input/workloads/api/locked",
         "@publication/state/committed.json",
         "@carried/state/carried.json",
     ] {
         assert!(index["inputs"].get(key).is_some(), "{key} missing from {index}");
     }
+}
+
+/// Output of a project without Release inputs, as the release before Release
+/// inputs rendered it; only `sourceCommit` in the index varies per run.
+/// Regenerate deliberately with `render-tree --target production` on this
+/// fixture when an intended change alters it.
+#[test]
+fn test_render_tree_without_inputs_matches_the_pre_inputs_output() {
+    let fixture = fixture();
+    render_production(&fixture).success();
+    let mut rendered = read_tree(&fixture.path().join("deploy/production"));
+    let index = rendered.get_mut(&PathBuf::from("_nyl/index.json")).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(index).unwrap();
+    value["sourceCommit"] = serde_json::Value::Null;
+    *index = serde_json::to_vec_pretty(&value).unwrap();
+    let golden =
+        read_tree(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/render-tree-without-inputs"));
+    assert_eq!(
+        rendered.keys().collect::<Vec<_>>(),
+        golden.keys().collect::<Vec<_>>(),
+        "rendered file set changed"
+    );
+    for (path, bytes) in &golden {
+        assert_eq!(
+            String::from_utf8_lossy(&rendered[path]),
+            String::from_utf8_lossy(bytes),
+            "{} changed",
+            path.display()
+        );
+    }
+}
+
+/// A state push that lands while `publish-tree` renders makes publication
+/// fail instead of publishing manifests rendered from older state. A fake
+/// `helm` on the command's PATH pushes the state during `helm template`.
+#[cfg(unix)]
+#[test]
+fn test_publish_tree_fails_when_state_is_pushed_while_rendering() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "read-before-render"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let release = fixture.path().join("applications/workloads/api.yaml");
+    let bundle = fs::read_to_string(&release).unwrap();
+    fs::write(
+        &release,
+        format!("{bundle}---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: chart\n  namespace: api\nspec:\n  chart:\n    name: ./charts/chart\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.path().join("charts/chart/templates")).unwrap();
+    fs::write(
+        fixture.path().join("charts/chart/Chart.yaml"),
+        "apiVersion: v2\nname: chart\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Render a chart");
+
+    let bin = TempDir::new().unwrap();
+    let helm = bin.path().join("helm");
+    fs::write(
+        &helm,
+        format!(
+            "#!/bin/sh\nset -e\ncase \"$1\" in\n  version) echo v3.15.0 ;;\n  template)\n    cd '{seed}'\n    git checkout -q deploy/production\n    git pull -q origin deploy/production\n    echo '{{\"api\": \"pushed-while-rendering\"}}' > production/state/images.json\n    git -c user.name=ci -c user.email=ci@example.invalid commit -qam 'Concurrent state' >&2\n    git push -q origin deploy/production >&2\n    printf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: from-chart\\n  namespace: api\\n' ;;\nesac\n",
+            seed = seed.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helm, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .env("PATH", path)
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("another writer pushed while rendering"));
+    // The branch holds the concurrent state and no publication built on it.
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let head = published_commit(&repository, "deploy/production");
+    assert_eq!(head.summary().unwrap(), Some("Concurrent state"));
+    assert!(head
+        .tree()
+        .unwrap()
+        .get_path(std::path::Path::new("production/_nyl/index.json"))
+        .is_err());
 }
 
 #[test]

@@ -1,0 +1,19 @@
+# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)
+# Nyl-Provenance: Resource: k8s.gitops.nyl/v1 Release api/api
+# Nyl-Provenance: Generated: Namespace "api" for Release "api"
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=confirm,Prune=confirm
+  name: api
+---
+# Nyl-Provenance: Source: applications/workloads/api.yaml (document 2)
+# Nyl-Provenance: Resource: v1 ConfigMap api/api
+apiVersion: v1
+data:
+  environment: production
+kind: ConfigMap
+metadata:
+  name: api
+  namespace: api
