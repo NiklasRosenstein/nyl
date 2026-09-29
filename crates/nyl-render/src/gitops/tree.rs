@@ -423,26 +423,7 @@ async fn compile_target_tree_inner(
     .with_cache(cache.cloned());
     let mut git_manager = None;
 
-    let mut groups = Vec::new();
-    let mut disabled_groups = BTreeSet::new();
-    for discovered in inventory.resources.values() {
-        if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup {
-            continue;
-        }
-        if !target_selects_group(&target, &discovered.static_labels) {
-            continue;
-        }
-        let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, &central_session)?
-        else {
-            continue;
-        };
-        if group.spec.enabled {
-            groups.push((discovered.source_path.clone(), *group));
-        } else {
-            disabled_groups.insert(group.metadata.name.clone());
-        }
-    }
-    groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
+    let (groups, disabled_groups) = selected_groups(inventory, &target, &central_session)?;
 
     let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
@@ -1593,7 +1574,7 @@ fn register_namespace_owner(
     Ok(())
 }
 
-fn target_selects_group(target: &DeploymentTarget, group_labels: &BTreeMap<String, String>) -> bool {
+pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTreeMap<String, String>) -> bool {
     target
         .spec
         .application_group_selector
@@ -1932,7 +1913,7 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
     Ok(())
 }
 
-fn resolve_git_publication(
+pub(super) fn resolve_git_publication(
     inventory: &GitOpsInventory,
     publication: &GitPublication,
 ) -> Result<(Option<String>, InlineGitRepository, Option<PathBuf>)> {
@@ -1945,7 +1926,7 @@ fn resolve_git_publication(
     Ok((name.filter(|_| path.is_some()), repository, path))
 }
 
-fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
+pub(super) fn resolve_cluster(inventory: &GitOpsInventory, name: &str) -> Result<(Cluster, PathBuf)> {
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, name)
         .ok_or_else(|| NylError::config(format!("Cluster {name:?} was not found")))?;
@@ -2198,7 +2179,7 @@ fn app_project_name(project: &AppProjectDefinition) -> Result<String> {
         .ok_or_else(|| NylError::config("AppProjectDefinition spec.manifest.metadata.name must be a string"))
 }
 
-fn render_effective_control(
+pub(super) fn render_effective_control(
     discovered: &super::DiscoveredGitOpsResource,
     session: &RenderSession,
 ) -> Result<Option<GitOpsResource>> {
@@ -2367,6 +2348,107 @@ fn resolve_remote_group_source(
     Ok((selected, checkout, repository))
 }
 
+/// Enabled groups with their resource paths, and the names of disabled ones.
+pub(super) type SelectedGroups = (Vec<(PathBuf, ApplicationGroup)>, BTreeSet<String>);
+
+/// The ApplicationGroups `target` selects: the enabled ones with their
+/// resource paths, sorted by name, and the names of the disabled ones.
+/// Effective `spec.enabled` is evaluated after selection.
+pub(super) fn selected_groups(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+    session: &RenderSession,
+) -> Result<SelectedGroups> {
+    let mut groups = Vec::new();
+    let mut disabled = BTreeSet::new();
+    for discovered in inventory.resources.values() {
+        if discovered.identity.kind != GitOpsResourceKind::ApplicationGroup
+            || !target_selects_group(target, &discovered.static_labels)
+        {
+            continue;
+        }
+        let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, session)? else {
+            continue;
+        };
+        if group.spec.enabled {
+            groups.push((discovered.source_path.clone(), *group));
+        } else {
+            disabled.insert(group.metadata.name.clone());
+        }
+    }
+    groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
+    Ok((groups, disabled))
+}
+
+/// The root and file selection of a local ApplicationGroup source, or `None`
+/// for a remote one. The root must exist.
+pub(super) fn local_group_source(
+    inventory: &GitOpsInventory,
+    group_resource_path: &Path,
+    group: &ApplicationGroup,
+) -> Result<Option<(PathBuf, ApplicationGroupSource)>> {
+    let (root, source) = match &group.spec.source {
+        Some(source) if source.is_remote() => return Ok(None),
+        Some(source) => (
+            local_group_source_root(inventory, &group.metadata.name, &source.path)?,
+            source.clone(),
+        ),
+        None => (
+            crate::gitops::derived_group_source_root(
+                &inventory.project_root,
+                group_resource_path,
+                &group.metadata.name,
+            ),
+            default_group_source(),
+        ),
+    };
+    ensure_group_source_root(&group.metadata.name, &root)?;
+    Ok(Some((root, source)))
+}
+
+fn ensure_group_source_root(group: &str, root: &Path) -> Result<()> {
+    if root.is_dir() {
+        Ok(())
+    } else {
+        Err(NylError::config(format!(
+            "ApplicationGroup {group:?} source directory does not exist: {}",
+            root.display()
+        )))
+    }
+}
+
+/// The files a local group source renders: Git-visible YAML beneath `root`,
+/// selected by the source, excluding control resources.
+pub(super) fn local_candidate_files(
+    inventory: &GitOpsInventory,
+    root: &Path,
+    source: &ApplicationGroupSource,
+) -> Vec<PathBuf> {
+    let files = inventory
+        .worktree_yaml_files
+        .iter()
+        .map(|path| inventory.worktree_root.join(path))
+        .filter(|path| path.starts_with(root))
+        .collect();
+    select_candidate_files(inventory, root, source, files)
+}
+
+fn select_candidate_files(
+    inventory: &GitOpsInventory,
+    root: &Path,
+    source: &ApplicationGroupSource,
+    mut files: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let control_files = inventory
+        .resources
+        .values()
+        .map(|resource| inventory.project_root.join(&resource.source_path))
+        .collect::<BTreeSet<_>>();
+    files.retain(|path| !control_files.contains(path) && source_matches(root, path, source));
+    files.sort();
+    files
+}
+
 fn resolve_group_source(
     inventory: &GitOpsInventory,
     group_resource_path: &Path,
@@ -2376,68 +2458,21 @@ fn resolve_group_source(
     cache: Option<&GitOpsCache>,
 ) -> Result<ResolvedGroupSource> {
     let mut provenance_inputs = Vec::new();
-    let (root, source, remote_root, source_repository) = match &group.spec.source {
+    let (root, source, remote_root, source_repository, candidate_files) = match &group.spec.source {
         Some(source) if source.is_remote() => {
             let (selected, checkout, repository) =
                 resolve_remote_group_source(inventory, source, git_manager, cache, &mut provenance_inputs)?;
-            (selected, source.clone(), Some(checkout), Some(repository))
+            ensure_group_source_root(&group.metadata.name, &selected)?;
+            let files = select_candidate_files(inventory, &selected, source, collect_checkout_yaml(&selected)?);
+            (selected, source.clone(), Some(checkout), Some(repository), files)
         }
-        Some(source) => (
-            local_group_source_root(inventory, &group.metadata.name, &source.path)?,
-            source.clone(),
-            None,
-            None,
-        ),
-        None => {
-            let root = crate::gitops::derived_group_source_root(
-                &inventory.project_root,
-                group_resource_path,
-                &group.metadata.name,
-            );
-            (
-                root,
-                ApplicationGroupSource {
-                    repository_ref: None,
-                    repository: None,
-                    revision: None,
-                    commit: None,
-                    path: String::new(),
-                    include: vec!["*.yaml".to_string(), "*.yml".to_string()],
-                    exclude: Vec::new(),
-                    recursive: true,
-                    renderer_config: RendererConfig::default(),
-                },
-                None,
-                None,
-            )
+        _ => {
+            let (root, source) = local_group_source(inventory, group_resource_path, group)?
+                .expect("a source that is not remote is local");
+            let files = local_candidate_files(inventory, &root, &source);
+            (root, source, None, None, files)
         }
     };
-    if !root.is_dir() {
-        return Err(NylError::config(format!(
-            "ApplicationGroup {:?} source directory does not exist: {}",
-            group.metadata.name,
-            root.display()
-        )));
-    }
-
-    let mut files = if remote_root.is_some() {
-        collect_checkout_yaml(&root)?
-    } else {
-        inventory
-            .worktree_yaml_files
-            .iter()
-            .map(|path| inventory.worktree_root.join(path))
-            .filter(|path| path.starts_with(&root))
-            .collect()
-    };
-    let control_files = inventory
-        .resources
-        .values()
-        .map(|resource| inventory.project_root.join(&resource.source_path))
-        .collect::<BTreeSet<_>>();
-    files.retain(|path| !control_files.contains(path) && source_matches(&root, path, &source));
-    files.sort();
-    let candidate_files = files;
     let files = static_release_files(&candidate_files)?;
 
     let source_session = build_group_source_session(inventory, target, remote_root.as_deref(), &source)?;
@@ -2568,6 +2603,22 @@ fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// The source of an ApplicationGroup that declares none: every YAML file
+/// beneath its derived root.
+pub(super) fn default_group_source() -> ApplicationGroupSource {
+    ApplicationGroupSource {
+        repository_ref: None,
+        repository: None,
+        revision: None,
+        commit: None,
+        path: String::new(),
+        include: vec!["*.yaml".to_string(), "*.yml".to_string()],
+        exclude: Vec::new(),
+        recursive: true,
+        renderer_config: RendererConfig::default(),
+    }
 }
 
 /// Whether an ApplicationGroup source selects a file below its root.

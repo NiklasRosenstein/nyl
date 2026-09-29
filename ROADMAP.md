@@ -628,11 +628,11 @@ ambiguous command semantics. Met by the
 - [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
   `fromFile`, `fromGit`, and `fromPublication`, with type validation and
   defaults.
-- [ ] Support `carryFileFromWorktree` for `fromPublication`, excluding carried files from the
+- [x] Support `carryFileFromWorktree` for `fromPublication`, excluding carried files from the
   dirty check.
 - [x] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
   `--target` filter.
-- [ ] Apply target bindings in direct commands and add `--input`/`--inputs`;
+- [x] Apply target bindings in direct commands and add `--input`/`--inputs`;
   a target that selects no group containing the Release fails unless
   `--application-group` or `--defaults-only` is given.
 - [x] Require unique generated Argo CD names across every pair of targets whose

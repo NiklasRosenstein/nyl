@@ -557,14 +557,7 @@ pub fn resolve_target_inputs(
             ));
             continue;
         }
-        for name in bindings.keys() {
-            if !release.declarations.contains_key(name) {
-                issues.push(format!(
-                    "spec.releaseInputs.{key_text:?}.{name} binds an input Release {key} does not declare; declared inputs: {}",
-                    release.declarations.keys().cloned().collect::<Vec<_>>().join(", ")
-                ));
-            }
-        }
+        issues.extend(undeclared_binding_issues(&key, bindings, release.declarations));
         bound.insert(key, bindings);
     }
 
@@ -612,6 +605,25 @@ pub fn resolve_target_inputs(
                 .join("\n")
         )))
     }
+}
+
+/// A binding must name an input its Release declares.
+pub fn undeclared_binding_issues(
+    key: &ReleaseKey,
+    bindings: &BTreeMap<String, InputBinding>,
+    declarations: &BTreeMap<String, InputDeclaration>,
+) -> Vec<String> {
+    bindings
+        .keys()
+        .filter(|name| !declarations.contains_key(*name))
+        .map(|name| {
+            format!(
+                "spec.releaseInputs.{:?}.{name} binds an input Release {key} does not declare; declared inputs: {}",
+                key.to_string(),
+                declarations.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect()
 }
 
 /// Resolve one Release's declared inputs.

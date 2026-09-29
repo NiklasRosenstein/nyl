@@ -446,7 +446,11 @@ effective input = --input / --inputs override, if present
   are validated like bindings and recorded as provenance.
 - `fromGit` resolves at its lock. `fromPublication` fetches the publication
   branch, reads its head (or the carried file when present), and reports the
-  commit it used.
+  commit it used; `nyl render --offline` reads the cached head, as
+  `render-tree --offline` does.
+- Only the rendered Release's bindings are validated. Problems elsewhere in
+  the target's binding set, such as a binding for another Release, are
+  reported by the tree commands.
 - Tree commands (`render-tree`, `diff-tree`, `publish-tree`) accept no
   overrides. Published output always reproduces from committed source, the
   recorded publication base commit, and carried files, which are part of the

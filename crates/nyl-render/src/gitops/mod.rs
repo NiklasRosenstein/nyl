@@ -1,6 +1,7 @@
 //! Project discovery and compilation support for rendered GitOps workflows.
 
 pub mod argocd;
+pub mod direct_inputs;
 pub mod discovery;
 pub mod inputs;
 pub mod layout;
