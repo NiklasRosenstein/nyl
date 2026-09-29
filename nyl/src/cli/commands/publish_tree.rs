@@ -648,10 +648,22 @@ fn writable_branch_name(revision: &str) -> Result<&str> {
 fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialProvider) -> Result<Repository> {
     let mut fetch = FetchOptions::new();
     fetch.remote_callbacks(credentials.build_callbacks(url));
+    // Check nothing out while cloning: the user's Git config may convert line
+    // endings, and owned files must keep the exact bytes their index records.
+    let mut no_checkout = CheckoutBuilder::new();
+    no_checkout.dry_run();
     let repository = RepoBuilder::new()
         .fetch_options(fetch)
+        .with_checkout(no_checkout)
         .clone(url, path)
         .map_err(|error| NylError::config(format!("Failed to clone {url}: {error}")))?;
+    {
+        let mut config = repository.config().map_err(crate::git::GitError::from)?;
+        config
+            .set_bool("core.autocrlf", false)
+            .and_then(|()| config.set_str("core.eol", "lf"))
+            .map_err(crate::git::GitError::from)?;
+    }
     if let Some(oid) = remote_branch_oid(&repository, branch) {
         let commit = repository.find_commit(oid).map_err(crate::git::GitError::from)?;
         repository
