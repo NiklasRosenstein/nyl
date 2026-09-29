@@ -1,4 +1,0 @@
-{
-  "$ref": "k8s.gitops.nyl/v1/argocd-instance.schema.json",
-  "$schema": "https://json-schema.org/draft/2020-12/schema"
-}
