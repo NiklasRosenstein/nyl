@@ -346,6 +346,7 @@ pub(super) struct Report {
     pub stages: Stages,
     validation: Validation,
     errors: Vec<OperationError>,
+    warnings: Vec<ReportWarning>,
     fail_on_diff: bool,
     diff_policy_failed: bool,
     #[serde(skip)]
@@ -400,6 +401,15 @@ struct Validation {
     reason: Option<String>,
     scope: &'static str,
     report: Option<crate::validation::ValidationReport>,
+}
+
+/// A condition that does not fail the comparison but needs the user's
+/// attention, with a stable code and the documentation that resolves it.
+#[derive(Serialize)]
+pub(super) struct ReportWarning {
+    pub code: &'static str,
+    pub message: String,
+    pub docs: &'static str,
 }
 
 #[derive(Serialize)]
@@ -472,6 +482,30 @@ impl Publication {
         }
     }
 
+    /// Whether both publish to the same repository, branch, and prefix.
+    fn same_destination(&self, other: &Self) -> bool {
+        (&self.repository, &self.publish_url, &self.revision, &self.path_prefix)
+            == (
+                &other.repository,
+                &other.publish_url,
+                &other.revision,
+                &other.path_prefix,
+            )
+    }
+
+    fn location(&self) -> String {
+        format!(
+            "{}@{}:{}",
+            self.publish_url.as_deref().unwrap_or(&self.repository),
+            self.revision,
+            if self.path_prefix.is_empty() {
+                "."
+            } else {
+                &self.path_prefix
+            }
+        )
+    }
+
     fn fields(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Cluster", self.cluster.clone()),
@@ -529,6 +563,7 @@ impl Report {
                 report: None,
             },
             errors: Vec::new(),
+            warnings: Vec::new(),
             fail_on_diff: args.fail_on_diff,
             diff_policy_failed: false,
             patch: None,
@@ -573,14 +608,28 @@ impl Report {
                 commit: b.commit.to_string(),
                 publication: Publication::from_tree(desired),
             },
-            ResolvedBaseline::Source(b) => Baseline::Source {
-                repository: sanitize_url(&b.repository),
-                revision: b.revision.clone(),
-                commit: b.commit.to_string(),
-                project_path: b.project_path.clone(),
-                project_location: b.project_location,
-                publication: Publication::from_tree(&b.compiled),
-            },
+            ResolvedBaseline::Source(b) => {
+                let (before, after) = (Publication::from_tree(&b.compiled), Publication::from_tree(desired));
+                if !before.same_destination(&after) {
+                    self.warnings.push(ReportWarning {
+                        code: "publication_moved",
+                        message: format!(
+                            "The target moves from {} to {}. Nyl does not move its publication state or remove the old prefix; the move needs manual steps on the publication branch and in Argo CD.",
+                            before.location(),
+                            after.location()
+                        ),
+                        docs: super::PUBLICATION_MOVE_DOCS,
+                    });
+                }
+                Baseline::Source {
+                    repository: sanitize_url(&b.repository),
+                    revision: b.revision.clone(),
+                    commit: b.commit.to_string(),
+                    project_path: b.project_path.clone(),
+                    project_location: b.project_location,
+                    publication: before,
+                }
+            }
         });
     }
 
@@ -778,6 +827,16 @@ impl Report {
         );
         for error in &self.errors {
             writeln!(output, "ERROR ({}): {}", error.stage, display_value(&error.message)).unwrap();
+        }
+        for warning in &self.warnings {
+            writeln!(
+                output,
+                "WARNING ({}): {}\n  See {}",
+                warning.code,
+                display_value(&warning.message),
+                warning.docs
+            )
+            .unwrap();
         }
         if let Some(validation) = &self.validation.report {
             for destination in &validation.destinations {

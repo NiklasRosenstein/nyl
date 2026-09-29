@@ -328,7 +328,16 @@ releaseInputs:
   commit is the one publication builds on. One command reads one base: the
   clean-`HEAD` verification of `publish-tree` and a `diff-tree` baseline, the
   published tree or another source revision, reuse the base of the desired
-  render.
+  render. A source baseline whose target publishes to another repository,
+  branch, or prefix reads its own branch head and its own carried state
+  instead, and `diff-tree` warns that the move needs manual migration.
+- **Before the first publication.** A prefix without an ownership index owns
+  nothing yet. It is accepted only while every file in it is a declared state
+  path of the target; any other file means the prefix belongs to something
+  else, such as after a mistyped `pathPrefix`, and fails the command.
+- **Moving a publication.** Nyl does not move state files or remove the old
+  prefix when a target's publication changes. The move is a manual change on
+  the publication branch, and Argo CD must be pointed at the new prefix.
 - **Scope.** Only the target's own prefix on its own publication branch can be
   read. Another target's prefix or branch, or another repository, uses
   `fromGit`.

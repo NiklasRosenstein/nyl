@@ -16,6 +16,10 @@ use crate::gitops::{
 use crate::util::project_path::{locate_checkout_project, ProjectLocation};
 use crate::{NylError, Result};
 
+/// Documentation of the manual steps a publication move needs.
+pub(super) const PUBLICATION_MOVE_DOCS: &str =
+    "https://niklasrosenstein.github.io/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/#move-a-publication";
+
 use report::{DiffMode, Report, ReportFormat, ReportOutput, StageState, TreeDiff};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
@@ -305,13 +309,24 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     );
     let compared = async {
         // A source baseline reads the same publication state, so the diff
-        // shows only what the source change causes.
+        // shows only what the source change causes. A baseline that
+        // publishes elsewhere reads its own publication instead.
         let options = TreeRenderOptions {
             publication_base: desired.publication_base.clone(),
             pinned_state_files: Some(desired.state_files.clone()),
             ..options
         };
         let baseline = resolve_baseline(args, &inventory, &target_name, &desired, &cache, options).await?;
+        if let ResolvedBaseline::Source(source) = &baseline {
+            if let Some(base) = source
+                .compiled
+                .publication_base
+                .as_ref()
+                .filter(|base| desired.publication_base.as_ref() != Some(*base))
+            {
+                eprintln!("Baseline: {}", base.describe());
+            }
+        }
         report.baseline(&baseline, &desired);
         let selection = DiffSelection::from_args(args);
         let comparison = comparison_files(&selection, &baseline, &desired)?;
@@ -689,7 +704,7 @@ fn published_tree(
     .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
     let root = checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
-    let published = read_rendered_tree(&root)?;
+    let published = read_rendered_tree(&root, &compiled.declared_state_paths())?;
     if let Some(index) = published.index {
         let repository = compiled
             .repository_name
@@ -840,7 +855,17 @@ fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Ve
     Ok(bytes)
 }
 
-pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
+/// Read the files the ownership index under `root` lists.
+///
+/// A prefix without an index owns nothing yet. Before the first publication it
+/// may hold state files another tool committed for `fromPublication`
+/// bindings, so it is accepted when every file in it is one of the
+/// `declared_state_paths` (relative to the prefix). Any other file means the
+/// prefix belongs to something else, such as after a mistyped `pathPrefix`.
+pub(super) fn read_rendered_tree(
+    root: &Path,
+    declared_state_paths: &BTreeSet<PathBuf>,
+) -> Result<PublishedRenderedTree> {
     if !root.exists() {
         return Ok(PublishedRenderedTree {
             files: BTreeMap::new(),
@@ -848,10 +873,27 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
         });
     }
     let index_path = root.join(crate::gitops::reconcile::DEFAULT_INDEX_PATH);
-    // A prefix without an index owns nothing yet. It may already hold state
-    // files another tool committed for fromPublication bindings; they are not
-    // Nyl's, so the published tree is empty until the first publication.
     if !index_path.is_file() {
+        let foreign = unindexed_files(root)?
+            .into_iter()
+            .filter(|path| !declared_state_paths.contains(path))
+            .collect::<Vec<_>>();
+        if !foreign.is_empty() {
+            const MAX_LISTED: usize = 5;
+            let mut listed = foreign
+                .iter()
+                .take(MAX_LISTED)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            if foreign.len() > MAX_LISTED {
+                listed.push(format!("… and {} more", foreign.len() - MAX_LISTED));
+            }
+            return Err(NylError::config(format!(
+                "Published rendered tree {} has no ownership index but holds files no fromPublication binding declares:\n- {}\nCheck the DeploymentTarget publication.pathPrefix; before its first publication a prefix may hold only declared state files.",
+                root.display(),
+                listed.join("\n- ")
+            )));
+        }
         return Ok(PublishedRenderedTree {
             files: BTreeMap::new(),
             index: None,
@@ -889,6 +931,31 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
         files,
         index: Some(index),
     })
+}
+
+/// Every file beneath `root`, relative to it, skipping Git metadata. A
+/// symbolic link is listed as a file, so it is never mistaken for state.
+fn unindexed_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut files = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| NylError::config(format!("Published path escaped its root: {error}")))?;
+                files.insert(relative.to_path_buf());
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
@@ -1079,12 +1146,20 @@ mod tests {
     }
 
     #[test]
-    fn test_read_rendered_tree_without_an_ownership_index_owns_nothing() {
+    fn test_read_rendered_tree_without_an_ownership_index_accepts_only_declared_state() {
         let temp = tempfile::TempDir::new().unwrap();
-        std::fs::write(temp.path().join("state.json"), "{\"image\": \"web:1\"}\n").unwrap();
-        let published = read_rendered_tree(temp.path()).unwrap();
+        std::fs::create_dir(temp.path().join("state")).unwrap();
+        std::fs::write(temp.path().join("state/images.json"), "{\"image\": \"web:1\"}\n").unwrap();
+        let declared = BTreeSet::from([PathBuf::from("state/images.json")]);
+        let published = read_rendered_tree(temp.path(), &declared).unwrap();
         assert!(published.index.is_none());
         assert!(published.files.is_empty());
+
+        std::fs::write(temp.path().join("deployment.yaml"), "kind: Deployment\n").unwrap();
+        let error = read_rendered_tree(temp.path(), &declared).unwrap_err().to_string();
+        assert!(error.contains("has no ownership index"), "{error}");
+        assert!(error.contains("- deployment.yaml"), "{error}");
+        assert!(!error.contains("images.json"), "{error}");
     }
 
     #[cfg(unix)]

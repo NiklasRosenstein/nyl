@@ -5289,6 +5289,8 @@ fn push_publication_change(seed: &TempDir, path: &str, contents: Option<&str>) -
             .peel_to_commit()
             .unwrap()
     });
+    // Detach first: the branch may be checked out from an earlier push.
+    repository.set_head_detached(base.id()).unwrap();
     repository.branch(branch, &base, true).unwrap();
     repository.set_head(&format!("refs/heads/{branch}")).unwrap();
     repository
@@ -5437,6 +5439,103 @@ fn test_publish_tree_renders_committed_publication_state_at_the_base_commit() {
     publish_production(&fixture)
         .success()
         .stdout(predicate::str::contains("is already published"));
+}
+
+#[test]
+fn test_diff_tree_accepts_an_unindexed_prefix_only_with_declared_state() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:committed"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let diff = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args([
+                "diff-tree",
+                "--target",
+                "production",
+                "--against",
+                "published",
+                "--color",
+                "never",
+            ])
+            .assert()
+    };
+    // Before the first publication the prefix holds only declared state.
+    diff()
+        .success()
+        .stdout(predicate::str::contains("production/workloads/api"));
+
+    // A file no binding declares means the prefix belongs to something else.
+    push_publication_state(&seed, "production/hand-written.yaml", "kind: ConfigMap\n");
+    diff()
+        .failure()
+        .stderr(predicate::str::contains("has no ownership index"))
+        .stderr(predicate::str::contains("- hand-written.yaml"));
+}
+
+#[test]
+fn test_diff_tree_source_baseline_reads_its_own_publication_after_a_move() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:before"}"#,
+    );
+    push_publication_state(
+        &seed,
+        "moved/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:after"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let baseline = Repository::open(fixture.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    let target = fixture.path().join("config/targets/production.yaml");
+    let moved = fs::read_to_string(&target)
+        .unwrap()
+        .replace("pathPrefix: production", "pathPrefix: moved");
+    fs::write(&target, moved).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "source",
+            "--source-ref",
+            &baseline,
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+            "--progress",
+            "off",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        // Each side reads the state of the prefix it publishes to.
+        .stdout(predicate::str::contains(
+            "-  image: registry.example.com/api@sha256:before",
+        ))
+        .stdout(predicate::str::contains(
+            "+  image: registry.example.com/api@sha256:after",
+        ))
+        .stderr(predicate::str::contains("WARNING (publication_moved)"))
+        .stderr(predicate::str::contains("#move-a-publication"));
 }
 
 #[test]
