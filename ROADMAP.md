@@ -230,7 +230,7 @@ spec:
   builds on and pushes with a compare-and-swap, so the published commit holds
   the state and the manifests rendered from it, and the index records the state
   digest. The path is relative to the target's publication prefix and must stay
-  outside Argo CD-synced directories. With `carry`,
+  outside Argo CD-synced directories. With `carryFileFromWorktree`,
   the state file is instead produced uncommitted in the working tree and
   written by `publish-tree` itself, alongside the manifests derived from it.
 - Rendering validates bound values against declared types and fails on an
@@ -628,7 +628,7 @@ ambiguous command semantics. Met by the
 - [ ] Implement Release inputs and DeploymentTarget bindings for `value`,
   `fromFile`, `fromGit`, and `fromPublication`, with type validation and
   defaults.
-- [ ] Support `carry` for `fromPublication`, excluding carried files from the
+- [ ] Support `carryFileFromWorktree` for `fromPublication`, excluding carried files from the
   dirty check.
 - [x] Extend `nyl update source-locks` to refresh `fromGit` locks, with a
   `--target` filter.

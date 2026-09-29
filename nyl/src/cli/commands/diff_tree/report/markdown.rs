@@ -71,6 +71,15 @@ impl Report {
         if omitted_errors > 0 {
             writeln!(output, "{omitted_errors} additional operation errors omitted.\n").unwrap();
         }
+        for warning in &self.warnings {
+            let block = format!(
+                "**Warning ({}):** {} [Steps]({})\n\n",
+                warning.code,
+                value(&warning.message),
+                warning.docs
+            );
+            push_if_fits(&mut output, &block, limit);
+        }
 
         let traces = self.markdown_findings(&mut output, limit);
         let details_position = output.len();

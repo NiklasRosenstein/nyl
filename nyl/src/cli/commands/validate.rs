@@ -82,9 +82,17 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
                 .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
                 .map(|resource| resource.identity.name.clone())
                 .collect::<Vec<_>>();
+            // Like `vendor --check`, validation reads fromPublication state at
+            // the refreshed branch head and falls back to the cached head, so
+            // it also works offline.
+            let options = crate::gitops::TreeRenderOptions {
+                publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
+                ..crate::gitops::TreeRenderOptions::default()
+            };
             let mut compiled = Vec::with_capacity(target_names.len());
             for target in target_names {
-                compiled.push(crate::gitops::compile_target_tree(&inventory, &target).await?);
+                compiled
+                    .push(crate::gitops::compile_target_tree_with_options(&inventory, &target, options.clone()).await?);
             }
             crate::gitops::validate_compiled_argocd_names(&inventory, &compiled)?;
             println!(

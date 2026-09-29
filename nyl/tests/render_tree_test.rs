@@ -4483,6 +4483,20 @@ fn release_input_bindings_of_disabled_groups_are_ignored() {
 }
 
 #[test]
+fn publication_bindings_of_disabled_groups_never_read_the_branch() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap();
+    fs::write(group_path, format!("{group}  enabled: false\n")).unwrap();
+    // The fixture's publication repository is unreachable.
+    with_api_inputs(
+        &fixture,
+        "    workloads/api:\n      image: {fromPublication: {path: state.json}}\n",
+    );
+    render_production(&fixture).success();
+}
+
+#[test]
 fn release_input_files_under_at_prefixed_directories_enter_the_index() {
     let fixture = fixture();
     fs::create_dir_all(fixture.path().join("@shared")).unwrap();
@@ -5015,4 +5029,529 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     let target = fs::read_to_string(fixture.path().join("config/targets/production.yaml")).unwrap();
     assert!(target.contains(&format!("commit: '{head}'")), "{target}");
     update_source_locks(&fixture, &cache, &["--check"]).success();
+}
+
+/// Commit `contents` at `path` on the publication branch `deploy/production`
+/// through the seed clone and push it, as a tool outside Nyl would.
+fn push_publication_state(seed: &TempDir, path: &str, contents: &str) -> git2::Oid {
+    push_publication_change(seed, path, Some(contents))
+}
+
+/// Commit `contents` at `path`, or its deletion, on `deploy/production`.
+fn push_publication_change(seed: &TempDir, path: &str, contents: Option<&str>) -> git2::Oid {
+    let repository = Repository::open(seed.path()).unwrap();
+    let branch = "deploy/production";
+    let remote_branch = repository
+        .find_remote("origin")
+        .unwrap()
+        .fetch(
+            &[format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")],
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|()| repository.find_reference(&format!("refs/remotes/origin/{branch}")).ok())
+        .and_then(|reference| reference.peel_to_commit().ok());
+    let base = remote_branch.unwrap_or_else(|| {
+        repository
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+    });
+    // Detach first: the branch may be checked out from an earlier push.
+    repository.set_head_detached(base.id()).unwrap();
+    repository.branch(branch, &base, true).unwrap();
+    repository.set_head(&format!("refs/heads/{branch}")).unwrap();
+    repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    let file = seed.path().join(path);
+    if let Some(contents) = contents {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, contents).unwrap();
+    } else {
+        fs::remove_file(file).unwrap();
+    }
+    commit_all(&repository, "Write state");
+    repository
+        .find_remote("origin")
+        .unwrap()
+        .push(&[format!("+refs/heads/{branch}:refs/heads/{branch}")], None)
+        .unwrap();
+    let head = repository.head().unwrap().peel_to_commit().unwrap().id();
+    head
+}
+
+/// Bind the `api` Release's `image` input from publication state and commit
+/// the source change.
+fn with_publication_binding(fixture: &TempDir, binding: &str) {
+    with_image_binding(fixture, &format!("      image:\n        fromPublication:\n{binding}"));
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Bind publication state");
+}
+
+fn publish_production(fixture: &TempDir) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+}
+
+fn published_api_manifests(destination: &TempDir) -> String {
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    let tree = commit.tree().unwrap();
+    let mut rendered = String::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        if root.starts_with("production/workloads/api") && entry.kind() == Some(git2::ObjectType::Blob) {
+            rendered.push_str(&String::from_utf8_lossy(
+                repository.find_blob(entry.id()).unwrap().content(),
+            ));
+        }
+        git2::TreeWalkResult::Ok
+    })
+    .unwrap();
+    rendered
+}
+
+#[test]
+fn test_vendor_check_reads_cached_publication_state_offline() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:state"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    fs::write(fixture.path().join("nyl.toml"), "[vendor]\nmode='required'\n").unwrap();
+    let nyl = |cache: &TempDir, args: &[&str]| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .args(args)
+            .assert()
+    };
+    let cache = TempDir::new().unwrap();
+    nyl(&cache, &["vendor"]).success();
+    // Nothing from the publication branch enters the snapshot.
+    let lock = fs::read_to_string(fixture.path().join("vendor/lock.yaml")).unwrap();
+    assert!(!lock.contains("images.json"), "{lock}");
+
+    // Offline, the check renders the cached state the next render reads.
+    fs::remove_dir_all(destination.path()).unwrap();
+    nyl(&cache, &["vendor", "--check"])
+        .success()
+        .stderr(predicate::str::contains("(cached head; the refresh failed)"));
+    // With no cached copy either, the bootstrap rule applies and names why.
+    nyl(&TempDir::new().unwrap(), &["vendor", "--check"])
+        .failure()
+        .stderr(predicate::str::contains("state file state/images.json is unavailable"));
+}
+
+#[test]
+fn test_validate_reads_cached_publication_state_offline() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:state"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let validate = |cache: &TempDir| {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(60))
+            .arg("validate")
+            .assert()
+    };
+    let cache = TempDir::new().unwrap();
+    validate(&cache).success();
+
+    // Offline, validation falls back to the cached branch head.
+    fs::remove_dir_all(destination.path()).unwrap();
+    validate(&cache)
+        .success()
+        .stdout(predicate::str::contains("GitOps configuration is valid"));
+}
+
+#[test]
+fn test_publish_tree_renders_committed_publication_state_at_the_base_commit() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:committed"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+
+    publish_production(&fixture)
+        .success()
+        .stdout(predicate::str::contains("Published deployment target production"));
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:committed"));
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    // The committed state file stays in the tree, unowned, and its digest is provenance.
+    assert!(published_file(&repository, &commit, "production/state/images.json").starts_with(b"{"));
+    assert!(index["files"].get("state/images.json").is_none(), "{index}");
+    assert!(
+        index["inputs"].get("@publication/state/images.json").is_some(),
+        "{index}"
+    );
+
+    publish_production(&fixture)
+        .success()
+        .stdout(predicate::str::contains("is already published"));
+}
+
+#[test]
+fn test_diff_tree_accepts_an_unindexed_prefix_only_with_declared_state() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:committed"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let diff = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args([
+                "diff-tree",
+                "--target",
+                "production",
+                "--against",
+                "published",
+                "--color",
+                "never",
+            ])
+            .assert()
+    };
+    // Before the first publication the prefix holds only declared state.
+    diff()
+        .success()
+        .stdout(predicate::str::contains("production/workloads/api"));
+
+    // A file no binding declares means the prefix belongs to something else.
+    push_publication_state(&seed, "production/hand-written.yaml", "kind: ConfigMap\n");
+    diff()
+        .failure()
+        .stderr(predicate::str::contains("has no ownership index"))
+        .stderr(predicate::str::contains("- hand-written.yaml"));
+}
+
+#[test]
+fn test_diff_tree_source_baseline_reads_its_own_publication_after_a_move() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:before"}"#,
+    );
+    push_publication_state(
+        &seed,
+        "moved/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:after"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let baseline = Repository::open(fixture.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    let target = fixture.path().join("config/targets/production.yaml");
+    let moved = fs::read_to_string(&target)
+        .unwrap()
+        .replace("pathPrefix: production", "pathPrefix: moved");
+    fs::write(&target, moved).unwrap();
+
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "source",
+            "--source-ref",
+            &baseline,
+            "--source-repository",
+            fixture.path().to_str().unwrap(),
+            "--progress",
+            "off",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        // Each side reads the state of the prefix it publishes to.
+        .stdout(predicate::str::contains(
+            "-  image: registry.example.com/api@sha256:before",
+        ))
+        .stdout(predicate::str::contains(
+            "+  image: registry.example.com/api@sha256:after",
+        ))
+        .stderr(predicate::str::contains("WARNING (publication_moved)"))
+        .stderr(predicate::str::contains("#move-a-publication"));
+}
+
+#[test]
+fn test_publish_tree_carries_state_through_a_dirty_worktree_check() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
+    fs::write(fixture.path().join("build/images.json"), carried).unwrap();
+    // An unrelated local change makes the worktree dirty, so publish-tree
+    // verifies against a clean render of HEAD, which must see the carry file.
+    fs::write(fixture.path().join("untracked-note.txt"), "local note\n").unwrap();
+
+    publish_production(&fixture).success();
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:carried"));
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        carried.as_bytes()
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_some(), "{index}");
+    assert!(index["inputs"].get("@carried/state/images.json").is_some(), "{index}");
+    assert_eq!(index["dirty"], false);
+}
+
+#[test]
+fn test_publish_tree_adopts_an_existing_state_file_when_carry_is_declared() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    let existing = r#"{"api": "registry.example.com/api@sha256:existing"}"#;
+    push_publication_state(&seed, "production/state/images.json", existing);
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+
+    // No carry file: the base copy is written back and becomes owned.
+    publish_production(&fixture).success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        existing.as_bytes()
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_some(), "{index}");
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:existing"));
+}
+
+#[test]
+fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
+    fs::write(fixture.path().join("build/images.json"), carried).unwrap();
+    publish_production(&fixture).success();
+
+    // Without carry the file is committed state that other tools maintain:
+    // the target renders from it and releases ownership instead of deleting it.
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    fs::write(
+        &target_path,
+        target.replace("          carryFileFromWorktree: build/images.json\n", ""),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Stop carrying state");
+    publish_production(&fixture).success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        carried.as_bytes()
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_none(), "{index}");
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:carried"));
+}
+
+#[test]
+fn test_publish_tree_republishes_owned_files_under_line_ending_conversion() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    // A user Git config that converts line endings on checkout, as on Windows.
+    let home = TempDir::new().unwrap();
+    fs::write(home.path().join(".gitconfig"), "[core]\n\tautocrlf = true\n").unwrap();
+    let publish = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .args(["publish-tree", "--target", "production"])
+            .assert()
+    };
+    with_image_binding(
+        &fixture,
+        "      image:\n        value: registry.example.com/api@sha256:first\n",
+    );
+    commit_all(&Repository::open(fixture.path()).unwrap(), "First image");
+    publish().success();
+
+    // Republishing reconciles over the owned files the clone checked out.
+    let target = fixture.path().join("config/targets/production.yaml");
+    let changed = fs::read_to_string(&target)
+        .unwrap()
+        .replace("sha256:first", "sha256:second");
+    fs::write(&target, changed).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Second image");
+    publish().success();
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:second"));
+}
+
+#[test]
+fn test_publish_tree_deletes_carried_state_when_the_binding_is_removed() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(
+        fixture.path().join("build/images.json"),
+        r#"{"api": "registry.example.com/api@sha256:carried"}"#,
+    )
+    .unwrap();
+    publish_production(&fixture).success();
+
+    // No binding names the path any more, so the target stops producing it.
+    with_image_binding(
+        &fixture,
+        "      image:\n        value: registry.example.com/api@sha256:fixed\n",
+    );
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap();
+    let (before, after) = target.split_once("  releaseInputs:\n").unwrap();
+    let (_, replacement) = after.split_once("  releaseInputs:\n").unwrap();
+    fs::write(&target_path, format!("{before}  releaseInputs:\n{replacement}")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Drop publication binding");
+    publish_production(&fixture).success();
+
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert!(commit
+        .tree()
+        .unwrap()
+        .get_path(std::path::Path::new("production/state/images.json"))
+        .is_err());
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:fixed"));
+}
+
+#[test]
+fn test_publish_tree_keeps_carried_state_while_its_group_is_disabled() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    // The project cache holds Git worktrees once the branch exists.
+    fs::write(fixture.path().join(".gitignore"), ".nyl/\n").unwrap();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    let carried = r#"{"api": "registry.example.com/api@sha256:carried"}"#;
+    fs::write(fixture.path().join("build/images.json"), carried).unwrap();
+    publish_production(&fixture).success();
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap();
+    fs::write(&group_path, format!("{group}  enabled: false\n")).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Disable workloads");
+    publish_production(&fixture).success();
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    assert_eq!(
+        published_file(&repository, &commit, "production/state/images.json"),
+        carried.as_bytes()
+    );
+
+    // Re-enabled, the carried binding adopts the kept file and renders from it.
+    fs::write(&group_path, group).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Enable workloads");
+    publish_production(&fixture).success();
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:carried"));
+    let commit = published_commit(&repository, "deploy/production");
+    let index: serde_json::Value =
+        serde_json::from_slice(&published_file(&repository, &commit, "production/_nyl/index.json")).unwrap();
+    assert!(index["files"].get("state/images.json").is_some(), "{index}");
+}
+
+#[test]
+fn test_publish_tree_rejects_an_owned_state_file_deleted_outside_nyl() {
+    let (fixture, _destination, seed, _) = publication_fixture();
+    with_publication_binding(
+        &fixture,
+        "          path: state/images.json\n          pointer: /api\n          carryFileFromWorktree: build/images.json\n",
+    );
+    fs::create_dir_all(fixture.path().join("build")).unwrap();
+    fs::write(
+        fixture.path().join("build/images.json"),
+        r#"{"api": "registry.example.com/api@sha256:carried"}"#,
+    )
+    .unwrap();
+    publish_production(&fixture).success();
+
+    push_publication_change(&seed, "production/state/images.json", None);
+    fs::remove_file(fixture.path().join("build/images.json")).unwrap();
+    publish_production(&fixture).failure().stderr(predicate::str::contains(
+        "deleted from the publication branch outside Nyl",
+    ));
+}
+
+#[test]
+fn test_render_tree_leaves_publication_inputs_unbound_before_the_branch_exists() {
+    let fixture = fixture();
+    let (destination, _seed) = seeded_bare_repository();
+    fs::write(
+        fixture.path().join("config/repositories/deploy.yaml"),
+        format!(
+            "apiVersion: gitops.nyl/v1\nkind: GitRepository\nmetadata:\n  name: deploy\nspec:\n  repoURL: {}\n",
+            destination.path().display()
+        ),
+    )
+    .unwrap();
+    with_image_binding(
+        &fixture,
+        "      image:\n        value: registry.example.com/api@sha256:fixed\n      tag:\n        fromPublication:\n          path: state/tag.json\n",
+    );
+    render_production(&fixture)
+        .success()
+        .stderr(predicate::str::contains("does not exist yet"));
+    let tree = read_tree(&fixture.path().join("deploy/production"));
+    let rendered = tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("workloads/api"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect::<String>();
+    // The Release default applies while the state file does not exist.
+    assert!(rendered.contains("tag: none"), "{rendered}");
 }

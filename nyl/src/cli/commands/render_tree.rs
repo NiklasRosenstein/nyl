@@ -9,7 +9,7 @@ use git2::{Repository, StatusOptions};
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
     reconcile_rendered_tree_with_options, resolve_deployment_target_name, validate_rendered_tree_owner, GitOpsCache,
-    ReconcileOptions, RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
+    RenderIndex, RenderIndexPublication, TreeCacheArgs, TreeRenderOptions,
 };
 use crate::resources::{DeploymentTarget, GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
@@ -18,6 +18,7 @@ use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
 
 /// Render one deployment target into its owned manifest tree.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct RenderTreeArgs {
     #[command(flatten)]
     pub validation: crate::validation::ValidationArgs,
@@ -50,8 +51,13 @@ pub struct RenderTreeArgs {
     /// Allow project secrets and NYL_* environment variables to affect rendered output.
     #[arg(long)]
     pub allow_secret_inputs: bool,
+
+    /// Read fromPublication state at the cached publication branch head.
+    #[arg(long)]
+    pub offline: bool,
 }
 
+#[allow(clippy::too_many_lines)] // One linear command flow from arguments to the rendered tree.
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
@@ -104,9 +110,14 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         &mut progress,
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
+            publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
+            ..TreeRenderOptions::default()
         },
     )
     .await?;
+    if let Some(base) = &compiled.publication_base {
+        eprintln!("{}", base.describe());
+    }
     let validation = crate::validation::validate_tree(&args.validation, &inventory, &compiled).await;
     if args.check {
         validation?;
@@ -119,7 +130,8 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let (source_commit, dirty) = source_state(&inventory.project_root)?;
+    let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
+    let (source_commit, dirty) = source_state(&inventory.project_root, &carried)?;
     let inputs = hash_inputs(&inventory, &compiled)?;
     let repository_identity = compiled
         .repository_name
@@ -139,11 +151,9 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
     );
     reconcile_rendered_tree_with_options(
         &output_root,
-        &compiled.files,
+        &compiled.owned_files(),
         index,
-        ReconcileOptions {
-            force_owned: args.force,
-        },
+        compiled.reconcile_options(args.force),
     )?;
     report_render_result(
         &target_name,
@@ -264,7 +274,9 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-pub(super) fn source_state(project_root: &Path) -> Result<(Option<String>, bool)> {
+/// Source commit and dirty state. Untracked `carried` files are outputs of
+/// this run, so they never make the worktree dirty.
+pub(super) fn source_state(project_root: &Path, carried: &[PathBuf]) -> Result<(Option<String>, bool)> {
     let repository = Repository::discover(project_root)
         .map_err(|error| NylError::config(format!("Failed to inspect source Git repository: {error}")))?;
     let commit = repository
@@ -280,10 +292,30 @@ pub(super) fn source_state(project_root: &Path) -> Result<(Option<String>, bool)
     let statuses = repository
         .statuses(Some(&mut options))
         .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
-    let dirty = statuses
-        .iter()
-        .any(|entry| !is_project_cache_status(&repository, project_root, entry.path().ok()));
+    let carried = carried.iter().map(|path| canonical_file_path(path)).collect::<Vec<_>>();
+    let worktree = repository.workdir().map(canonical_file_path);
+    let dirty = statuses.iter().any(|entry| {
+        let carried_file = entry.status().is_wt_new()
+            && worktree
+                .as_ref()
+                .zip(entry.path().ok())
+                .is_some_and(|(worktree, path)| carried.contains(&worktree.join(path)));
+        !carried_file && !is_project_cache_status(&repository, project_root, entry.path().ok())
+    });
     Ok((commit, dirty))
+}
+
+/// Canonical form of a possibly missing file: its canonical parent plus name.
+fn canonical_file_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        match (
+            path.parent().and_then(|parent| parent.canonicalize().ok()),
+            path.file_name(),
+        ) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        }
+    })
 }
 
 fn is_project_cache_status(repository: &Repository, project_root: &Path, status_path: Option<&str>) -> bool {

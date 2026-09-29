@@ -218,6 +218,9 @@ pub struct InputBinding {
     /// A YAML or JSON file of a Git repository at a locked commit.
     #[serde(default, rename = "fromGit", skip_serializing_if = "Option::is_none")]
     pub from_git: Option<GitInputSource>,
+    /// A state file in this target's publication branch, read at the publication base commit.
+    #[serde(default, rename = "fromPublication", skip_serializing_if = "Option::is_none")]
+    pub from_publication: Option<PublicationInputSource>,
     /// Reserved for orchestration: a recorded unit output or artifact field. Rejected outside orchestrated execution.
     #[serde(default, rename = "fromUnit", skip_serializing_if = "Option::is_none")]
     pub from_unit: Option<UnitInputSource>,
@@ -235,6 +238,8 @@ pub enum BindingKind {
     FromFile,
     /// `fromGit`
     FromGit,
+    /// `fromPublication`
+    FromPublication,
     /// `fromUnit`
     FromUnit,
     /// `fromPromotion`
@@ -248,6 +253,7 @@ impl BindingKind {
             Self::Value => "value",
             Self::FromFile => "fromFile",
             Self::FromGit => "fromGit",
+            Self::FromPublication => "fromPublication",
             Self::FromUnit => "fromUnit",
             Self::FromPromotion => "fromPromotion",
         }
@@ -266,6 +272,7 @@ impl InputBinding {
             (self.value.is_some(), BindingKind::Value),
             (self.from_file.is_some(), BindingKind::FromFile),
             (self.from_git.is_some(), BindingKind::FromGit),
+            (self.from_publication.is_some(), BindingKind::FromPublication),
             (self.from_unit.is_some(), BindingKind::FromUnit),
             (self.from_promotion.is_some(), BindingKind::FromPromotion),
         ]
@@ -275,7 +282,7 @@ impl InputBinding {
         match set.as_slice() {
             [kind] => Ok(*kind),
             [] => Err(CoreError::config(format!(
-                "{field} must set exactly one of value, fromFile, fromGit, fromUnit, or fromPromotion"
+                "{field} must set exactly one of value, fromFile, fromGit, fromPublication, fromUnit, or fromPromotion"
             ))),
             _ => Err(CoreError::config(format!(
                 "{field} sets {}; set exactly one source",
@@ -307,18 +314,44 @@ impl InputBinding {
                 .as_ref()
                 .expect("kind agrees with the set field")
                 .validate(&format!("{field}.fromGit")),
+            BindingKind::FromPublication => self
+                .from_publication
+                .as_ref()
+                .expect("kind agrees with the set field")
+                .validate(&format!("{field}.fromPublication")),
         }
     }
 }
 
 /// Validate the static form of `spec.releaseInputs`.
 pub fn validate_bindings(bindings: &ReleaseInputBindings) -> Result<()> {
+    // A state path is either committed by another tool or carried by Nyl from
+    // one working-tree file, so every binding naming it must agree on `carryFileFromWorktree`.
+    let mut state_paths = BTreeMap::<&str, (String, Option<&str>)>::new();
     for (key, inputs) in bindings {
         ReleaseKey::parse(key)?;
         for (name, binding) in inputs {
             let field = format!("spec.releaseInputs.{key:?}.{name}");
             validate_input_name(&field, name)?;
             binding.validate(&field)?;
+            let Some(source) = &binding.from_publication else {
+                continue;
+            };
+            let carry = source.carry_file_from_worktree.as_deref();
+            match state_paths.get(source.path.as_str()) {
+                Some((previous, previous_carry)) if *previous_carry != carry => {
+                    return Err(CoreError::config(format!(
+                        "{previous} and {field} both name fromPublication path {:?} but disagree on carryFileFromWorktree ({} and {}); bindings of one state path must all carry the same file or none",
+                        source.path,
+                        previous_carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                        carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    state_paths.insert(source.path.as_str(), (field, carry));
+                }
+            }
         }
     }
     Ok(())
@@ -393,6 +426,37 @@ fn git_input_source_constraints(schema: &mut schemars::Schema) {
     );
 }
 
+/// A value read from a state file in the target's own publication branch.
+///
+/// The file is read at the publication base commit, the branch head that
+/// `publish-tree` builds on, so a published commit holds the state and the
+/// manifests rendered from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationInputSource {
+    /// State file path relative to the target's publication path prefix. It must lie outside every directory a generated Argo CD Application syncs: workload Release directories and `_nyl`.
+    pub path: String,
+    /// JSON Pointer selecting the value inside the document; the whole document when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pointer: String,
+    /// Untracked working-tree file of this run, under the local path rule. When present, Nyl renders from it and writes its bytes to `path` in the publication commit; otherwise the base copy is written back. With `carryFileFromWorktree`, `path` is owned by this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "carryFileFromWorktree")]
+    pub carry_file_from_worktree: Option<String>,
+}
+
+impl PublicationInputSource {
+    /// Validate the static form of this source.
+    pub fn validate(&self, field: &str) -> Result<()> {
+        super::validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
+        crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)?;
+        if let Some(carry) = &self.carry_file_from_worktree {
+            crate::local_path::validate_local_path(&format!("{field}.carryFileFromWorktree"), carry)?;
+        }
+        Ok(())
+    }
+}
+
 /// Reserved orchestration reference to a unit output or artifact field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -445,6 +509,10 @@ fn input_binding_constraints(schema: &mut schemars::Schema) {
             (
                 "fromGit",
                 "Reads the value from a file of a Git repository at a locked commit.",
+            ),
+            (
+                "fromPublication",
+                "Reads the value from a state file in this target's publication branch.",
             ),
             (
                 "fromUnit",
@@ -637,6 +705,45 @@ mod tests {
                 serde_json::from_value(json!({"g/r": {"image": {"fromGit": source.clone()}}})).unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
             assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_from_publication_paths_stay_inside_the_prefix() {
+        for (source, expected) in [
+            (json!({"path": "../other/state.json"}), "fromPublication.path"),
+            (json!({"path": "/state.json"}), "fromPublication.path"),
+            (
+                json!({"path": "state.json", "carryFileFromWorktree": "build/./images.json"}),
+                "fromPublication.carryFileFromWorktree",
+            ),
+        ] {
+            let bindings: ReleaseInputBindings =
+                serde_json::from_value(json!({"g/r": {"image": {"fromPublication": source.clone()}}})).unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_state_paths_agree_on_carry() {
+        let agree: ReleaseInputBindings = serde_json::from_value(json!({
+            "g/a": {"image": {"fromPublication": {"path": "state.json", "pointer": "/a", "carryFileFromWorktree": "build/state.json"}}},
+            "g/b": {"image": {"fromPublication": {"path": "state.json", "pointer": "/b", "carryFileFromWorktree": "build/state.json"}}},
+        }))
+        .unwrap();
+        validate_bindings(&agree).unwrap();
+        for other in [
+            json!({"path": "state.json"}),
+            json!({"path": "state.json", "carryFileFromWorktree": "other.json"}),
+        ] {
+            let bindings: ReleaseInputBindings = serde_json::from_value(json!({
+                "g/a": {"image": {"fromPublication": {"path": "state.json", "carryFileFromWorktree": "build/state.json"}}},
+                "g/b": {"image": {"fromPublication": other.clone()}},
+            }))
+            .unwrap();
+            let error = validate_bindings(&bindings).unwrap_err().to_string();
+            assert!(error.contains("disagree on carryFileFromWorktree"), "{other}: {error}");
         }
     }
 

@@ -16,6 +16,10 @@ use crate::gitops::{
 use crate::util::project_path::{locate_checkout_project, ProjectLocation};
 use crate::{NylError, Result};
 
+/// Documentation of the manual steps a publication move needs.
+pub(super) const PUBLICATION_MOVE_DOCS: &str =
+    "https://niklasrosenstein.github.io/nyl/deployment-workflows/rendered-manifests/rendering-and-publishing/#move-a-publication";
+
 use report::{DiffMode, Report, ReportFormat, ReportOutput, StageState, TreeDiff};
 
 use super::super::tree_progress::{TreeProgressArgs, TreeProgressReporter};
@@ -98,6 +102,10 @@ pub struct DiffTreeArgs {
     /// Allow project secrets and NYL_* environment variables to affect rendered output.
     #[arg(long)]
     pub allow_secret_inputs: bool,
+
+    /// Read fromPublication state at the cached publication branch head.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Debug)]
@@ -127,10 +135,11 @@ enum ResolvedBaseline {
 }
 
 impl ResolvedBaseline {
-    fn files(&self) -> &BTreeMap<PathBuf, Vec<u8>> {
+    /// Every owned file of the baseline, rendered files and state files.
+    fn files(&self) -> std::borrow::Cow<'_, BTreeMap<PathBuf, Vec<u8>>> {
         match self {
-            Self::Published(baseline) => &baseline.files,
-            Self::Source(baseline) => &baseline.compiled.files,
+            Self::Published(baseline) => std::borrow::Cow::Borrowed(&baseline.files),
+            Self::Source(baseline) => std::borrow::Cow::Owned(baseline.compiled.owned_files()),
         }
     }
 
@@ -174,7 +183,7 @@ struct ComparisonFiles {
 
 /// Compare rendered trees with the automatic report color policy.
 pub async fn execute(args: DiffTreeArgs) -> Result<()> {
-    execute_with_color(args, crate::cli::ColorChoice::Auto).await
+    Box::pin(execute_with_color(args, crate::cli::ColorChoice::Auto)).await
 }
 
 pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {
@@ -236,7 +245,8 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
-        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root)?;
+        let carried = crate::gitops::inputs::carry_paths(&inventory, &target)?;
+        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
         let repository = source_repository_url(&inventory.project_root)?;
         Ok::<_, NylError>((inventory, target, commit, dirty, repository))
     })();
@@ -260,10 +270,17 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let mut progress = TreeProgressReporter::new(args.progress, desired_phase);
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
+        publication_read: crate::gitops::inputs::PublicationRead::from_offline(args.offline),
+        ..TreeRenderOptions::default()
     };
-    let rendered =
-        compile_target_tree_cached_with_observer_and_options(&inventory, &target_name, &cache, &mut progress, options)
-            .await;
+    let rendered = compile_target_tree_cached_with_observer_and_options(
+        &inventory,
+        &target_name,
+        &cache,
+        &mut progress,
+        options.clone(),
+    )
+    .await;
     report.render = Some(cache.stats());
     let desired = match rendered {
         Ok(desired) => desired,
@@ -272,6 +289,9 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             return;
         }
     };
+    if let Some(base) = &desired.publication_base {
+        eprintln!("{}", base.describe());
+    }
     report.desired(&desired);
     // The combined report owns findings; the validator still emits progress and exports.
     let validation_args = crate::validation::ValidationArgs {
@@ -288,7 +308,25 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         },
     );
     let compared = async {
+        // A source baseline reads the same publication state, so the diff
+        // shows only what the source change causes. A baseline that
+        // publishes elsewhere reads its own publication instead.
+        let options = TreeRenderOptions {
+            publication_base: desired.publication_base.clone(),
+            pinned_state_files: Some(desired.state_files.clone()),
+            ..options
+        };
         let baseline = resolve_baseline(args, &inventory, &target_name, &desired, &cache, options).await?;
+        if let ResolvedBaseline::Source(source) = &baseline {
+            if let Some(base) = source
+                .compiled
+                .publication_base
+                .as_ref()
+                .filter(|base| desired.publication_base.as_ref() != Some(*base))
+            {
+                eprintln!("Baseline: {}", base.describe());
+            }
+        }
         report.baseline(&baseline, &desired);
         let selection = DiffSelection::from_args(args);
         let comparison = comparison_files(&selection, &baseline, &desired)?;
@@ -315,7 +353,11 @@ async fn resolve_baseline(
     options: TreeRenderOptions,
 ) -> Result<ResolvedBaseline> {
     match args.against {
-        DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(desired, cache)?)),
+        DiffTreeBase::Published => Ok(ResolvedBaseline::Published(published_tree(
+            desired,
+            cache,
+            options.publication_read == crate::gitops::inputs::PublicationRead::Cached,
+        )?)),
         DiffTreeBase::Source => {
             let source_ref = args
                 .source_ref
@@ -344,8 +386,14 @@ fn comparison_files(
 ) -> Result<ComparisonFiles> {
     match selection {
         DiffSelection::Tree => {
-            let mut base = baseline.files().clone();
-            let mut desired_files = desired.files.clone();
+            let mut base = baseline.files().into_owned();
+            // State files are owned plain files, shown as file diffs next to
+            // the manifest changes they cause.
+            let mut desired_files = desired.owned_files();
+            // Committed state leaves ownership without being deleted.
+            for path in &desired.committed_state_paths {
+                base.remove(path);
+            }
             if let ResolvedBaseline::Source(source) = baseline {
                 let marker = PathBuf::from("_nyl/publication.json");
                 base.insert(marker.clone(), publication_marker(&source.compiled)?);
@@ -357,12 +405,12 @@ fn comparison_files(
             })
         }
         DiffSelection::Catalog => Ok(ComparisonFiles {
-            base: files_beneath(baseline.files(), Path::new("_nyl/catalog")),
+            base: files_beneath(&baseline.files(), Path::new("_nyl/catalog")),
             desired: files_beneath(&desired.files, Path::new("_nyl/catalog")),
         }),
         DiffSelection::Applications(selectors) => application_comparison_files(
             selectors,
-            baseline.files(),
+            &baseline.files(),
             baseline.publication_path_prefix(desired),
             &desired.files,
             desired.target.publication_path_prefix(),
@@ -634,18 +682,29 @@ fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn published_tree(compiled: &crate::gitops::CompiledTargetTree, cache: &GitOpsCache) -> Result<PublishedBaseline> {
+/// The published tree to compare against: the commit `fromPublication` state
+/// was read at, so both sides see one publication; otherwise the branch head,
+/// refreshed unless `offline`.
+fn published_tree(
+    compiled: &crate::gitops::CompiledTargetTree,
+    cache: &GitOpsCache,
+    offline: bool,
+) -> Result<PublishedBaseline> {
     let mut manager = git_manager(cache)?;
-    let checkout = manager
-        .resolve_ref_fresh(
-            &compiled.repository.repo_url,
-            Some(&compiled.target.spec.publication.revision),
-            None,
-        )
-        .map_err(NylError::Git)?;
+    let revision = &compiled.target.spec.publication.revision;
+    let checkout = match compiled
+        .publication_base
+        .as_ref()
+        .and_then(|base| Some((base.url.as_str(), base.commit.as_deref()?)))
+    {
+        Some((url, commit)) => manager.resolve_ref(url, Some(commit), None),
+        None if offline => manager.resolve_ref(&compiled.repository.repo_url, Some(revision), None),
+        None => manager.resolve_ref_fresh(&compiled.repository.repo_url, Some(revision), None),
+    }
+    .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
     let root = checked_published_root(&checkout, compiled.target.publication_path_prefix())?;
-    let published = read_rendered_tree(&root)?;
+    let published = read_rendered_tree(&root, &compiled.declared_state_paths())?;
     if let Some(index) = published.index {
         let repository = compiled
             .repository_name
@@ -796,7 +855,17 @@ fn publication_marker(compiled: &crate::gitops::CompiledTargetTree) -> Result<Ve
     Ok(bytes)
 }
 
-pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
+/// Read the files the ownership index under `root` lists.
+///
+/// A prefix without an index owns nothing yet. Before the first publication it
+/// may hold state files another tool committed for `fromPublication`
+/// bindings, so it is accepted when every file in it is one of the
+/// `declared_state_paths` (relative to the prefix). Any other file means the
+/// prefix belongs to something else, such as after a mistyped `pathPrefix`.
+pub(super) fn read_rendered_tree(
+    root: &Path,
+    declared_state_paths: &BTreeSet<PathBuf>,
+) -> Result<PublishedRenderedTree> {
     if !root.exists() {
         return Ok(PublishedRenderedTree {
             files: BTreeMap::new(),
@@ -805,10 +874,30 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
     }
     let index_path = root.join(crate::gitops::reconcile::DEFAULT_INDEX_PATH);
     if !index_path.is_file() {
-        return Err(NylError::config(format!(
-            "Published rendered tree {} has no ownership index",
-            root.display()
-        )));
+        let foreign = unindexed_files(root)?
+            .into_iter()
+            .filter(|path| !declared_state_paths.contains(path))
+            .collect::<Vec<_>>();
+        if !foreign.is_empty() {
+            const MAX_LISTED: usize = 5;
+            let mut listed = foreign
+                .iter()
+                .take(MAX_LISTED)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            if foreign.len() > MAX_LISTED {
+                listed.push(format!("… and {} more", foreign.len() - MAX_LISTED));
+            }
+            return Err(NylError::config(format!(
+                "Published rendered tree {} has no ownership index but holds files no fromPublication binding declares:\n- {}\nCheck the DeploymentTarget publication.pathPrefix; before its first publication a prefix may hold only declared state files.",
+                root.display(),
+                listed.join("\n- ")
+            )));
+        }
+        return Ok(PublishedRenderedTree {
+            files: BTreeMap::new(),
+            index: None,
+        });
     }
     reject_published_symlink(root, &index_path)?;
     let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
@@ -842,6 +931,31 @@ pub(super) fn read_rendered_tree(root: &Path) -> Result<PublishedRenderedTree> {
         files,
         index: Some(index),
     })
+}
+
+/// Every file beneath `root`, relative to it, skipping Git metadata. A
+/// symbolic link is listed as a file, so it is never mistaken for state.
+fn unindexed_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut files = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| NylError::config(format!("Published path escaped its root: {error}")))?;
+                files.insert(relative.to_path_buf());
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn reject_published_symlink(root: &Path, path: &Path) -> Result<()> {
@@ -1017,6 +1131,9 @@ mod tests {
             files: BTreeMap::new(),
             inputs: BTreeSet::new(),
             input_digests: BTreeMap::new(),
+            state_files: BTreeMap::new(),
+            committed_state_paths: BTreeSet::new(),
+            publication_base: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;
@@ -1029,11 +1146,20 @@ mod tests {
     }
 
     #[test]
-    fn published_tree_requires_an_ownership_index() {
+    fn test_read_rendered_tree_without_an_ownership_index_accepts_only_declared_state() {
         let temp = tempfile::TempDir::new().unwrap();
-        std::fs::write(temp.path().join("unrelated.yaml"), "kind: ConfigMap\n").unwrap();
-        let error = read_rendered_tree(temp.path()).unwrap_err();
-        assert!(error.to_string().contains("no ownership index"));
+        std::fs::create_dir(temp.path().join("state")).unwrap();
+        std::fs::write(temp.path().join("state/images.json"), "{\"image\": \"web:1\"}\n").unwrap();
+        let declared = BTreeSet::from([PathBuf::from("state/images.json")]);
+        let published = read_rendered_tree(temp.path(), &declared).unwrap();
+        assert!(published.index.is_none());
+        assert!(published.files.is_empty());
+
+        std::fs::write(temp.path().join("deployment.yaml"), "kind: Deployment\n").unwrap();
+        let error = read_rendered_tree(temp.path(), &declared).unwrap_err().to_string();
+        assert!(error.contains("has no ownership index"), "{error}");
+        assert!(error.contains("- deployment.yaml"), "{error}");
+        assert!(!error.contains("images.json"), "{error}");
     }
 
     #[cfg(unix)]
