@@ -5397,6 +5397,39 @@ fn test_publish_tree_keeps_state_committed_after_carry_is_dropped() {
 }
 
 #[test]
+fn test_publish_tree_republishes_owned_files_under_line_ending_conversion() {
+    let (fixture, destination, _seed, _) = publication_fixture();
+    // A user Git config that converts line endings on checkout, as on Windows.
+    let home = TempDir::new().unwrap();
+    fs::write(home.path().join(".gitconfig"), "[core]\n\tautocrlf = true\n").unwrap();
+    let publish = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .args(["publish-tree", "--target", "production"])
+            .assert()
+    };
+    with_image_binding(
+        &fixture,
+        "      image:\n        value: registry.example.com/api@sha256:first\n",
+    );
+    commit_all(&Repository::open(fixture.path()).unwrap(), "First image");
+    publish().success();
+
+    // Republishing reconciles over the owned files the clone checked out.
+    let target = fixture.path().join("config/targets/production.yaml");
+    let changed = fs::read_to_string(&target)
+        .unwrap()
+        .replace("sha256:first", "sha256:second");
+    fs::write(&target, changed).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Second image");
+    publish().success();
+    assert!(published_api_manifests(&destination).contains("image: registry.example.com/api@sha256:second"));
+}
+
+#[test]
 fn test_publish_tree_deletes_carried_state_when_the_binding_is_removed() {
     let (fixture, destination, _seed, _) = publication_fixture();
     with_publication_binding(
