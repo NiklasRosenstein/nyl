@@ -82,7 +82,7 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Offline mode: never connect to Kubernetes
+    /// Offline mode: never connect to Kubernetes, and read `fromPublication` Release inputs at the cached publication branch head, as `render-tree --offline` does
     #[arg(long)]
     pub offline: bool,
 
@@ -227,6 +227,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 .zip(resolved_target.as_ref())
                 .map(|(inventory, resolved)| (inventory, &resolved.target)),
             cache: Some(&render_cache),
+            publication_read: crate::gitops::inputs::PublicationRead::from_offline(options.offline),
         },
         path,
         &crate::gitops::direct_inputs::DirectInputSelection {

@@ -5467,6 +5467,35 @@ fn test_vendor_check_reads_cached_publication_state_offline() {
 }
 
 #[test]
+fn test_render_offline_reads_publication_state_at_the_cached_head() {
+    let (fixture, destination, seed, _) = publication_fixture();
+    push_publication_state(
+        &seed,
+        "production/state/images.json",
+        r#"{"api": "registry.example.com/api@sha256:cached"}"#,
+    );
+    with_publication_binding(&fixture, "          path: state/images.json\n          pointer: /api\n");
+    let cache = TempDir::new().unwrap();
+    let render = |offline: bool| {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .args(["render", "--target", "production"]);
+        if offline {
+            command.arg("--offline");
+        }
+        command.arg("applications/workloads/api.yaml").assert()
+    };
+    render(false).success();
+    fs::remove_dir_all(destination.path()).unwrap();
+    let output = render(true)
+        .success()
+        .stderr(predicate::str::contains("(cached head, --offline)"));
+    assert!(String::from_utf8_lossy(&output.get_output().stdout).contains("registry.example.com/api@sha256:cached"));
+}
+
+#[test]
 fn test_publish_tree_renders_committed_publication_state_at_the_base_commit() {
     let (fixture, destination, seed, _) = publication_fixture();
     push_publication_state(

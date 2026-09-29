@@ -49,6 +49,9 @@ pub struct DirectInputContext<'a> {
     pub target: Option<(&'a GitOpsInventory, &'a crate::resources::DeploymentTarget)>,
     /// The command's render cache, for `fromGit` reads and cache modes.
     pub cache: Option<&'a crate::render::cache::RenderCache>,
+    /// How `fromPublication` reads the publication branch, as for
+    /// `render-tree`: refreshed, or the cached head with `--offline`.
+    pub publication_read: PublicationRead,
 }
 
 /// Resolved inputs of the Release a direct command renders.
@@ -343,7 +346,7 @@ impl<'a> Sources<'a> {
                 repository.publish_url.as_deref().unwrap_or(&repository.repo_url),
                 &target.spec.publication.revision,
                 target.publication_path_prefix(),
-                PublicationRead::Fresh,
+                context.publication_read,
             )?)
         } else {
             None

@@ -39,7 +39,7 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 
 ### Offline Mode Options
 
-- `--offline` - Skip Kubernetes discovery and use the target Cluster or explicit API information.
+- `--offline` - Skip Kubernetes discovery and use the target Cluster or explicit API information. `fromPublication` Release inputs read the cached publication branch head, as with `render-tree --offline`.
 - `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless offline render.
 - `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless offline render, comma-separated or repeated.
 
