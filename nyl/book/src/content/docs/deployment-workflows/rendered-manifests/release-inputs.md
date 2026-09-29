@@ -134,10 +134,11 @@ releaseInputs:
 `nyl update source-locks` refreshes these locks together with ApplicationGroup
 source locks, so CI has one `--check` gate for every Git lock. `--target
 production` selects one target's locks; filters choose which locks move,
-never where. A lock whose file lies inside another target's publication prefix
-on that branch moves to that target's newest publication commit, so a
-production target can promote the state a dev target published by moving its
-lock in a reviewed change. Other locks move to the branch head.
+never where. Every lock moves to the head of its revision.
+
+A target should not `fromGit`-lock a file in its own publication: each of its
+publications moves the branch head, so the lock is stale again right after.
+Read the target's own state with `fromPublication` instead.
 
 ## Provenance
 

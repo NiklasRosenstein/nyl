@@ -44,9 +44,6 @@ pub struct InputSources<'a> {
     /// that resource's absolute source file, through
     /// [`GitOpsInventory::resolve_git_repository`](super::GitOpsInventory::resolve_git_repository).
     pub repositories: &'a RepositoryResolver<'a>,
-    /// The target's own publication location. `fromGit` must not lock a file
-    /// there; that state is read with `fromPublication`.
-    pub publication_scope: Option<&'a PublicationScope>,
     /// Reader of files at locked commits, for `fromGit`.
     pub git: &'a dyn GitBlobSource,
 }
@@ -54,61 +51,6 @@ pub struct InputSources<'a> {
 /// Resolves a GitRepository name to the repository and its source file.
 pub type RepositoryResolver<'a> =
     dyn Fn(&crate::resources::LocalReference) -> Result<(InlineGitRepository, PathBuf)> + 'a;
-
-/// Where a DeploymentTarget publishes: its repository URLs, branch, and prefix.
-///
-/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds),
-/// source locks. A lock on a file inside a target's publication moves to that
-/// target's newest publication; a target cannot lock its own publication,
-/// because each publication would make the lock stale again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicationScope {
-    pub target: String,
-    /// Read and publish URLs, normalized for equality.
-    urls: Vec<String>,
-    branch: String,
-    prefix: String,
-}
-
-impl PublicationScope {
-    /// The publication location of `target`.
-    pub fn of(inventory: &super::GitOpsInventory, target: &DeploymentTarget) -> Result<Self> {
-        let publication = &target.spec.publication;
-        let (repository, _) =
-            inventory.resolve_git_repository(publication.repository_ref.as_ref(), publication.repository.as_ref())?;
-        Ok(Self {
-            target: target.metadata.name.clone(),
-            urls: std::iter::once(&repository.repo_url)
-                .chain(repository.publish_url.as_ref())
-                .map(|url| crate::git::normalize_git_url_for_equality(url))
-                .collect(),
-            branch: branch_name(&publication.revision).to_owned(),
-            prefix: target.publication_path_prefix().trim_matches('/').to_owned(),
-        })
-    }
-
-    /// Whether `path` at `revision` of `url` lies inside this publication.
-    pub fn contains(&self, url: &str, revision: &str, path: &str) -> bool {
-        let url = crate::git::normalize_git_url_for_equality(url);
-        self.urls.contains(&url)
-            && branch_name(revision) == self.branch
-            && (self.prefix.is_empty()
-                || path
-                    .strip_prefix(&self.prefix)
-                    .is_some_and(|rest| rest.starts_with('/')))
-    }
-}
-
-/// The rejection of a `fromGit` lock on its own target's publication.
-pub fn self_lock_error(lock: &str, target: &str) -> String {
-    format!(
-        "{lock} locks a file in the publication of DeploymentTarget {target} itself; every publication would make the lock stale, so read the target's own state with fromPublication"
-    )
-}
-
-fn branch_name(revision: &str) -> &str {
-    super::tree::normalize_branch_revision(revision)
-}
 
 /// Reads a file at an immutable commit.
 pub trait GitBlobSource {
@@ -515,12 +457,6 @@ fn resolve_binding(
                 }
                 (None, None) => unreachable!("validated fromGit names a repository"),
             };
-            if let Some(scope) = sources
-                .publication_scope
-                .filter(|scope| scope.contains(&repository.repo_url, &source.revision, &source.path))
-            {
-                return Err(self_lock_error(&format!("{field}.fromGit ({})", source.path), &scope.target));
-            }
             let bytes = sources
                 .git
                 .read_blob(&repository.repo_url, &source.commit, &source.path)
@@ -670,7 +606,6 @@ mod tests {
                         reference.name
                     )))
                 },
-                publication_scope: None,
                 git: &NoGit,
                 visible_files: &visible_files,
             },
@@ -825,7 +760,6 @@ mod tests {
                     .cloned()
                     .ok_or_else(|| NylError::config(format!("GitRepository {:?} was not found", reference.name)))
             },
-            publication_scope: None,
             git: &git,
         };
         let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
@@ -887,29 +821,5 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("has no value at JSON Pointer \"/port\""), "{error}");
-    }
-
-    #[test]
-    fn test_publication_scope_matches_prefix_branch_and_credential_free_url() {
-        let scope = PublicationScope {
-            target: "dev".to_owned(),
-            urls: vec![crate::git::normalize_git_url_for_equality(
-                "https://git.example.com/deploy.git",
-            )],
-            branch: "deploy".to_owned(),
-            prefix: "dev".to_owned(),
-        };
-        assert!(scope.contains(
-            "https://ci-token@git.example.com/deploy",
-            "refs/heads/deploy",
-            "dev/state.json"
-        ));
-        assert!(!scope.contains("https://git.example.com/deploy.git", "deploy", "develop/state.json"));
-        assert!(!scope.contains("https://git.example.com/deploy.git", "main", "dev/state.json"));
-        let root = PublicationScope {
-            prefix: String::new(),
-            ..scope
-        };
-        assert!(root.contains("https://git.example.com/deploy.git", "deploy", "state.json"));
     }
 }

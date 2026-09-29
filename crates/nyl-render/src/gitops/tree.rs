@@ -2174,7 +2174,6 @@ fn resolve_prepared_release_inputs(
         // file wherever the command runs.
         Ok((repository, inventory.project_root.join(source)))
     };
-    let publication_scope = super::inputs::PublicationScope::of(inventory, target)?;
     super::inputs::resolve_target_inputs(
         target,
         &releases,
@@ -2182,7 +2181,6 @@ fn resolve_prepared_release_inputs(
         &super::inputs::InputSources {
             paths: &paths,
             repositories: &repositories,
-            publication_scope: Some(&publication_scope),
             git,
             visible_files: &inventory.worktree_data_files,
         },

@@ -404,11 +404,9 @@ nyl update source-locks --check
 A group name selects that ApplicationGroup and `--target` selects one
 DeploymentTarget's `fromGit` locks; without either, every lock is updated. The
 filters choose which locks move, never where: each lock's destination depends
-only on the lock, so a filtered update agrees with an unfiltered `--check`. A
-`fromGit` lock whose file lies inside a DeploymentTarget's publication prefix
-on that branch moves to that target's newest publication commit, never to a
-later write-back by another tool; every other lock moves to the branch head.
-Each repository is fetched once per run. Locks are edited in place by their
+only on the lock, so a filtered update agrees with an unfiltered `--check`.
+Every lock moves to the head of its revision. Each repository is fetched once
+per run. Locks are edited in place by their
 position, so write `fromGit` bindings in block style.
 
 Mutable revisions must refresh successfully before a lock is reported current

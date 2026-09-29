@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a GitRepository or inline repository, recorded as an `@git/…` digest in
   the ownership index. `nyl update source-locks` refreshes `fromGit` locks with
   ApplicationGroup locks and gains `--target` to select one DeploymentTarget.
-  A lock reading a file in a target's publication prefix moves to that
-  target's newest publication commit; every other lock moves to the branch
-  head. Filters choose which locks move, never where. Locked files follow the
+  Every lock moves to the head of its revision; filters choose which locks
+  move, never where. A locked commit the server will not send by ID is found
+  through the refs. Locked files follow the
   vendor policy: `nyl vendor` captures them as `git-blob` artifacts and mode
   `required` renders them only from the snapshot.
 

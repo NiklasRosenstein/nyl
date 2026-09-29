@@ -299,19 +299,6 @@ impl GitManager {
         repo.resolve_ref(git_ref)
     }
 
-    /// The newest commit reachable from `head` in the cached repository of
-    /// `url` whose message has a line equal to `line`.
-    pub fn newest_commit_with_message_line(
-        &mut self,
-        url: &str,
-        head: git2::Oid,
-        line: &str,
-    ) -> Result<Option<git2::Oid>> {
-        let bare_repo = self.get_or_create_bare_repo(url)?;
-        let repo = bare_repo.lock().unwrap();
-        repo.newest_commit_with_message_line(head, line)
-    }
-
     /// Read `path` at the immutable `commit` of `url` without a worktree.
     ///
     /// Refs are never resolved. A commit missing from the local cache is
