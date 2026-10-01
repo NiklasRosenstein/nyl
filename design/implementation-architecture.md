@@ -169,6 +169,8 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   `nyl_core::bindings`; `nyl-render` provides the Release input sources.
 - **M3** starts `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as new
   crates, never inside `gitops/`, with the scenario harness and property tests
-  from the first commit.
+  from the first commit. It first moves the rules the `nyl` package still
+  holds, such as ownership-index input hashing, into their owning crates, and
+  replaces the two Git source types M2 leaves with the one `GitSource`.
 - **M4–M6** add drivers, the Kubernetes adapter, and promotion inside those
   boundaries; each contract walkthrough they introduce lands as a scenario.
