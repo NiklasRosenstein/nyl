@@ -207,7 +207,7 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
         }
         store::atomic_write(
             &store::cluster_index_path(&root, &args.name)?,
-            &store::json_bytes(&index)?,
+            &store::pretty_json_bytes(&index)?,
         )?;
         atomic_replace(&path, &contents, &updated)?;
     } else {

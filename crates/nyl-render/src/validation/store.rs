@@ -50,10 +50,16 @@ pub struct BuiltinIndex {
     pub collections: BTreeMap<String, String>,
 }
 
-/// The schema store's file format: pretty-printed JSON with object keys sorted
-/// recursively and a trailing newline. Vendored schema files and their recorded
-/// digests use it, so it stays fixed; it is not RFC 8785 canonical JSON.
+/// Bytes of a schema-store blob, cache record, or digested value: RFC 8785
+/// canonical JSON, the one form Nyl digests JSON in.
 pub fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
+    Ok(nyl_core::digest::canonical_json_bytes(value)?)
+}
+
+/// Bytes of a file people read: the schema inventories and JSON reports.
+/// Pretty-printed with object keys sorted recursively and a trailing newline,
+/// so committed inventories diff by line. Nothing digests these bytes.
+pub fn pretty_json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     fn sorted(value: Value) -> Value {
         match value {
             Value::Object(fields) => Value::Object(

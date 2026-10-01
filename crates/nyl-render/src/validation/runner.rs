@@ -950,7 +950,7 @@ pub async fn vendor_schemas(
     if !check {
         store::atomic_write(
             &store::safe_path(&root, Path::new("schemas/builtins.json"))?,
-            &store::json_bytes(&index)?,
+            &store::pretty_json_bytes(&index)?,
         )?;
     }
     store::check_and_prune(&root, false)?;

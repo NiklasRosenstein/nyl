@@ -336,7 +336,7 @@ Each resource result contains:
 - `schemaOrigin`: null when unresolved, or a tagged origin. `captured` contains
   `cluster` and `digest`; `desired` contains `crd` and `digest`; `local` contains
   `path` and `digest`; `builtin` contains `url` and nullable `digest`. Digests
-  identify canonical schema JSON; built-in URLs retain the registry commit and
+  are SHA-256 over the schema's RFC 8785 canonical JSON; built-in URLs retain the registry commit and
   selected Kubernetes version.
 
 `summary` counts resources as `valid`, `invalid`, `errors`, `skipped`, and
