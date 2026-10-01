@@ -131,8 +131,8 @@ impl PublicationBase {
             // Without a refresh, a branch missing from the cache cannot be
             // told apart from one that was never fetched, and a repository
             // that was never cached is a cache miss, not a failure.
-            // A cache that exists but cannot be read is an error, so state is
-            // never silently replaced by defaults.
+            // In both cached reads, a cache that exists but cannot be read is
+            // an error, so state is never silently replaced by defaults.
             PublicationRead::Cached => match git.branch_head(url, &branch, false) {
                 Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::Cached),
                 Ok(None) | Err(NylError::Git(crate::git::GitError::NotCached { .. })) => {
@@ -146,7 +146,10 @@ impl PublicationBase {
                     tracing::warn!("Cannot refresh publication branch {branch}: {refresh_error}; using cached state");
                     match git.branch_head(url, &branch, false) {
                         Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::CachedAfterFailedRefresh),
-                        Ok(None) | Err(_) => (None, PublicationBaseOrigin::Unavailable),
+                        Ok(None) | Err(NylError::Git(crate::git::GitError::NotCached { .. })) => {
+                            (None, PublicationBaseOrigin::Unavailable)
+                        }
+                        Err(cache_error) => return Err(error(cache_error, "")),
                     }
                 }
             },
@@ -1543,7 +1546,10 @@ mod tests {
 
         fn branch_head(&self, _: &str, _: &str, refresh: bool) -> Result<Option<String>> {
             let outcome = if refresh { &self.refreshed } else { &self.cached };
-            outcome.clone().map_err(NylError::config)
+            outcome.clone().map_err(|reason| match reason {
+                "not cached" => NylError::Git(crate::git::GitError::NotCached { url: "u".to_owned() }),
+                reason => NylError::config(reason),
+            })
         }
     }
 
@@ -1578,6 +1584,14 @@ mod tests {
                 (None, PublicationBaseOrigin::Unavailable)
             );
         }
+        let unreadable = Heads {
+            refreshed: Err("offline"),
+            cached: Err("corrupt pack"),
+        };
+        let error = PublicationBase::resolve(&unreadable, "u", "deploy", "dev", PublicationRead::FreshOrCached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("corrupt pack"), "{error}");
         let error = PublicationBase::resolve(
             &Heads {
                 refreshed: Err("offline"),
@@ -1598,12 +1612,14 @@ mod tests {
 
     #[test]
     fn test_cached_read_of_an_empty_cache_is_unavailable() {
-        let heads = Heads {
-            refreshed: Err("unused"),
-            cached: Ok(None),
-        };
-        let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
-        assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+        for cached in [Ok(None), Err("not cached")] {
+            let heads = Heads {
+                refreshed: Err("unused"),
+                cached,
+            };
+            let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+            assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+        }
     }
 
     #[test]

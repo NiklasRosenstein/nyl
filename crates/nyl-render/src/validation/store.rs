@@ -209,12 +209,23 @@ pub fn prepare_capture(
     }
     Ok((
         ClusterSchemaIndex {
-            version: 1,
+            version: CLUSTER_SCHEMA_INDEX_VERSION,
             cluster: name.to_owned(),
             capabilities_fingerprint: capabilities_fingerprint(capabilities)?,
             crds,
         },
         blobs,
+    ))
+}
+
+/// Format version of a Cluster schema snapshot. Version 2 fingerprints
+/// capabilities and stores schemas as canonical JSON; a version 1 snapshot is
+/// recaptured, because its fingerprint cannot be compared offline.
+pub const CLUSTER_SCHEMA_INDEX_VERSION: u32 = 2;
+
+fn unsupported_snapshot(cluster: &str) -> NylError {
+    NylError::validation(format!(
+        "Schema snapshot for Cluster {cluster} was captured by an older Nyl; run nyl capture cluster {cluster} --crds"
     ))
 }
 
@@ -233,7 +244,10 @@ pub fn read_cluster_index(root: &Path, name: &str) -> Result<Option<ClusterSchem
         Err(error) => return Err(error.into()),
     };
     let index: ClusterSchemaIndex = serde_json::from_slice(&bytes)?;
-    if index.version != 1 || index.cluster != name {
+    if index.version == 1 && index.cluster == name {
+        return Err(unsupported_snapshot(name));
+    }
+    if index.version != CLUSTER_SCHEMA_INDEX_VERSION || index.cluster != name {
         return Err(NylError::validation(format!(
             "Invalid schema snapshot for Cluster {name}"
         )));
@@ -312,7 +326,12 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
             }
             if entry.file_type().is_file() && entry.file_name() == "schemas.json" {
                 let index: ClusterSchemaIndex = serde_json::from_slice(&fs::read(entry.path())?)?;
-                if index.version != 1 || cluster_index_path(root, &index.cluster)? != entry.path() {
+                if index.version == 1 {
+                    return Err(unsupported_snapshot(&index.cluster));
+                }
+                if index.version != CLUSTER_SCHEMA_INDEX_VERSION
+                    || cluster_index_path(root, &index.cluster)? != entry.path()
+                {
                     return Err(NylError::config("Invalid cluster schema inventory identity"));
                 }
                 for crd in index.crds.values() {
@@ -375,12 +394,43 @@ mod tests {
         })]).unwrap()
     }
 
+    #[test]
+    fn test_a_snapshot_of_an_older_nyl_asks_for_a_recapture() {
+        let root = TempDir::new().unwrap();
+        let index = ClusterSchemaIndex {
+            version: 1,
+            cluster: "staging".into(),
+            capabilities_fingerprint: "a".repeat(64),
+            crds: BTreeMap::new(),
+        };
+        atomic_write(
+            &cluster_index_path(root.path(), "staging").unwrap(),
+            &pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
+        for error in [
+            read_cluster_index(root.path(), "staging").unwrap_err(),
+            check_and_prune(root.path(), true).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains(
+                    "Schema snapshot for Cluster staging was captured by an older Nyl; run nyl capture cluster staging --crds"
+                ),
+                "{error}"
+            );
+        }
+    }
+
     fn write_capture(root: &Path, name: &str) -> ClusterSchemaIndex {
         let (index, blobs) = prepare_capture(name, &capabilities(), &definitions()).unwrap();
         for bytes in blobs.values() {
             write_blob(root, bytes).unwrap();
         }
-        atomic_write(&cluster_index_path(root, name).unwrap(), &json_bytes(&index).unwrap()).unwrap();
+        atomic_write(
+            &cluster_index_path(root, name).unwrap(),
+            &pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
         index
     }
 

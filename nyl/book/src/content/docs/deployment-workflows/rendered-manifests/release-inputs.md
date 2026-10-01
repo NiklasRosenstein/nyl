@@ -230,7 +230,7 @@ source and the publication state.
 Resolved inputs are part of the render-cache key. The ownership index records
 each `fromFile` file under its path, each effective input as
 `@input/<group>/<release>/<input>` with the SHA-256 digest of its canonical
-JSON value, each `fromGit` file as `@git/<url>@<commit>/<path>` with the
+JSON value (RFC 8785, with exact digits for integers beyond ±(2^53 - 1)), each `fromGit` file as `@git/<url>@<commit>/<path>` with the
 digest of its bytes, and each publication state file as `@publication/<path>`
 (read from the base commit) or `@carried/<path>` (from a carry file). Keys under `@input/` and `@git/` are reserved for these
 entries; a project file whose key equals one fails the render instead of being

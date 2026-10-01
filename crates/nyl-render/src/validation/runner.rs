@@ -1324,7 +1324,7 @@ mod tests {
         }
         store::atomic_write(
             &store::cluster_index_path(&root, "staging").unwrap(),
-            &store::json_bytes(&index).unwrap(),
+            &store::pretty_json_bytes(&index).unwrap(),
         )
         .unwrap();
         partition.schema_source = Some("staging".into());
@@ -1393,7 +1393,11 @@ mod tests {
             version: 1,
             schemas: BTreeMap::from([(url, hash), (dependency_url, dependency_hash.clone())]),
         };
-        store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+        store::atomic_write(
+            &root.join("schemas/builtins.json"),
+            &store::pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
         validate_partitions(
             &ValidationArgs::default(),
             &config,
@@ -1451,7 +1455,11 @@ mod tests {
                 version: 1,
                 schemas: BTreeMap::from([(url.to_string(), hash.clone())]),
             };
-            store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+            store::atomic_write(
+                &root.join("schemas/builtins.json"),
+                &store::pretty_json_bytes(&index).unwrap(),
+            )
+            .unwrap();
             let valid = json!({
                 "apiVersion":"apiextensions.k8s.io/v1", "kind":"CustomResourceDefinition",
                 "metadata":{"name":"widgets.example.com"},
@@ -1552,14 +1560,14 @@ mod tests {
         assert!(error.to_string().contains("Missing vendored built-in schema"));
         let root = directory.path().join("vendor");
         let index = store::ClusterSchemaIndex {
-            version: 1,
+            version: store::CLUSTER_SCHEMA_INDEX_VERSION,
             cluster: "staging".into(),
             capabilities_fingerprint: "different".into(),
             crds: BTreeMap::new(),
         };
         store::atomic_write(
             &store::cluster_index_path(&root, "staging").unwrap(),
-            &store::json_bytes(&index).unwrap(),
+            &store::pretty_json_bytes(&index).unwrap(),
         )
         .unwrap();
         partition.schema_source = Some("staging".into());
