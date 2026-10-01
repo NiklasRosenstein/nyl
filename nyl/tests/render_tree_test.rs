@@ -1374,6 +1374,51 @@ fn test_validate_names_the_template_fix_for_implied_app_project_collisions() {
         ));
 }
 
+/// A second group with a Release `api`, selected by production next to
+/// `workloads`, so both default Application names are `api`.
+fn second_group_with_the_same_release_name(fixture: &TempDir) {
+    let root = fixture.path();
+    fs::write(
+        root.join("config/application-groups/extras.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: extras\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd-production\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("applications/extras")).unwrap();
+    fs::write(
+        root.join("applications/extras/api.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: extras\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_render_tree_rejects_duplicate_application_names_within_one_target() {
+    let fixture = fixture();
+    second_group_with_the_same_release_name(&fixture);
+    let output = fixture.path().join("deploy");
+    for check in [true, false] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command.current_dir(fixture.path()).args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ]);
+        if check {
+            command.arg("--check");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Releases extras/api and workloads/api of DeploymentTarget \"production\" generate the same Argo CD Application argocd-production/api",
+            ))
+            .stderr(predicate::str::contains("'workloads-${ release.metadata.name }'"));
+    }
+    assert!(!output.join("production/_nyl/index.json").exists());
+}
+
 #[test]
 fn test_render_tree_expands_application_name_template_values_per_release() {
     let fixture = fixture();

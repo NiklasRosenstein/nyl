@@ -563,6 +563,7 @@ async fn compile_target_tree_inner(
     let mut emitted_projects = BTreeSet::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
+    let mut application_owners = BTreeMap::<(String, String), String>::new();
     let mut pending_workloads = Vec::new();
     let mut namespace_scope_errors = Vec::new();
     let mut release_count = 0;
@@ -765,6 +766,22 @@ async fn compile_target_tree_inner(
             annotations: workload.group.spec.annotations.clone(),
         })?;
         apply_release_application_override(&mut application, &workload.release, &workload.group)?;
+        let owner = application_name_hint(&workload.group, &workload.release);
+        if let Some(previous) = application_owners.insert(
+            (
+                workload.group.spec.application_namespace.clone(),
+                workload.application_name.clone(),
+            ),
+            owner.clone(),
+        ) {
+            return Err(NylError::config(format!(
+                "Releases {previous} and {owner} of DeploymentTarget {:?} generate the same Argo CD Application {}/{}; set ApplicationGroup.spec.applicationNameTemplate on one of the groups, for example '{}-${{ release.metadata.name }}'",
+                target.metadata.name,
+                workload.group.spec.application_namespace,
+                workload.application_name,
+                workload.group.metadata.name,
+            )));
+        }
         insert_yaml(
             &mut files,
             PathBuf::from("_nyl/catalog/applications")
