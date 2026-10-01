@@ -483,6 +483,8 @@ fn resolved_project_scope(
     }
     let template = group.spec.project_template.as_ref()?;
     // An omitted template list leaves the generated project's namespaces unrestricted.
+    // The group may render on several target Clusters, so this early warning
+    // counts every entry's namespace; render-tree enforces the per-Cluster check.
     let mut namespaces = template
         .destinations
         .as_ref()?

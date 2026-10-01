@@ -2176,7 +2176,6 @@ fn resolve_project_source_repositories(
 /// The Argo CD glob that admits every namespace, group, or kind.
 const PERMISSIVE_PATTERN: &str = "*";
 
-/// Whether an AppProject resource permission already admits every cluster-scoped resource.
 /// Whether an Argo CD namespace glob list admits a namespace.
 pub fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
     patterns
