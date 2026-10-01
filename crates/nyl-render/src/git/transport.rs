@@ -100,6 +100,11 @@ pub fn push_branch_if_unchanged(repository: &Repository, url: &str, branch: &str
 
 /// Run `git` against `repository` and return its standard output.
 fn run(repository: &Repository, url: &str, operation: &str, args: &[&str]) -> Result<String> {
+    // A hooks directory that never exists: the user's hooks, such as a
+    // global `core.hooksPath` pre-push hook, must not judge Nyl's own
+    // fetches and pushes.
+    let mut hooks_path = std::ffi::OsString::from("core.hooksPath=");
+    hooks_path.push(repository.path().join("nyl-no-hooks"));
     let mut command = Command::new("git");
     command
         .arg("--git-dir")
@@ -113,7 +118,9 @@ fn run(repository: &Repository, url: &str, operation: &str, args: &[&str]) -> Re
             "maintenance.auto=false",
             "-c",
             "protocol.ext.allow=never",
+            "-c",
         ])
+        .arg(hooks_path)
         .args(args)
         .stdin(Stdio::null())
         // Fail instead of waiting for a terminal password prompt; OpenSSH
@@ -221,5 +228,25 @@ mod tests {
         assert!(remote_branch(&local, &url, "main").is_err());
         assert!(push_branch_if_unchanged(&local, &url, "main", None).is_err());
         assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_push_ignores_the_users_git_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let remote_dir = TempDir::new().unwrap();
+        Repository::init_bare(remote_dir.path()).unwrap();
+        let url = remote_dir.path().to_string_lossy().to_string();
+        let local_dir = TempDir::new().unwrap();
+        let local = Repository::init(local_dir.path()).unwrap();
+        let hook = local.path().join("hooks/pre-push");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let commit = commit(&local, "refs/heads/deploy", "First", &[]);
+        push_branch_if_unchanged(&local, &url, "deploy", None).unwrap();
+        assert_eq!(remote_branch(&local, &url, "deploy").unwrap(), Some(commit));
     }
 }

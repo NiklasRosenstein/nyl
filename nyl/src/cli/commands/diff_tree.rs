@@ -103,8 +103,8 @@ pub struct DiffTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Never fetch: read the published tree, `--source-ref`, and
-    /// fromPublication state from the cached refs of the local Git cache.
+    /// Read the published tree, `--source-ref`, and fromPublication state
+    /// from the cached refs of the local Git cache instead of fetching them.
     #[arg(long)]
     pub offline: bool,
 }
