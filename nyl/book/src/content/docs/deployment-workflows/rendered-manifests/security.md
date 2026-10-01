@@ -35,20 +35,20 @@ even when an application source repository is compromised. An
 `AppProjectDefinition` with `management: External` references an administrator-
 managed project without publishing its manifest.
 
-`ApplicationGroup.spec.projectTemplate` is a constrained alternative. Nyl fixes
-its source repository and destination cluster from the selected target, checks
-every Release namespace against its declared destination patterns, and only
-adds Namespace permissions when namespace creation is enabled. An omitted
-`clusterResourceWhitelist` admits every cluster-scoped resource; a declared
-list, `[]` included, admits only its patterns. The generated policy complements,
-but does not replace, Argo CD admission.
+A group that declares no project gets an implied AppProject as permissive as
+Argo CD's `default` project: every source repository, every cluster and
+namespace, and every cluster-scoped resource. No Release namespace check
+applies.
 
-A group that declares no project at all keeps the implied AppProject, which is
-permissive: it still confines the group to one destination cluster and to the
-target publication repository, but it admits every namespace and every
-cluster-scoped resource, and no Release namespace check applies. Declare
-`projectTemplate` for any group whose namespace or cluster-resource scope
-should be an enforced boundary.
+`ApplicationGroup.spec.projectTemplate` mirrors the AppProject spec fields and
+narrows exactly the fields it declares; omitted fields keep the permissive
+defaults. Declare `sourceRepos`, `destinations`, and `clusterResourceWhitelist`
+for any group whose repository, namespace, or cluster-resource scope should be
+an enforced boundary. With declared `destinations`, Nyl checks every Release
+namespace against the entries admitting the target workload Cluster, and adds
+Namespace permissions only when namespace creation is enabled and the
+cluster-resource whitelist is narrowed. The generated policy complements, but
+does not replace, Argo CD admission.
 
 The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades

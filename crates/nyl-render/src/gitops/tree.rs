@@ -13,11 +13,11 @@ use crate::git::GitManager;
 use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
-    is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
-    AppProjectTemplate, ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec,
-    CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget, GitOpsResource, GitOpsResourceKind,
-    GitPublication, InlineGitRepository, LocalReference, ManagedResourceDeletionPolicy, RendererConfig,
-    RendererConfigMode, SharedNamespaceOwner,
+    is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
+    AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
+    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
+    GitOpsResource, GitOpsResourceKind, GitPublication, InlineGitRepository, LocalReference,
+    ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -427,14 +427,7 @@ async fn compile_target_tree_inner(
 
     let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
-        let project = resolve_effective_group_project(
-            inventory,
-            &group,
-            &central_session,
-            &repository,
-            &cluster,
-            &argocd.resource,
-        )?;
+        let project = resolve_effective_group_project(inventory, &group, &central_session, &cluster, &argocd.resource)?;
         let mut source = resolve_group_source(
             inventory,
             &group_resource_path,
@@ -1962,7 +1955,6 @@ fn resolve_effective_group_project(
     inventory: &GitOpsInventory,
     group: &ApplicationGroup,
     session: &RenderSession,
-    publication_repository: &InlineGitRepository,
     target_cluster: &Cluster,
     argocd: &ArgoCDInstance,
 ) -> Result<EffectiveProject> {
@@ -1991,93 +1983,87 @@ fn resolve_effective_group_project(
         });
     }
 
-    build_generated_project(group, publication_repository, target_cluster, argocd)
+    build_generated_project(group, target_cluster, argocd)
 }
 
 /// Build the AppProject a group generates for itself, from `spec.projectTemplate`
 /// or, when it declares none, from the implied permissive project.
 fn build_generated_project(
     group: &ApplicationGroup,
-    publication_repository: &InlineGitRepository,
     target_cluster: &Cluster,
     argocd: &ArgoCDInstance,
 ) -> Result<EffectiveProject> {
-    // A group that declares no project owns an implied permissive AppProject:
-    // the target cluster, any namespace, any cluster-scoped resource. Narrowing
-    // it means declaring spec.projectTemplate.
-    let implied = group.spec.project_template.is_none();
+    // A group that declares no project owns an implied AppProject as permissive
+    // as Argo CD's default project. Each field spec.projectTemplate declares
+    // replaces the default; omitted fields stay permissive.
     let default_template = AppProjectTemplate::default();
     let template = group.spec.project_template.as_ref().unwrap_or(&default_template);
     let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
-    let mut destination_namespaces = template.destination_namespaces.clone();
-    if let Some(namespace) = &group.spec.destination_namespace {
-        if !namespace_matches_any(namespace, &destination_namespaces) {
-            destination_namespaces.push(namespace.clone());
-        }
-    }
-    if destination_namespaces.is_empty() {
-        if !implied {
-            return Err(NylError::config(format!(
-                "ApplicationGroup {:?} projectTemplate requires destinationNamespaces when spec.destinationNamespace is absent; remove spec.projectTemplate for the implied permissive project",
-                group.metadata.name
-            )));
-        }
-        destination_namespaces.push(PERMISSIVE_PATTERN.to_owned());
-    }
+    let (destinations, mut destination_namespaces) = generated_destinations(group, template, target_cluster)?;
     destination_namespaces.sort();
     destination_namespaces.dedup();
 
-    // An omitted clusterResourceWhitelist leaves cluster-scoped resources as
-    // open as the implied project; only a declared list, `[]` included, narrows it.
-    let mut cluster_resources = match &template.cluster_resource_whitelist {
-        None => vec![serde_json::json!({"group": PERMISSIVE_PATTERN, "kind": PERMISSIVE_PATTERN})],
-        Some(patterns) => patterns
-            .iter()
-            .map(|pattern| {
-                let mut value = serde_json::Map::from_iter([
-                    ("group".to_owned(), pattern.group.clone().into()),
-                    ("kind".to_owned(), pattern.kind.clone().into()),
-                ]);
-                if let Some(name) = &pattern.name {
-                    value.insert("name".to_owned(), name.clone().into());
-                }
-                Value::Object(value)
-            })
-            .collect::<Vec<_>>(),
-    };
-    let permits_every_resource = cluster_resources.iter().any(is_permissive_resource);
+    let mut cluster_resources = template.cluster_resource_whitelist.clone().unwrap_or_else(|| {
+        vec![AppProjectResourcePattern {
+            group: PERMISSIVE_PATTERN.to_owned(),
+            kind: PERMISSIVE_PATTERN.to_owned(),
+            name: None,
+        }]
+    });
+    let permits_every_resource = cluster_resources.iter().any(|pattern| {
+        pattern.group == PERMISSIVE_PATTERN && pattern.kind == PERMISSIVE_PATTERN && pattern.name.is_none()
+    });
     if group.spec.namespace.create && !permits_every_resource {
         for namespace in &destination_namespaces {
-            let permission = serde_json::json!({"group": "", "kind": "Namespace", "name": namespace});
+            let permission = AppProjectResourcePattern {
+                group: String::new(),
+                kind: "Namespace".to_owned(),
+                name: Some(namespace.clone()),
+            };
             if !cluster_resources.contains(&permission) {
                 cluster_resources.push(permission);
             }
         }
     }
 
-    let destinations = destination_namespaces
-        .iter()
-        .map(|namespace| {
-            let mut destination = serde_json::Map::from_iter([("namespace".to_owned(), namespace.clone().into())]);
-            if let Some(server) = &target_cluster.spec.destination.server {
-                destination.insert("server".to_owned(), server.clone().into());
-            }
-            if let Some(cluster_name) = &target_cluster.spec.destination.name {
-                destination.insert("name".to_owned(), cluster_name.clone().into());
-            }
-            Value::Object(destination)
-        })
-        .collect::<Vec<_>>();
+    // Applications live in applicationNamespace, so the project must admit it.
+    let mut source_namespaces = template.source_namespaces.clone().unwrap_or_default();
+    if !namespace_matches_any(&group.spec.application_namespace, &source_namespaces) {
+        source_namespaces.push(group.spec.application_namespace.clone());
+    }
+
+    let mut metadata = serde_json::json!({"name": name, "namespace": argocd.spec.namespace});
+    for (field, value) in [
+        ("labels", serde_json::to_value(&template.labels)?),
+        ("annotations", serde_json::to_value(&template.annotations)?),
+        ("finalizers", serde_json::to_value(&template.finalizers)?),
+    ] {
+        if value.as_object().is_some_and(|map| !map.is_empty()) || value.as_array().is_some_and(|list| !list.is_empty())
+        {
+            metadata[field] = value;
+        }
+    }
+    let spec = serde_json::to_value(AppProjectTemplate {
+        name: None,
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        finalizers: Vec::new(),
+        source_repos: Some(
+            template
+                .source_repos
+                .clone()
+                .unwrap_or_else(|| vec![PERMISSIVE_PATTERN.to_owned()]),
+        ),
+        source_namespaces: Some(source_namespaces),
+        destinations: Some(destinations),
+        cluster_resource_whitelist: Some(cluster_resources),
+        ..template.clone()
+    })?;
     let manifest = serde_json::json!({
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "AppProject",
-        "metadata": {"name": name, "namespace": argocd.spec.namespace},
-        "spec": {
-            "sourceRepos": [publication_repository.repo_url],
-            "sourceNamespaces": [group.spec.application_namespace],
-            "destinations": destinations,
-            "clusterResourceWhitelist": cluster_resources,
-        }
+        "metadata": metadata,
+        "spec": spec,
     });
     Ok(EffectiveProject {
         catalog_id: group.metadata.name.clone(),
@@ -2086,6 +2072,60 @@ fn build_generated_project(
         manifest: Some(manifest),
         destination_namespaces: Some(destination_namespaces),
     })
+}
+
+/// The destinations of a generated AppProject and the namespace patterns they
+/// admit on the target workload Cluster, which bound the group's Releases.
+fn generated_destinations(
+    group: &ApplicationGroup,
+    template: &AppProjectTemplate,
+    target_cluster: &Cluster,
+) -> Result<(Vec<AppProjectDestination>, Vec<String>)> {
+    let cluster = &target_cluster.spec.destination;
+
+    let mut destinations = template.destinations.clone().unwrap_or_else(|| {
+        vec![AppProjectDestination {
+            server: Some(PERMISSIVE_PATTERN.to_owned()),
+            name: None,
+            namespace: PERMISSIVE_PATTERN.to_owned(),
+        }]
+    });
+    // Only entries admitting the target workload Cluster bound its Releases.
+    let target_namespaces = |destinations: &[AppProjectDestination]| {
+        destinations
+            .iter()
+            .filter(|destination| destination_admits_cluster(destination, cluster))
+            .map(|destination| destination.namespace.clone())
+            .collect::<Vec<_>>()
+    };
+    if let Some(namespace) = &group.spec.destination_namespace {
+        if !namespace_matches_any(namespace, &target_namespaces(&destinations)) {
+            destinations.push(AppProjectDestination {
+                server: cluster.server.clone(),
+                name: cluster.name.clone(),
+                namespace: namespace.clone(),
+            });
+        }
+    }
+    let destination_namespaces = target_namespaces(&destinations);
+    if destination_namespaces.is_empty() {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} projectTemplate.destinations admits no namespace on Cluster {:?}; add an entry for it, or omit destinations to admit every cluster and namespace",
+            group.metadata.name, target_cluster.metadata.name
+        )));
+    }
+    Ok((destinations, destination_namespaces))
+}
+
+/// Whether an AppProject destination's server or name pattern admits a Cluster.
+/// A Cluster without a server or name matches only patterns admitting any value.
+fn destination_admits_cluster(destination: &AppProjectDestination, cluster: &ClusterDestination) -> bool {
+    let matches = |pattern: &Option<String>, value: &Option<String>| {
+        pattern.as_deref().is_some_and(|pattern| {
+            Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(value.as_deref().unwrap_or_default()))
+        })
+    };
+    matches(&destination.server, &cluster.server) || matches(&destination.name, &cluster.name)
 }
 
 fn resolve_project_source_repositories(
@@ -2137,11 +2177,6 @@ fn resolve_project_source_repositories(
 const PERMISSIVE_PATTERN: &str = "*";
 
 /// Whether an AppProject resource permission already admits every cluster-scoped resource.
-fn is_permissive_resource(permission: &Value) -> bool {
-    permission.get("group").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
-        && permission.get("kind").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
-}
-
 /// Whether an Argo CD namespace glob list admits a namespace.
 pub fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
     patterns
@@ -2160,7 +2195,7 @@ fn validate_project_namespace_scope(
     {
         if !namespace_matches_any(namespace, patterns) {
             return Err(NylError::config(format!(
-                "Release {}/{} uses namespace {namespace:?}, which is outside ApplicationGroup.spec.projectTemplate.destinationNamespaces [{}]",
+                "Release {}/{} uses namespace {namespace:?}, which is outside ApplicationGroup.spec.projectTemplate.destinations [{}] for the target Cluster",
                 group.metadata.name,
                 release.metadata.name,
                 patterns.iter().map(|value| format!("{value:?}")).collect::<Vec<_>>().join(", ")
@@ -2890,6 +2925,35 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_destination_admits_cluster_by_server_or_name_pattern() {
+        let destination = |server: Option<&str>, name: Option<&str>| AppProjectDestination {
+            server: server.map(ToOwned::to_owned),
+            name: name.map(ToOwned::to_owned),
+            namespace: "*".to_owned(),
+        };
+        let by_server = ClusterDestination {
+            server: Some("https://kubernetes.default.svc".to_owned()),
+            name: None,
+        };
+        let by_name = ClusterDestination {
+            server: None,
+            name: Some("production".to_owned()),
+        };
+        // The default `server: '*'` admits clusters addressed either way.
+        assert!(destination_admits_cluster(&destination(Some("*"), None), &by_server));
+        assert!(destination_admits_cluster(&destination(Some("*"), None), &by_name));
+        assert!(destination_admits_cluster(&destination(None, Some("prod*")), &by_name));
+        assert!(!destination_admits_cluster(
+            &destination(Some("https://*"), None),
+            &by_name
+        ));
+        assert!(!destination_admits_cluster(
+            &destination(None, Some("staging")),
+            &by_name
+        ));
+    }
 
     #[test]
     fn included_manifests_are_not_reported_as_unclaimed() {

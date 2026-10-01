@@ -200,7 +200,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
             json!({"management": "External", "manifest": {"apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject", "metadata": {"name": "workloads", "namespace": "argocd"}, "spec": {}}})
         }
         ResourceKind::ApplicationGroup => {
-            json!({"projectTemplate": {"destinationNamespaces": ["workloads"]}, "applicationNamespace": "argocd", "source": {"path": "applications/workloads"}, "destinationNamespace": "workloads"})
+            json!({"projectTemplate": {"destinations": [{"server": "https://kubernetes.default.svc", "namespace": "workloads"}]}, "applicationNamespace": "argocd", "source": {"path": "applications/workloads"}, "destinationNamespace": "workloads"})
         }
         ResourceKind::Release => json!({"include": ["manifests/*.yaml"]}),
         ResourceKind::HelmChart => json!({"chart": {"name": "./charts/app"}, "values": {"replicaCount": 2}}),
@@ -309,10 +309,10 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
             ),
             (
                 "projectTemplate",
-                "Generates an AppProject for this group, narrowed to the declared namespaces and, when listed, cluster resources.",
+                "Generates an AppProject for this group from the declared AppProject fields; omitted fields keep Argo CD's permissive default-project values.",
             ),
         ],
-        Some("Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource."),
+        Some("Generates a permissive AppProject named after the group, like Argo CD's default project: every source repository, every destination, every cluster-scoped resource."),
     );
 }
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {

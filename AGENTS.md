@@ -312,11 +312,10 @@ fn test_operation() -> Result<()> {
   apply options, cascade deletion in the foreground, and require confirmation
   before self-pruning.
 - An ApplicationGroup has at most one of `projectRef` and `projectTemplate`.
-  Declaring neither implies a permissive AppProject named after the group:
-  the target workload Cluster, every namespace, every cluster-scoped resource.
-  A declared `projectTemplate` narrows that project and requires explicit
-  destination namespaces. An omitted `clusterResourceWhitelist` admits every
-  cluster-scoped resource; only a declared list, `[]` included, narrows it.
+  Declaring neither implies an AppProject named after the group with Argo CD's
+  permissive default-project policy: every source repository, destination, and
+  cluster-scoped resource. `projectTemplate` mirrors the AppProject spec fields;
+  each declared field narrows that policy and omitted fields stay permissive.
   Releases may narrow their resource content but never expand a generated project's namespace or cluster-resource policy.
 - Kubernetes bootstrap namespaces are externally owned unless an explicit
   `sharedNamespaces` policy delegates ownership. Authorization to render into

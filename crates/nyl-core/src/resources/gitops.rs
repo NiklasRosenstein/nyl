@@ -384,7 +384,7 @@ pub struct InlineGitRepository {
 ///
 /// ## If omitted
 ///
-/// An ApplicationGroup generates its own AppProject: `spec.projectTemplate` for a least-privilege project, or the implied permissive project when the group declares neither. Nyl does not assume an existing Argo CD project supplies the required policy contract.
+/// An ApplicationGroup generates its own AppProject: the implied permissive project, narrowed by whatever `spec.projectTemplate` declares. Nyl does not assume an existing Argo CD project supplies the required policy contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::AppProjectDefinition))]
@@ -505,19 +505,80 @@ pub struct LabelSelector {
     pub match_labels: BTreeMap<String, String>,
 }
 
-/// A constrained AppProject generated for one ApplicationGroup and target.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// An Argo CD AppProject generated for one ApplicationGroup and target.
+///
+/// `name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field takes the value of Argo CD's permissive `default` project, so a bare template only renames the implied project: every source repository, every destination, every cluster-scoped resource. Declare a field to narrow it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AppProjectTemplate {
     /// Generated AppProject name; defaults to the ApplicationGroup name. Must be unambiguous across targets sharing an Argo CD namespace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Permitted destination namespace patterns. Must cover all effective Release namespaces and additional namespaces; required when no fixed destination namespace is configured.
-    #[serde(default, rename = "destinationNamespaces", skip_serializing_if = "Vec::is_empty")]
-    pub destination_namespaces: Vec<String>,
-    /// Cluster-scoped resource permissions. Omitted, the project admits every cluster-scoped resource; an explicit list, including `[]`, admits only those patterns. Namespace permissions are added for approved namespaces when creation is enabled.
+    /// Labels on the generated AppProject.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations on the generated AppProject.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+    /// Finalizers on the generated AppProject, such as `resources-finalizer.argocd.argoproj.io`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalizers: Vec<String>,
+    /// Project description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Permitted source repository URL patterns. Omitted, the project admits every repository (`*`).
+    #[serde(rename = "sourceRepos", skip_serializing_if = "Option::is_none")]
+    pub source_repos: Option<Vec<String>>,
+    /// Namespaces whose Applications may use the project. `applicationNamespace` is always added.
+    #[serde(rename = "sourceNamespaces", skip_serializing_if = "Option::is_none")]
+    pub source_namespaces: Option<Vec<String>>,
+    /// Permitted destinations. Omitted, the project admits every cluster and namespace. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destinations: Option<Vec<AppProjectDestination>>,
+    /// Cluster-scoped resources the project admits. Omitted, every cluster-scoped resource; a declared list, including `[]`, admits only its patterns. Namespace permissions are added for the admitted namespaces when namespace creation is enabled.
     #[serde(rename = "clusterResourceWhitelist", skip_serializing_if = "Option::is_none")]
     pub cluster_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
+    /// Cluster-scoped resources the project denies.
+    #[serde(rename = "clusterResourceBlacklist", skip_serializing_if = "Option::is_none")]
+    pub cluster_resource_blacklist: Option<Vec<AppProjectResourcePattern>>,
+    /// Namespaced resources the project admits. Omitted, every namespaced resource.
+    #[serde(rename = "namespaceResourceWhitelist", skip_serializing_if = "Option::is_none")]
+    pub namespace_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
+    /// Namespaced resources the project denies.
+    #[serde(rename = "namespaceResourceBlacklist", skip_serializing_if = "Option::is_none")]
+    pub namespace_resource_blacklist: Option<Vec<AppProjectResourcePattern>>,
+    /// Project roles, as Argo CD `spec.roles`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<serde_json::Value>>,
+    /// Sync windows, as Argo CD `spec.syncWindows`.
+    #[serde(rename = "syncWindows", skip_serializing_if = "Option::is_none")]
+    pub sync_windows: Option<Vec<serde_json::Value>>,
+    /// Orphaned resource monitoring, as Argo CD `spec.orphanedResources`.
+    #[serde(rename = "orphanedResources", skip_serializing_if = "Option::is_none")]
+    pub orphaned_resources: Option<serde_json::Value>,
+    /// GnuPG keys required to verify source commits, as Argo CD `spec.signatureKeys`.
+    #[serde(rename = "signatureKeys", skip_serializing_if = "Option::is_none")]
+    pub signature_keys: Option<Vec<serde_json::Value>>,
+    /// Whether only clusters scoped to this project are admitted, as Argo CD `spec.permitOnlyProjectScopedClusters`.
+    #[serde(rename = "permitOnlyProjectScopedClusters", skip_serializing_if = "Option::is_none")]
+    pub permit_only_project_scoped_clusters: Option<bool>,
+    /// Service accounts used for sync per destination, as Argo CD `spec.destinationServiceAccounts`.
+    #[serde(rename = "destinationServiceAccounts", skip_serializing_if = "Option::is_none")]
+    pub destination_service_accounts: Option<Vec<serde_json::Value>>,
+}
+
+/// One Argo CD AppProject destination. At least one of `server` and `name` is required.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppProjectDestination {
+    /// Cluster API server URL pattern, such as `https://kubernetes.default.svc` or `*`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Argo CD cluster name pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Namespace pattern, such as `apps`, `preview-*`, or `*`.
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
@@ -1231,17 +1292,36 @@ impl AppProjectTemplate {
         if let Some(name) = &self.name {
             validate_dns_subdomain("spec.projectTemplate.name", name)?;
         }
-        validate_unique_static_names(
-            "spec.projectTemplate.destinationNamespaces",
-            &self.destination_namespaces,
-        )?;
-        for namespace in &self.destination_namespaces {
-            validate_namespace_pattern("spec.projectTemplate.destinationNamespaces", namespace)?;
+        for repository in self.source_repos.iter().flatten() {
+            validate_static_required("spec.projectTemplate.sourceRepos[]", repository)?;
         }
-        for pattern in self.cluster_resource_whitelist.iter().flatten() {
-            validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].kind", &pattern.kind)?;
-            if let Some(name) = &pattern.name {
-                validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].name", name)?;
+        for namespace in self.source_namespaces.iter().flatten() {
+            validate_namespace_pattern("spec.projectTemplate.sourceNamespaces[]", namespace)?;
+        }
+        for destination in self.destinations.iter().flatten() {
+            if destination.server.is_none() && destination.name.is_none() {
+                return Err(CoreError::config(
+                    "spec.projectTemplate.destinations[] requires server or name; use server: '*' to admit every cluster",
+                ));
+            }
+            for (field, value) in [("server", &destination.server), ("name", &destination.name)] {
+                if let Some(value) = value {
+                    validate_static_required(&format!("spec.projectTemplate.destinations[].{field}"), value)?;
+                }
+            }
+            validate_namespace_pattern("spec.projectTemplate.destinations[].namespace", &destination.namespace)?;
+        }
+        for (field, patterns) in [
+            ("clusterResourceWhitelist", &self.cluster_resource_whitelist),
+            ("clusterResourceBlacklist", &self.cluster_resource_blacklist),
+            ("namespaceResourceWhitelist", &self.namespace_resource_whitelist),
+            ("namespaceResourceBlacklist", &self.namespace_resource_blacklist),
+        ] {
+            for pattern in patterns.iter().flatten() {
+                validate_static_required(&format!("spec.projectTemplate.{field}[].kind"), &pattern.kind)?;
+                if let Some(name) = &pattern.name {
+                    validate_static_required(&format!("spec.projectTemplate.{field}[].name"), name)?;
+                }
             }
         }
         Ok(())
@@ -1743,7 +1823,7 @@ mod tests {
     #[test]
     fn application_group_accepts_at_most_one_project_source() {
         let mut value = application_group();
-        value["spec"]["projectTemplate"] = json!({"destinationNamespaces": ["cloud"]});
+        value["spec"]["projectTemplate"] = json!({"destinations": [{"server": "*", "namespace": "cloud"}]});
         assert!(parse_gitops_resource(&value)
             .unwrap_err()
             .to_string()

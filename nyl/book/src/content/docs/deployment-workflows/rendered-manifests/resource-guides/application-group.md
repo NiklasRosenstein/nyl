@@ -11,43 +11,59 @@ selection, `spec.enabled` may be structurally templated per target.
 ## Project assignment
 
 A group that declares neither `projectRef` nor `projectTemplate` owns an
-implied AppProject named after the group. It is permissive: the target workload
-Cluster as its only destination, every namespace, and every cluster-scoped
-resource. Nothing outside the group needs to exist for it to render, and Argo CD
-still confines the project to that one cluster and to the target publication
-repository.
+implied AppProject named after the group. It is as permissive as Argo CD's
+`default` project: every source repository, every cluster and namespace, and
+every cluster-scoped resource. Nothing outside the group needs to exist for it
+to render.
 
 `projectRef` retains a reusable AppProjectDefinition contract. A `Rendered`
 definition is copied into the target catalog once; an `External` definition
 only supplies the project name.
 
-`projectTemplate` replaces the implied project with a narrower one.
-Declaring it opts into explicit scope, so it requires `destinationNamespaces`
-unless `spec.destinationNamespace` fixes the namespace:
+`projectTemplate` generates the group's AppProject. `name`, `labels`,
+`annotations`, and `finalizers` set its metadata, and the remaining fields mirror the
+[Argo CD AppProject](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)
+spec: `description`, `sourceRepos`, `sourceNamespaces`, `destinations`,
+`clusterResourceWhitelist`, `clusterResourceBlacklist`,
+`namespaceResourceWhitelist`, `namespaceResourceBlacklist`, `roles`,
+`syncWindows`, `orphanedResources`, `signatureKeys`,
+`permitOnlyProjectScopedClusters`, and `destinationServiceAccounts`. Every
+omitted field keeps the permissive default, so a bare template only renames the
+implied project; declare a field to narrow it:
 
 ```yaml
 projectTemplate:
   name: workloads
-  destinationNamespaces:
-    - workloads
-    - 'preview-*'
+  sourceRepos:
+    - https://git.example.com/deploy.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: workloads
+    - server: https://kubernetes.default.svc
+      namespace: 'preview-*'
   clusterResourceWhitelist:
     - group: apiextensions.k8s.io
       kind: CustomResourceDefinition
 ```
 
-The name defaults to the ApplicationGroup name. Remove the whole
-`projectTemplate` to go back to the implied permissive project. Nyl fixes
-`sourceRepos` to the target publication repository, `sourceNamespaces` to `applicationNamespace`,
-and destinations to the target workload Cluster. A fixed
-`destinationNamespace` is automatically added. Without one, at least one
-destination namespace pattern is required. Every effective Release destination
-and `additionalNamespaces` entry must match the declared policy.
+| Omitted field | Generated value |
+| --- | --- |
+| `sourceRepos` | `['*']` |
+| `destinations` | `[{server: '*', namespace: '*'}]` |
+| `clusterResourceWhitelist` | `[{group: '*', kind: '*'}]` |
 
-Omitting `clusterResourceWhitelist` keeps cluster-scoped resources as open as
-in the implied project. A declared list, including `clusterResourceWhitelist: []`,
-admits only its patterns; when namespace creation is enabled, Nyl then adds
-Namespace permissions for the approved destination patterns. Argo CD's AppProject admission remains the authorization boundary.
+The name defaults to the ApplicationGroup name. Nyl always adds
+`applicationNamespace` to `sourceNamespaces`. Each `destinations` entry names a
+`server` or `name` pattern and a `namespace` pattern. A fixed
+`destinationNamespace` not covered by an entry for the target workload Cluster
+is added for that Cluster. Every effective Release destination and
+`additionalNamespaces` entry must match an entry that admits the target
+workload Cluster.
+
+A declared `clusterResourceWhitelist`, including `[]`, admits only its
+patterns; when namespace creation is enabled, Nyl then adds Namespace
+permissions for the target Cluster's admitted namespace patterns. Argo CD's
+AppProject admission remains the authorization boundary.
 
 ## Application names
 
