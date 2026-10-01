@@ -16,5 +16,8 @@ define. `_project/` is the project they share unless a scenario brings its own.
 | [`stale-promotion-evidence`](stale-promotion-evidence/scenario.yaml) | Promotion with stale source evidence | M6 |
 
 These files are the contract's acceptance tests. The M3 scenario harness runs
-them; until it exists, nothing executes them. A change to a rule that a
+them; until it exists, nothing executes them.
+[`walkthrough_resources_test.rs`](../../walkthrough_resources_test.rs) already
+parses and validates every project resource whose kind exists today, and lists
+the kinds later milestones add. A change to a rule that a
 walkthrough uses changes the walkthrough and its scenario in the same change.
