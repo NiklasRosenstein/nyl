@@ -1,12 +1,10 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use clap::Args;
-use git2::build::{CheckoutBuilder, RepoBuilder};
-use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Signature, StatusOptions};
+use git2::build::CheckoutBuilder;
+use git2::{IndexAddOption, Repository, ResetType, Signature, StatusOptions};
 
-use crate::git::CredentialProvider;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
@@ -249,8 +247,7 @@ fn publish_compiled(
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
     let branch = writable_branch_name(&compiled.target.spec.publication.revision)?;
-    let credentials = Arc::new(CredentialProvider::new());
-    if let Some(commit) = publication_current_commit(compiled, publication_url, &credentials, cache)? {
+    if let Some(commit) = publication_current_commit(compiled, publication_url, cache)? {
         // The published tree matching is not enough: state read at an older
         // base means the branch moved while rendering.
         verify_publication_base(compiled, Some(commit), publication_url, branch)?;
@@ -263,7 +260,7 @@ fn publish_compiled(
         return Ok(());
     }
     let temp = tempfile::TempDir::new()?;
-    let repository = clone_branch(publication_url, branch, temp.path(), &credentials)?;
+    let repository = clone_branch(publication_url, branch, temp.path())?;
     let expected = remote_branch_oid(&repository, branch);
     verify_publication_base(compiled, expected, publication_url, branch)?;
 
@@ -284,7 +281,7 @@ fn publish_compiled(
         subject: args.message.as_deref(),
     })?;
     if !args.dry_run {
-        fetch_branch(&repository, publication_url, branch, &credentials)?;
+        fetch_branch(&repository, publication_url, branch)?;
         let actual = remote_branch_oid(&repository, branch);
         if actual != expected {
             return Err(NylError::config(format!(
@@ -316,7 +313,7 @@ fn publish_compiled(
         return Ok(());
     }
 
-    push_branch(&repository, publication_url, branch, expected, &credentials)?;
+    push_branch(&repository, publication_url, branch, expected)?;
     print_publication_result(
         &format!("Published deployment target {target_name}"),
         publication_url,
@@ -553,13 +550,12 @@ fn verify_publication_base(
 fn publication_current_commit(
     compiled: &crate::gitops::CompiledTargetTree,
     publication_url: &str,
-    credentials: &Arc<CredentialProvider>,
     cache: &GitOpsCache,
 ) -> Result<Option<git2::Oid>> {
     let mut manager = if let Some(cache_root) = cache.external_cache_root() {
-        GitManager::with_cache_dir_and_provider(cache_root, Some(Arc::clone(credentials)))
+        GitManager::with_cache_dir(cache_root)
     } else {
-        GitManager::with_credential_provider(Some(Arc::clone(credentials))).map_err(NylError::Git)?
+        GitManager::new().map_err(NylError::Git)?
     }
     .with_render_cache(Some(cache.clone()));
     let checkout =
@@ -645,18 +641,15 @@ fn writable_branch_name(revision: &str) -> Result<&str> {
     }
 }
 
-fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialProvider) -> Result<Repository> {
-    let mut fetch = FetchOptions::new();
-    fetch.remote_callbacks(credentials.build_callbacks(url));
-    // Check nothing out while cloning: the user's Git config may convert line
-    // endings, and owned files must keep the exact bytes their index records.
-    let mut no_checkout = CheckoutBuilder::new();
-    no_checkout.dry_run();
-    let repository = RepoBuilder::new()
-        .fetch_options(fetch)
-        .with_checkout(no_checkout)
-        .clone(url, path)
-        .map_err(|error| NylError::config(format!("Failed to clone {url}: {error}")))?;
+fn clone_branch(url: &str, branch: &str, path: &Path) -> Result<Repository> {
+    // Nothing is checked out by the fetch: the user's Git config may convert
+    // line endings, and owned files must keep the exact bytes their index records.
+    let repository = Repository::init(path)
+        .and_then(|repository| {
+            repository.remote("origin", url)?;
+            Ok(repository)
+        })
+        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", crate::util::sanitize_url(url))))?;
     {
         let mut config = repository.config().map_err(crate::git::GitError::from)?;
         config
@@ -664,6 +657,7 @@ fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialPr
             .and_then(|()| config.set_str("core.eol", "lf"))
             .map_err(crate::git::GitError::from)?;
     }
+    fetch_branch(&repository, url, branch)?;
     if let Some(oid) = remote_branch_oid(&repository, branch) {
         let commit = repository.find_commit(oid).map_err(crate::git::GitError::from)?;
         repository
@@ -808,45 +802,14 @@ fn configured_publication_signature(
     Ok(Signature::now(&name, &email).map_err(crate::git::GitError::from)?)
 }
 
-fn fetch_branch(repository: &Repository, url: &str, branch: &str, credentials: &CredentialProvider) -> Result<()> {
-    let mut remote = repository.find_remote("origin").map_err(crate::git::GitError::from)?;
-    let mut options = FetchOptions::new();
-    options.remote_callbacks(credentials.build_callbacks(url));
-    remote
-        .fetch(&[branch], Some(&mut options), None)
+fn fetch_branch(repository: &Repository, url: &str, branch: &str) -> Result<()> {
+    crate::git::transport::fetch_branch(repository, url, branch, &format!("refs/remotes/origin/{branch}"))
+        .map(drop)
         .map_err(|error| NylError::config(format!("Failed to refresh publication branch: {error}")))
 }
 
-fn push_branch(
-    repository: &Repository,
-    url: &str,
-    branch: &str,
-    expected: Option<git2::Oid>,
-    credentials: &CredentialProvider,
-) -> Result<()> {
-    let mut remote = repository.find_remote("origin").map_err(crate::git::GitError::from)?;
-    let mut options = PushOptions::new();
-    let publication_ref = format!("refs/heads/{branch}");
-    let mut callbacks = credentials.build_callbacks(url);
-    callbacks.push_negotiation({
-        let publication_ref = publication_ref.clone();
-        move |updates| {
-            let update = updates
-                .iter()
-                .find(|update| update.dst_refname().is_ok_and(|name| name == publication_ref.as_str()))
-                .ok_or_else(|| git2::Error::from_str("publication branch was absent from push negotiation"))?;
-            let advertised = (!update.src().is_zero()).then_some(update.src());
-            if advertised != expected {
-                return Err(git2::Error::from_str(
-                    "publication branch changed during compare-and-swap publication",
-                ));
-            }
-            Ok(())
-        }
-    });
-    options.remote_callbacks(callbacks);
-    remote
-        .push(&[format!("refs/heads/{branch}:{publication_ref}")], Some(&mut options))
+fn push_branch(repository: &Repository, url: &str, branch: &str, expected: Option<git2::Oid>) -> Result<()> {
+    crate::git::transport::push_branch_if_unchanged(repository, url, branch, expected)
         .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
 }
 
@@ -922,13 +885,7 @@ mod tests {
             .unwrap();
 
         let checkout = tempfile::TempDir::new().unwrap();
-        let repository = clone_branch(
-            source.path().to_str().unwrap(),
-            "deploy/main",
-            checkout.path(),
-            &CredentialProvider::new(),
-        )
-        .unwrap();
+        let repository = clone_branch(source.path().to_str().unwrap(), "deploy/main", checkout.path()).unwrap();
         assert!(!checkout.path().join("source.txt").exists());
         assert!(checkout.path().join("deploy/old.yaml").is_file());
         assert!(repository.statuses(None).unwrap().is_empty());
@@ -959,13 +916,7 @@ mod tests {
         commit_initial(&source_repository);
 
         let checkout = tempfile::TempDir::new().unwrap();
-        let repository = clone_branch(
-            source.path().to_str().unwrap(),
-            "deploy/new",
-            checkout.path(),
-            &CredentialProvider::new(),
-        )
-        .unwrap();
+        let repository = clone_branch(source.path().to_str().unwrap(), "deploy/new", checkout.path()).unwrap();
         assert!(!checkout.path().join("source.txt").exists());
         assert!(repository.statuses(None).unwrap().is_empty());
         assert!(repository.head().is_err());
