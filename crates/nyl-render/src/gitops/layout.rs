@@ -1,6 +1,7 @@
 //! Deterministic on-disk layout for rendered Kubernetes manifests.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value};
@@ -69,9 +70,9 @@ pub fn take_managed_namespace(
 
 /// Serialize manifests into the rendered application directory layout.
 ///
-/// Non-CRD resources are stored as a multi-document `resources.yaml` stream.
-/// Each v1 CRD is stored separately as `crd/<metadata.name>.yaml`. Paths are
-/// returned relative to the application directory and sorted lexicographically.
+/// Each v1 CRD is stored as `crd/<metadata.name>.yaml`. Every other resource is
+/// stored in its own file at [`resource_path`]. Paths are returned relative to
+/// the application directory and sorted lexicographically.
 pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     render_manifest_layout_with_provenance(resources, &HashMap::new())
 }
@@ -81,56 +82,110 @@ pub(crate) fn render_manifest_layout_with_provenance(
     provenance: &HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut output = BTreeMap::new();
-    let mut ordinary_resources = Vec::new();
-    let mut crd_names = BTreeSet::new();
+    // Paths are compared case-insensitively so that the layout can be checked
+    // out on case-insensitive filesystems without two files merging into one.
+    let mut folded_paths = HashMap::new();
 
     for resource in resources {
-        if is_v1_crd(resource) {
-            let name = resource
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| NylError::config("CustomResourceDefinition metadata.name must be a string"))?;
-            validate_safe_path_segment("CustomResourceDefinition metadata.name", name)?;
-            if !crd_names.insert(name.to_owned()) {
-                return Err(NylError::config(format!(
-                    "Rendered resources contain duplicate CustomResourceDefinition {name:?}"
-                )));
-            }
-
-            let path = PathBuf::from("crd").join(format!("{name}.yaml"));
-            output.insert(path, serialize_documents(&[resource], provenance)?);
+        let key = crate::kubernetes::ResourceKey::from_json_value(resource)?;
+        let path = if is_v1_crd(resource) {
+            validate_safe_path_segment("CustomResourceDefinition metadata.name", &key.name)?;
+            PathBuf::from("crd").join(format!("{}.yaml", key.name))
         } else {
-            ordinary_resources.push(resource);
-        }
-    }
+            resource_path(&key)?
+        };
 
-    if !ordinary_resources.is_empty() {
-        let mut ordered = ordinary_resources
-            .into_iter()
-            .map(|resource| {
-                let key = crate::kubernetes::ResourceKey::from_json_value(resource)?;
-                Ok((
-                    (
-                        crate::kubernetes::ResourceOrdering::priority(resource),
-                        key.gvk.group,
-                        key.gvk.version,
-                        key.gvk.kind,
-                        key.namespace.unwrap_or_default(),
-                        key.name,
-                    ),
-                    resource,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ordered.sort_by(|left, right| left.0.cmp(&right.0));
-        let ordinary_resources = ordered.into_iter().map(|(_, resource)| resource).collect::<Vec<_>>();
-        output.insert(
-            PathBuf::from("resources.yaml"),
-            serialize_documents(&ordinary_resources, provenance)?,
-        );
+        let folded = path.to_string_lossy().to_lowercase();
+        if let Some(previous) = folded_paths.insert(folded, key.clone()) {
+            let message = if is_v1_crd(resource) && previous.gvk == key.gvk {
+                format!(
+                    "Rendered resources contain duplicate CustomResourceDefinition {:?}",
+                    key.name
+                )
+            } else if previous.gvk.group == key.gvk.group
+                && previous.gvk.kind == key.gvk.kind
+                && previous.namespace.as_deref().unwrap_or_default() == key.namespace.as_deref().unwrap_or_default()
+                && previous.name == key.name
+            {
+                format!("Rendered resources contain duplicate resource {key}")
+            } else {
+                format!(
+                    "Rendered resources {previous} and {key} map to the same file {} on case-insensitive filesystems",
+                    path.display()
+                )
+            };
+            return Err(NylError::config(message));
+        }
+        output.insert(path, serialize_documents(&[resource], provenance)?);
     }
 
     Ok(output)
+}
+
+/// Return the file that stores one non-CRD resource in the rendered layout.
+///
+/// The path is `<kind>[.<group>]/[<namespace>/]<name>.yaml`, where `<kind>` is
+/// lowercased and the type segment matches kubectl's `<kind>.<group>` resource
+/// form, for example `deployment.apps/api/web.yaml` or `clusterrole.rbac.authorization.k8s.io/admin.yaml`.
+/// The API version is omitted, so changing it keeps the object in the same file.
+/// A resource without `metadata.namespace` has no namespace directory.
+///
+/// The mapping is injective: every byte outside a per-segment safe set is
+/// percent-encoded, `%` included. The namespace safe set excludes `.`, so a
+/// namespace directory never equals a `<name>.yaml` file beside it.
+pub fn resource_path(key: &crate::kubernetes::ResourceKey) -> Result<PathBuf> {
+    let kind = encode_path_segment(&key.gvk.kind.to_lowercase(), |byte| byte.is_ascii_alphanumeric());
+    let resource_type = if key.gvk.group.is_empty() {
+        kind
+    } else {
+        let group = encode_path_segment(&key.gvk.group, |byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+        });
+        format!("{kind}.{group}")
+    };
+    if key.name.is_empty() {
+        return Err(NylError::config(format!(
+            "Rendered {} has an empty metadata.name",
+            key.gvk.kind
+        )));
+    }
+    let name = encode_path_segment(&key.name, |byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+    });
+
+    let mut segments = vec![resource_type];
+    if let Some(namespace) = key.namespace.as_deref().filter(|namespace| !namespace.is_empty()) {
+        segments.push(encode_path_segment(namespace, |byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-'
+        }));
+    }
+    segments.push(format!("{name}.yaml"));
+
+    let mut path = PathBuf::new();
+    for segment in segments {
+        if segment.len() > MAX_PATH_SEGMENT_BYTES {
+            return Err(NylError::config(format!(
+                "Rendered resource {key} needs the path segment {segment:?}, which exceeds {MAX_PATH_SEGMENT_BYTES} bytes"
+            )));
+        }
+        path.push(segment);
+    }
+    Ok(path)
+}
+
+/// The common file name length limit of Linux, macOS, and Windows filesystems.
+const MAX_PATH_SEGMENT_BYTES: usize = 255;
+
+fn encode_path_segment(value: &str, safe: impl Fn(u8) -> bool) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if safe(byte) {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 fn is_namespace_named(resource: &Value, namespace: &str) -> bool {
@@ -398,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn render_manifest_layout_splits_and_sorts_crds() {
+    fn render_manifest_layout_writes_one_file_per_resource() {
         let resources = vec![
             serde_json::json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "api"}}),
             serde_json::json!({
@@ -445,18 +500,15 @@ mod tests {
             vec![
                 PathBuf::from("crd/gadgets.example.com.yaml"),
                 PathBuf::from("crd/widgets.example.com.yaml"),
-                PathBuf::from("resources.yaml"),
+                PathBuf::from("deployment.apps/api.yaml"),
+                PathBuf::from("service/api.yaml"),
             ]
         );
-        let ordinary = String::from_utf8(output[&PathBuf::from("resources.yaml")].clone()).unwrap();
-        let service_offset = ordinary.find("kind: Service").unwrap();
-        let deployment_offset = ordinary.find("kind: Deployment").unwrap();
-        assert!(service_offset < deployment_offset);
-        assert!(ordinary.contains("---\n# Nyl-Provenance:"));
-        assert!(ordinary.contains("apiVersion: apps/v1"));
-        assert!(ordinary.contains("# Nyl-Provenance: Source: applications/api.yaml (document 2)"));
-        assert!(ordinary.contains("# Nyl-Provenance: Resource: Service"));
-        assert!(!ordinary.contains("CustomResourceDefinition"));
+        let service = String::from_utf8(output[&PathBuf::from("service/api.yaml")].clone()).unwrap();
+        assert!(service.starts_with(
+            "# Nyl-Provenance: Source: applications/api.yaml (document 2)\n# Nyl-Provenance: Resource: Service\n"
+        ));
+        assert!(!service.contains("---"));
         let widget = String::from_utf8(output[&PathBuf::from("crd/widgets.example.com.yaml")].clone()).unwrap();
         assert!(widget.starts_with(
             "# Source: widget/crds/widgets.yaml\n# Nyl-Provenance: Source: applications/api.yaml (document 2)\n# Nyl-Provenance: Resource: CustomResourceDefinition\n"
@@ -481,5 +533,86 @@ mod tests {
         });
         let error = render_manifest_layout(&[unsafe_name]).unwrap_err();
         assert!(error.to_string().contains("not a safe path segment"));
+    }
+
+    fn key(api_version: &str, kind: &str, namespace: Option<&str>, name: &str) -> crate::kubernetes::ResourceKey {
+        let mut resource = serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}});
+        if let Some(namespace) = namespace {
+            resource["metadata"]["namespace"] = namespace.into();
+        }
+        crate::kubernetes::ResourceKey::from_json_value(&resource).unwrap()
+    }
+
+    #[test]
+    fn resource_path_uses_kubectl_type_namespace_and_name() {
+        let cases = [
+            (
+                key("v1", "ConfigMap", Some("api"), "settings"),
+                "configmap/api/settings.yaml",
+            ),
+            (
+                key("apps/v1", "Deployment", Some("api"), "web"),
+                "deployment.apps/api/web.yaml",
+            ),
+            (key("apps/v1", "Deployment", None, "web"), "deployment.apps/web.yaml"),
+            (
+                key(
+                    "rbac.authorization.k8s.io/v1",
+                    "ClusterRole",
+                    None,
+                    "system:aggregate-to-admin",
+                ),
+                "clusterrole.rbac.authorization.k8s.io/system%3Aaggregate-to-admin.yaml",
+            ),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(resource_path(&key).unwrap(), PathBuf::from(expected), "{key}");
+        }
+    }
+
+    #[test]
+    fn resource_path_is_independent_of_api_version() {
+        assert_eq!(
+            resource_path(&key("autoscaling/v1", "HorizontalPodAutoscaler", Some("api"), "web")).unwrap(),
+            resource_path(&key("autoscaling/v2", "HorizontalPodAutoscaler", Some("api"), "web")).unwrap(),
+        );
+    }
+
+    #[test]
+    fn resource_path_never_collides_for_distinct_identities() {
+        // Each pair would collide under a naive `<kind>-<namespace>-<name>` or
+        // unescaped `<kind>.<group>/<namespace>/<name>` scheme.
+        let keys = [
+            key("v1", "ConfigMap", Some("a-b"), "c"),
+            key("v1", "ConfigMap", Some("a"), "b-c"),
+            key("v1", "ConfigMap", None, "a"),
+            key("v1", "ConfigMap", Some("a.yaml"), "x"),
+            key("v1", "ConfigMap", None, "a.yaml"),
+            key("cert-manager.io/v1", "Certificate", Some("a"), "x"),
+            key("example.com/v1", "Certificate", Some("a"), "x"),
+            key("v1", "ConfigMap", None, "../escape"),
+            key("v1", "ConfigMap", None, "%2E%2E%2Fescape"),
+        ];
+        let paths = keys.iter().map(|key| resource_path(key).unwrap()).collect::<Vec<_>>();
+        let unique = paths.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{paths:?}");
+        for path in &paths {
+            assert!(path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))));
+        }
+    }
+
+    #[test]
+    fn render_manifest_layout_rejects_resources_sharing_a_file() {
+        let v1 = serde_json::json!({"apiVersion": "autoscaling/v1", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web"}});
+        let v2 = serde_json::json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web"}});
+        let error = render_manifest_layout(&[v1, v2]).unwrap_err();
+        assert!(error.to_string().contains("duplicate resource"), "{error}");
+
+        let lower = serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "admin"}});
+        let upper = serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "Admin"}});
+        let error = render_manifest_layout(&[lower, upper]).unwrap_err();
+        assert!(error.to_string().contains("case-insensitive filesystems"), "{error}");
     }
 }
