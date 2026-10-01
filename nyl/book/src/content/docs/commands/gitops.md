@@ -80,9 +80,9 @@ Unindexed repository content is never treated as target-owned baseline data. `--
 cached branch head, as for `render-tree`, and compares against the published
 tree at that same commit, or at the cached publication branch head, without
 contacting the publication repository. With `--against source`, `--source-ref`
-resolves against the cached refs too. Helm charts from Git that name a branch
-or tag still refresh their refs, falling back to the cache when the remote is
-unreachable.
+resolves against the cached refs too. Helm charts from Git come from the
+vendor lock or the local source cache when they are there; only a chart in
+neither, or `--refresh`, fetches.
 
 Compare with a render from a source revision:
 

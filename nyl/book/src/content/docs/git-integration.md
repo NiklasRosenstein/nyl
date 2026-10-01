@@ -62,8 +62,8 @@ require a successful refresh.
 Immutable commit rendering uses objects already present in the cache without
 refreshing refs. `diff-tree --offline` reads the publication branch and
 `--source-ref` from the cached refs without contacting their remotes. Helm
-charts from Git that name a branch or tag still refresh their refs, falling
-back to the cache when the remote is unreachable.
+charts from Git come from the vendor lock or the local source cache when they
+are there; only a chart in neither, or `--refresh`, fetches.
 `--refresh` bypasses exact source and render cache reads, while `--no-cache`
 uses disposable storage and performs no persistent cache reads or writes.
 
