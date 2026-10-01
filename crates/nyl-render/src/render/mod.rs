@@ -504,18 +504,7 @@ metadata:
             "spec": {"url": "http://example.com/manifests.yaml"}
         });
 
-        let result = generate_resource(
-            &resource,
-            &context,
-            &config,
-            "",
-            &[],
-            None,
-            false,
-            None,
-            &artifact_resolver,
-        )
-        .await;
+        let result = generate_resource(&resource, &context, &config, "", &[], false, None, &artifact_resolver).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
     }

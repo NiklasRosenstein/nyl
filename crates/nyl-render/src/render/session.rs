@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,7 +33,6 @@ pub struct RenderSession {
     kube_version: String,
     api_versions: Vec<String>,
     template_context: TemplateContext,
-    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     missing_capabilities_error: Option<String>,
     cache: Option<RenderCache>,
 }
@@ -257,7 +255,6 @@ impl RenderSession {
             kube_version,
             api_versions,
             template_context,
-            credential_provider: None,
             missing_capabilities_error: None,
             cache: None,
         })
@@ -286,7 +283,6 @@ impl RenderSession {
                 kube_version,
                 api_versions,
                 template_context: TemplateContext::build(serde_json::json!({}), &secrets)?,
-                credential_provider: None,
                 missing_capabilities_error,
                 cache: None,
             }
@@ -453,7 +449,6 @@ impl RenderSession {
                     &self.project_config,
                     &kube_version,
                     &api_versions,
-                    self.credential_provider.clone(),
                     request.track_parent,
                     self.cache.as_ref(),
                     &artifact_resolver,

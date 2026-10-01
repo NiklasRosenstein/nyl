@@ -677,10 +677,12 @@ byte-identical output to the previous release.
   pushes and `publish-tree`. Remote Git operations run the `git` command line,
   so fetches and `publish-tree` already authenticate as the user's `git` does
   (SSH config and keys, agent, credential helpers) and push with a
-  `--force-with-lease` compare-and-swap; libgit2 handles only local object
-  access and programmatically supplied credentials, because its SSH transport
-  ignores SSH config. State pushes must use the same transport, including
-  atomic multi-ref pushes with per-ref leases.
+  `--force-with-lease` compare-and-swap; libgit2 handles only local
+  repository access, because its SSH transport ignores SSH config. Dedicated
+  SSH keys and HTTPS tokens are supplied to the same `git` invocations, for
+  example through `GIT_SSH_COMMAND` or a credential helper. State pushes must
+  use the same transport, including atomic multi-ref pushes with per-ref
+  leases.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
   units with `fromUnit` references, including `--local` runs next to remote

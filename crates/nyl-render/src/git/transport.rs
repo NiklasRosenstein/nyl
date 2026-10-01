@@ -7,16 +7,11 @@
 //! `core.sshCommand`/`GIT_SSH_COMMAND`. libgit2's SSH transport reads none of
 //! these and offers the agent's keys in agent order, so a host that accepts
 //! the first key as a different account rejects a fetch that `git` performs.
-//!
-//! Credentials registered programmatically in a [`CredentialProvider`] are
-//! in-memory secrets the command line cannot receive; a URL with one keeps
-//! using libgit2.
 
 use std::process::{Command, Stdio};
 
-use git2::{FetchOptions, FetchPrune, Oid, Repository};
+use git2::{Oid, Repository};
 
-use super::auth::CredentialProvider;
 use super::error::{GitError, Result};
 
 /// Repository-location variables that `git` would otherwise prefer over the
@@ -42,24 +37,7 @@ const REPOSITORY_ENVIRONMENT: &[&str] = &[
 ///
 /// With `prune`, destination refs matched by a glob refspec whose source no
 /// longer exists are deleted.
-pub fn fetch(
-    repository: &Repository,
-    url: &str,
-    refspecs: &[&str],
-    prune: bool,
-    credentials: Option<&CredentialProvider>,
-) -> Result<()> {
-    if let Some(provider) = credentials.filter(|provider| provider.get_credential(url).is_some()) {
-        let mut options = FetchOptions::new();
-        options.remote_callbacks(provider.build_callbacks(url));
-        if prune {
-            options.prune(FetchPrune::On);
-        }
-        let mut remote = repository.remote_anonymous(url)?;
-        return remote
-            .fetch(refspecs, Some(&mut options), None)
-            .map_err(|error| remote_error("git fetch", url, &error.to_string()));
-    }
+pub fn fetch(repository: &Repository, url: &str, refspecs: &[&str], prune: bool) -> Result<()> {
     let mut args = vec!["fetch", "--quiet"];
     if prune {
         args.push("--prune");
@@ -73,18 +51,12 @@ pub fn fetch(
 ///
 /// A branch that does not exist on the remote deletes `tracking` and returns
 /// `None`.
-pub fn fetch_branch(
-    repository: &Repository,
-    url: &str,
-    branch: &str,
-    tracking: &str,
-    credentials: Option<&CredentialProvider>,
-) -> Result<Option<Oid>> {
+pub fn fetch_branch(repository: &Repository, url: &str, branch: &str, tracking: &str) -> Result<Option<Oid>> {
     let refspec = format!("+refs/heads/{branch}:{tracking}");
-    match fetch(repository, url, &[&refspec], false, credentials) {
+    match fetch(repository, url, &[&refspec], false) {
         Ok(()) => Ok(Some(repository.refname_to_id(tracking)?)),
         // Only an absent branch makes the fetch fail while listing works.
-        Err(error) => match remote_branch(repository, url, branch, credentials) {
+        Err(error) => match remote_branch(repository, url, branch) {
             Ok(None) => {
                 if let Ok(mut reference) = repository.find_reference(tracking) {
                     reference.delete()?;
@@ -97,24 +69,8 @@ pub fn fetch_branch(
 }
 
 /// The commit `branch` names on `url`, or `None` when it does not exist.
-pub fn remote_branch(
-    repository: &Repository,
-    url: &str,
-    branch: &str,
-    credentials: Option<&CredentialProvider>,
-) -> Result<Option<Oid>> {
+pub fn remote_branch(repository: &Repository, url: &str, branch: &str) -> Result<Option<Oid>> {
     let name = format!("refs/heads/{branch}");
-    if let Some(provider) = credentials.filter(|provider| provider.get_credential(url).is_some()) {
-        let mut remote = repository.remote_anonymous(url)?;
-        let connection = remote
-            .connect_auth(git2::Direction::Fetch, Some(provider.build_callbacks(url)), None)
-            .map_err(|error| remote_error("git ls-remote", url, &error.to_string()))?;
-        return Ok(connection
-            .list()?
-            .iter()
-            .find(|head| head.name() == name)
-            .map(git2::RemoteHead::oid));
-    }
     let output = run(repository, url, "git ls-remote", &["ls-remote", "--", url, &name])?;
     output
         .lines()
@@ -125,39 +81,8 @@ pub fn remote_branch(
 
 /// Push `branch` to `url` only while the remote branch is still at
 /// `expected` (`None`: absent), so a concurrent writer is never overwritten.
-pub fn push_branch_if_unchanged(
-    repository: &Repository,
-    url: &str,
-    branch: &str,
-    expected: Option<Oid>,
-    credentials: Option<&CredentialProvider>,
-) -> Result<()> {
+pub fn push_branch_if_unchanged(repository: &Repository, url: &str, branch: &str, expected: Option<Oid>) -> Result<()> {
     let reference = format!("refs/heads/{branch}");
-    if let Some(provider) = credentials.filter(|provider| provider.get_credential(url).is_some()) {
-        let mut callbacks = provider.build_callbacks(url);
-        callbacks.push_negotiation({
-            let reference = reference.clone();
-            move |updates| {
-                let update = updates
-                    .iter()
-                    .find(|update| update.dst_refname().is_ok_and(|name| name == reference.as_str()))
-                    .ok_or_else(|| git2::Error::from_str("publication branch was absent from push negotiation"))?;
-                let advertised = (!update.src().is_zero()).then_some(update.src());
-                if advertised != expected {
-                    return Err(git2::Error::from_str(
-                        "publication branch changed during compare-and-swap publication",
-                    ));
-                }
-                Ok(())
-            }
-        });
-        let mut options = git2::PushOptions::new();
-        options.remote_callbacks(callbacks);
-        let mut remote = repository.remote_anonymous(url)?;
-        return remote
-            .push(&[format!("{reference}:{reference}")], Some(&mut options))
-            .map_err(|error| remote_error("git push", url, &error.to_string()));
-    }
     // An empty expected value leases on the branch not existing yet.
     let lease = format!(
         "--force-with-lease={reference}:{}",
@@ -244,10 +169,10 @@ mod tests {
         let local_dir = TempDir::new().unwrap();
         let local = Repository::init(local_dir.path()).unwrap();
 
-        assert_eq!(remote_branch(&local, &url, "deploy", None).unwrap(), None);
+        assert_eq!(remote_branch(&local, &url, "deploy").unwrap(), None);
         let first = commit(&local, "refs/heads/deploy", "First", &[]);
-        push_branch_if_unchanged(&local, &url, "deploy", None, None).unwrap();
-        assert_eq!(remote_branch(&local, &url, "deploy", None).unwrap(), Some(first));
+        push_branch_if_unchanged(&local, &url, "deploy", None).unwrap();
+        assert_eq!(remote_branch(&local, &url, "deploy").unwrap(), Some(first));
 
         // Another writer advances the branch; a push leased on `first` fails.
         let concurrent = commit(
@@ -262,19 +187,12 @@ mod tests {
             "Second",
             &[&local.find_commit(first).unwrap()],
         );
-        assert!(push_branch_if_unchanged(&local, &url, "deploy", Some(first), None).is_err());
+        assert!(push_branch_if_unchanged(&local, &url, "deploy", Some(first)).is_err());
         assert_eq!(remote.refname_to_id("refs/heads/deploy").unwrap(), concurrent);
 
-        fetch(
-            &local,
-            &url,
-            &["+refs/heads/deploy:refs/remotes/origin/deploy"],
-            false,
-            None,
-        )
-        .unwrap();
+        fetch(&local, &url, &["+refs/heads/deploy:refs/remotes/origin/deploy"], false).unwrap();
         assert_eq!(local.refname_to_id("refs/remotes/origin/deploy").unwrap(), concurrent);
-        assert!(push_branch_if_unchanged(&local, &url, "deploy", None, None).is_err());
+        assert!(push_branch_if_unchanged(&local, &url, "deploy", None).is_err());
         assert_ne!(remote.refname_to_id("refs/heads/deploy").unwrap(), second);
     }
 
@@ -286,7 +204,7 @@ mod tests {
             "file://user:token@localhost{}/missing",
             local_dir.path().to_string_lossy()
         );
-        let error = fetch(&local, &url, &["+refs/heads/*:refs/heads/*"], true, None)
+        let error = fetch(&local, &url, &["+refs/heads/*:refs/heads/*"], true)
             .unwrap_err()
             .to_string();
         assert!(error.starts_with("git fetch failed for "), "{error}");
@@ -299,9 +217,9 @@ mod tests {
         let local = Repository::init_bare(local_dir.path()).unwrap();
         let marker = local_dir.path().join("marker");
         let url = format!("--upload-pack=touch {}", marker.display());
-        assert!(fetch(&local, &url, &["+refs/heads/*:refs/heads/*"], false, None).is_err());
-        assert!(remote_branch(&local, &url, "main", None).is_err());
-        assert!(push_branch_if_unchanged(&local, &url, "main", None, None).is_err());
+        assert!(fetch(&local, &url, &["+refs/heads/*:refs/heads/*"], false).is_err());
+        assert!(remote_branch(&local, &url, "main").is_err());
+        assert!(push_branch_if_unchanged(&local, &url, "main", None).is_err());
         assert!(!marker.exists());
     }
 }

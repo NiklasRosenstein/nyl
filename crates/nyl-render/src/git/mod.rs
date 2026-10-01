@@ -39,14 +39,12 @@
 //! ).unwrap();
 //! ```
 
-mod auth;
 mod cache;
 mod error;
 mod repository;
 pub mod transport;
 mod worktree;
 
-pub use auth::{CredentialProvider, GitCredential};
 pub use error::{GitError, Result};
 
 use cache::CacheLayout;
@@ -100,7 +98,6 @@ enum Freshness {
 pub struct GitManager {
     cache: CacheLayout,
     bare_repos: HashMap<String, Arc<Mutex<BareRepository>>>,
-    credential_provider: Option<Arc<CredentialProvider>>,
     render_cache: Option<crate::render::cache::RenderCache>,
 }
 
@@ -110,7 +107,6 @@ impl GitManager {
         Ok(Self {
             cache: CacheLayout::new()?,
             bare_repos: HashMap::new(),
-            credential_provider: None,
             render_cache: None,
         })
     }
@@ -120,26 +116,9 @@ impl GitManager {
     /// This is useful for testing where you want to avoid environment variable
     /// race conditions between parallel tests.
     pub fn with_cache_dir(cache_dir: impl Into<PathBuf>) -> Self {
-        Self::with_cache_dir_and_provider(cache_dir, None)
-    }
-
-    pub fn with_credential_provider(credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
-        Ok(Self {
-            cache: CacheLayout::new()?,
-            bare_repos: HashMap::new(),
-            credential_provider,
-            render_cache: None,
-        })
-    }
-
-    pub fn with_cache_dir_and_provider(
-        cache_dir: impl Into<PathBuf>,
-        credential_provider: Option<Arc<CredentialProvider>>,
-    ) -> Self {
         Self {
             cache: CacheLayout::with_path(cache_dir),
             bare_repos: HashMap::new(),
-            credential_provider,
             render_cache: None,
         }
     }
@@ -395,7 +374,7 @@ impl GitManager {
         // Create or open the bare repository
         let bare_repo_path = self.cache.bare_repo_path(url);
         let repository_exists = bare_repo_path.exists();
-        let bare_repo = BareRepository::get_or_create(url, &bare_repo_path, self.credential_provider.clone())?;
+        let bare_repo = BareRepository::get_or_create(url, &bare_repo_path)?;
         self.observe_source(if repository_exists {
             crate::render::cache::SourceOperation::GitRepositoryReuse
         } else {
@@ -508,7 +487,7 @@ mod tests {
         let bare_repo_path = manager.cache.bare_repo_path(&url);
         let raw_repo = Repository::init_bare(&bare_repo_path).unwrap();
         raw_repo.remote("origin", &url).unwrap();
-        let bare_repo = BareRepository::get_or_create(&url, &bare_repo_path, None).unwrap();
+        let bare_repo = BareRepository::get_or_create(&url, &bare_repo_path).unwrap();
         manager.bare_repos.insert(url.clone(), Arc::new(Mutex::new(bare_repo)));
 
         let err = manager.resolve_ref(&url, Some("HEAD"), None).unwrap_err();
@@ -607,25 +586,6 @@ mod tests {
         let checkout = manager.resolve_ref(&url, Some(&commit.to_string()), None).unwrap();
         assert_eq!(checkout_head(&checkout), commit);
         assert!(manager.resolve_cached_ref(&url, "later").is_err());
-    }
-
-    #[test]
-    fn test_stored_credentials_fetch_refs_and_remote_head_through_libgit2() {
-        let source_dir = TempDir::new().unwrap();
-        let source_repo = Repository::init(source_dir.path()).unwrap();
-        let commit = commit_on(&source_repo, "Initial");
-        let url = source_dir.path().to_string_lossy().to_string();
-        let provider = CredentialProvider::new();
-        provider.add_credential(
-            url.clone(),
-            GitCredential::SshAgent {
-                username: "git".to_string(),
-            },
-        );
-        let cache_dir = TempDir::new().unwrap();
-        let bare =
-            BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git"), Some(Arc::new(provider))).unwrap();
-        assert_eq!(bare.resolve_ref("HEAD").unwrap(), commit);
     }
 
     #[test]

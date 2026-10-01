@@ -4,11 +4,9 @@
 /// - Chart resolution (local paths in Phase 2)
 /// - Template command building
 /// - Chart caching (stubbed for git/OCI in Phase 3)
-use crate::git::CredentialProvider;
 use crate::resources::ChartRef;
 use crate::{NylError, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 mod oci;
 mod template;
@@ -65,8 +63,6 @@ pub struct HelmChartResolver {
     /// Optional cache directory for Git operations (defaults to env var/system default)
     cache_dir: Option<PathBuf>,
 
-    credential_provider: Option<Arc<CredentialProvider>>,
-
     render_cache: Option<crate::render::cache::RenderCache>,
 
     artifact_resolver: Option<crate::render::artifact::ArtifactResolver>,
@@ -79,7 +75,7 @@ impl HelmChartResolver {
     /// * `search_paths` - Directories to search for charts
     /// * `working_dir` - Working directory for relative paths
     pub fn new(search_paths: Vec<PathBuf>, working_dir: PathBuf) -> Self {
-        Self::with_cache_dir_and_provider(search_paths, working_dir, None, None)
+        Self::with_cache_dir(search_paths, working_dir, None)
     }
 
     /// Create a new chart resolver with explicit cache directory
@@ -89,20 +85,10 @@ impl HelmChartResolver {
     /// * `working_dir` - Working directory for relative paths
     /// * `cache_dir` - Optional cache directory for Git operations (defaults to env var/system default)
     pub fn with_cache_dir(search_paths: Vec<PathBuf>, working_dir: PathBuf, cache_dir: Option<PathBuf>) -> Self {
-        Self::with_cache_dir_and_provider(search_paths, working_dir, cache_dir, None)
-    }
-
-    pub fn with_cache_dir_and_provider(
-        search_paths: Vec<PathBuf>,
-        working_dir: PathBuf,
-        cache_dir: Option<PathBuf>,
-        credential_provider: Option<Arc<CredentialProvider>>,
-    ) -> Self {
         Self {
             search_paths,
             working_dir,
             cache_dir,
-            credential_provider,
             render_cache: None,
             artifact_resolver: None,
         }
@@ -279,9 +265,9 @@ impl HelmChartResolver {
             }
         }
         let mut git_manager = if let Some(ref cache_dir) = self.cache_dir {
-            crate::git::GitManager::with_cache_dir_and_provider(cache_dir, self.credential_provider.clone())
+            crate::git::GitManager::with_cache_dir(cache_dir)
         } else {
-            crate::git::GitManager::with_credential_provider(self.credential_provider.clone())?
+            crate::git::GitManager::new()?
         }
         .with_render_cache(self.render_cache.clone());
 
@@ -353,10 +339,6 @@ impl std::fmt::Debug for HelmChartResolver {
             .field("search_paths", &self.search_paths)
             .field("working_dir", &self.working_dir)
             .field("cache_dir", &self.cache_dir)
-            .field(
-                "credential_provider",
-                &self.credential_provider.as_ref().map(|_| "<redacted>"),
-            )
             .field("render_cache", &self.render_cache.as_ref().map(|_| "<attached>"))
             .field(
                 "artifact_resolver",

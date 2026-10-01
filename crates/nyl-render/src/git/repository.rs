@@ -1,8 +1,6 @@
 use git2::{ErrorCode, Oid, Repository};
 use std::path::Path;
-use std::sync::Arc;
 
-use super::auth::CredentialProvider;
 use super::error::{GitError, Result};
 use super::transport;
 
@@ -10,7 +8,6 @@ use super::transport;
 pub struct BareRepository {
     repo: Repository,
     url: String,
-    credential_provider: Option<Arc<CredentialProvider>>,
 }
 
 impl BareRepository {
@@ -45,13 +42,13 @@ impl BareRepository {
     }
 
     /// Get or create a bare repository at the specified path
-    pub fn get_or_create(url: &str, path: &Path, credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
+    pub fn get_or_create(url: &str, path: &Path) -> Result<Self> {
         let repo = if path.exists() {
             tracing::debug!("Reusing cached bare repository for {} at {}", url, path.display());
             Repository::open(path)?
         } else {
             tracing::debug!("Creating bare repository cache for {} at {}", url, path.display());
-            Self::clone_bare(url, path, credential_provider.as_deref())?
+            Self::clone_bare(url, path)?
         };
 
         // Cached checkouts preserve repository bytes so ownership hashes and
@@ -64,12 +61,11 @@ impl BareRepository {
         Ok(Self {
             repo,
             url: url.to_string(),
-            credential_provider,
         })
     }
 
     /// Clone a bare repository with lazy fetching (refs only initially)
-    fn clone_bare(url: &str, path: &Path, credential_provider: Option<&CredentialProvider>) -> Result<Repository> {
+    fn clone_bare(url: &str, path: &Path) -> Result<Repository> {
         // Create parent directory
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -91,7 +87,7 @@ impl BareRepository {
 
         tracing::debug!("Fetching initial refs for {}", url);
         // Fetch refs only (no objects yet - lazy loading)
-        Self::fetch_refs_with_auth(&repo, url, credential_provider)?;
+        Self::fetch_refs_from(&repo, url)?;
         tracing::debug!("Initial ref fetch complete for {}", url);
         tracing::trace!("Bare clone completed successfully for {}", url);
 
@@ -99,11 +95,7 @@ impl BareRepository {
     }
 
     /// Fetch the branches, tags, and remote `HEAD` of `url`, pruning deleted ones.
-    fn fetch_refs_with_auth(
-        repo: &Repository,
-        url: &str,
-        credential_provider: Option<&CredentialProvider>,
-    ) -> Result<()> {
+    fn fetch_refs_from(repo: &Repository, url: &str) -> Result<()> {
         tracing::trace!("Fetching refs for {}", url);
         // `HEAD*` matches the remote HEAD as a glob, so a repository without
         // one (an empty repository) fetches nothing instead of failing.
@@ -116,7 +108,6 @@ impl BareRepository {
                 "+HEAD*:refs/remotes/origin/HEAD*",
             ],
             true,
-            credential_provider,
         )?;
         tracing::trace!("Fetch refs completed for {}", url);
         Ok(())
@@ -125,7 +116,7 @@ impl BareRepository {
     /// Update refs from the remote
     pub fn fetch_refs(&self) -> Result<()> {
         tracing::debug!("Refreshing remote refs for {}", self.url);
-        Self::fetch_refs_with_auth(&self.repo, &self.url, self.credential_provider.as_deref())
+        Self::fetch_refs_from(&self.repo, &self.url)
     }
 
     /// Resolve a ref (branch, tag, or commit) to an OID, fetching a commit
@@ -193,13 +184,7 @@ impl BareRepository {
         let oid_str = oid.to_string();
         tracing::debug!("Fetching commit objects for {} at {}", self.url, oid_str);
 
-        transport::fetch(
-            &self.repo,
-            &self.url,
-            &[&oid_str],
-            false,
-            self.credential_provider.as_deref(),
-        )?;
+        transport::fetch(&self.repo, &self.url, &[&oid_str], false)?;
 
         tracing::debug!("Fetched commit objects for {} at {}", self.url, oid_str);
         Ok(())
@@ -308,7 +293,7 @@ mod tests {
             .unwrap();
 
         let url = source_dir.path().to_string_lossy();
-        BareRepository::get_or_create(&url, &repo_path, None).unwrap();
+        BareRepository::get_or_create(&url, &repo_path).unwrap();
 
         let config = Repository::open_bare(&repo_path)
             .unwrap()
@@ -337,7 +322,7 @@ mod tests {
 
         let cache_dir = TempDir::new().unwrap();
         let url = source_dir.path().to_string_lossy();
-        let bare = BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git"), None).unwrap();
+        let bare = BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git")).unwrap();
         assert_eq!(bare.resolve_ref("temporary").unwrap(), commit_id);
 
         source_repo
