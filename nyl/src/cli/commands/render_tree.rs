@@ -380,12 +380,40 @@ pub(super) fn hash_inputs(
             );
         }
     }
-    for (key, digest) in &compiled.input_digests {
+    merge_input_digests(&mut hashes, &compiled.input_digests)?;
+    Ok(hashes)
+}
+
+/// Add the `@`-prefixed digests of resolved inputs to the project file hashes.
+/// A project file whose path equals one of those keys is an error, never an
+/// overwrite, so the index cannot misattribute a digest.
+fn merge_input_digests(hashes: &mut BTreeMap<String, String>, input_digests: &BTreeMap<String, String>) -> Result<()> {
+    for (key, digest) in input_digests {
         if hashes.insert(key.clone(), digest.clone()).is_some() {
             return Err(NylError::config(format!(
                 "Project file {key} collides with the ownership-index key of a resolved Release input; rename or move the file"
             )));
         }
     }
-    Ok(hashes)
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_input_digests_rejects_a_project_file_named_like_an_input_key() {
+        let inputs = BTreeMap::from([("@input/platform/web/image".to_owned(), "b".repeat(64))]);
+        let mut hashes = BTreeMap::from([("applications/web.yaml".to_owned(), "a".repeat(64))]);
+        merge_input_digests(&mut hashes, &inputs).unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        let mut hashes = BTreeMap::from([("@input/platform/web/image".to_owned(), "a".repeat(64))]);
+        let error = merge_input_digests(&mut hashes, &inputs).unwrap_err().to_string();
+        assert!(
+            error.contains("Project file @input/platform/web/image collides with the ownership-index key"),
+            "{error}"
+        );
+    }
 }

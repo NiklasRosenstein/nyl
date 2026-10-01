@@ -88,10 +88,13 @@ pub struct CompiledTargetTree {
 impl CompiledTargetTree {
     /// Every file this target owns in its prefix: rendered files and state
     /// files. Reconciliation, the ownership index, and tree comparisons use it.
-    pub fn owned_files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-        let mut owned = self.files.clone();
-        owned.extend(self.state_files.clone());
-        owned
+    /// The map borrows the compiled bytes; nothing is copied.
+    pub fn owned_files(&self) -> super::reconcile::DesiredFiles<'_> {
+        self.files
+            .iter()
+            .chain(&self.state_files)
+            .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+            .collect()
     }
 
     /// Every `fromPublication` state path the target declares, carried or

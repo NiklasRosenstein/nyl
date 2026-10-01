@@ -1094,6 +1094,37 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// Templating may produce any spec, but never other input declarations
+    /// than the literal ones validation and binding checks were run against.
+    #[test]
+    fn test_verify_rendered_declarations_rejects_templated_changes() {
+        let declared = declarations(json!({"image": {"type": "string"}}));
+        let release = |inputs: Value| -> crate::resources::Release {
+            serde_json::from_value(json!({
+                "apiVersion": "k8s.gitops.nyl/v1",
+                "kind": "Release",
+                "metadata": {"name": "web", "namespace": "web"},
+                "spec": {"inputs": inputs},
+            }))
+            .unwrap()
+        };
+        let path = Path::new("applications/platform/web.yaml");
+        verify_rendered_declarations(path, &declared, &release(json!({"image": {"type": "string"}}))).unwrap();
+        for rendered in [
+            json!({"image": {"type": "integer"}}),
+            json!({"image": {"type": "string"}, "tag": {"type": "string"}}),
+            json!({}),
+        ] {
+            let error = verify_rendered_declarations(path, &declared, &release(rendered.clone()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Release \"web\" in applications/platform/web.yaml renders spec.inputs that differ"),
+                "{rendered}: {error}"
+            );
+        }
+    }
+
     fn resolve(
         target: &DeploymentTarget,
         declared: &[(&str, &BTreeMap<String, InputDeclaration>)],

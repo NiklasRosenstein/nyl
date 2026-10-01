@@ -20,8 +20,8 @@ pub use discovery::{
 pub(crate) use layout::render_manifest_layout_with_provenance;
 pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};
 pub use reconcile::{
-    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, ReconcileOptions,
-    RenderIndex, RenderIndexPublication,
+    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, DesiredFiles,
+    ReconcileOptions, RenderIndex, RenderIndexPublication,
 };
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,

@@ -139,7 +139,7 @@ impl ResolvedBaseline {
     fn files(&self) -> std::borrow::Cow<'_, BTreeMap<PathBuf, Vec<u8>>> {
         match self {
             Self::Published(baseline) => std::borrow::Cow::Borrowed(&baseline.files),
-            Self::Source(baseline) => std::borrow::Cow::Owned(baseline.compiled.owned_files()),
+            Self::Source(baseline) => std::borrow::Cow::Owned(owned_copy(&baseline.compiled.owned_files())),
         }
     }
 
@@ -379,6 +379,14 @@ async fn resolve_baseline(
     }
 }
 
+/// An owned copy of borrowed files, for comparisons that add and remove entries.
+fn owned_copy(files: &crate::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
+    files
+        .iter()
+        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
+        .collect()
+}
+
 fn comparison_files(
     selection: &DiffSelection,
     baseline: &ResolvedBaseline,
@@ -389,7 +397,7 @@ fn comparison_files(
             let mut base = baseline.files().into_owned();
             // State files are owned plain files, shown as file diffs next to
             // the manifest changes they cause.
-            let mut desired_files = desired.owned_files();
+            let mut desired_files = owned_copy(&desired.owned_files());
             // Committed state leaves ownership without being deleted.
             for path in &desired.committed_state_paths {
                 base.remove(path);
