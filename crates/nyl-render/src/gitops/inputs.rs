@@ -131,13 +131,14 @@ impl PublicationBase {
             // Without a refresh, a branch missing from the cache cannot be
             // told apart from one that was never fetched, and a repository
             // that was never cached is a cache miss, not a failure.
+            // A cache that exists but cannot be read is an error, so state is
+            // never silently replaced by defaults.
             PublicationRead::Cached => match git.branch_head(url, &branch, false) {
                 Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::Cached),
-                Ok(None) => (None, PublicationBaseOrigin::Unavailable),
-                Err(cache_error) => {
-                    tracing::debug!("No cached head for publication branch {branch}: {cache_error}");
+                Ok(None) | Err(NylError::Git(crate::git::GitError::NotCached { .. })) => {
                     (None, PublicationBaseOrigin::Unavailable)
                 }
+                Err(cache_error) => return Err(error(cache_error, "")),
             },
             PublicationRead::FreshOrCached => match git.branch_head(url, &branch, true) {
                 Ok(commit) => (commit, PublicationBaseOrigin::Refreshed),
@@ -1033,6 +1034,23 @@ pub fn place_state_files(
     Ok(state)
 }
 
+/// Add the `@`-prefixed digests of resolved inputs to the project file hashes.
+/// A project file whose path equals one of those keys is an error, never an
+/// overwrite, so the index cannot misattribute a digest.
+pub fn merge_input_digests(
+    hashes: &mut BTreeMap<String, String>,
+    input_digests: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (key, digest) in input_digests {
+        if hashes.insert(key.clone(), digest.clone()).is_some() {
+            return Err(NylError::config(format!(
+                "Project file {key} collides with the ownership-index key of a resolved Release input; rename or move the file"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// After rendering, a Release's `spec.inputs` must equal its static
 /// declaration: templating cannot add, remove, or change declarations.
 pub fn verify_rendered_declarations(
@@ -1092,6 +1110,21 @@ mod tests {
 
     fn declarations(value: Value) -> BTreeMap<String, InputDeclaration> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn test_merge_input_digests_rejects_a_project_file_named_like_an_input_key() {
+        let inputs = BTreeMap::from([("@input/platform/web/image".to_owned(), "b".repeat(64))]);
+        let mut hashes = BTreeMap::from([("applications/web.yaml".to_owned(), "a".repeat(64))]);
+        merge_input_digests(&mut hashes, &inputs).unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        let mut hashes = BTreeMap::from([("@input/platform/web/image".to_owned(), "a".repeat(64))]);
+        let error = merge_input_digests(&mut hashes, &inputs).unwrap_err().to_string();
+        assert!(
+            error.contains("Project file @input/platform/web/image collides with the ownership-index key"),
+            "{error}"
+        );
     }
 
     /// Templating may produce any spec, but never other input declarations
@@ -1565,14 +1598,25 @@ mod tests {
 
     #[test]
     fn test_cached_read_of_an_empty_cache_is_unavailable() {
-        for cached in [Ok(None), Err("not cached")] {
-            let heads = Heads {
-                refreshed: Err("unused"),
-                cached,
-            };
-            let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
-            assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
-        }
+        let heads = Heads {
+            refreshed: Err("unused"),
+            cached: Ok(None),
+        };
+        let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+        assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+    }
+
+    #[test]
+    fn test_cached_read_of_an_unreadable_cache_fails() {
+        let heads = Heads {
+            refreshed: Err("unused"),
+            cached: Err("corrupt pack"),
+        };
+        let error = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Cannot read publication branch deploy"), "{error}");
+        assert!(error.contains("corrupt pack"), "{error}");
     }
 
     /// `--offline` before the publication repository was ever fetched: the real

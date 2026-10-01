@@ -523,6 +523,7 @@ async fn compile_target_tree_inner(
         repository: &repository,
         repository_source_path: repository_path.as_deref(),
     };
+    let input_digests = release_inputs.index_entries()?;
     let mut cache_probe = prepare_target_cache(
         inventory,
         &target_cache_inputs,
@@ -530,6 +531,7 @@ async fn compile_target_tree_inner(
         cache,
         &prepared_groups,
         &release_inputs,
+        &input_digests,
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
@@ -558,12 +560,11 @@ async fn compile_target_tree_inner(
     for path in release_inputs.files() {
         inputs.insert(inventory.paths().key(&path).unwrap_or(path));
     }
-    let input_digests = release_inputs.index_entries()?;
     let mut provenance_by_key = HashMap::new();
     let mut emitted_projects = BTreeSet::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
-    let mut application_owners = BTreeMap::<(String, String), String>::new();
+    let mut application_owners = BTreeMap::<(String, String), ApplicationOwner>::new();
     let mut pending_workloads = Vec::new();
     let mut namespace_scope_errors = Vec::new();
     let mut release_count = 0;
@@ -766,22 +767,16 @@ async fn compile_target_tree_inner(
             annotations: workload.group.spec.annotations.clone(),
         })?;
         apply_release_application_override(&mut application, &workload.release, &workload.group)?;
-        let owner = application_name_hint(&workload.group, &workload.release);
-        if let Some(previous) = application_owners.insert(
-            (
-                workload.group.spec.application_namespace.clone(),
-                workload.application_name.clone(),
-            ),
-            owner.clone(),
-        ) {
-            return Err(NylError::config(format!(
-                "Releases {previous} and {owner} of DeploymentTarget {:?} generate the same Argo CD Application {}/{}; set ApplicationGroup.spec.applicationNameTemplate on one of the groups, for example '{}-${{ release.metadata.name }}'",
-                target.metadata.name,
-                workload.group.spec.application_namespace,
-                workload.application_name,
-                workload.group.metadata.name,
-            )));
-        }
+        claim_application(
+            &mut application_owners,
+            &target.metadata.name,
+            &workload.group.spec.application_namespace,
+            &workload.application_name,
+            ApplicationOwner::Release {
+                group: workload.group.metadata.name.clone(),
+                release: workload.release.metadata.name.clone(),
+            },
+        )?;
         insert_yaml(
             &mut files,
             PathBuf::from("_nyl/catalog/applications")
@@ -812,12 +807,19 @@ async fn compile_target_tree_inner(
             revision: target.spec.publication.revision.clone(),
             rendered_path,
             destination: owner.destination,
-            destination_namespace: namespace,
+            destination_namespace: namespace.clone(),
             sync_policy: owner.sync_policy,
             deletion_policy: owner.deletion_policy,
             labels: owner.labels,
             annotations: owner.annotations,
         })?;
+        claim_application(
+            &mut application_owners,
+            &target.metadata.name,
+            &owner.application_namespace,
+            &application_name,
+            ApplicationOwner::Namespace(namespace.clone()),
+        )?;
         insert_yaml(
             &mut files,
             PathBuf::from("_nyl/catalog/applications")
@@ -829,6 +831,13 @@ async fn compile_target_tree_inner(
 
     if target.spec.catalog_application.enabled {
         let (parent_name, application) = build_catalog_application(&target, &repository, &argocd)?;
+        claim_application(
+            &mut application_owners,
+            &target.metadata.name,
+            &argocd.resource.spec.namespace,
+            &parent_name,
+            ApplicationOwner::Catalog,
+        )?;
         insert_yaml(
             &mut files,
             PathBuf::from("_nyl/catalog/applications")
@@ -919,6 +928,7 @@ fn prepare_target_cache(
     cache: Option<&GitOpsCache>,
     groups: &[PreparedGroup],
     release_inputs: &super::inputs::ResolvedTargetInputs,
+    input_digests: &BTreeMap<String, String>,
 ) -> Result<Option<TargetCacheProbe>> {
     let Some(cache) = cache else {
         return Ok(None);
@@ -987,9 +997,8 @@ fn prepare_target_cache(
     for path in release_inputs.files() {
         recorder.record_path_file(&path)?;
     }
-    let provenance = release_inputs.index_entries()?;
-    if !provenance.is_empty() {
-        recorder.record_value("input-provenance", &provenance)?;
+    if !input_digests.is_empty() {
+        recorder.record_value("input-provenance", input_digests)?;
     }
     cache.record_renderer_tools(&mut recorder)?;
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
@@ -1168,6 +1177,63 @@ fn store_cached_target(
     cache.store_record("target", &probe.key, &record)?;
     cache.observe(CacheLayer::Target, CacheOutcome::Stored, &[]);
     Ok(())
+}
+
+/// What generates one Argo CD Application of a target's catalog.
+enum ApplicationOwner {
+    Release { group: String, release: String },
+    Namespace(String),
+    Catalog,
+}
+
+impl std::fmt::Display for ApplicationOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Release { group, release } => write!(formatter, "Release {group}/{release}"),
+            Self::Namespace(namespace) => write!(formatter, "the owner Application of namespace {namespace:?}"),
+            Self::Catalog => formatter.write_str("the catalog Application"),
+        }
+    }
+}
+
+/// Record that `owner` generates Application `namespace`/`name`, failing with
+/// the fix when another Application of the target already has that name.
+fn claim_application(
+    owners: &mut BTreeMap<(String, String), ApplicationOwner>,
+    target: &str,
+    namespace: &str,
+    name: &str,
+    owner: ApplicationOwner,
+) -> Result<()> {
+    let key = (namespace.to_owned(), name.to_owned());
+    let Some(previous) = owners.get(&key) else {
+        owners.insert(key, owner);
+        return Ok(());
+    };
+    // Only a Release's name can be changed, through its group's template.
+    // The example keeps the target, because a target-independent name can
+    // collide with another target's Application in a shared namespace.
+    let fix = match (previous, &owner) {
+        (ApplicationOwner::Release { group: first, .. }, ApplicationOwner::Release { group: second, .. })
+            if first == second =>
+        {
+            format!(
+                "ApplicationGroup {first:?} needs an applicationNameTemplate that gives each Release its own name, for example '${{ target.metadata.name }}-${{ release.metadata.name }}'"
+            )
+        }
+        (ApplicationOwner::Release { group: first, .. }, ApplicationOwner::Release { group: second, .. }) => {
+            format!(
+                "set applicationNameTemplate on ApplicationGroup {first:?} or {second:?} so their names differ, for example '${{ target.metadata.name }}-{second}-${{ release.metadata.name }}'"
+            )
+        }
+        (ApplicationOwner::Release { group, .. }, _) | (_, ApplicationOwner::Release { group, .. }) => format!(
+            "rename the Release Application with ApplicationGroup {group:?} applicationNameTemplate, for example '${{ target.metadata.name }}-${{ release.metadata.name }}'"
+        ),
+        _ => "rename the catalog Application with DeploymentTarget.spec.catalogApplication.name".to_owned(),
+    };
+    Err(NylError::config(format!(
+        "{previous} and {owner} of DeploymentTarget {target:?} generate the same Argo CD Application {namespace}/{name}; {fix}"
+    )))
 }
 
 fn application_name_hint(group: &ApplicationGroup, release: &crate::resources::Release) -> String {

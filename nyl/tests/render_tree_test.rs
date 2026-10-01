@@ -1412,11 +1412,41 @@ fn test_render_tree_rejects_duplicate_application_names_within_one_target() {
             .assert()
             .failure()
             .stderr(predicate::str::contains(
-                "Releases extras/api and workloads/api of DeploymentTarget \"production\" generate the same Argo CD Application argocd-production/api",
+                "Release extras/api and Release workloads/api of DeploymentTarget \"production\" generate the same Argo CD Application argocd-production/api",
             ))
-            .stderr(predicate::str::contains("'workloads-${ release.metadata.name }'"));
+            .stderr(predicate::str::contains(
+                "'${ target.metadata.name }-workloads-${ release.metadata.name }'",
+            ));
     }
     assert!(!output.join("production/_nyl/index.json").exists());
+}
+
+#[test]
+fn test_render_tree_names_a_release_application_that_takes_the_catalog_name() {
+    let fixture = fixture();
+    let root = fixture.path();
+    fs::write(
+        root.join("config/application-groups/extras.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: extras\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("applications/extras")).unwrap();
+    fs::write(
+        root.join("applications/extras/catalog.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: production-catalog\n  namespace: extras\n",
+    )
+    .unwrap();
+    let output = root.join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root)
+        .args(["render-tree", "--target", "production", "--check", "--output-dir", output.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Release extras/production-catalog and the catalog Application of DeploymentTarget \"production\" generate the same Argo CD Application argocd/production-catalog",
+        ))
+        .stderr(predicate::str::contains("ApplicationGroup \"extras\" applicationNameTemplate"));
 }
 
 #[test]

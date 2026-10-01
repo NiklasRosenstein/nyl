@@ -100,9 +100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING**: `ApplicationGroup.spec.source.commit` must be the full
   40-character lowercase commit ID, the form `nyl update source-locks` writes
-  and compares, like `fromGit.commit`. Uppercase and 64-character values were
-  accepted before but always reported as stale; run
-  `nyl update source-locks` to rewrite them.
+  and compares, like `fromGit.commit`. Uppercase values were accepted before
+  but always reported as stale, and Nyl's Git backend cannot read
+  64-character object IDs; run `nyl update source-locks` to rewrite them.
 
 - Generated Argo CD names (catalog Applications, default workload Application
   names, and AppProjects) must be unique across every pair of targets whose

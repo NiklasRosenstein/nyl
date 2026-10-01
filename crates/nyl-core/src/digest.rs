@@ -9,8 +9,10 @@
 //! ([design/orchestration-core.md](../../../../design/orchestration-core.md)):
 //! no insignificant whitespace, object members sorted by the UTF-16 code units
 //! of their names, ECMAScript string escaping, and ECMAScript number
-//! formatting. Numbers must be exactly representable as IEEE 754 doubles
-//! (I-JSON), so two different values never share a digest.
+//! formatting. RFC 8785 covers only I-JSON numbers, which a double represents
+//! exactly; an integer beyond ±(2^53 - 1) is written with its exact decimal
+//! digits instead of being rounded, so two different values never share a
+//! digest.
 
 use serde::ser::Error as _;
 use serde::Serialize;
@@ -26,9 +28,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// RFC 8785 canonical JSON bytes of `value`.
-///
-/// Fails for integers that a double cannot represent exactly, because RFC 8785
-/// would round them and make distinct values canonicalize identically.
 pub fn canonical_json_bytes(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_canonical(&serde_json::to_value(value)?, &mut bytes)?;
@@ -74,29 +73,20 @@ fn write_canonical(value: &Value, out: &mut Vec<u8>) -> serde_json::Result<()> {
 // The integer casts are exact: both are checked against MAX_SAFE_INTEGER first.
 #[allow(clippy::cast_precision_loss)]
 fn write_number(number: &Number, out: &mut Vec<u8>) -> serde_json::Result<()> {
-    let double = if let Some(value) = number.as_u64() {
-        if value > MAX_SAFE_INTEGER {
-            return Err(unsafe_integer(number));
+    let double = match (number.as_u64(), number.as_i64()) {
+        (Some(value), _) if value <= MAX_SAFE_INTEGER => value as f64,
+        (None, Some(value)) if value.unsigned_abs() <= MAX_SAFE_INTEGER => value as f64,
+        // Beyond I-JSON: the exact digits, never a rounded double.
+        (Some(_), _) | (None, Some(_)) => {
+            out.extend_from_slice(number.to_string().as_bytes());
+            return Ok(());
         }
-        value as f64
-    } else if let Some(value) = number.as_i64() {
-        if value.unsigned_abs() > MAX_SAFE_INTEGER {
-            return Err(unsafe_integer(number));
-        }
-        value as f64
-    } else {
-        number
+        (None, None) => number
             .as_f64()
-            .ok_or_else(|| serde_json::Error::custom(format!("number {number} is not a finite double")))?
+            .ok_or_else(|| serde_json::Error::custom(format!("number {number} is not a finite double")))?,
     };
     out.extend_from_slice(ryu_js::Buffer::new().format_finite(double).as_bytes());
     Ok(())
-}
-
-fn unsafe_integer(number: &Number) -> serde_json::Error {
-    serde_json::Error::custom(format!(
-        "integer {number} is outside ±(2^53 - 1) and cannot be canonicalized exactly; write it as a string"
-    ))
 }
 
 #[cfg(test)]
@@ -149,12 +139,16 @@ mod tests {
         );
     }
 
+    /// A double would round 2^53 + 1 to 2^53, giving two inputs one digest.
     #[test]
-    fn test_canonical_json_bytes_reject_integers_a_double_cannot_represent() {
-        assert!(canonical_json_bytes(&json!(9_007_199_254_740_991_u64)).is_ok());
-        let error = canonical_json_bytes(&json!(9_007_199_254_740_993_u64)).unwrap_err();
-        assert!(error.to_string().contains("write it as a string"), "{error}");
-        assert!(canonical_json_bytes(&json!(-9_007_199_254_740_993_i64)).is_err());
+    fn test_canonical_json_bytes_keep_integers_beyond_doubles_exact() {
+        assert_eq!(canonical(json!(9_007_199_254_740_991_u64)), "9007199254740991");
+        assert_eq!(canonical(json!(9_007_199_254_740_993_u64)), "9007199254740993");
+        assert_eq!(canonical(json!(-9_007_199_254_740_993_i64)), "-9007199254740993");
+        assert_ne!(
+            canonical(json!(9_007_199_254_740_992_u64)),
+            canonical(json!(9_007_199_254_740_993_u64))
+        );
     }
 
     #[test]
