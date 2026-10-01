@@ -50,8 +50,27 @@ pub struct BuiltinIndex {
     pub collections: BTreeMap<String, String>,
 }
 
+/// The schema store's file format: pretty-printed JSON with object keys sorted
+/// recursively and a trailing newline. Vendored schema files and their recorded
+/// digests use it, so it stays fixed; it is not RFC 8785 canonical JSON.
 pub fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
-    Ok(nyl_core::digest::canonical_json_bytes(value)?)
+    fn sorted(value: Value) -> Value {
+        match value {
+            Value::Object(fields) => Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(values.into_iter().map(sorted).collect()),
+            other => other,
+        }
+    }
+    let mut bytes = serde_json::to_vec_pretty(&sorted(serde_json::to_value(value)?))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 pub fn capabilities_fingerprint(capabilities: &ClusterKubernetesCapabilities) -> Result<String> {

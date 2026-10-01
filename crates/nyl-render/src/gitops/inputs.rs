@@ -129,10 +129,15 @@ impl PublicationBase {
                 PublicationBaseOrigin::Refreshed,
             ),
             // Without a refresh, a branch missing from the cache cannot be
-            // told apart from one that was never fetched.
-            PublicationRead::Cached => match git.branch_head(url, &branch, false).map_err(|e| error(e, ""))? {
-                Some(commit) => (Some(commit), PublicationBaseOrigin::Cached),
-                None => (None, PublicationBaseOrigin::Unavailable),
+            // told apart from one that was never fetched, and a repository
+            // that was never cached is a cache miss, not a failure.
+            PublicationRead::Cached => match git.branch_head(url, &branch, false) {
+                Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::Cached),
+                Ok(None) => (None, PublicationBaseOrigin::Unavailable),
+                Err(cache_error) => {
+                    tracing::debug!("No cached head for publication branch {branch}: {cache_error}");
+                    (None, PublicationBaseOrigin::Unavailable)
+                }
             },
             PublicationRead::FreshOrCached => match git.branch_head(url, &branch, true) {
                 Ok(commit) => (commit, PublicationBaseOrigin::Refreshed),
@@ -1175,7 +1180,7 @@ mod tests {
         let entries = resolved.index_entries().unwrap();
         assert_eq!(
             entries["@input/platform/web/replicas"],
-            nyl_core::digest::sha256_hex(b"2\n")
+            nyl_core::digest::sha256_hex(b"2")
         );
         assert_eq!(entries.len(), 4);
     }
@@ -1529,11 +1534,29 @@ mod tests {
 
     #[test]
     fn test_cached_read_of_an_empty_cache_is_unavailable() {
-        let heads = Heads {
-            refreshed: Err("unused"),
-            cached: Ok(None),
-        };
-        let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+        for cached in [Ok(None), Err("not cached")] {
+            let heads = Heads {
+                refreshed: Err("unused"),
+                cached,
+            };
+            let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+            assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+        }
+    }
+
+    /// `--offline` before the publication repository was ever fetched: the real
+    /// cache reports the repository as not cached, which is no failure.
+    #[test]
+    fn test_cached_read_of_a_never_fetched_repository_is_unavailable() {
+        let temp = TempDir::new().unwrap();
+        let source = CachedGitBlobSource::new(
+            Some(crate::git::GitManager::with_cache_dir(temp.path().join("cache"))),
+            temp.path(),
+            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap(),
+            None,
+        );
+        let url = temp.path().join("publication").to_string_lossy().into_owned();
+        let base = PublicationBase::resolve(&source, &url, "deploy", "dev", PublicationRead::Cached).unwrap();
         assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
     }
 
