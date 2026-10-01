@@ -30,11 +30,14 @@
       "description": "A constrained AppProject generated for one ApplicationGroup and target.",
       "properties": {
         "clusterResourceWhitelist": {
-          "description": "Explicit cluster-scoped resource permissions. Namespace permissions are added for approved namespaces when creation is enabled.",
+          "description": "Cluster-scoped resource permissions. Omitted, the project admits every cluster-scoped resource; an explicit list, including `[]`, admits only those patterns. Namespace permissions are added for approved namespaces when creation is enabled.",
           "items": {
             "$ref": "#/$defs/AppProjectResourcePattern"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "destinationNamespaces": {
           "description": "Permitted destination namespace patterns. Must cover all effective Release namespaces and additional namespaces; required when no fixed destination namespace is configured.",
@@ -260,7 +263,7 @@
           "title": "projectRef"
         },
         {
-          "description": "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
+          "description": "Generates an AppProject for this group, narrowed to the declared namespaces and, when listed, cluster resources.",
           "not": {
             "anyOf": [
               {

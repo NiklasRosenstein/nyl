@@ -515,9 +515,9 @@ pub struct AppProjectTemplate {
     /// Permitted destination namespace patterns. Must cover all effective Release namespaces and additional namespaces; required when no fixed destination namespace is configured.
     #[serde(default, rename = "destinationNamespaces", skip_serializing_if = "Vec::is_empty")]
     pub destination_namespaces: Vec<String>,
-    /// Explicit cluster-scoped resource permissions. Namespace permissions are added for approved namespaces when creation is enabled.
-    #[serde(default, rename = "clusterResourceWhitelist", skip_serializing_if = "Vec::is_empty")]
-    pub cluster_resource_whitelist: Vec<AppProjectResourcePattern>,
+    /// Cluster-scoped resource permissions. Omitted, the project admits every cluster-scoped resource; an explicit list, including `[]`, admits only those patterns. Namespace permissions are added for approved namespaces when creation is enabled.
+    #[serde(rename = "clusterResourceWhitelist", skip_serializing_if = "Option::is_none")]
+    pub cluster_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
@@ -1238,7 +1238,7 @@ impl AppProjectTemplate {
         for namespace in &self.destination_namespaces {
             validate_namespace_pattern("spec.projectTemplate.destinationNamespaces", namespace)?;
         }
-        for pattern in &self.cluster_resource_whitelist {
+        for pattern in self.cluster_resource_whitelist.iter().flatten() {
             validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].kind", &pattern.kind)?;
             if let Some(name) = &pattern.name {
                 validate_static_required("spec.projectTemplate.clusterResourceWhitelist[].name", name)?;

@@ -21,7 +21,7 @@ repository.
 definition is copied into the target catalog once; an `External` definition
 only supplies the project name.
 
-`projectTemplate` replaces the implied project with a least-privilege one.
+`projectTemplate` replaces the implied project with a narrower one.
 Declaring it opts into explicit scope, so it requires `destinationNamespaces`
 unless `spec.destinationNamespace` fixes the namespace:
 
@@ -44,9 +44,10 @@ and destinations to the target workload Cluster. A fixed
 destination namespace pattern is required. Every effective Release destination
 and `additionalNamespaces` entry must match the declared policy.
 
-When namespace creation is enabled, Nyl adds Namespace permissions for the
-approved destination patterns. Other cluster-scoped permissions remain
-explicit. Argo CD's AppProject admission remains the authorization boundary.
+Omitting `clusterResourceWhitelist` keeps cluster-scoped resources as open as
+in the implied project. A declared list, including `clusterResourceWhitelist: []`,
+admits only its patterns; when namespace creation is enabled, Nyl then adds
+Namespace permissions for the approved destination patterns. Argo CD's AppProject admission remains the authorization boundary.
 
 ## Application names
 

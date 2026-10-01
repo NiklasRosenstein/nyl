@@ -2027,23 +2027,24 @@ fn build_generated_project(
     destination_namespaces.sort();
     destination_namespaces.dedup();
 
-    let mut cluster_resources = template
-        .cluster_resource_whitelist
-        .iter()
-        .map(|pattern| {
-            let mut value = serde_json::Map::from_iter([
-                ("group".to_owned(), pattern.group.clone().into()),
-                ("kind".to_owned(), pattern.kind.clone().into()),
-            ]);
-            if let Some(name) = &pattern.name {
-                value.insert("name".to_owned(), name.clone().into());
-            }
-            Value::Object(value)
-        })
-        .collect::<Vec<_>>();
-    if implied && cluster_resources.is_empty() {
-        cluster_resources.push(serde_json::json!({"group": PERMISSIVE_PATTERN, "kind": PERMISSIVE_PATTERN}));
-    }
+    // An omitted clusterResourceWhitelist leaves cluster-scoped resources as
+    // open as the implied project; only a declared list, `[]` included, narrows it.
+    let mut cluster_resources = match &template.cluster_resource_whitelist {
+        None => vec![serde_json::json!({"group": PERMISSIVE_PATTERN, "kind": PERMISSIVE_PATTERN})],
+        Some(patterns) => patterns
+            .iter()
+            .map(|pattern| {
+                let mut value = serde_json::Map::from_iter([
+                    ("group".to_owned(), pattern.group.clone().into()),
+                    ("kind".to_owned(), pattern.kind.clone().into()),
+                ]);
+                if let Some(name) = &pattern.name {
+                    value.insert("name".to_owned(), name.clone().into());
+                }
+                Value::Object(value)
+            })
+            .collect::<Vec<_>>(),
+    };
     let permits_every_resource = cluster_resources.iter().any(is_permissive_resource);
     if group.spec.namespace.create && !permits_every_resource {
         for namespace in &destination_namespaces {

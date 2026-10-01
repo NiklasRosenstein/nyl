@@ -309,7 +309,7 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
             ),
             (
                 "projectTemplate",
-                "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
+                "Generates an AppProject for this group, narrowed to the declared namespaces and, when listed, cluster resources.",
             ),
         ],
         Some("Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource."),

@@ -38,8 +38,9 @@ managed project without publishing its manifest.
 `ApplicationGroup.spec.projectTemplate` is a constrained alternative. Nyl fixes
 its source repository and destination cluster from the selected target, checks
 every Release namespace against its declared destination patterns, and only
-adds Namespace permissions when namespace creation is enabled. Other
-cluster-scoped permissions remain explicit. The generated policy complements,
+adds Namespace permissions when namespace creation is enabled. An omitted
+`clusterResourceWhitelist` admits every cluster-scoped resource; a declared
+list, `[]` included, admits only its patterns. The generated policy complements,
 but does not replace, Argo CD admission.
 
 A group that declares no project at all keeps the implied AppProject, which is

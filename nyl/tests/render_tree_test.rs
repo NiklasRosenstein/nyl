@@ -1209,7 +1209,7 @@ fn project_templates_generate_constrained_projects() {
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
         "  projectRef: workloads\n",
-        "  projectTemplate:\n    destinationNamespaces:\n      - api\n      - shared-*\n",
+        "  projectTemplate:\n    destinationNamespaces:\n      - api\n      - shared-*\n    clusterResourceWhitelist: []\n",
     );
     fs::write(group_path, group).unwrap();
     let output = fixture.path().join("deploy");
@@ -1233,6 +1233,39 @@ fn project_templates_generate_constrained_projects() {
     assert!(project.contains("namespace: api"));
     assert!(project.contains("kind: Namespace"));
     assert!(project.contains("name: api"));
+}
+
+#[test]
+fn project_template_without_cluster_resource_whitelist_admits_every_cluster_resource() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectTemplate:\n    destinationNamespaces:\n      - api\n      - shared-*\n",
+    );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+        &fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap(),
+    )
+    .unwrap();
+    // Only the declared namespace dimension narrows the project.
+    assert_eq!(
+        project["spec"]["clusterResourceWhitelist"],
+        serde_json::json!([{"group": "*", "kind": "*"}])
+    );
 }
 
 #[test]
