@@ -1482,12 +1482,14 @@ pub fn relative_path_to_posix(field: &str, value: &Path) -> Result<String> {
     Ok(value)
 }
 
-/// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
 /// `applicationNameTemplate` is a template value that must contain at least
 /// one `${ … }` expression, so every Release gets its own name. Text outside
 /// expressions is literal; the `{{ … }}` form is not expanded.
 fn validate_application_name_template(template: &str) -> Result<()> {
-    if has_template_expression(template) {
+    use crate::template_value::{parse, Segment};
+    let segments = parse(template)
+        .map_err(|error| CoreError::config(format!("spec.applicationNameTemplate has {error}: {template:?}")))?;
+    if segments.iter().any(|segment| matches!(segment, Segment::Expression(_))) {
         return Ok(());
     }
     Err(CoreError::config(format!(
@@ -1495,23 +1497,7 @@ fn validate_application_name_template(template: &str) -> Result<()> {
     )))
 }
 
-/// Whether `value` contains a `${` that starts an expression, not counting the
-/// `$${` escape.
-fn has_template_expression(value: &str) -> bool {
-    let mut rest = value;
-    while let Some(start) = rest.find('$') {
-        let after = &rest[start + 1..];
-        if let Some(escaped) = after.strip_prefix("${") {
-            rest = escaped;
-        } else if after.starts_with('{') {
-            return true;
-        } else {
-            rest = after;
-        }
-    }
-    false
-}
-
+/// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
 pub fn validate_immutable_git_commit(field: &str, value: &str) -> Result<()> {
     validate_static_required(field, value)?;
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1582,6 +1568,17 @@ mod tests {
         ] {
             let error = validate_application_name_template(template).unwrap_err().to_string();
             assert!(error.contains("at least one ${ … } expression"), "{template}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_application_name_template_rejects_malformed_expressions() {
+        for template in ["${ release.metadata.name", "${ }-${ release.metadata.name }"] {
+            let error = validate_application_name_template(template).unwrap_err().to_string();
+            assert!(
+                error.contains("spec.applicationNameTemplate has an"),
+                "{template}: {error}"
+            );
         }
     }
 

@@ -71,6 +71,8 @@ fn write_canonical(value: &Value, out: &mut Vec<u8>) -> serde_json::Result<()> {
     Ok(())
 }
 
+// The integer casts are exact: both are checked against MAX_SAFE_INTEGER first.
+#[allow(clippy::cast_precision_loss)]
 fn write_number(number: &Number, out: &mut Vec<u8>) -> serde_json::Result<()> {
     let double = if let Some(value) = number.as_u64() {
         if value > MAX_SAFE_INTEGER {

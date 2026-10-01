@@ -1827,11 +1827,7 @@ fn validate_argocd_name_collisions(
                     if referenced && previous.2 && previous.0 == target.metadata.name && previous.3 == catalog_id {
                         continue;
                     }
-                    let field = if group.spec.project_template.is_some() {
-                        "ApplicationGroup.spec.projectTemplate.name"
-                    } else {
-                        "a target-specific AppProjectDefinition name or management: External"
-                    };
+                    let field = project_collision_fix(&group);
                     return Err(NylError::config(format!(
                         "{}/{} and {}/{} generate the same AppProject {control_namespace}/{project_name} in Argo CD on Cluster {control_cluster:?} (catalog id {catalog_id:?}); customize {field}",
                         previous.0,
@@ -1992,6 +1988,20 @@ fn resolve_effective_group_project(
     }
 
     build_generated_project(group, publication_repository, target_cluster, argocd)
+}
+
+/// What to change when `group`'s AppProject name collides with another
+/// target's in the same Argo CD namespace.
+fn project_collision_fix(group: &ApplicationGroup) -> &'static str {
+    if group.spec.project_ref.is_some() {
+        "a target-specific AppProjectDefinition name or management: External"
+    } else if group.spec.project_template.is_some() {
+        "ApplicationGroup.spec.projectTemplate.name"
+    } else {
+        // The implied project is named after the group, and only a declared
+        // template or reference can name it otherwise.
+        "the implied AppProject's name by declaring ApplicationGroup.spec.projectTemplate with a target-qualified name, or set spec.projectRef"
+    }
 }
 
 /// Build the AppProject a group generates for itself, from `spec.projectTemplate`

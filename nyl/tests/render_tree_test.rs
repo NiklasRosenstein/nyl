@@ -1351,6 +1351,30 @@ fn test_validate_implicit_argocd_instances_on_one_cluster_require_cross_target_n
 }
 
 #[test]
+fn test_validate_names_the_template_fix_for_implied_app_project_collisions() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU,
+    )
+    .unwrap();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    validate(&fixture)
+        .failure()
+        .stderr(predicate::str::contains(
+            "generate the same AppProject argocd/workloads",
+        ))
+        .stderr(predicate::str::contains(
+            "declaring ApplicationGroup.spec.projectTemplate with a target-qualified name",
+        ));
+}
+
+#[test]
 fn test_render_tree_expands_application_name_template_values_per_release() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
