@@ -260,7 +260,12 @@ impl GitManager {
         // Resolve ref to OID
         let oid = {
             let repo = bare_repo.lock().unwrap();
-            match repo.resolve_ref(git_ref) {
+            let resolved = if freshness == Freshness::Cached {
+                repo.resolve_cached_ref(git_ref)
+            } else {
+                repo.resolve_ref(git_ref)
+            };
+            match resolved {
                 Ok(oid) => {
                     if fetch_error.is_some() {
                         tracing::debug!("Using cached ref '{}' for {} after fetch failure", git_ref, url);
@@ -280,6 +285,12 @@ impl GitManager {
                             fetch_error: fetch_error.to_string(),
                         });
                     }
+                    if freshness == Freshness::Cached && matches!(resolve_error, GitError::RefNotFound { .. }) {
+                        return Err(GitError::NotCachedRef {
+                            url: crate::util::sanitize_url(url),
+                            ref_name: git_ref.to_string(),
+                        });
+                    }
                     return Err(resolve_error);
                 }
             }
@@ -289,6 +300,12 @@ impl GitManager {
         {
             let repo = bare_repo.lock().unwrap();
             if !repo.has_object(oid) {
+                if freshness == Freshness::Cached {
+                    return Err(GitError::NotCachedRef {
+                        url: crate::util::sanitize_url(url),
+                        ref_name: git_ref.to_string(),
+                    });
+                }
                 // Lazy fetch objects for this commit
                 repo.fetch_objects(oid)?;
             }
@@ -327,7 +344,8 @@ impl GitManager {
     }
 
     /// Resolve `git_ref` against the cached refs of `url` to a commit ID,
-    /// without fetching or creating a worktree.
+    /// without refreshing refs or creating a worktree. A commit ID missing
+    /// from the cache is still fetched by ID.
     pub fn resolve_cached_ref(&mut self, url: &str, git_ref: &str) -> Result<git2::Oid> {
         let bare_repo = self.get_or_create_bare_repo(url)?;
         let repo = bare_repo.lock().unwrap();
@@ -563,6 +581,11 @@ mod tests {
         let second = commit_on(&source_repo, "Second");
         let cached = manager.resolve_ref_cached(&url, Some("HEAD"), None).unwrap();
         assert_eq!(checkout_head(&cached), first);
+        // A commit the cache lacks is an error, never a fetch by ID.
+        let error = manager
+            .resolve_ref_cached(&url, Some(&second.to_string()), None)
+            .unwrap_err();
+        assert!(matches!(error, GitError::NotCachedRef { .. }), "{error:?}");
         let fresh = manager.resolve_ref_fresh(&url, Some("HEAD"), None).unwrap();
         assert_eq!(checkout_head(&fresh), second);
     }

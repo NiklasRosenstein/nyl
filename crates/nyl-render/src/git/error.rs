@@ -56,6 +56,9 @@ pub enum GitError {
     #[error("Authentication failed for {url}: {reason}\nHint: For SSH, ensure your SSH key is available to the agent. For HTTPS, configure an appropriate Git credential helper or token.")]
     AuthenticationFailed { url: String, reason: String },
 
+    #[error("'{ref_name}' of {url} is not in the local Git cache\nHint: Run once without --offline to fetch it.")]
+    NotCachedRef { url: String, ref_name: String },
+
     #[error("No cached copy of {url} exists\nHint: Run once without --offline to populate the Git cache.")]
     NotCached { url: String },
 }

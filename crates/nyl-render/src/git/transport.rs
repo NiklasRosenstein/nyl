@@ -64,7 +64,7 @@ pub fn fetch(
     if prune {
         args.push("--prune");
     }
-    args.push(url);
+    args.extend(["--", url]);
     args.extend_from_slice(refspecs);
     run(repository, url, "git fetch", &args).map(drop)
 }
@@ -115,7 +115,7 @@ pub fn remote_branch(
             .find(|head| head.name() == name)
             .map(git2::RemoteHead::oid));
     }
-    let output = run(repository, url, "git ls-remote", &["ls-remote", url, &name])?;
+    let output = run(repository, url, "git ls-remote", &["ls-remote", "--", url, &name])?;
     output
         .lines()
         .find_map(|line| line.split_once('\t').filter(|(_, reference)| *reference == name))
@@ -168,7 +168,7 @@ pub fn push_branch_if_unchanged(
         repository,
         url,
         "git push",
-        &["push", "--quiet", "--porcelain", &lease, url, &refspec],
+        &["push", "--quiet", "--porcelain", &lease, "--", url, &refspec],
     )
     .map(drop)
 }
@@ -179,8 +179,16 @@ fn run(repository: &Repository, url: &str, operation: &str, args: &[&str]) -> Re
     command
         .arg("--git-dir")
         .arg(repository.path())
-        // Fetches into the cache must not start background maintenance.
-        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
+        // Fetches into the cache must not start background maintenance, and
+        // a URL must never run a command through the `ext::` transport.
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "protocol.ext.allow=never",
+        ])
         .args(args)
         .stdin(Stdio::null())
         // Fail instead of waiting for a terminal password prompt; OpenSSH
@@ -283,5 +291,17 @@ mod tests {
             .to_string();
         assert!(error.starts_with("git fetch failed for "), "{error}");
         assert!(!error.contains("token"), "{error}");
+    }
+
+    #[test]
+    fn test_a_url_is_never_read_as_a_git_option() {
+        let local_dir = TempDir::new().unwrap();
+        let local = Repository::init_bare(local_dir.path()).unwrap();
+        let marker = local_dir.path().join("marker");
+        let url = format!("--upload-pack=touch {}", marker.display());
+        assert!(fetch(&local, &url, &["+refs/heads/*:refs/heads/*"], false, None).is_err());
+        assert!(remote_branch(&local, &url, "main", None).is_err());
+        assert!(push_branch_if_unchanged(&local, &url, "main", None, None).is_err());
+        assert!(!marker.exists());
     }
 }
