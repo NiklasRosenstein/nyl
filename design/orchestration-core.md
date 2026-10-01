@@ -1881,8 +1881,10 @@ revisions, and locked `fromGit` bindings.
 ### Credentials and branch protection
 
 - State pushes use the same Git credentials as `publish-tree`, through the
-  GitRepository's `publishURL`. Today `publish-tree` authenticates through the
-  SSH agent only; SSH keys and HTTPS tokens for both are an M3 item.
+  GitRepository's `publishURL`. Remote Git operations run the `git` command
+  line, so `publish-tree` authenticates as the user's `git` does (SSH config
+  and keys, SSH agent, credential helpers); state pushes use the same
+  transport.
 - Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
   as corruption and stops every command until an operator repairs it.
 - Recommended protection: force pushes and deletion are disabled on both state

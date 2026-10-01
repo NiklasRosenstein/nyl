@@ -76,9 +76,10 @@ another tool has committed `fromPublication` state before the first
 publication. It may then hold only files the target declares as
 `fromPublication` state paths; any other file fails the comparison, which
 usually means `pathPrefix` names a directory that belongs to something else.
-Unindexed repository content is never treated as target-owned baseline data. `--offline` reads `fromPublication` state at the cached branch
-head, as for `render-tree`, and compares against the published tree at that
-same commit.
+Unindexed repository content is never treated as target-owned baseline data. `--offline` never fetches: it reads `fromPublication` state at the
+cached branch head, as for `render-tree`, and compares against the published
+tree at that same commit, or at the cached publication branch head. With
+`--against source`, `--source-ref` resolves against the cached refs too.
 
 Compare with a render from a source revision:
 

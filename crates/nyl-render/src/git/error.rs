@@ -31,6 +31,17 @@ pub enum GitError {
     #[error("Command execution failed: {0}\nHint: Ensure git is installed and available in PATH.")]
     Command(String),
 
+    /// A failure that is not about running `git`, such as unreadable content.
+    #[error("{0}")]
+    Other(String),
+
+    #[error("{operation} failed for {url}: {message}\nHint: Nyl runs git for remote access, with your SSH config, SSH agent, and credential helpers; check that `git ls-remote {url}` succeeds in the same environment.")]
+    RemoteFailed {
+        operation: String,
+        url: String,
+        message: String,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

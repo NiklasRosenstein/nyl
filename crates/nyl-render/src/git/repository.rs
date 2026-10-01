@@ -1,9 +1,10 @@
-use git2::{ErrorCode, FetchOptions, FetchPrune, Oid, Repository};
+use git2::{ErrorCode, Oid, Repository};
 use std::path::Path;
 use std::sync::Arc;
 
 use super::auth::CredentialProvider;
 use super::error::{GitError, Result};
+use super::transport;
 
 /// Manages a bare Git repository
 pub struct BareRepository {
@@ -97,60 +98,28 @@ impl BareRepository {
         Ok(repo)
     }
 
-    /// Fetch refs from the remote using git2 API with authentication
+    /// Fetch the branches, tags, and remote `HEAD` of `url`, pruning deleted ones.
     fn fetch_refs_with_auth(
         repo: &Repository,
         url: &str,
         credential_provider: Option<&CredentialProvider>,
     ) -> Result<()> {
-        tracing::trace!(
-            "Fetching refs for {} (credential_provider={})",
+        tracing::trace!("Fetching refs for {}", url);
+        // `HEAD*` matches the remote HEAD as a glob, so a repository without
+        // one (an empty repository) fetches nothing instead of failing.
+        transport::fetch(
+            repo,
             url,
-            if credential_provider.is_some() {
-                "present"
-            } else {
-                "absent"
-            }
-        );
-        let callbacks = if let Some(provider) = credential_provider {
-            provider.build_callbacks(url)
-        } else {
-            Self::build_default_callbacks()
-        };
-
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-        fetch_options.prune(FetchPrune::On);
-
-        let mut remote = repo.find_remote("origin").map_err(GitError::Repository)?;
-        remote
-            .fetch(
-                &[
-                    "+refs/heads/*:refs/heads/*",
-                    "+refs/tags/*:refs/tags/*",
-                    "+HEAD:refs/remotes/origin/HEAD",
-                ],
-                Some(&mut fetch_options),
-                None,
-            )
-            .map_err(|e| GitError::Command(format!("git fetch failed: {}", e)))?;
-
+            &[
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+                "+HEAD*:refs/remotes/origin/HEAD*",
+            ],
+            true,
+            credential_provider,
+        )?;
         tracing::trace!("Fetch refs completed for {}", url);
         Ok(())
-    }
-
-    /// Build default callbacks with SSH agent fallback
-    fn build_default_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, allowed_types| {
-            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-                let username = username_from_url.unwrap_or("git");
-                git2::Cred::ssh_key_from_agent(username)
-            } else {
-                Err(git2::Error::from_str("No credentials available"))
-            }
-        });
-        callbacks
     }
 
     /// Update refs from the remote
@@ -213,19 +182,13 @@ impl BareRepository {
         let oid_str = oid.to_string();
         tracing::debug!("Fetching commit objects for {} at {}", self.url, oid_str);
 
-        let callbacks = if let Some(provider) = &self.credential_provider {
-            provider.build_callbacks(&self.url)
-        } else {
-            Self::build_default_callbacks()
-        };
-
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-
-        let mut remote = self.repo.find_remote("origin").map_err(GitError::Repository)?;
-        remote
-            .fetch(&[&oid_str], Some(&mut fetch_options), None)
-            .map_err(|e| GitError::Command(format!("git fetch {} failed: {}", oid_str, e)))?;
+        transport::fetch(
+            &self.repo,
+            &self.url,
+            &[&oid_str],
+            false,
+            self.credential_provider.as_deref(),
+        )?;
 
         tracing::debug!("Fetched commit objects for {} at {}", self.url, oid_str);
         Ok(())
@@ -243,14 +206,14 @@ impl BareRepository {
         tracing::debug!("Fetching refs of {} to find {commit}", self.url);
         match (self.fetch_refs(), by_id) {
             (Ok(()), _) if self.has_object(commit) => Ok(()),
-            (Ok(()), by_id) => Err(GitError::Command(format!(
+            (Ok(()), by_id) => Err(GitError::Other(format!(
                 "commit {commit} is not reachable from any branch or tag of {}{}",
                 crate::util::sanitize_url(&self.url),
                 by_id
                     .map(|error| format!(", and fetching it by ID failed: {error}"))
                     .unwrap_or_default()
             ))),
-            (Err(refs), Some(by_id)) => Err(GitError::Command(format!(
+            (Err(refs), Some(by_id)) => Err(GitError::Other(format!(
                 "fetching {commit} by ID failed ({by_id}), and fetching refs failed ({refs})"
             ))),
             (Err(refs), None) => Err(refs),
@@ -279,7 +242,7 @@ impl BareRepository {
                 Err(error) => return Err(GitError::Repository(error)),
             };
             if found.filemode() == 0o120_000 {
-                return Err(GitError::Command(format!(
+                return Err(GitError::Other(format!(
                     "{} at {commit} is a symbolic link; Nyl reads only regular files",
                     prefix.display()
                 )));
@@ -292,7 +255,7 @@ impl BareRepository {
         let object = entry.to_object(&self.repo)?;
         let blob = object
             .as_blob()
-            .ok_or_else(|| GitError::Command(format!("{path} at {commit} is not a file")))?;
+            .ok_or_else(|| GitError::Other(format!("{path} at {commit} is not a file")))?;
         Ok(Some(blob.content().to_vec()))
     }
 

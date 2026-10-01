@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
-use git2::build::{CheckoutBuilder, RepoBuilder};
-use git2::{FetchOptions, IndexAddOption, PushOptions, Repository, ResetType, Signature, StatusOptions};
+use git2::build::CheckoutBuilder;
+use git2::{IndexAddOption, Repository, ResetType, Signature, StatusOptions};
 
 use crate::git::CredentialProvider;
 use crate::git::{GitManager, WorktreeManager};
@@ -646,17 +646,14 @@ fn writable_branch_name(revision: &str) -> Result<&str> {
 }
 
 fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialProvider) -> Result<Repository> {
-    let mut fetch = FetchOptions::new();
-    fetch.remote_callbacks(credentials.build_callbacks(url));
-    // Check nothing out while cloning: the user's Git config may convert line
-    // endings, and owned files must keep the exact bytes their index records.
-    let mut no_checkout = CheckoutBuilder::new();
-    no_checkout.dry_run();
-    let repository = RepoBuilder::new()
-        .fetch_options(fetch)
-        .with_checkout(no_checkout)
-        .clone(url, path)
-        .map_err(|error| NylError::config(format!("Failed to clone {url}: {error}")))?;
+    // Nothing is checked out by the fetch: the user's Git config may convert
+    // line endings, and owned files must keep the exact bytes their index records.
+    let repository = Repository::init(path)
+        .and_then(|repository| {
+            repository.remote("origin", url)?;
+            Ok(repository)
+        })
+        .map_err(|error| NylError::config(format!("Failed to clone {}: {error}", crate::util::sanitize_url(url))))?;
     {
         let mut config = repository.config().map_err(crate::git::GitError::from)?;
         config
@@ -664,6 +661,7 @@ fn clone_branch(url: &str, branch: &str, path: &Path, credentials: &CredentialPr
             .and_then(|()| config.set_str("core.eol", "lf"))
             .map_err(crate::git::GitError::from)?;
     }
+    fetch_branch(&repository, url, branch, credentials)?;
     if let Some(oid) = remote_branch_oid(&repository, branch) {
         let commit = repository.find_commit(oid).map_err(crate::git::GitError::from)?;
         repository
@@ -809,12 +807,15 @@ fn configured_publication_signature(
 }
 
 fn fetch_branch(repository: &Repository, url: &str, branch: &str, credentials: &CredentialProvider) -> Result<()> {
-    let mut remote = repository.find_remote("origin").map_err(crate::git::GitError::from)?;
-    let mut options = FetchOptions::new();
-    options.remote_callbacks(credentials.build_callbacks(url));
-    remote
-        .fetch(&[branch], Some(&mut options), None)
-        .map_err(|error| NylError::config(format!("Failed to refresh publication branch: {error}")))
+    crate::git::transport::fetch_branch(
+        repository,
+        url,
+        branch,
+        &format!("refs/remotes/origin/{branch}"),
+        Some(credentials),
+    )
+    .map(drop)
+    .map_err(|error| NylError::config(format!("Failed to refresh publication branch: {error}")))
 }
 
 fn push_branch(
@@ -824,29 +825,7 @@ fn push_branch(
     expected: Option<git2::Oid>,
     credentials: &CredentialProvider,
 ) -> Result<()> {
-    let mut remote = repository.find_remote("origin").map_err(crate::git::GitError::from)?;
-    let mut options = PushOptions::new();
-    let publication_ref = format!("refs/heads/{branch}");
-    let mut callbacks = credentials.build_callbacks(url);
-    callbacks.push_negotiation({
-        let publication_ref = publication_ref.clone();
-        move |updates| {
-            let update = updates
-                .iter()
-                .find(|update| update.dst_refname().is_ok_and(|name| name == publication_ref.as_str()))
-                .ok_or_else(|| git2::Error::from_str("publication branch was absent from push negotiation"))?;
-            let advertised = (!update.src().is_zero()).then_some(update.src());
-            if advertised != expected {
-                return Err(git2::Error::from_str(
-                    "publication branch changed during compare-and-swap publication",
-                ));
-            }
-            Ok(())
-        }
-    });
-    options.remote_callbacks(callbacks);
-    remote
-        .push(&[format!("refs/heads/{branch}:{publication_ref}")], Some(&mut options))
+    crate::git::transport::push_branch_if_unchanged(repository, url, branch, expected, Some(credentials))
         .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
 }
 

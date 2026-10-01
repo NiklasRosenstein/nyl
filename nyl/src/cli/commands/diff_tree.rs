@@ -103,7 +103,8 @@ pub struct DiffTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Read fromPublication state at the cached publication branch head.
+    /// Never fetch: read the published tree, `--source-ref`, and
+    /// fromPublication state from the cached refs of the local Git cache.
     #[arg(long)]
     pub offline: bool,
 }
@@ -698,7 +699,7 @@ fn published_tree(
         .and_then(|base| Some((base.url.as_str(), base.commit.as_deref()?)))
     {
         Some((url, commit)) => manager.resolve_ref(url, Some(commit), None),
-        None if offline => manager.resolve_ref(&compiled.repository.repo_url, Some(revision), None),
+        None if offline => manager.resolve_ref_cached(&compiled.repository.repo_url, Some(revision), None),
         None => manager.resolve_ref_fresh(&compiled.repository.repo_url, Some(revision), None),
     }
     .map_err(NylError::Git)?;
@@ -787,9 +788,12 @@ async fn source_derived_tree(
             .ok_or_else(|| NylError::config("Source repository has no origin; pass --source-repository"))?
     };
     let mut manager = git_manager(cache)?;
-    let checkout = manager
-        .resolve_ref_fresh(&repository_url, Some(source_ref), None)
-        .map_err(NylError::Git)?;
+    let checkout = if options.publication_read == crate::gitops::inputs::PublicationRead::Cached {
+        manager.resolve_ref_cached(&repository_url, Some(source_ref), None)
+    } else {
+        manager.resolve_ref_fresh(&repository_url, Some(source_ref), None)
+    }
+    .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
     let located = locate_checkout_project(
         &checkout,

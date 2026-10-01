@@ -43,6 +43,7 @@ mod auth;
 mod cache;
 mod error;
 mod repository;
+pub mod transport;
 mod worktree;
 
 pub use auth::{CredentialProvider, GitCredential};
@@ -84,6 +85,17 @@ pub(crate) fn normalize_git_url_for_equality(url: &str) -> String {
 
     normalized
 }
+/// Whether resolving a ref refreshes the remote refs first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    /// Refresh; a failed refresh is an error.
+    Required,
+    /// Refresh unless the ref is a cached commit; fall back to cached refs.
+    BestEffort,
+    /// Never contact the remote for refs.
+    Cached,
+}
+
 /// Main Git manager for resolving Git references to local paths
 pub struct GitManager {
     cache: CacheLayout,
@@ -183,7 +195,7 @@ impl GitManager {
     /// ).unwrap();
     /// ```
     pub fn resolve_ref(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
-        self.resolve_ref_with_freshness(url, git_ref, subpath, false)
+        self.resolve_ref_with_freshness(url, git_ref, subpath, Freshness::BestEffort)
     }
 
     /// Resolve a ref only after a successful remote refresh.
@@ -191,7 +203,19 @@ impl GitManager {
     /// Use this for freshness-sensitive comparisons and lock updates. Immutable
     /// commit rendering can continue to use [`Self::resolve_ref`] offline.
     pub fn resolve_ref_fresh(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
-        self.resolve_ref_with_freshness(url, git_ref, subpath, true)
+        self.resolve_ref_with_freshness(url, git_ref, subpath, Freshness::Required)
+    }
+
+    /// Resolve a ref against the cached refs without contacting the remote,
+    /// for `--offline`. A repository with no cached copy is an error rather
+    /// than a clone.
+    pub fn resolve_ref_cached(&mut self, url: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Result<PathBuf> {
+        if !self.bare_repos.contains_key(url) && !self.cache.bare_repo_path(url).exists() {
+            return Err(GitError::NotCached {
+                url: crate::util::sanitize_url(url),
+            });
+        }
+        self.resolve_ref_with_freshness(url, git_ref, subpath, Freshness::Cached)
     }
 
     fn resolve_ref_with_freshness(
@@ -199,19 +223,28 @@ impl GitManager {
         url: &str,
         git_ref: Option<&str>,
         subpath: Option<&str>,
-        require_fresh: bool,
+        freshness: Freshness,
     ) -> Result<PathBuf> {
         let git_ref = git_ref.unwrap_or("HEAD");
 
         // Get or create bare repository
         let bare_repo = self.get_or_create_bare_repo(url)?;
 
-        // Always fetch latest refs to ensure we have the most recent version
-        // Fall back to cached refs if fetch fails (e.g., offline scenarios)
-        let fetch_error = {
+        // Refresh the refs so mutable names resolve to their current commit,
+        // falling back to cached refs if the fetch fails (e.g. offline). A
+        // full commit ID already in the cache cannot move, so it needs none.
+        let cached_commit = git2::Oid::from_str(git_ref)
+            .ok()
+            .filter(|oid| git_ref.len() == 40 && bare_repo.lock().unwrap().has_object(*oid));
+        let refresh = match freshness {
+            Freshness::Required => true,
+            Freshness::BestEffort => cached_commit.is_none(),
+            Freshness::Cached => false,
+        };
+        let fetch_error = if refresh {
             let repo = bare_repo.lock().unwrap();
             if let Err(e) = repo.fetch_refs() {
-                if require_fresh {
+                if freshness == Freshness::Required {
                     return Err(e);
                 }
                 tracing::warn!("Failed to fetch refs for {}: {}. Falling back to cached refs.", url, e);
@@ -220,6 +253,8 @@ impl GitManager {
                 self.observe_source(crate::render::cache::SourceOperation::GitRefRefresh);
                 None
             }
+        } else {
+            None
         };
 
         // Resolve ref to OID
@@ -482,6 +517,92 @@ mod tests {
         let err = manager.branch_head(&url, "main", false).unwrap_err();
         assert!(matches!(err, GitError::NotCached { .. }), "{err:?}");
         assert!(!manager.cache.bare_repo_path(&url).exists());
+    }
+
+    fn commit_on(repository: &Repository, message: &str) -> git2::Oid {
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree = repository
+            .find_tree(repository.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let parents = repository
+            .head()
+            .ok()
+            .and_then(|head| head.peel_to_commit().ok())
+            .into_iter()
+            .collect::<Vec<_>>();
+        repository
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                message,
+                &tree,
+                &parents.iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
+    }
+
+    fn checkout_head(path: &Path) -> git2::Oid {
+        Repository::open(path).unwrap().head().unwrap().target().unwrap()
+    }
+
+    #[test]
+    fn test_resolve_ref_cached_reads_cached_refs_without_contacting_the_remote() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let first = commit_on(&source_repo, "First");
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = source_dir.path().to_string_lossy().to_string();
+
+        let uncached = cache_dir.path().join("other").to_string_lossy().to_string();
+        let error = manager.resolve_ref_cached(&uncached, Some("HEAD"), None).unwrap_err();
+        assert!(matches!(error, GitError::NotCached { .. }), "{error:?}");
+
+        manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
+        let second = commit_on(&source_repo, "Second");
+        let cached = manager.resolve_ref_cached(&url, Some("HEAD"), None).unwrap();
+        assert_eq!(checkout_head(&cached), first);
+        let fresh = manager.resolve_ref_fresh(&url, Some("HEAD"), None).unwrap();
+        assert_eq!(checkout_head(&fresh), second);
+    }
+
+    #[test]
+    fn test_resolve_ref_of_a_cached_commit_skips_the_ref_refresh() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let commit = commit_on(&source_repo, "Pinned");
+        let cache_dir = TempDir::new().unwrap();
+        let mut manager = GitManager::with_cache_dir(cache_dir.path());
+        let url = source_dir.path().to_string_lossy().to_string();
+        manager.resolve_ref(&url, Some("HEAD"), None).unwrap();
+
+        // Resolving the pinned commit leaves a new remote branch unfetched.
+        source_repo
+            .branch("later", &source_repo.find_commit(commit).unwrap(), false)
+            .unwrap();
+        let checkout = manager.resolve_ref(&url, Some(&commit.to_string()), None).unwrap();
+        assert_eq!(checkout_head(&checkout), commit);
+        assert!(manager.resolve_cached_ref(&url, "later").is_err());
+    }
+
+    #[test]
+    fn test_stored_credentials_fetch_refs_and_remote_head_through_libgit2() {
+        let source_dir = TempDir::new().unwrap();
+        let source_repo = Repository::init(source_dir.path()).unwrap();
+        let commit = commit_on(&source_repo, "Initial");
+        let url = source_dir.path().to_string_lossy().to_string();
+        let provider = CredentialProvider::new();
+        provider.add_credential(
+            url.clone(),
+            GitCredential::SshAgent {
+                username: "git".to_string(),
+            },
+        );
+        let cache_dir = TempDir::new().unwrap();
+        let bare =
+            BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git"), Some(Arc::new(provider))).unwrap();
+        assert_eq!(bare.resolve_ref("HEAD").unwrap(), commit);
     }
 
     #[test]
