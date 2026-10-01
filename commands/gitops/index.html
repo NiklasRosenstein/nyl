@@ -117,9 +117,13 @@ another tool has committed <code dir="auto">fromPublication</code> state before 
 publication. It may then hold only files the target declares as
 <code dir="auto">fromPublication</code> state paths; any other file fails the comparison, which
 usually means <code dir="auto">pathPrefix</code> names a directory that belongs to something else.
-Unindexed repository content is never treated as target-owned baseline data. <code dir="auto">--offline</code> reads <code dir="auto">fromPublication</code> state at the cached branch
-head, as for <code dir="auto">render-tree</code>, and compares against the published tree at that
-same commit.</p>
+Unindexed repository content is never treated as target-owned baseline data. <code dir="auto">--offline</code> reads <code dir="auto">fromPublication</code> state at the
+cached branch head, as for <code dir="auto">render-tree</code>, and compares against the published
+tree at that same commit, or at the cached publication branch head, without
+contacting the publication repository. With <code dir="auto">--against source</code>, <code dir="auto">--source-ref</code>
+resolves against the cached refs too. Helm charts from Git come from the
+vendor lock or the local source cache when they are there; only a chart in
+neither, or <code dir="auto">--refresh</code>, fetches.</p>
 <p>Compare with a render from a source revision:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">diff-tree</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--target</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">production</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--against</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">source</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--source-ref</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">origin/main</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl diff-tree \  --target production \  --against source \  --source-ref origin/main"><div></div></button></div></figure></div>
 <p>The baseline checkout may hold the project somewhere else, for example while a
