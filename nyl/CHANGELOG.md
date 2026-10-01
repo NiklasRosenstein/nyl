@@ -98,6 +98,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}`
   as `'${ target.metadata.name }-${ release.metadata.name }'`.
 
+- **BREAKING**: Nyl digests JSON in one form, RFC 8785 canonical JSON, with
+  integers beyond ±(2^53 - 1) written as their exact digits: Release input
+  digests, vendored schema files, Cluster capability fingerprints, and schema
+  digests in validation reports.
+  - Run `nyl vendor` once. It rewrites schemas vendored by an older Nyl from
+    the vendored files, without network access; until then
+    `nyl vendor --check` fails with "uses the format of an older Nyl".
+    Validation reads the old files meanwhile.
+  - CRD snapshots now have format version 2. Recapture each snapshot with
+    `nyl capture cluster <name> --crds`; until then validation and
+    `nyl vendor` fail with "captured by an older Nyl".
+  - The disposable schema download cache is refilled once.
+  - Schema inventories and `--report json` output stay pretty-printed.
+
+- **BREAKING**: `ApplicationGroup.spec.source.commit` must be the full
+  40-character lowercase commit ID, the form `nyl update source-locks` writes
+  and compares, like `fromGit.commit`. Uppercase values were accepted before
+  but always reported as stale, and Nyl's Git backend cannot read
+  64-character object IDs; run `nyl update source-locks` to rewrite them.
+
 - Generated Argo CD names (catalog Applications, default workload Application
   names, and AppProjects) must be unique across every pair of targets whose
   Argo CD instances resolve to the same Cluster and namespace, including

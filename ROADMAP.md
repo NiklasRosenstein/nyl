@@ -696,6 +696,16 @@ implicit per-target Argo CD instances.
   refs, and content-based execution keys.
 - [ ] Prove stale-evidence blocking, competing runners, and recovery after an
   effect succeeds but receipt publication fails.
+- [ ] Move the business rules the `nyl` package still holds into the crates
+  that own them before orchestration builds on them: ownership-index input
+  hashing (`hash_inputs`), the worktree source state with its carry exclusion
+  (`source_state`), and publication-base verification
+  (`verify_publication_base`). The command line then only parses arguments,
+  wires crates, and renders reports.
+- [ ] Replace the remote fields of `ApplicationGroupSource` and `fromGit`'s
+  `GitInputSource` with the one `GitSource` type of the implementation
+  architecture, which command-unit sources then use too. Both already share
+  one commit-lock rule.
 - [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
 - [ ] Add the `test-clock` Cargo feature, the test-only fake kinds, and the

@@ -380,12 +380,6 @@ pub(super) fn hash_inputs(
             );
         }
     }
-    for (key, digest) in &compiled.input_digests {
-        if hashes.insert(key.clone(), digest.clone()).is_some() {
-            return Err(NylError::config(format!(
-                "Project file {key} collides with the ownership-index key of a resolved Release input; rename or move the file"
-            )));
-        }
-    }
+    crate::gitops::inputs::merge_input_digests(&mut hashes, &compiled.input_digests)?;
     Ok(hashes)
 }

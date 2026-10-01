@@ -98,7 +98,13 @@ impl SchemaResolver<'_> {
         self.populate_collection(&collection).await?;
         let bytes = store::json_bytes(&collection)?;
         let hash = if self.check {
-            nyl_core::digest::sha256_hex(&bytes)
+            let hash = nyl_core::digest::sha256_hex(&bytes);
+            if store::read_builtins(&self.vendor)?.collections.get(&directory) != Some(&hash) {
+                return Err(NylError::validation(format!(
+                    "Vendored builtin schema collection {directory} uses the format of an older Nyl; run nyl vendor"
+                )));
+            }
+            hash
         } else {
             store::write_blob(&self.vendor, &bytes)?
         };
@@ -244,7 +250,11 @@ mod tests {
             let hash = store::write_blob(root, &store::json_bytes(&value).unwrap()).unwrap();
             index.schemas.insert(format!("{}{file}", collection.directory), hash);
         }
-        store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+        store::atomic_write(
+            &root.join("schemas/builtins.json"),
+            &store::pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
         collection
     }
 

@@ -1351,6 +1351,105 @@ fn test_validate_implicit_argocd_instances_on_one_cluster_require_cross_target_n
 }
 
 #[test]
+fn test_validate_names_the_template_fix_for_implied_app_project_collisions() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("config/targets/staging.yaml"),
+        STAGING_TARGET_ON_KASOKU,
+    )
+    .unwrap();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  applicationNameTemplate: '${ target.metadata.name }-${ release.metadata.name }'\n",
+    );
+    fs::write(group_path, group).unwrap();
+    validate(&fixture)
+        .failure()
+        .stderr(predicate::str::contains(
+            "generate the same AppProject argocd/workloads",
+        ))
+        .stderr(predicate::str::contains(
+            "declaring ApplicationGroup.spec.projectTemplate with a target-qualified name",
+        ));
+}
+
+/// A second group with a Release `api`, selected by production next to
+/// `workloads`, so both default Application names are `api`.
+fn second_group_with_the_same_release_name(fixture: &TempDir) {
+    let root = fixture.path();
+    fs::write(
+        root.join("config/application-groups/extras.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: extras\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd-production\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("applications/extras")).unwrap();
+    fs::write(
+        root.join("applications/extras/api.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: extras\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_render_tree_rejects_duplicate_application_names_within_one_target() {
+    let fixture = fixture();
+    second_group_with_the_same_release_name(&fixture);
+    let output = fixture.path().join("deploy");
+    for check in [true, false] {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command.current_dir(fixture.path()).args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ]);
+        if check {
+            command.arg("--check");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Release extras/api and Release workloads/api of DeploymentTarget \"production\" generate the same Argo CD Application argocd-production/api",
+            ))
+            .stderr(predicate::str::contains(
+                "'${ target.metadata.name }-workloads-${ release.metadata.name }'",
+            ));
+    }
+    assert!(!output.join("production/_nyl/index.json").exists());
+}
+
+#[test]
+fn test_render_tree_names_a_release_application_that_takes_the_catalog_name() {
+    let fixture = fixture();
+    let root = fixture.path();
+    fs::write(
+        root.join("config/application-groups/extras.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: extras\n  labels:\n    environment: production\nspec:\n  projectRef: workloads\n  applicationNamespace: argocd\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("applications/extras")).unwrap();
+    fs::write(
+        root.join("applications/extras/catalog.yaml"),
+        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: production-catalog\n  namespace: extras\n",
+    )
+    .unwrap();
+    let output = root.join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(root)
+        .args(["render-tree", "--target", "production", "--check", "--output-dir", output.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Release extras/production-catalog and the catalog Application of DeploymentTarget \"production\" generate the same Argo CD Application argocd/production-catalog",
+        ))
+        .stderr(predicate::str::contains("ApplicationGroup \"extras\" applicationNameTemplate"));
+}
+
+#[test]
 fn test_render_tree_expands_application_name_template_values_per_release() {
     let fixture = fixture();
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");

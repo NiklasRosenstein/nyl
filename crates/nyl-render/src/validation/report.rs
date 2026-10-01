@@ -300,7 +300,7 @@ impl ValidationReport {
         for output in destinations {
             let result = (|| {
                 let bytes = match output.format {
-                    ReportFormat::Json => super::store::json_bytes(self)?,
+                    ReportFormat::Json => super::store::pretty_json_bytes(self)?,
                     ReportFormat::Text => self.text().into_bytes(),
                 };
                 if output.path == Path::new("-") {

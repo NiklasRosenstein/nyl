@@ -136,10 +136,10 @@ enum ResolvedBaseline {
 
 impl ResolvedBaseline {
     /// Every owned file of the baseline, rendered files and state files.
-    fn files(&self) -> std::borrow::Cow<'_, BTreeMap<PathBuf, Vec<u8>>> {
+    fn files(&self) -> crate::gitops::DesiredFiles<'_> {
         match self {
-            Self::Published(baseline) => std::borrow::Cow::Borrowed(&baseline.files),
-            Self::Source(baseline) => std::borrow::Cow::Owned(baseline.compiled.owned_files()),
+            Self::Published(baseline) => borrowed(&baseline.files),
+            Self::Source(baseline) => baseline.compiled.owned_files(),
         }
     }
 
@@ -379,6 +379,22 @@ async fn resolve_baseline(
     }
 }
 
+/// Borrow owned files, for helpers that only read or filter them.
+fn borrowed(files: &BTreeMap<PathBuf, Vec<u8>>) -> crate::gitops::DesiredFiles<'_> {
+    files
+        .iter()
+        .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+        .collect()
+}
+
+/// An owned copy of borrowed files, for comparisons that add and remove entries.
+fn owned_copy(files: &crate::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
+    files
+        .iter()
+        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
+        .collect()
+}
+
 fn comparison_files(
     selection: &DiffSelection,
     baseline: &ResolvedBaseline,
@@ -386,10 +402,10 @@ fn comparison_files(
 ) -> Result<ComparisonFiles> {
     match selection {
         DiffSelection::Tree => {
-            let mut base = baseline.files().into_owned();
+            let mut base = owned_copy(&baseline.files());
             // State files are owned plain files, shown as file diffs next to
             // the manifest changes they cause.
-            let mut desired_files = desired.owned_files();
+            let mut desired_files = owned_copy(&desired.owned_files());
             // Committed state leaves ownership without being deleted.
             for path in &desired.committed_state_paths {
                 base.remove(path);
@@ -406,13 +422,13 @@ fn comparison_files(
         }
         DiffSelection::Catalog => Ok(ComparisonFiles {
             base: files_beneath(&baseline.files(), Path::new("_nyl/catalog")),
-            desired: files_beneath(&desired.files, Path::new("_nyl/catalog")),
+            desired: files_beneath(&borrowed(&desired.files), Path::new("_nyl/catalog")),
         }),
         DiffSelection::Applications(selectors) => application_comparison_files(
             selectors,
             &baseline.files(),
             baseline.publication_path_prefix(desired),
-            &desired.files,
+            &borrowed(&desired.files),
             desired.target.publication_path_prefix(),
         ),
     }
@@ -420,9 +436,9 @@ fn comparison_files(
 
 fn application_comparison_files(
     selectors: &BTreeSet<String>,
-    base: &BTreeMap<PathBuf, Vec<u8>>,
+    base: &crate::gitops::DesiredFiles<'_>,
     base_path_prefix: &str,
-    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    desired: &crate::gitops::DesiredFiles<'_>,
     desired_path_prefix: &str,
 ) -> Result<ComparisonFiles> {
     let base_views = derive_application_views(base, base_path_prefix)?;
@@ -478,7 +494,7 @@ fn validate_application_selector(selector: &str) -> Result<()> {
 }
 
 fn derive_application_views(
-    files: &BTreeMap<PathBuf, Vec<u8>>,
+    files: &crate::gitops::DesiredFiles<'_>,
     publication_path_prefix: &str,
 ) -> Result<BTreeMap<String, ApplicationView>> {
     let catalog_root = Path::new("_nyl/catalog/applications");
@@ -523,7 +539,7 @@ fn derive_application_views(
         )?;
         let payload_path = strip_publication_prefix(rendered_path, publication_path_prefix, path)?;
         let view = ApplicationView {
-            catalog_file: path.clone(),
+            catalog_file: path.to_path_buf(),
             catalog_application: payload_path == Path::new("_nyl/catalog"),
             payload_path,
         };
@@ -627,7 +643,7 @@ fn validate_application_payloads(views: &BTreeMap<String, ApplicationView>) -> R
 }
 
 fn select_application_views(
-    files: &BTreeMap<PathBuf, Vec<u8>>,
+    files: &crate::gitops::DesiredFiles<'_>,
     views: &BTreeMap<String, ApplicationView>,
     selected: &BTreeSet<String>,
 ) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -636,19 +652,19 @@ fn select_application_views(
         let Some(view) = views.get(identity) else {
             continue;
         };
-        if let Some(bytes) = files.get(&view.catalog_file) {
-            output.insert(view.catalog_file.clone(), bytes.clone());
+        if let Some(bytes) = files.get(view.catalog_file.as_path()) {
+            output.insert(view.catalog_file.clone(), bytes.to_vec());
         }
         output.extend(files_beneath(files, &view.payload_path));
     }
     output
 }
 
-fn files_beneath(files: &BTreeMap<PathBuf, Vec<u8>>, prefix: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+fn files_beneath(files: &crate::gitops::DesiredFiles<'_>, prefix: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
         .iter()
         .filter(|(path, _)| path.starts_with(prefix))
-        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
         .collect()
 }
 
@@ -1046,13 +1062,19 @@ mod tests {
             ),
         ]);
 
-        let views = derive_application_views(&files, "production").unwrap();
+        let views = derive_application_views(&borrowed(&files), "production").unwrap();
         assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
         assert!(!views["argocd/api"].catalog_application);
         assert!(views["argocd/production-catalog"].catalog_application);
 
-        let comparison =
-            application_comparison_files(&BTreeSet::new(), &files, "production", &files, "production").unwrap();
+        let comparison = application_comparison_files(
+            &BTreeSet::new(),
+            &borrowed(&files),
+            "production",
+            &borrowed(&files),
+            "production",
+        )
+        .unwrap();
         for selected in [&comparison.base, &comparison.desired] {
             assert!(selected.contains_key(Path::new("_nyl/catalog/applications/argocd/api.yaml")));
             assert!(selected.contains_key(Path::new("workloads/api/resources.yaml")));
@@ -1061,7 +1083,14 @@ mod tests {
         }
 
         let selectors = BTreeSet::from(["argocd/production-catalog".to_owned()]);
-        let comparison = application_comparison_files(&selectors, &files, "production", &files, "production").unwrap();
+        let comparison = application_comparison_files(
+            &selectors,
+            &borrowed(&files),
+            "production",
+            &borrowed(&files),
+            "production",
+        )
+        .unwrap();
         assert!(comparison
             .base
             .contains_key(Path::new("_nyl/catalog/projects/workloads.yaml")));
@@ -1082,14 +1111,14 @@ mod tests {
                 application_yaml("argocd", "child", "production/workloads/child"),
             ),
         ]);
-        let error = derive_application_views(&overlapping, "production").unwrap_err();
+        let error = derive_application_views(&borrowed(&overlapping), "production").unwrap_err();
         assert!(error.to_string().contains("overlapping payload paths"));
 
         let escaping = BTreeMap::from([(
             PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
             application_yaml("argocd", "api", "another-target/workloads/api"),
         )]);
-        let error = derive_application_views(&escaping, "production").unwrap_err();
+        let error = derive_application_views(&borrowed(&escaping), "production").unwrap_err();
         assert!(error.to_string().contains("outside publication path prefix"));
     }
 

@@ -135,6 +135,26 @@ impl<'a> SchemaResolver<'a> {
         Ok(document)
     }
 
+    /// The hash under which a vendored blob stays recorded. A blob written by
+    /// a Nyl before canonical JSON is valid for validation; `nyl vendor`
+    /// rewrites it in canonical form, offline, and `nyl vendor --check`
+    /// reports it.
+    pub(super) fn migrate_blob(&self, what: &str, hash: &str, bytes: &[u8], value: &Value) -> Result<String> {
+        let canonical = store::json_bytes(value)?;
+        if canonical == bytes {
+            return Ok(hash.to_owned());
+        }
+        if self.check {
+            return Err(NylError::validation(format!(
+                "Vendored {what} uses the format of an older Nyl; run nyl vendor"
+            )));
+        }
+        if self.populate {
+            return store::write_blob(&self.vendor, &canonical);
+        }
+        Ok(hash.to_owned())
+    }
+
     async fn load_builtin(&mut self, url: &str) -> Result<Option<SchemaDocument>> {
         if let Some(hash) = self.observed_builtins.get(url) {
             return Ok(Some(SchemaDocument {
@@ -147,9 +167,11 @@ impl<'a> SchemaResolver<'a> {
             if let Some(hash) = existing.schemas.get(url) {
                 match store::read_blob(&self.vendor, hash) {
                     Ok(bytes) => {
-                        self.observed_builtins.insert(url.to_owned(), hash.clone());
+                        let value: Value = serde_json::from_slice(&bytes)?;
+                        let hash = self.migrate_blob(&format!("schema {url}"), hash, &bytes, &value)?;
+                        self.observed_builtins.insert(url.to_owned(), hash);
                         return Ok(Some(SchemaDocument {
-                            value: serde_json::from_slice(&bytes)?,
+                            value,
                             origin: Origin::Builtin(url.to_owned()),
                         }));
                     }
@@ -667,7 +689,7 @@ mod tests {
         };
         store::atomic_write(
             &resolver.vendor.join("schemas/builtins.json"),
-            &store::json_bytes(&index).unwrap(),
+            &store::pretty_json_bytes(&index).unwrap(),
         )
         .unwrap();
         let cache = CachedSchema {
@@ -714,6 +736,56 @@ mod tests {
                 store::json_bytes(&value).unwrap()
             );
         }
+    }
+
+    /// Nyl before canonical JSON vendored pretty-printed blobs.
+    #[tokio::test]
+    async fn test_vendor_rewrites_a_blob_of_an_older_nyl_offline_and_check_reports_it() {
+        let directory = TempDir::new().unwrap();
+        let vendor = directory.path().join("vendor");
+        let settings = KubeconformSettings {
+            builtin_schemas: crate::validation::BuiltinSchemas::VendorUsed,
+            ..KubeconformSettings::default()
+        };
+        let resolver = |populate, check| {
+            SchemaResolver::new(directory.path(), vendor.clone(), &settings, populate, check).unwrap()
+        };
+        let url = resolver(false, false).builtin_url("v1/ConfigMap", "1.31.4").unwrap();
+        let value = json!({"type": "object", "required": ["metadata"]});
+        let old = store::write_blob(&vendor, &store::pretty_json_bytes(&value).unwrap()).unwrap();
+        let index = store::BuiltinIndex {
+            collections: BTreeMap::new(),
+            version: 1,
+            schemas: BTreeMap::from([(url.clone(), old.clone())]),
+        };
+        store::atomic_write(
+            &vendor.join("schemas/builtins.json"),
+            &store::pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
+
+        // Validation reads the old blob as it is.
+        assert_eq!(
+            resolver(false, false).builtin(&url).await.unwrap().unwrap().value,
+            value
+        );
+        let Err(error) = resolver(false, true).builtin(&url).await else {
+            panic!("check accepted a blob of an older Nyl");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("uses the format of an older Nyl; run nyl vendor"),
+            "{error}"
+        );
+
+        // The server is unreachable, so the rewrite reads only the vendored blob.
+        let mut populate = resolver(true, false);
+        assert_eq!(populate.builtin(&url).await.unwrap().unwrap().value, value);
+        let canonical = store::json_bytes(&value).unwrap();
+        let new = populate.observed_builtins[&url].clone();
+        assert_eq!(new, nyl_core::digest::sha256_hex(&canonical));
+        assert_eq!(store::read_blob(&vendor, &new).unwrap(), canonical);
+        assert_eq!(populate.schema_digests[&url], new);
     }
 
     #[tokio::test]

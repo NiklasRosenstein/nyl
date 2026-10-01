@@ -546,7 +546,7 @@ pub struct ApplicationGroupSource {
     /// Human-readable remote Git revision refreshed by `nyl update source-locks`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
-    /// Full immutable remote Git commit lock used for rendering.
+    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.
@@ -1482,12 +1482,14 @@ pub fn relative_path_to_posix(field: &str, value: &Path) -> Result<String> {
     Ok(value)
 }
 
-/// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
 /// `applicationNameTemplate` is a template value that must contain at least
 /// one `${ … }` expression, so every Release gets its own name. Text outside
 /// expressions is literal; the `{{ … }}` form is not expanded.
 fn validate_application_name_template(template: &str) -> Result<()> {
-    if has_template_expression(template) {
+    use crate::template_value::{parse, Segment};
+    let segments = parse(template)
+        .map_err(|error| CoreError::config(format!("spec.applicationNameTemplate has {error}: {template:?}")))?;
+    if segments.iter().any(|segment| matches!(segment, Segment::Expression(_))) {
         return Ok(());
     }
     Err(CoreError::config(format!(
@@ -1495,28 +1497,18 @@ fn validate_application_name_template(template: &str) -> Result<()> {
     )))
 }
 
-/// Whether `value` contains a `${` that starts an expression, not counting the
-/// `$${` escape.
-fn has_template_expression(value: &str) -> bool {
-    let mut rest = value;
-    while let Some(start) = rest.find('$') {
-        let after = &rest[start + 1..];
-        if let Some(escaped) = after.strip_prefix("${") {
-            rest = escaped;
-        } else if after.starts_with('{') {
-            return true;
-        } else {
-            rest = after;
-        }
-    }
-    false
-}
-
+/// Accept only a full commit ID in the form Git reports it: 40 lowercase
+/// hexadecimal digits, never a mutable ref or an abbreviation.
+///
+/// Every Git commit lock shares this one rule. Rendering reads the commit as
+/// written, `nyl update source-locks` writes and compares this form, and
+/// `@git/` ownership-index keys contain it, so any other spelling of the same
+/// commit would always look stale.
 pub fn validate_immutable_git_commit(field: &str, value: &str) -> Result<()> {
     validate_static_required(field, value)?;
-    if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() != 40 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
         return Err(CoreError::config(format!(
-            "{field} must be a full 40- or 64-character hexadecimal Git object ID"
+            "{field} must be a full 40-character lowercase hexadecimal Git commit ID"
         )));
     }
     Ok(())
@@ -1571,6 +1563,22 @@ mod tests {
 
     use super::*;
 
+    /// Group sources and fromGit locks share one commit rule.
+    #[test]
+    fn test_immutable_git_commit_is_the_full_lowercase_form() {
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        validate_immutable_git_commit("spec.source.commit", commit).unwrap();
+        for value in ["3f1c9a0", &commit.to_uppercase(), &"a".repeat(64), "main"] {
+            let error = validate_immutable_git_commit("spec.source.commit", value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("spec.source.commit must be a full 40-character lowercase hexadecimal Git commit ID"),
+                "{value}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn test_application_name_template_requires_an_expression() {
         validate_application_name_template("${ target.metadata.name }-${ release.metadata.name }").unwrap();
@@ -1582,6 +1590,17 @@ mod tests {
         ] {
             let error = validate_application_name_template(template).unwrap_err().to_string();
             assert!(error.contains("at least one ${ … } expression"), "{template}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_application_name_template_rejects_malformed_expressions() {
+        for template in ["${ release.metadata.name", "${ }-${ release.metadata.name }"] {
+            let error = validate_application_name_template(template).unwrap_err().to_string();
+            assert!(
+                error.contains("spec.applicationNameTemplate has an"),
+                "{template}: {error}"
+            );
         }
     }
 

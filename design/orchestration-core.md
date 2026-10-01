@@ -1056,7 +1056,9 @@ the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form (RFC 8785), so formatting never
-affects them. The version in `apiVersion` is the format version of each kind:
+affects them. An integer beyond ±(2^53 - 1), which RFC 8785 would round to a
+double, is written with its exact decimal digits, so two values never share a
+digest. The version in `apiVersion` is the format version of each kind:
 a format change adds a version with a migration from the previous one, golden
 files cover every version, and a reader rejects a version it does not know.
 
