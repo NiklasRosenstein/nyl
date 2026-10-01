@@ -546,7 +546,7 @@ pub struct ApplicationGroupSource {
     /// Human-readable remote Git revision refreshed by `nyl update source-locks`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
-    /// Full immutable remote Git commit lock used for rendering.
+    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.
@@ -1497,12 +1497,18 @@ fn validate_application_name_template(template: &str) -> Result<()> {
     )))
 }
 
-/// Accept only full hexadecimal Git object IDs, never a mutable ref abbreviation.
+/// Accept only a full commit ID in the form Git reports it: 40 lowercase
+/// hexadecimal digits, never a mutable ref or an abbreviation.
+///
+/// Every Git commit lock shares this one rule. Rendering reads the commit as
+/// written, `nyl update source-locks` writes and compares this form, and
+/// `@git/` ownership-index keys contain it, so any other spelling of the same
+/// commit would always look stale.
 pub fn validate_immutable_git_commit(field: &str, value: &str) -> Result<()> {
     validate_static_required(field, value)?;
-    if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() != 40 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
         return Err(CoreError::config(format!(
-            "{field} must be a full 40- or 64-character hexadecimal Git object ID"
+            "{field} must be a full 40-character lowercase hexadecimal Git commit ID"
         )));
     }
     Ok(())
@@ -1556,6 +1562,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Group sources and fromGit locks share one commit rule.
+    #[test]
+    fn test_immutable_git_commit_is_the_full_lowercase_form() {
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        validate_immutable_git_commit("spec.source.commit", commit).unwrap();
+        for value in ["3f1c9a0", &commit.to_uppercase(), &"a".repeat(64), "main"] {
+            let error = validate_immutable_git_commit("spec.source.commit", value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("spec.source.commit must be a full 40-character lowercase hexadecimal Git commit ID"),
+                "{value}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn test_application_name_template_requires_an_expression() {

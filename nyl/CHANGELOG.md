@@ -98,6 +98,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{% raw %}{{ target.metadata.name }}-{{ release.metadata.name }}{% endraw %}`
   as `'${ target.metadata.name }-${ release.metadata.name }'`.
 
+- **BREAKING**: `ApplicationGroup.spec.source.commit` must be the full
+  40-character lowercase commit ID, the form `nyl update source-locks` writes
+  and compares, like `fromGit.commit`. Uppercase and 64-character values were
+  accepted before but always reported as stale; run
+  `nyl update source-locks` to rewrite them.
+
 - Generated Argo CD names (catalog Applications, default workload Application
   names, and AppProjects) must be unique across every pair of targets whose
   Argo CD instances resolve to the same Cluster and namespace, including
