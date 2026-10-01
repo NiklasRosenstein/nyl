@@ -45,8 +45,8 @@ test('mutually exclusive fields read as labelled variants rather than a blanket 
   for (const [project, expected] of [
     [{}, true],
     [{ projectRef: 'workloads' }, true],
-    [{ projectTemplate: { destinationNamespaces: ['apps'] } }, true],
-    [{ projectRef: 'workloads', projectTemplate: { destinationNamespaces: ['apps'] } }, false],
+    [{ projectTemplate: { destinations: [{ server: '*', namespace: 'apps' }] } }, true],
+    [{ projectRef: 'workloads', projectTemplate: { destinations: [{ server: '*', namespace: 'apps' }] } }, false],
   ]) {
     const example = structuredClone(schema.examples[0]);
     delete example.spec.projectRef;
