@@ -76,7 +76,7 @@ at a time into its configured publication prefix.</p>
 <p>For each release, Nyl writes:</p>
 <div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-142/_astro/ec.w36nc.css"><script type="module" src="/nyl/pr-preview/pr-142/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/&#x3C;kind>[.&#x3C;group>]/[&#x3C;namespace>/]&#x3C;name>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/crd/&#x3C;crd-name>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/projects/&#x3C;project-id>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/applications/&#x3C;namespace>/&#x3C;application>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/applications/&#x3C;argocd-namespace>/&#x3C;target>-catalog.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/index.json</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="<target-prefix>/<group-output>/<release>/<kind>[.<group>]/[<namespace>/]<name>.yaml<target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml<target-prefix>/_nyl/catalog/projects/<project-id>.yaml<target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml<target-prefix>/_nyl/catalog/applications/<argocd-namespace>/<target>-catalog.yaml<target-prefix>/_nyl/index.json"><div></div></button></div></figure></div>
 <p>Every resource is written to its own file, and Helm <code dir="auto"># Source:</code> comments are
-retained. CRDs live in <code dir="auto">crd/&#x3C;crd-name>.yaml</code>. Other resources are placed by
+retained. CRDs live in <code dir="auto">crd/&#x3C;crd-name>.yaml</code> whatever their API version. Other resources are placed by
 identity: the lowercased kind and API group form a directory that matches
 kubectl’s resource syntax, followed by the namespace directory when
 <code dir="auto">metadata.namespace</code> is set, and the object name. For example:</p>
@@ -84,8 +84,13 @@ kubectl’s resource syntax, followed by the namespace directory when
 <p>The API version is not part of the path, so changing an object’s
 <code dir="auto">apiVersion</code> updates its file in place. Characters that are unsafe in
 a path segment, such as <code dir="auto">:</code>, are percent-encoded, which keeps distinct objects
-in distinct files. Nyl rejects two resources whose paths differ only in case,
-because they would collide on case-insensitive filesystems. Generated Argo CD
+in distinct files. Windows device names such as <code dir="auto">con</code> or <code dir="auto">aux</code> have their first
+character encoded (<code dir="auto">%63on.yaml</code>). A segment that would exceed the 255-byte file
+name limit keeps its first characters followed by <code dir="auto">_</code> and a digest of the full
+name; all other names are written unchanged. Nyl rejects two resources whose
+paths differ only in case, because they would collide on case-insensitive
+filesystems. When an object is renamed only by case, the next render replaces
+the file under its new name. Generated Argo CD
 Applications use <code dir="auto">source.directory.recurse: true</code>, so every nested directory
 is included.</p>
 <p>Every workload manifest has <code dir="auto"># Nyl-Provenance:</code> comments identifying its
