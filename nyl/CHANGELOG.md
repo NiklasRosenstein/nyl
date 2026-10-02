@@ -97,10 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of one `resources.yaml`. The kind is lowercased and the API version is
   omitted, so `deployment.apps/api/web.yaml` matches kubectl's
   `deployment.apps/web -n api`. Characters outside each segment's safe set are
-  percent-encoded so distinct objects never share a file, and Nyl rejects
-  resources that would collide on a case-insensitive filesystem. The next render
-  replaces an indexed `resources.yaml` automatically; CRDs stay in
-  `crd/<name>.yaml`.
+  percent-encoded so distinct objects never share a file, Windows device names
+  are escaped, and a name over the 255-byte file name limit is shortened with a
+  digest. Nyl rejects resources that would collide on a case-insensitive
+  filesystem, and a case-only rename replaces the file under its new name. The
+  next render replaces an indexed `resources.yaml` automatically. CRDs of every
+  API version stay in `crd/<name>.yaml`, so the same CRD at two versions is
+  rejected as a duplicate.
 
 - **BREAKING**: `ApplicationGroup.spec.applicationNameTemplate` no longer
   expands `{{ … }}` protected with `{% raw %}`. It must contain at least one

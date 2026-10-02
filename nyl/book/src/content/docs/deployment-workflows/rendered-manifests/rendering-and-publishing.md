@@ -19,7 +19,7 @@ For each release, Nyl writes:
 ```
 
 Every resource is written to its own file, and Helm `# Source:` comments are
-retained. CRDs live in `crd/<crd-name>.yaml`. Other resources are placed by
+retained. CRDs live in `crd/<crd-name>.yaml` whatever their API version. Other resources are placed by
 identity: the lowercased kind and API group form a directory that matches
 kubectl's resource syntax, followed by the namespace directory when
 `metadata.namespace` is set, and the object name. For example:
@@ -33,8 +33,13 @@ clusterrole.rbac.authorization.k8s.io/system%3Aaggregate-to-admin.yaml
 The API version is not part of the path, so changing an object's
 `apiVersion` updates its file in place. Characters that are unsafe in
 a path segment, such as `:`, are percent-encoded, which keeps distinct objects
-in distinct files. Nyl rejects two resources whose paths differ only in case,
-because they would collide on case-insensitive filesystems. Generated Argo CD
+in distinct files. Windows device names such as `con` or `aux` have their first
+character encoded (`%63on.yaml`). A segment that would exceed the 255-byte file
+name limit keeps its first characters followed by `_` and a digest of the full
+name; all other names are written unchanged. Nyl rejects two resources whose
+paths differ only in case, because they would collide on case-insensitive
+filesystems. When an object is renamed only by case, the next render replaces
+the file under its new name. Generated Argo CD
 Applications use `source.directory.recurse: true`, so every nested directory
 is included.
 

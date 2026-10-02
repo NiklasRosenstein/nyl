@@ -157,9 +157,11 @@ pub fn reconcile_rendered_tree_with_options(
     let previous_files = previous.as_ref().map(|index| &index.files).cloned().unwrap_or_default();
     for relative in desired.keys() {
         reject_symlink_components(output_root, &output_root.join(relative))?;
-        let relative_text = path_text(relative)?;
         let destination = output_root.join(relative);
-        if destination.exists() && !previous_files.contains_key(&relative_text) && !options.adopt.contains(relative) {
+        let Some(existing) = existing_entry(output_root, relative)? else {
+            continue;
+        };
+        if !previous_files.contains_key(&path_text(&existing)?) && !options.adopt.contains(relative) {
             let expected = desired.get(relative).expect("iterated desired key exists");
             let actual = fs::read(&destination)?;
             if !resumes_transaction || actual.as_slice() != expected.as_slice() {
@@ -195,14 +197,9 @@ pub fn reconcile_rendered_tree_with_options(
 
     fs::create_dir_all(output_root)?;
     install_transaction(output_root, &next_index)?;
-    for relative in desired.keys() {
-        let source = staged.path().join(relative);
-        let destination = output_root.join(relative);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(source, destination)?;
-    }
+    // Remove stale files before installing new ones. On a case-insensitive
+    // filesystem a stale `Admin.yaml` and a desired `admin.yaml` are one file,
+    // and removing the stale name afterwards would delete the new file.
     for stale in previous_files
         .keys()
         .filter(|path| !next_index.files.contains_key(*path) && !options.release.contains(Path::new(path)))
@@ -212,6 +209,14 @@ pub fn reconcile_rendered_tree_with_options(
         if stale_path.exists() {
             fs::remove_file(stale_path)?;
         }
+    }
+    for relative in desired.keys() {
+        let source = staged.path().join(relative);
+        let destination = output_root.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(source, destination)?;
     }
     if let Some(parent) = index_path.parent() {
         fs::create_dir_all(parent)?;
@@ -224,6 +229,32 @@ pub fn reconcile_rendered_tree_with_options(
     }
 
     Ok(next_index)
+}
+
+/// Return the existing entry that `relative` resolves to beneath `output_root`.
+///
+/// On a case-insensitive filesystem, the entry may differ from `relative` in the
+/// case of its file name; the returned path carries the name found on disk, so
+/// ownership is checked against the file that would be replaced.
+fn existing_entry(output_root: &Path, relative: &Path) -> Result<Option<PathBuf>> {
+    let destination = output_root.join(relative);
+    if !destination.exists() {
+        return Ok(None);
+    }
+    let (Some(parent), Some(name)) = (destination.parent(), relative.file_name()) else {
+        return Ok(Some(relative.to_path_buf()));
+    };
+    let mut case_variant = None;
+    for entry in fs::read_dir(parent)? {
+        let entry_name = entry?.file_name();
+        if entry_name == name {
+            return Ok(Some(relative.to_path_buf()));
+        }
+        if entry_name.eq_ignore_ascii_case(name) {
+            case_variant = Some(relative.with_file_name(entry_name));
+        }
+    }
+    Ok(Some(case_variant.unwrap_or_else(|| relative.to_path_buf())))
 }
 
 fn ensure_same_owner(path: &Path, actual: &RenderIndex, expected: &RenderIndex) -> Result<()> {
@@ -441,6 +472,27 @@ mod tests {
         assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"b\n");
         assert!(!root.join("apps/stale.yaml").exists());
         assert_eq!(fs::read_to_string(root.join("unowned.txt")).unwrap(), "keep\n");
+    }
+
+    #[test]
+    fn case_only_rename_installs_the_new_file_name() {
+        // Meaningful on case-insensitive filesystems (macOS and Windows CI),
+        // where both names refer to one file.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([(PathBuf::from("apps/Admin.yaml"), b"role\n".to_vec())]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+
+        let second = BTreeMap::from([(PathBuf::from("apps/admin.yaml"), b"role\n".to_vec())]);
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+
+        let names = fs::read_dir(root.join("apps"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["admin.yaml"]);
+        assert_eq!(fs::read(root.join("apps/admin.yaml")).unwrap(), b"role\n");
     }
 
     #[test]
