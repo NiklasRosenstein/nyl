@@ -738,11 +738,11 @@ async fn compile_target_tree_inner(
                 )));
             }
         }
-        for (relative, bytes) in
-            render_manifest_layout_with_provenance(&workload.manifests, &workload.manifest_provenance)?
-        {
+        // Every file of the release shares one provenance map.
+        let manifest_provenance = std::sync::Arc::new(workload.manifest_provenance);
+        for (relative, bytes) in render_manifest_layout_with_provenance(&workload.manifests, &manifest_provenance)? {
             let path = workload.release_directory.join(relative);
-            provenance_by_key.insert(path.clone(), workload.manifest_provenance.clone());
+            provenance_by_key.insert(path.clone(), manifest_provenance.clone());
             insert_file(&mut files, path, bytes)?;
         }
 
@@ -777,7 +777,7 @@ async fn compile_target_tree_inner(
         let application_name = format!("nyl-namespace-{suffix}");
         let namespace_directory = PathBuf::from("_nyl/namespaces").join(suffix);
         let key = crate::kubernetes::ResourceKey::from_json_value(&owner.manifest)?;
-        let provenance = HashMap::from([(key, owner.provenance.clone())]);
+        let provenance = std::sync::Arc::new(HashMap::from([(key, owner.provenance.clone())]));
         for (relative, bytes) in render_manifest_layout_with_provenance(&[owner.manifest], &provenance)? {
             let path = namespace_directory.join(relative);
             provenance_by_key.insert(path.clone(), provenance.clone());

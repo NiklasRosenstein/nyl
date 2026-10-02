@@ -108,6 +108,11 @@ pub(crate) fn render_manifest_layout_with_provenance(
                 && previous.name == key.name
             {
                 format!("Rendered resources contain duplicate resource {key}")
+            } else if previous.gvk.kind != key.gvk.kind && previous.gvk.kind.eq_ignore_ascii_case(&key.gvk.kind) {
+                format!(
+                    "Rendered resources {previous} and {key} map to the same file {} because their kinds differ only in case",
+                    path.display()
+                )
             } else {
                 format!(
                     "Rendered resources {previous} and {key} map to the same file {} on case-insensitive filesystems",
@@ -614,5 +619,10 @@ mod tests {
         let upper = serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "Admin"}});
         let error = render_manifest_layout(&[lower, upper]).unwrap_err();
         assert!(error.to_string().contains("case-insensitive filesystems"), "{error}");
+
+        let widget = serde_json::json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "x"}});
+        let shouting = serde_json::json!({"apiVersion": "example.com/v1", "kind": "WIDGET", "metadata": {"name": "x"}});
+        let error = render_manifest_layout(&[widget, shouting]).unwrap_err();
+        assert!(error.to_string().contains("kinds differ only in case"), "{error}");
     }
 }
