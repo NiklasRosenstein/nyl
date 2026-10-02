@@ -35,9 +35,9 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 
-**Next step:** move binding resolution into a generic resolver in
-`nyl_core::bindings` (see M2), then finish the Release inputs of M2 against the
-[Release inputs contract](design/release-inputs.md). M3 can start in parallel from the
+**Next step:** document Release inputs and regenerate the resource schemas to
+finish M2 against the [Release inputs contract](design/release-inputs.md). M3
+can start in parallel from the
 [orchestration core contract](design/orchestration-core.md) and its
 executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
 its scenario harness runs first.
@@ -643,13 +643,15 @@ ambiguous command semantics. Met by the
   `@`-prefixed keys, keeping index format version 2.
 - [ ] Reject `fromUnit` and `fromPromotion` bindings outside orchestration with
   an actionable message.
-- [ ] Move binding declarations, validation, and resolution into one generic
+- [x] Move binding declarations, validation, and resolution into one generic
   resolver in `nyl_core::bindings`: typed declarations, exactly one source
   per binding, JSON Pointer selection, effective-value precedence, digests
   and provenance, and aggregated issues, with each binding kind served by a
   provider trait. Release input sources become providers in `nyl-render`, so
   M3's unit `values` and `variables`, PromotionPath selectors, and `nyl get`
-  reuse the same resolver instead of growing their own.
+  reuse the same resolver instead of growing their own: it resolves declared
+  slots and references at any depth of a document, records provenance per JSON
+  Pointer, and lists blocked references by location.
 - [ ] Document the feature and regenerate resource schemas.
 - [x] Expand template values (`${ … }`) in fields rendered later than the
   structural pass, starting with `applicationNameTemplate`, which requires at
