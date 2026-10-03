@@ -828,29 +828,17 @@ impl PartitionSchemas {
                     "{gvk}: captured CRD does not serve this version"
                 )));
             }
-            let value = match &crd.source {
-                store::CrdSource::Definition(digest) => {
-                    let definition = self.vendored_definition(&resolver.vendor, name, digest)?;
-                    let variants = definition.versions.get(version).ok_or_else(|| {
-                        NylError::validation(format!("{gvk}: vendored CRD does not serve this version"))
-                    })?;
-                    if resolver.settings.strict {
-                        &variants.strict
-                    } else {
-                        &variants.permissive
-                    }
-                    .clone()
-                }
-                store::CrdSource::Legacy(versions) => {
-                    let variants = &versions[version];
-                    let hash = if resolver.settings.strict {
-                        &variants.strict
-                    } else {
-                        &variants.permissive
-                    };
-                    serde_json::from_slice(&store::read_blob(&resolver.vendor, hash)?)?
-                }
-            };
+            let definition = self.vendored_definition(&resolver.vendor, name, &crd.definition)?;
+            let variants = definition
+                .versions
+                .get(version)
+                .ok_or_else(|| NylError::validation(format!("{gvk}: vendored CRD does not serve this version")))?;
+            let value = if resolver.settings.strict {
+                &variants.strict
+            } else {
+                &variants.permissive
+            }
+            .clone();
             SchemaDocument {
                 value,
                 origin: Origin::Captured,

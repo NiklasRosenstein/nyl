@@ -644,10 +644,12 @@ mod tests {
         let index = crate::validation::store::read_cluster_index(&root, "staging")
             .unwrap()
             .unwrap();
-        let store::CrdSource::Definition(digest) = &index.crds["widgets.example.com"].source else {
-            panic!("capture vendors the CRD");
-        };
-        let schemas = store::read_definition(&root, "widgets.example.com", digest).unwrap();
+        let schemas = store::read_definition(
+            &root,
+            "widgets.example.com",
+            &index.crds["widgets.example.com"].definition,
+        )
+        .unwrap();
         assert_eq!(
             schemas.versions["v1"].strict["properties"]["spec"]["properties"]["count"]["type"],
             "integer"
