@@ -1,15 +1,20 @@
 //! Deterministic on-disk layout for rendered Kubernetes manifests.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::{Map, Value};
 
 use crate::resources::{ManagedNamespacePolicy, ManagedResourceDeletionPolicy};
 use crate::{NylError, Result};
 
+/// The directory beneath a target prefix that holds the generated Argo CD
+/// Applications and AppProjects, laid out like any rendered Application.
+pub const CATALOG_DIRECTORY: &str = "_nyl/catalog";
+
 const ARGOCD_SYNC_OPTIONS_ANNOTATION: &str = "argocd.argoproj.io/sync-options";
-const CRD_API_VERSION: &str = "apiextensions.k8s.io/v1";
+const CRD_GROUP: &str = "apiextensions.k8s.io";
 const CRD_KIND: &str = "CustomResourceDefinition";
 
 /// Ensure that the rendered resources contain the configured destination namespace.
@@ -69,9 +74,10 @@ pub fn take_managed_namespace(
 
 /// Serialize manifests into the rendered application directory layout.
 ///
-/// Non-CRD resources are stored as a multi-document `resources.yaml` stream.
-/// Each v1 CRD is stored separately as `crd/<metadata.name>.yaml`. Paths are
-/// returned relative to the application directory and sorted lexicographically.
+/// Each CRD, whatever its API version, is stored as `crd/<metadata.name>.yaml`.
+/// Every other resource is stored in its own file at [`resource_path`]. Paths
+/// are returned relative to the application directory and sorted
+/// lexicographically.
 pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     render_manifest_layout_with_provenance(resources, &HashMap::new())
 }
@@ -81,67 +87,151 @@ pub(crate) fn render_manifest_layout_with_provenance(
     provenance: &HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut output = BTreeMap::new();
-    let mut ordinary_resources = Vec::new();
-    let mut crd_names = BTreeSet::new();
+    // Paths are compared case-insensitively so that the layout can be checked
+    // out on case-insensitive filesystems without two files merging into one.
+    let mut folded_paths = HashMap::new();
 
     for resource in resources {
-        if is_v1_crd(resource) {
-            let name = resource
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| NylError::config("CustomResourceDefinition metadata.name must be a string"))?;
-            validate_safe_path_segment("CustomResourceDefinition metadata.name", name)?;
-            if !crd_names.insert(name.to_owned()) {
-                return Err(NylError::config(format!(
-                    "Rendered resources contain duplicate CustomResourceDefinition {name:?}"
-                )));
-            }
-
-            let path = PathBuf::from("crd").join(format!("{name}.yaml"));
-            output.insert(path, serialize_documents(&[resource], provenance)?);
+        let key = crate::kubernetes::ResourceKey::from_json_value(resource)?;
+        let path = if is_crd(&key) {
+            PathBuf::from("crd").join(name_file(&key)?)
         } else {
-            ordinary_resources.push(resource);
-        }
-    }
+            resource_path(&key)?
+        };
 
-    if !ordinary_resources.is_empty() {
-        let mut ordered = ordinary_resources
-            .into_iter()
-            .map(|resource| {
-                let key = crate::kubernetes::ResourceKey::from_json_value(resource)?;
-                Ok((
-                    (
-                        crate::kubernetes::ResourceOrdering::priority(resource),
-                        key.gvk.group,
-                        key.gvk.version,
-                        key.gvk.kind,
-                        key.namespace.unwrap_or_default(),
-                        key.name,
-                    ),
-                    resource,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ordered.sort_by(|left, right| left.0.cmp(&right.0));
-        let ordinary_resources = ordered.into_iter().map(|(_, resource)| resource).collect::<Vec<_>>();
-        output.insert(
-            PathBuf::from("resources.yaml"),
-            serialize_documents(&ordinary_resources, provenance)?,
-        );
+        let folded = path.to_string_lossy().to_lowercase();
+        if let Some(previous) = folded_paths.insert(folded, key.clone()) {
+            let same_object = previous.gvk.group == key.gvk.group
+                && previous.gvk.kind == key.gvk.kind
+                && previous.namespace.as_deref().unwrap_or_default() == key.namespace.as_deref().unwrap_or_default()
+                && previous.name == key.name;
+            let message = if same_object && is_crd(&key) {
+                format!(
+                    "Rendered resources contain duplicate CustomResourceDefinition {:?}",
+                    key.name
+                )
+            } else if same_object {
+                format!("Rendered resources contain duplicate resource {key}")
+            } else if previous.gvk.kind != key.gvk.kind && previous.gvk.kind.eq_ignore_ascii_case(&key.gvk.kind) {
+                format!(
+                    "Rendered resources {previous} and {key} map to the same file {} because their kinds differ only in case",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Rendered resources {previous} and {key} map to the same file {} on case-insensitive filesystems",
+                    path.display()
+                )
+            };
+            return Err(NylError::config(message));
+        }
+        output.insert(path, serialize_documents(&[resource], provenance)?);
     }
 
     Ok(output)
+}
+
+/// Return the file that stores one non-CRD resource in the rendered layout.
+///
+/// The path is `<kind>[.<group>]/[<namespace>/]<name>.yaml`, where `<kind>` is
+/// lowercased and the type segment matches kubectl's `<kind>.<group>` resource
+/// form, for example `deployment.apps/api/web.yaml` or `clusterrole.rbac.authorization.k8s.io/admin.yaml`.
+/// The API version is omitted, so changing it keeps the object in the same file.
+/// A resource without `metadata.namespace` has no namespace directory.
+///
+/// The mapping is injective: every byte outside a per-segment safe set is
+/// percent-encoded, `%` and `_` included. The namespace safe set excludes `.`,
+/// so a namespace directory never equals a `<name>.yaml` file beside it. Each
+/// segment is then made portable by [`portable_segment`].
+pub fn resource_path(key: &crate::kubernetes::ResourceKey) -> Result<PathBuf> {
+    let kind = utf8_percent_encode(&key.gvk.kind.to_lowercase(), NON_ALPHANUMERIC).to_string();
+    let resource_type = if key.gvk.group.is_empty() {
+        kind
+    } else {
+        format!("{kind}.{}", utf8_percent_encode(&key.gvk.group, GROUP_OR_NAME))
+    };
+
+    let mut path = PathBuf::from(portable_segment(resource_type, ""));
+    if let Some(namespace) = key.namespace.as_deref().filter(|namespace| !namespace.is_empty()) {
+        path.push(portable_segment(
+            utf8_percent_encode(namespace, NAMESPACE).to_string(),
+            "",
+        ));
+    }
+    path.push(name_file(key)?);
+    Ok(path)
+}
+
+/// Bytes kept verbatim in an API group or object name segment.
+const GROUP_OR_NAME: &AsciiSet = &NON_ALPHANUMERIC.remove(b'.').remove(b'-');
+/// Bytes kept verbatim in a namespace segment; `.` is encoded, see [`resource_path`].
+const NAMESPACE: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-');
+
+/// The common file name length limit of Linux, macOS, and Windows filesystems.
+const MAX_PATH_SEGMENT_BYTES: usize = 255;
+/// Hex digits of the name digest appended to a shortened segment.
+const SHORTENED_DIGEST_LENGTH: usize = 16;
+
+/// Device names that Windows reserves regardless of case or extension.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt0",
+    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+fn is_crd(key: &crate::kubernetes::ResourceKey) -> bool {
+    key.gvk.group == CRD_GROUP && key.gvk.kind == CRD_KIND
+}
+
+/// Return `<name>.yaml` for the object's encoded, portable name.
+fn name_file(key: &crate::kubernetes::ResourceKey) -> Result<String> {
+    if key.name.is_empty() {
+        return Err(NylError::config(format!(
+            "Rendered {} has an empty metadata.name",
+            key.gvk.kind
+        )));
+    }
+    Ok(portable_segment(
+        utf8_percent_encode(&key.name, GROUP_OR_NAME).to_string(),
+        ".yaml",
+    ))
+}
+
+/// Make an encoded segment portable to Windows and to file name length limits.
+///
+/// A Windows device name has its first byte percent-encoded, and a trailing `.`
+/// that Windows would strip is encoded. A segment longer than
+/// [`MAX_PATH_SEGMENT_BYTES`] keeps a prefix of `stem` followed by `_` and a
+/// digest of the whole stem; encoded stems never contain `_`, so a shortened
+/// segment cannot equal an unshortened one.
+fn portable_segment(mut stem: String, suffix: &str) -> String {
+    let device = stem.split('.').next().unwrap_or_default();
+    if WINDOWS_RESERVED_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(device))
+    {
+        stem = format!("%{:02X}{}", stem.as_bytes()[0], &stem[1..]);
+    }
+    if suffix.is_empty() && stem.ends_with('.') {
+        stem.pop();
+        stem.push_str("%2E");
+    }
+    if stem.len() + suffix.len() <= MAX_PATH_SEGMENT_BYTES {
+        return format!("{stem}{suffix}");
+    }
+
+    let digest = nyl_core::digest::sha256_hex(stem.as_bytes());
+    let mut keep = MAX_PATH_SEGMENT_BYTES - suffix.len() - 1 - SHORTENED_DIGEST_LENGTH;
+    // Never cut through a `%XX` escape.
+    if let Some(escape) = stem[keep.saturating_sub(2)..keep].find('%') {
+        keep = keep - 2 + escape;
+    }
+    format!("{}_{}{suffix}", &stem[..keep], &digest[..SHORTENED_DIGEST_LENGTH])
 }
 
 fn is_namespace_named(resource: &Value, namespace: &str) -> bool {
     resource.get("apiVersion").and_then(Value::as_str) == Some("v1")
         && resource.get("kind").and_then(Value::as_str) == Some("Namespace")
         && resource.pointer("/metadata/name").and_then(Value::as_str) == Some(namespace)
-}
-
-fn is_v1_crd(resource: &Value) -> bool {
-    resource.get("apiVersion").and_then(Value::as_str) == Some(CRD_API_VERSION)
-        && resource.get("kind").and_then(Value::as_str) == Some(CRD_KIND)
 }
 
 fn apply_namespace_policy(namespace: &mut Value, policy: &ManagedNamespacePolicy) -> Result<()> {
@@ -398,11 +488,11 @@ mod tests {
     }
 
     #[test]
-    fn render_manifest_layout_splits_and_sorts_crds() {
+    fn render_manifest_layout_writes_one_file_per_resource() {
         let resources = vec![
             serde_json::json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "api"}}),
             serde_json::json!({
-                "apiVersion": CRD_API_VERSION,
+                "apiVersion": "apiextensions.k8s.io/v1",
                 "kind": CRD_KIND,
                 "metadata": {
                     "name": "widgets.example.com",
@@ -414,7 +504,7 @@ mod tests {
             }),
             serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api"}}),
             serde_json::json!({
-                "apiVersion": CRD_API_VERSION,
+                "apiVersion": "apiextensions.k8s.io/v1",
                 "kind": CRD_KIND,
                 "metadata": {"name": "gadgets.example.com"},
                 "spec": {}
@@ -445,18 +535,15 @@ mod tests {
             vec![
                 PathBuf::from("crd/gadgets.example.com.yaml"),
                 PathBuf::from("crd/widgets.example.com.yaml"),
-                PathBuf::from("resources.yaml"),
+                PathBuf::from("deployment.apps/api.yaml"),
+                PathBuf::from("service/api.yaml"),
             ]
         );
-        let ordinary = String::from_utf8(output[&PathBuf::from("resources.yaml")].clone()).unwrap();
-        let service_offset = ordinary.find("kind: Service").unwrap();
-        let deployment_offset = ordinary.find("kind: Deployment").unwrap();
-        assert!(service_offset < deployment_offset);
-        assert!(ordinary.contains("---\n# Nyl-Provenance:"));
-        assert!(ordinary.contains("apiVersion: apps/v1"));
-        assert!(ordinary.contains("# Nyl-Provenance: Source: applications/api.yaml (document 2)"));
-        assert!(ordinary.contains("# Nyl-Provenance: Resource: Service"));
-        assert!(!ordinary.contains("CustomResourceDefinition"));
+        let service = String::from_utf8(output[&PathBuf::from("service/api.yaml")].clone()).unwrap();
+        assert!(service.starts_with(
+            "# Nyl-Provenance: Source: applications/api.yaml (document 2)\n# Nyl-Provenance: Resource: Service\n"
+        ));
+        assert!(!service.contains("---"));
         let widget = String::from_utf8(output[&PathBuf::from("crd/widgets.example.com.yaml")].clone()).unwrap();
         assert!(widget.starts_with(
             "# Source: widget/crds/widgets.yaml\n# Nyl-Provenance: Source: applications/api.yaml (document 2)\n# Nyl-Provenance: Resource: CustomResourceDefinition\n"
@@ -465,21 +552,161 @@ mod tests {
     }
 
     #[test]
-    fn render_manifest_layout_rejects_duplicate_or_unsafe_crd_names() {
-        let duplicate = serde_json::json!({
-            "apiVersion": CRD_API_VERSION,
+    fn render_manifest_layout_rejects_the_same_crd_at_two_versions() {
+        let v1 = serde_json::json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
             "kind": CRD_KIND,
             "metadata": {"name": "widgets.example.com"}
         });
-        let error = render_manifest_layout(&[duplicate.clone(), duplicate]).unwrap_err();
-        assert!(error.to_string().contains("duplicate CustomResourceDefinition"));
-
-        let unsafe_name = serde_json::json!({
-            "apiVersion": CRD_API_VERSION,
+        let v1beta1 = serde_json::json!({
+            "apiVersion": "apiextensions.k8s.io/v1beta1",
             "kind": CRD_KIND,
-            "metadata": {"name": "../widgets.example.com"}
+            "metadata": {"name": "widgets.example.com"}
         });
-        let error = render_manifest_layout(&[unsafe_name]).unwrap_err();
-        assert!(error.to_string().contains("not a safe path segment"));
+        let output = render_manifest_layout(std::slice::from_ref(&v1beta1)).unwrap();
+        assert!(output.contains_key(&PathBuf::from("crd/widgets.example.com.yaml")));
+
+        let error = render_manifest_layout(&[v1beta1, v1]).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate CustomResourceDefinition"),
+            "{error}"
+        );
+    }
+
+    fn key(api_version: &str, kind: &str, namespace: Option<&str>, name: &str) -> crate::kubernetes::ResourceKey {
+        let mut resource = serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}});
+        if let Some(namespace) = namespace {
+            resource["metadata"]["namespace"] = namespace.into();
+        }
+        crate::kubernetes::ResourceKey::from_json_value(&resource).unwrap()
+    }
+
+    #[test]
+    fn resource_path_uses_kubectl_type_namespace_and_name() {
+        let cases = [
+            (
+                key("v1", "ConfigMap", Some("api"), "settings"),
+                "configmap/api/settings.yaml",
+            ),
+            (
+                key("apps/v1", "Deployment", Some("api"), "web"),
+                "deployment.apps/api/web.yaml",
+            ),
+            (key("apps/v1", "Deployment", None, "web"), "deployment.apps/web.yaml"),
+            (
+                key(
+                    "rbac.authorization.k8s.io/v1",
+                    "ClusterRole",
+                    None,
+                    "system:aggregate-to-admin",
+                ),
+                "clusterrole.rbac.authorization.k8s.io/system%3Aaggregate-to-admin.yaml",
+            ),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(resource_path(&key).unwrap(), PathBuf::from(expected), "{key}");
+        }
+    }
+
+    #[test]
+    fn resource_path_is_independent_of_api_version() {
+        assert_eq!(
+            resource_path(&key("autoscaling/v1", "HorizontalPodAutoscaler", Some("api"), "web")).unwrap(),
+            resource_path(&key("autoscaling/v2", "HorizontalPodAutoscaler", Some("api"), "web")).unwrap(),
+        );
+    }
+
+    #[test]
+    fn resource_path_never_collides_for_distinct_identities() {
+        // Each pair would collide under a naive `<kind>-<namespace>-<name>` or
+        // unescaped `<kind>.<group>/<namespace>/<name>` scheme.
+        let keys = [
+            key("v1", "ConfigMap", Some("a-b"), "c"),
+            key("v1", "ConfigMap", Some("a"), "b-c"),
+            key("v1", "ConfigMap", None, "a"),
+            key("v1", "ConfigMap", Some("a.yaml"), "x"),
+            key("v1", "ConfigMap", None, "a.yaml"),
+            key("cert-manager.io/v1", "Certificate", Some("a"), "x"),
+            key("example.com/v1", "Certificate", Some("a"), "x"),
+            key("v1", "ConfigMap", None, "../escape"),
+            key("v1", "ConfigMap", None, "%2E%2E%2Fescape"),
+        ];
+        let paths = keys.iter().map(|key| resource_path(key).unwrap()).collect::<Vec<_>>();
+        let unique = paths.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{paths:?}");
+        for path in &paths {
+            assert!(path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))));
+        }
+    }
+
+    #[test]
+    fn render_manifest_layout_rejects_resources_sharing_a_file() {
+        let v1 = serde_json::json!({"apiVersion": "autoscaling/v1", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web"}});
+        let v2 = serde_json::json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web"}});
+        let error = render_manifest_layout(&[v1, v2]).unwrap_err();
+        assert!(error.to_string().contains("duplicate resource"), "{error}");
+
+        let lower = serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "admin"}});
+        let upper = serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "Admin"}});
+        let error = render_manifest_layout(&[lower, upper]).unwrap_err();
+        assert!(error.to_string().contains("case-insensitive filesystems"), "{error}");
+
+        let widget = serde_json::json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "x"}});
+        let shouting = serde_json::json!({"apiVersion": "example.com/v1", "kind": "WIDGET", "metadata": {"name": "x"}});
+        let error = render_manifest_layout(&[widget, shouting]).unwrap_err();
+        assert!(error.to_string().contains("kinds differ only in case"), "{error}");
+    }
+
+    #[test]
+    fn resource_path_escapes_windows_device_names() {
+        assert_eq!(
+            resource_path(&key("v1", "ConfigMap", Some("aux"), "con")).unwrap(),
+            PathBuf::from("configmap/%61ux/%63on.yaml")
+        );
+        assert_eq!(
+            resource_path(&key("v1", "ConfigMap", None, "NUL.backup")).unwrap(),
+            PathBuf::from("configmap/%4EUL.backup.yaml")
+        );
+        assert_eq!(
+            resource_path(&key("v1", "ConfigMap", None, "console")).unwrap(),
+            PathBuf::from("configmap/console.yaml")
+        );
+    }
+
+    #[test]
+    fn resource_path_shortens_only_segments_over_the_file_name_limit() {
+        let longest = "a".repeat(250);
+        assert_eq!(
+            resource_path(&key("v1", "ConfigMap", None, &longest)).unwrap(),
+            PathBuf::from(format!("configmap/{longest}.yaml"))
+        );
+
+        let long = "a".repeat(253);
+        let longer = format!("{}b", "a".repeat(252));
+        let shortened = [&long, &longer].map(|name| {
+            let path = resource_path(&key("v1", "ConfigMap", None, name)).unwrap();
+            path.file_name().unwrap().to_str().unwrap().to_owned()
+        });
+        assert_ne!(shortened[0], shortened[1]);
+        for file in &shortened {
+            assert_eq!(file.len(), MAX_PATH_SEGMENT_BYTES);
+            assert!(file.starts_with(&"a".repeat(233)));
+            assert_eq!(&file[file.len() - ".yaml".len()..], ".yaml");
+        }
+
+        // Shortening never cuts through a percent escape.
+        let colons = ":".repeat(100);
+        let file = resource_path(&key("rbac.authorization.k8s.io/v1", "ClusterRole", None, &colons)).unwrap();
+        let file = file.file_name().unwrap().to_str().unwrap();
+        assert!(file.len() <= MAX_PATH_SEGMENT_BYTES);
+        let (prefix, _) = file.rsplit_once('_').unwrap();
+        assert_eq!(prefix.len() % 3, 0, "{file}");
+        assert!(prefix
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(3)
+            .all(|escape| escape == ['%', '3', 'A']));
     }
 }
