@@ -237,7 +237,7 @@ pub fn tree_partitions(inventory: &GitOpsInventory, compiled: &CompiledTargetTre
         {
             continue;
         }
-        let destination = if path.starts_with("_nyl/catalog") {
+        let destination = if path.starts_with(crate::gitops::CATALOG_DIRECTORY) {
             catalog
         } else {
             workload

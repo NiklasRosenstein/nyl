@@ -19,6 +19,15 @@ fn read_tree(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
+/// Concatenate every rendered manifest file beneath one release directory.
+fn read_resources(directory: &std::path::Path) -> String {
+    read_tree(directory)
+        .into_values()
+        .map(|bytes| String::from_utf8(bytes).unwrap())
+        .collect::<Vec<_>>()
+        .join("---\n")
+}
+
 fn fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     Repository::init(temp.path()).unwrap();
@@ -402,7 +411,7 @@ fn validation_failure_writes_inspectable_tree_and_rechecks_cached_artifacts() {
             .assert()
             .failure()
             .stderr(predicate::str::contains("1 invalid"));
-        let resources = fs::read_to_string(destination.join("production/workloads/api/resources.yaml")).unwrap();
+        let resources = read_resources(&destination.join("production/workloads/api"));
         assert!(resources.contains("inspection: available"));
         assert!(destination.join("production/_nyl/index.json").is_file());
     }
@@ -585,7 +594,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
         ));
 
     let root = output.join("production");
-    let resources = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
+    let resources = read_resources(&root.join("workloads/api"));
     assert!(resources.contains("kind: ConfigMap"));
     assert!(resources.contains("kind: Namespace"));
     assert!(resources.contains(
@@ -597,12 +606,13 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
 
-    let project = fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project = fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap();
     assert!(project.contains("https://charts.example.invalid"));
     assert!(project.contains("https://example.invalid/deploy.git"));
     assert!(!project.contains("ssh://git@example.invalid/deploy.git"));
 
-    let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+    let application =
+        fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd-production/api.yaml")).unwrap();
     assert!(application.contains("targetRevision: deploy/production"));
     assert!(application.contains("path: production/workloads/api"));
     assert!(application.contains("recurse: true"));
@@ -612,13 +622,18 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(application.contains("server: https://kubernetes.default.svc"));
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert_eq!(application.matches("- ServerSideApply=true").count(), 1);
-    assert!(!fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-")));
+    assert!(
+        !fs::read_dir(root.join("_nyl/catalog/application.argoproj.io/argocd-production"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-"))
+    );
 
-    assert!(root.join("_nyl/catalog/projects/workloads.yaml").is_file());
-    let catalog = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/production-catalog.yaml")).unwrap();
+    assert!(root
+        .join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")
+        .is_file());
+    let catalog =
+        fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml")).unwrap();
     assert!(catalog.contains("project: default"));
     assert!(catalog.contains("path: production/_nyl/catalog"));
     assert!(catalog.contains("targetRevision: deploy/production"));
@@ -1195,11 +1210,14 @@ spec:
         ])
         .assert()
         .success();
-    let catalog =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/gitops-system/production-catalog.yaml"))
-            .unwrap();
+    let catalog = fs::read_to_string(
+        output.join("production/_nyl/catalog/application.argoproj.io/gitops-system/production-catalog.yaml"),
+    )
+    .unwrap();
     assert!(catalog.contains("namespace: gitops-system"));
-    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project =
+        fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/gitops-system/workloads.yaml"))
+            .unwrap();
     assert!(project.contains("namespace: gitops-system"));
 }
 
@@ -1225,7 +1243,9 @@ fn project_templates_generate_constrained_projects() {
         ])
         .assert()
         .success();
-    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project =
+        fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
+            .unwrap();
     assert!(project.contains("sourceRepos:"));
     assert!(project.contains("https://example.invalid/deploy.git"));
     assert!(project.contains("sourceNamespaces:"));
@@ -1373,8 +1393,10 @@ fn test_render_tree_expands_application_name_template_values_per_release() {
         .assert()
         .success();
     let application: serde_json::Value = serde_saphyr::from_str(
-        &fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/production-api.yaml"))
-            .unwrap(),
+        &fs::read_to_string(
+            output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/production-api.yaml"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(application["metadata"]["name"], "production-api");
@@ -1527,7 +1549,7 @@ fn force_repairs_missing_and_modified_owned_files() {
         .assert()
         .success();
 
-    let resources = output.join("production/workloads/api/resources.yaml");
+    let resources = output.join("production/workloads/api/configmap/api/api.yaml");
     fs::remove_file(&resources).unwrap();
     Command::cargo_bin("nyl")
         .unwrap()
@@ -1806,7 +1828,8 @@ fn applications_inherit_a_named_cluster_destination() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert!(application.contains("name: in-cluster"));
     assert!(!application.contains("server: https://kubernetes.default.svc"));
 }
@@ -1858,7 +1881,7 @@ metadata:
     let root = output.join("production");
     assert_eq!(fs::read_dir(root.join("_nyl/namespaces")).unwrap().count(), 1);
     for release in ["api", "worker"] {
-        let resources = fs::read_to_string(root.join(format!("workloads/{release}/resources.yaml"))).unwrap();
+        let resources = read_resources(&root.join(format!("workloads/{release}")));
         assert!(!resources.contains("kind: Namespace"));
     }
 }
@@ -1909,8 +1932,8 @@ metadata:
         .success();
 
     let root = output.join("production");
-    let api = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
-    let worker = fs::read_to_string(root.join("workloads/worker/resources.yaml")).unwrap();
+    let api = read_resources(&root.join("workloads/api"));
+    let worker = read_resources(&root.join("workloads/worker"));
     assert!(api.contains("kind: Namespace"));
     assert!(!worker.contains("kind: Namespace"));
     assert!(!root.join("_nyl/namespaces").exists());
@@ -1963,7 +1986,7 @@ metadata:
 
     let root = output.join("production");
     for release in ["api", "worker"] {
-        let resources = fs::read_to_string(root.join(format!("workloads/{release}/resources.yaml"))).unwrap();
+        let resources = read_resources(&root.join(format!("workloads/{release}")));
         assert!(!resources.contains("kind: Namespace"));
     }
     assert!(!root.join("_nyl/namespaces").exists());
@@ -1999,7 +2022,7 @@ metadata:
         .assert()
         .success();
 
-    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    let workload = read_resources(&output.join("production/workloads/api"));
     assert!(workload.contains("namespace: default"));
     assert!(!workload.contains("kind: Namespace\nmetadata:\n  name: default"));
 }
@@ -2067,7 +2090,7 @@ fn explicit_owner_can_manage_a_bootstrap_namespace() {
         .assert()
         .success();
 
-    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    let workload = read_resources(&output.join("production/workloads/api"));
     assert!(workload.contains("name: default"));
     assert_eq!(workload.matches("kind: Namespace").count(), 2);
 }
@@ -2299,7 +2322,8 @@ fn release_can_append_explicitly_allowed_sync_options() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert!(application.contains("- RespectIgnoreDifferences=false"));
     assert!(!application.contains("+syncOptions"));
@@ -2336,7 +2360,8 @@ fn release_can_replace_the_default_sync_option_with_an_allowed_value() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=false").count(), 1);
     assert!(!application.contains("ApplyOutOfSyncOnly=true"));
 }
@@ -2534,7 +2559,7 @@ metadata:
         .success();
 
     let root = output.join("production");
-    let workload = fs::read_to_string(root.join("workloads/api/resources.yaml")).unwrap();
+    let workload = read_resources(&root.join("workloads/api"));
     assert!(workload.contains("namespace: monitoring"));
     assert_eq!(workload.matches("kind: Namespace").count(), 2);
     assert!(workload.contains("Prune=confirm"));
@@ -2566,7 +2591,7 @@ fn additional_namespace_is_synthesized_when_missing() {
         .assert()
         .success();
 
-    let workload = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    let workload = read_resources(&output.join("production/workloads/api"));
     assert!(workload.contains("name: api"));
     assert!(workload.contains("name: monitoring"));
     assert_eq!(workload.matches("kind: Namespace").count(), 2);
@@ -2605,7 +2630,7 @@ fn release_include_preserves_explicit_secret_manifest() {
         .assert()
         .success();
 
-    let resources = fs::read_to_string(output.join("production/workloads/api/resources.yaml")).unwrap();
+    let resources = read_resources(&output.join("production/workloads/api"));
     assert!(resources.contains("kind: Secret"));
     assert!(resources.contains("name: included"));
 }
@@ -2636,11 +2661,11 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     assert!(message.contains("Nyl-Cluster: kasoku"));
     let tree = commit.tree().unwrap();
     assert!(tree
-        .get_path(std::path::Path::new("production/workloads/api/resources.yaml"))
+        .get_path(std::path::Path::new("production/workloads/api/configmap/api/api.yaml"))
         .is_ok());
     assert!(tree
         .get_path(std::path::Path::new(
-            "production/_nyl/catalog/applications/argocd-production/api.yaml"
+            "production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"
         ))
         .is_ok());
     assert!(tree
@@ -2786,9 +2811,9 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         ))
         .stderr(predicate::str::contains("1 changed · 0 added · 1 modified · 0 deleted"));
     let application_diff_contents = fs::read_to_string(&application_diff).unwrap();
-    assert!(application_diff_contents.contains("workloads/api/resources.yaml"));
+    assert!(application_diff_contents.contains("workloads/api/configmap/api/api.yaml"));
     assert!(application_diff_contents.contains("+  environment: changed"));
-    assert!(!application_diff_contents.contains("_nyl/catalog/projects"));
+    assert!(!application_diff_contents.contains("_nyl/catalog/appproject.argoproj.io"));
 
     let failing_diff = fixture.path().join("artifacts/failing.diff");
     Command::cargo_bin("nyl")
@@ -2849,8 +2874,8 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success();
     let catalog_diff_contents = fs::read_to_string(catalog_diff).unwrap();
-    assert!(catalog_diff_contents.contains("_nyl/catalog/projects/workloads.yaml"));
-    assert!(!catalog_diff_contents.contains("workloads/api/resources.yaml"));
+    assert!(catalog_diff_contents.contains("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"));
+    assert!(!catalog_diff_contents.contains("workloads/api/configmap/api/api.yaml"));
 }
 
 #[test]
@@ -2893,7 +2918,9 @@ fn publish_tree_default_rejects_changes_that_affect_the_rendered_target() {
         .stderr(predicate::str::contains(
             "Local changes affect deployment target \"production\"",
         ))
-        .stderr(predicate::str::contains("modified workloads/api/resources.yaml"))
+        .stderr(predicate::str::contains(
+            "modified workloads/api/configmap/api/api.yaml",
+        ))
         .stderr(predicate::str::contains("--allow-dirty"));
 
     let destination = Repository::open_bare(destination.path()).unwrap();
@@ -2927,7 +2954,7 @@ fn publish_tree_allow_dirty_records_nonreproducible_provenance() {
     let resources = String::from_utf8(published_file(
         &destination,
         &commit,
-        "production/workloads/api/resources.yaml",
+        "production/workloads/api/configmap/api/api.yaml",
     ))
     .unwrap();
     assert!(resources.contains("environment: locally-modified"));
@@ -2987,7 +3014,7 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
         .clone(destination.path().to_str().unwrap(), checkout.path())
         .unwrap();
     let root = checkout.path().join("production");
-    let path = root.join("workloads/api/resources.yaml");
+    let path = root.join("workloads/api/configmap/api/api.yaml");
     let rendered = fs::read_to_string(&path).unwrap();
     assert!(rendered.contains("config: |\n    first\n    second\n"), "{rendered}");
     let documents = nyl::yaml::parse_yaml_documents_k8s_compatible(&rendered).unwrap();
@@ -2999,7 +3026,7 @@ fn diff_tree_normalization_controls_patch_reports_and_exit_status() {
     fs::write(path, &quoted).unwrap();
     let index_path = root.join("_nyl/index.json");
     let mut index: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-    index["files"]["workloads/api/resources.yaml"] = nyl_core::digest::sha256_hex(quoted.as_bytes()).into();
+    index["files"]["workloads/api/configmap/api/api.yaml"] = nyl_core::digest::sha256_hex(quoted.as_bytes()).into();
     fs::write(index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
     commit_all(&repository, "Quoted publication configuration");
     repository
@@ -3102,14 +3129,14 @@ fn diff_tree_exports_complete_reports_and_controls_stderr_independently() {
     assert_eq!(json["diff"]["files_changed"], 1);
     assert_eq!(json["diff"]["lines_added"], 1);
     assert_eq!(json["diff"]["lines_removed"], 1);
-    assert_eq!(json["diff"]["files"][0]["path"], "workloads/api/resources.yaml");
+    assert_eq!(json["diff"]["files"][0]["path"], "workloads/api/configmap/api/api.yaml");
     assert_eq!(json["render"]["sources"]["git_ref_refresh"], 1);
     for path in ["artifacts/report.txt", "artifacts/comment.md", "artifacts/report.json"] {
         let contents = fs::read_to_string(fixture.path().join(path)).unwrap();
         assert!(!contents.contains('\x1b'), "{path} must be ANSI-free in auto mode");
     }
     let markdown = fs::read_to_string(fixture.path().join("artifacts/comment.md")).unwrap();
-    assert!(markdown.contains("| workloads/api/resources\\.yaml | modified | +1 | −1 |"));
+    assert!(markdown.contains("| workloads/api/configmap/api/api\\.yaml | modified | +1 | −1 |"));
     assert!(markdown.contains("<summary>Render statistics</summary>\n\n```text\n"));
     #[cfg(unix)]
     Command::cargo_bin("nyl")
@@ -3487,8 +3514,14 @@ fn validation_reports_export_findings_and_skipped_resources_without_losing_rende
     let invalid = resources.iter().find(|r| r["status"] == "invalid").unwrap();
     assert_eq!(invalid["findings"][0]["path"], "/data/environment");
     assert_eq!(invalid["schemaOrigin"]["type"], "local");
-    assert_eq!(invalid["renderedLocation"]["path"], "workloads/api/resources.yaml");
-    assert!(output.path().join("production/workloads/api/resources.yaml").is_file());
+    assert_eq!(
+        invalid["renderedLocation"]["path"],
+        "workloads/api/configmap/api/api.yaml"
+    );
+    assert!(output
+        .path()
+        .join("production/workloads/api/configmap/api/api.yaml")
+        .is_file());
     let exported = fs::read_to_string(text).unwrap();
     assert!(exported.contains("Source:        applications/workloads/api.yaml"));
     assert!(!exported.contains('\x1b'));
@@ -3997,7 +4030,7 @@ fn created_release_is_rendered_by_the_group_that_owns_its_directory() {
 
     let root = fixture.path().join("deploy-worktree/production");
     assert!(root
-        .join("_nyl/catalog/applications/argocd-production/web.yaml")
+        .join("_nyl/catalog/application.argoproj.io/argocd-production/web.yaml")
         .is_file());
 }
 
@@ -4036,7 +4069,7 @@ spec:
 
     let root = fixture.path().join("deploy-worktree/production");
     let project = nyl::yaml::parse_yaml_value_k8s_compatible(
-        &fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap(),
+        &fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap(),
     )
     .unwrap();
     assert_eq!(project["metadata"]["name"], "workloads");
@@ -4055,7 +4088,7 @@ spec:
         serde_json::json!(["https://example.invalid/deploy.git"])
     );
 
-    let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/api.yaml")).unwrap();
+    let application = fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd/api.yaml")).unwrap();
     assert!(application.contains("project: workloads"));
 }
 
@@ -4134,7 +4167,8 @@ fn test_render_tree_with_nested_project_reads_sibling_releases_by_either_path_fo
         index["inputs"].as_object().unwrap().keys().cloned().collect::<Vec<_>>()
     };
     assert_eq!(input_keys(&relative), input_keys(&rooted));
-    let resources = String::from_utf8(relative[&PathBuf::from("workloads/api/resources.yaml")].clone()).unwrap();
+    let resources =
+        String::from_utf8(relative[&PathBuf::from("workloads/api/configmap/api/api.yaml")].clone()).unwrap();
     assert!(
         resources.contains("# Nyl-Provenance: Source: /applications/workloads/api.yaml (document 2)"),
         "{resources}"

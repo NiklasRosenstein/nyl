@@ -1951,6 +1951,7 @@ dependencies = [
  "kube",
  "minijinja",
  "nyl-core",
+ "percent-encoding",
  "regex",
  "reqwest",
  "same-file",

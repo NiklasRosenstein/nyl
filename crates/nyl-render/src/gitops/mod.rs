@@ -18,7 +18,9 @@ pub use discovery::{
     DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
 };
 pub(crate) use layout::render_manifest_layout_with_provenance;
-pub use layout::{ensure_managed_namespace, render_manifest_layout, take_managed_namespace};
+pub use layout::{
+    ensure_managed_namespace, render_manifest_layout, resource_path, take_managed_namespace, CATALOG_DIRECTORY,
+};
 pub use reconcile::{
     reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, ReconcileOptions,
     RenderIndex, RenderIndexPublication,
