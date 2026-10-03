@@ -13,11 +13,11 @@ use crate::git::GitManager;
 use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
-    is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectManagement,
-    AppProjectTemplate, ApplicationGroup, ApplicationGroupSource, ArgoCDInstance, ArgoCDInstanceSpec,
-    CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget, GitOpsResource, GitOpsResourceKind,
-    GitPublication, InlineGitRepository, LocalReference, ManagedResourceDeletionPolicy, RendererConfig,
-    RendererConfigMode, SharedNamespaceOwner,
+    is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
+    AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
+    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
+    GitOpsResource, GitOpsResourceKind, GitPublication, InlineGitRepository, LocalReference,
+    ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -200,15 +200,26 @@ struct EffectiveProject {
     catalog_id: String,
     source_paths: Vec<PathBuf>,
     name: String,
-    manifest: Option<Value>,
+    manifest: ProjectManifest,
     destination_namespaces: Option<Vec<String>>,
+}
+
+/// How a group's AppProject reaches the target catalog.
+#[derive(Debug, Serialize)]
+enum ProjectManifest {
+    /// The AppProject is managed outside Nyl.
+    External,
+    /// A rendered AppProjectDefinition manifest, emitted as declared.
+    Fixed(Value),
+    /// A generated AppProject, finished from what the group renders.
+    Generated(Box<GeneratedProject>),
 }
 
 #[derive(Serialize)]
 struct EffectiveProjectCacheInput<'a> {
     catalog_id: &'a str,
     name: &'a str,
-    manifest: &'a Option<Value>,
+    manifest: &'a ProjectManifest,
     destination_namespaces: &'a Option<Vec<String>>,
 }
 
@@ -558,6 +569,7 @@ async fn compile_target_tree_inner(
     let input_digests = release_inputs.index_entries()?;
     let mut provenance_by_key = HashMap::new();
     let mut emitted_projects = BTreeSet::new();
+    let mut generated_projects: BTreeMap<String, (String, Box<GeneratedProject>)> = BTreeMap::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
     let mut pending_workloads = Vec::new();
@@ -577,14 +589,21 @@ async fn compile_target_tree_inner(
         inputs.insert(group_resource_path.clone());
         inputs.extend(project.source_paths.iter().cloned());
         let argocd_project_name = project.name;
-        if let Some(manifest) = project.manifest {
-            if emitted_projects.insert(project.catalog_id.clone()) {
-                insert_yaml(
-                    &mut files,
-                    PathBuf::from("_nyl/catalog/projects").join(format!("{}.yaml", project.catalog_id)),
-                    &manifest,
-                )?;
+        match project.manifest {
+            ProjectManifest::Fixed(manifest) => {
+                if emitted_projects.insert(project.catalog_id.clone()) {
+                    insert_yaml(
+                        &mut files,
+                        PathBuf::from("_nyl/catalog/projects").join(format!("{}.yaml", project.catalog_id)),
+                        &manifest,
+                    )?;
+                }
             }
+            // Generated projects are finished once every Release has rendered.
+            ProjectManifest::Generated(generated) => {
+                generated_projects.insert(argocd_project_name.clone(), (project.catalog_id.clone(), generated));
+            }
+            ProjectManifest::External => {}
         }
         inputs.extend(source.provenance_inputs.iter().cloned());
         let session = match source.renderer_mode {
@@ -720,6 +739,38 @@ async fn compile_target_tree_inner(
     }
 
     resolve_namespace_ownership(&mut pending_workloads, &mut namespace_owners, &cluster)?;
+    // What each project's Applications deploy decides its derived defaults.
+    let mut project_usage: BTreeMap<String, ProjectUsage> = BTreeMap::new();
+    for workload in &pending_workloads {
+        let usage = project_usage.entry(workload.argocd_project_name.clone()).or_default();
+        usage.namespaces.insert(workload.destination_namespace.clone());
+        usage
+            .namespaces
+            .extend(workload.release.spec.additional_namespaces.iter().cloned());
+        for manifest in &workload.manifests {
+            usage.record(manifest);
+        }
+    }
+    for ((_, namespace), owner) in &namespace_owners {
+        let usage = project_usage.entry(owner.project.clone()).or_default();
+        usage.namespaces.insert(namespace.clone());
+        usage.record(&owner.manifest);
+    }
+    let scopes = ScopeResolver::new(
+        &cluster,
+        pending_workloads.iter().flat_map(|workload| workload.manifests.iter()),
+    );
+    let empty_usage = ProjectUsage::default();
+    for (name, (catalog_id, generated)) in &generated_projects {
+        if emitted_projects.insert(catalog_id.clone()) {
+            let manifest = generated.finish(project_usage.get(name).unwrap_or(&empty_usage), &scopes)?;
+            insert_yaml(
+                &mut files,
+                PathBuf::from("_nyl/catalog/projects").join(format!("{catalog_id}.yaml")),
+                &manifest,
+            )?;
+        }
+    }
     let release_directories = pending_workloads
         .iter()
         .map(|workload| workload.release_directory.clone())
@@ -1983,9 +2034,9 @@ fn resolve_effective_group_project(
                 &mut manifest,
             )?);
             manifest["metadata"]["namespace"] = argocd.spec.namespace.clone().into();
-            Some(manifest)
+            ProjectManifest::Fixed(manifest)
         } else {
-            None
+            ProjectManifest::External
         };
         return Ok(EffectiveProject {
             catalog_id: project_id,
@@ -1999,97 +2050,277 @@ fn resolve_effective_group_project(
     build_generated_project(group, publication_repository, target_cluster, argocd)
 }
 
-/// Build the AppProject a group generates for itself, from `spec.projectTemplate`
-/// or, when it declares none, from the implied permissive project.
+/// Prepare the AppProject a group generates for itself, from `spec.projectTemplate`
+/// or, when it declares none, from the implied project.
+///
+/// Declared fields are kept as written. Omitted fields default to the least the
+/// group's Applications need: the target publication repository, and the target
+/// Cluster's destinations and resource kinds that the group renders, which
+/// [`GeneratedProject::finish`] fills in once the group has rendered.
 fn build_generated_project(
     group: &ApplicationGroup,
     publication_repository: &InlineGitRepository,
     target_cluster: &Cluster,
     argocd: &ArgoCDInstance,
 ) -> Result<EffectiveProject> {
-    // A group that declares no project owns an implied permissive AppProject:
-    // the target cluster, any namespace, any cluster-scoped resource. Narrowing
-    // it means declaring spec.projectTemplate.
-    let implied = group.spec.project_template.is_none();
     let default_template = AppProjectTemplate::default();
     let template = group.spec.project_template.as_ref().unwrap_or(&default_template);
     let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
-    let mut destination_namespaces = template.destination_namespaces.clone();
-    if let Some(namespace) = &group.spec.destination_namespace {
-        if !namespace_matches_any(namespace, &destination_namespaces) {
-            destination_namespaces.push(namespace.clone());
-        }
-    }
-    if destination_namespaces.is_empty() {
-        if !implied {
-            return Err(NylError::config(format!(
-                "ApplicationGroup {:?} projectTemplate requires destinationNamespaces when spec.destinationNamespace is absent; remove spec.projectTemplate for the implied permissive project",
-                group.metadata.name
-            )));
-        }
-        destination_namespaces.push(PERMISSIVE_PATTERN.to_owned());
-    }
-    destination_namespaces.sort();
-    destination_namespaces.dedup();
+    let declared_destinations = generated_destinations(group, template, target_cluster)?;
 
-    let mut cluster_resources = template
-        .cluster_resource_whitelist
-        .iter()
-        .map(|pattern| {
-            let mut value = serde_json::Map::from_iter([
-                ("group".to_owned(), pattern.group.clone().into()),
-                ("kind".to_owned(), pattern.kind.clone().into()),
-            ]);
-            if let Some(name) = &pattern.name {
-                value.insert("name".to_owned(), name.clone().into());
-            }
-            Value::Object(value)
-        })
-        .collect::<Vec<_>>();
-    if implied && cluster_resources.is_empty() {
-        cluster_resources.push(serde_json::json!({"group": PERMISSIVE_PATTERN, "kind": PERMISSIVE_PATTERN}));
-    }
-    let permits_every_resource = cluster_resources.iter().any(is_permissive_resource);
-    if group.spec.namespace.create && !permits_every_resource {
-        for namespace in &destination_namespaces {
-            let permission = serde_json::json!({"group": "", "kind": "Namespace", "name": namespace});
-            if !cluster_resources.contains(&permission) {
-                cluster_resources.push(permission);
-            }
-        }
+    // Applications live in applicationNamespace, so the project must admit it.
+    let mut source_namespaces = template.source_namespaces.clone().unwrap_or_default();
+    if !namespace_matches_any(&group.spec.application_namespace, &source_namespaces) {
+        source_namespaces.push(group.spec.application_namespace.clone());
     }
 
-    let destinations = destination_namespaces
-        .iter()
-        .map(|namespace| {
-            let mut destination = serde_json::Map::from_iter([("namespace".to_owned(), namespace.clone().into())]);
-            if let Some(server) = &target_cluster.spec.destination.server {
-                destination.insert("server".to_owned(), server.clone().into());
-            }
-            if let Some(cluster_name) = &target_cluster.spec.destination.name {
-                destination.insert("name".to_owned(), cluster_name.clone().into());
-            }
-            Value::Object(destination)
-        })
-        .collect::<Vec<_>>();
-    let manifest = serde_json::json!({
-        "apiVersion": "argoproj.io/v1alpha1",
-        "kind": "AppProject",
-        "metadata": {"name": name, "namespace": argocd.spec.namespace},
-        "spec": {
-            "sourceRepos": [publication_repository.repo_url],
-            "sourceNamespaces": [group.spec.application_namespace],
-            "destinations": destinations,
-            "clusterResourceWhitelist": cluster_resources,
+    let mut metadata = serde_json::json!({"name": name, "namespace": argocd.spec.namespace});
+    for (field, value) in [
+        ("labels", serde_json::to_value(&template.labels)?),
+        ("annotations", serde_json::to_value(&template.annotations)?),
+        ("finalizers", serde_json::to_value(&template.finalizers)?),
+    ] {
+        if value.as_object().is_some_and(|map| !map.is_empty()) || value.as_array().is_some_and(|list| !list.is_empty())
+        {
+            metadata[field] = value;
         }
-    });
+    }
+    let destination_namespaces = declared_destinations.as_ref().map(|(_, namespaces)| namespaces.clone());
+    let spec = AppProjectTemplate {
+        name: None,
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        finalizers: Vec::new(),
+        source_repos: Some(
+            template
+                .source_repos
+                .clone()
+                .unwrap_or_else(|| vec![publication_repository.repo_url.clone()]),
+        ),
+        source_namespaces: Some(source_namespaces),
+        destinations: declared_destinations.map(|(destinations, _)| destinations),
+        ..template.clone()
+    };
     Ok(EffectiveProject {
         catalog_id: group.metadata.name.clone(),
         source_paths: Vec::new(),
         name,
-        manifest: Some(manifest),
-        destination_namespaces: Some(destination_namespaces),
+        manifest: ProjectManifest::Generated(Box::new(GeneratedProject {
+            metadata,
+            spec,
+            group: group.metadata.name.clone(),
+            cluster: target_cluster.metadata.name.clone(),
+            destination: target_cluster.spec.destination.clone(),
+            namespace_create: group.spec.namespace.create,
+            declared_namespaces: destination_namespaces.clone(),
+        })),
+        destination_namespaces,
     })
+}
+
+/// A generated AppProject whose omitted fields are derived from what its group renders.
+#[derive(Debug, Serialize)]
+struct GeneratedProject {
+    metadata: Value,
+    /// Declared spec fields; omitted ones that are derived remain `None`.
+    spec: AppProjectTemplate,
+    group: String,
+    cluster: String,
+    destination: ClusterDestination,
+    namespace_create: bool,
+    /// Namespace patterns declared destinations admit on the target Cluster.
+    declared_namespaces: Option<Vec<String>>,
+}
+
+/// What a project's Applications deploy on the target Cluster.
+#[derive(Debug, Default)]
+struct ProjectUsage {
+    namespaces: BTreeSet<String>,
+    /// API group and kind of every rendered resource, with `""` for the core group.
+    kinds: BTreeSet<(String, String)>,
+}
+
+impl ProjectUsage {
+    fn record(&mut self, manifest: &Value) {
+        let api_version = manifest.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
+        let group = api_version.split_once('/').map_or("", |(group, _)| group);
+        if let Some(kind) = manifest.get("kind").and_then(Value::as_str) {
+            self.kinds.insert((group.to_owned(), kind.to_owned()));
+        }
+    }
+}
+
+/// Resource scopes known for a target: CRDs it renders, then the Cluster's capabilities.
+struct ScopeResolver<'a> {
+    rendered: BTreeMap<(String, String), crate::resources::ResourceScope>,
+    capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
+}
+
+impl<'a> ScopeResolver<'a> {
+    fn new<'m>(cluster: &'a Cluster, manifests: impl IntoIterator<Item = &'m Value>) -> Self {
+        let mut rendered = BTreeMap::new();
+        for manifest in manifests {
+            if manifest.get("kind").and_then(Value::as_str) != Some("CustomResourceDefinition") {
+                continue;
+            }
+            let field = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str);
+            let scope = match field("/spec/scope") {
+                Some("Cluster") => crate::resources::ResourceScope::Cluster,
+                Some("Namespaced") => crate::resources::ResourceScope::Namespaced,
+                _ => continue,
+            };
+            if let (Some(group), Some(kind)) = (field("/spec/group"), field("/spec/names/kind")) {
+                rendered.insert((group.to_owned(), kind.to_owned()), scope);
+            }
+        }
+        Self {
+            rendered,
+            capabilities: cluster.spec.kubernetes.as_ref(),
+        }
+    }
+
+    fn scope(&self, group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
+        self.rendered
+            .get(&(group.to_owned(), kind.to_owned()))
+            .copied()
+            .or_else(|| {
+                self.capabilities
+                    .and_then(|capabilities| capabilities.scope_of(group, kind))
+            })
+    }
+}
+
+impl GeneratedProject {
+    /// The AppProject manifest, with omitted fields derived from the group's usage.
+    fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver<'_>) -> Result<Value> {
+        let mut spec = self.spec.clone();
+        if spec.destinations.is_none() {
+            spec.destinations = Some(
+                usage
+                    .namespaces
+                    .iter()
+                    .map(|namespace| AppProjectDestination {
+                        server: self.destination.server.clone(),
+                        name: self.destination.name.clone(),
+                        namespace: namespace.clone(),
+                    })
+                    .collect(),
+            );
+        }
+        let derive_cluster = spec.cluster_resource_whitelist.is_none();
+        let derive_namespaced = spec.namespace_resource_whitelist.is_none();
+        if derive_cluster || derive_namespaced {
+            let mut cluster_kinds = Vec::new();
+            let mut namespaced_kinds = Vec::new();
+            for (group, kind) in &usage.kinds {
+                let pattern = AppProjectResourcePattern {
+                    group: group.clone(),
+                    kind: kind.clone(),
+                    name: None,
+                };
+                match scopes.scope(group, kind) {
+                    Some(crate::resources::ResourceScope::Cluster) => cluster_kinds.push(pattern),
+                    Some(crate::resources::ResourceScope::Namespaced) => namespaced_kinds.push(pattern),
+                    None => {
+                        return Err(NylError::config(format!(
+                            "Cannot tell whether {} rendered by ApplicationGroup {:?} is cluster-scoped: Cluster {:?} does not record its scope; run nyl capture cluster {}, render its CRD in this target, or declare projectTemplate.clusterResourceWhitelist and namespaceResourceWhitelist",
+                            crate::resources::group_kind_key(group, kind),
+                            self.group,
+                            self.cluster,
+                            self.cluster
+                        )))
+                    }
+                }
+            }
+            if derive_cluster {
+                spec.cluster_resource_whitelist = Some(cluster_kinds);
+            }
+            if derive_namespaced {
+                spec.namespace_resource_whitelist = Some(namespaced_kinds);
+            }
+        }
+        // A declared cluster-resource whitelist still admits the Namespaces Nyl creates.
+        if !derive_cluster && self.namespace_create {
+            let whitelist = spec.cluster_resource_whitelist.get_or_insert_with(Vec::new);
+            let permits_every_resource = whitelist.iter().any(|pattern| {
+                pattern.group == PERMISSIVE_PATTERN && pattern.kind == PERMISSIVE_PATTERN && pattern.name.is_none()
+            });
+            if !permits_every_resource {
+                let namespaces = self
+                    .declared_namespaces
+                    .clone()
+                    .unwrap_or_else(|| usage.namespaces.iter().cloned().collect());
+                for namespace in namespaces {
+                    let permission = AppProjectResourcePattern {
+                        group: String::new(),
+                        kind: "Namespace".to_owned(),
+                        name: Some(namespace),
+                    };
+                    if !whitelist.contains(&permission) {
+                        whitelist.push(permission);
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "AppProject",
+            "metadata": self.metadata,
+            "spec": serde_json::to_value(spec)?,
+        }))
+    }
+}
+
+/// Declared destinations of a generated AppProject and the namespace patterns
+/// they admit on the target workload Cluster, which bound the group's Releases.
+/// `None` when the template omits destinations, which are then derived.
+fn generated_destinations(
+    group: &ApplicationGroup,
+    template: &AppProjectTemplate,
+    target_cluster: &Cluster,
+) -> Result<Option<(Vec<AppProjectDestination>, Vec<String>)>> {
+    let cluster = &target_cluster.spec.destination;
+    let Some(mut destinations) = template.destinations.clone() else {
+        return Ok(None);
+    };
+    // Only entries admitting the target workload Cluster bound its Releases.
+    let target_namespaces = |destinations: &[AppProjectDestination]| {
+        destinations
+            .iter()
+            .filter(|destination| destination_admits_cluster(destination, cluster))
+            .map(|destination| destination.namespace.clone())
+            .collect::<Vec<_>>()
+    };
+    if let Some(namespace) = &group.spec.destination_namespace {
+        if !namespace_matches_any(namespace, &target_namespaces(&destinations)) {
+            destinations.push(AppProjectDestination {
+                server: cluster.server.clone(),
+                name: cluster.name.clone(),
+                namespace: namespace.clone(),
+            });
+        }
+    }
+    let mut destination_namespaces = target_namespaces(&destinations);
+    if destination_namespaces.is_empty() {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} projectTemplate.destinations admits no namespace on Cluster {:?}; add an entry for it, or omit destinations to derive them from the group's Releases",
+            group.metadata.name, target_cluster.metadata.name
+        )));
+    }
+    destination_namespaces.sort();
+    destination_namespaces.dedup();
+    Ok(Some((destinations, destination_namespaces)))
+}
+
+/// Whether an AppProject destination's server or name pattern admits a Cluster.
+/// A Cluster without a server or name matches only patterns admitting any value.
+fn destination_admits_cluster(destination: &AppProjectDestination, cluster: &ClusterDestination) -> bool {
+    let matches = |pattern: &Option<String>, value: &Option<String>| {
+        pattern.as_deref().is_some_and(|pattern| {
+            Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(value.as_deref().unwrap_or_default()))
+        })
+    };
+    matches(&destination.server, &cluster.server) || matches(&destination.name, &cluster.name)
 }
 
 fn resolve_project_source_repositories(
@@ -2140,12 +2371,6 @@ fn resolve_project_source_repositories(
 /// The Argo CD glob that admits every namespace, group, or kind.
 const PERMISSIVE_PATTERN: &str = "*";
 
-/// Whether an AppProject resource permission already admits every cluster-scoped resource.
-fn is_permissive_resource(permission: &Value) -> bool {
-    permission.get("group").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
-        && permission.get("kind").and_then(Value::as_str) == Some(PERMISSIVE_PATTERN)
-}
-
 /// Whether an Argo CD namespace glob list admits a namespace.
 pub fn namespace_matches_any(namespace: &str, patterns: &[String]) -> bool {
     patterns
@@ -2164,7 +2389,7 @@ fn validate_project_namespace_scope(
     {
         if !namespace_matches_any(namespace, patterns) {
             return Err(NylError::config(format!(
-                "Release {}/{} uses namespace {namespace:?}, which is outside ApplicationGroup.spec.projectTemplate.destinationNamespaces [{}]",
+                "Release {}/{} uses namespace {namespace:?}, which is outside ApplicationGroup.spec.projectTemplate.destinations [{}] for the target Cluster",
                 group.metadata.name,
                 release.metadata.name,
                 patterns.iter().map(|value| format!("{value:?}")).collect::<Vec<_>>().join(", ")
@@ -2894,6 +3119,136 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generated_project(spec: AppProjectTemplate) -> GeneratedProject {
+        GeneratedProject {
+            metadata: serde_json::json!({"name": "web", "namespace": "argocd"}),
+            spec,
+            group: "web".into(),
+            cluster: "production".into(),
+            destination: ClusterDestination {
+                server: Some("https://kubernetes.default.svc".into()),
+                name: None,
+            },
+            namespace_create: true,
+            declared_namespaces: None,
+        }
+    }
+
+    fn scoped_cluster() -> Cluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.gitops.nyl/v1", "kind": "Cluster", "metadata": {"name": "production"},
+            "spec": {"destination": {"server": "https://kubernetes.default.svc"},
+                "kubernetes": {"kubeVersion": "1.31.4",
+                    "apiVersions": ["v1", "v1/Namespace", "v1/ConfigMap", "rbac.authorization.k8s.io/v1/ClusterRole"],
+                    "clusterScopedKinds": ["core/Namespace", "rbac.authorization.k8s.io/ClusterRole"]}}
+        }))
+        .unwrap()
+    }
+
+    fn usage(kinds: &[(&str, &str)]) -> ProjectUsage {
+        ProjectUsage {
+            namespaces: BTreeSet::from(["web".to_owned()]),
+            kinds: kinds
+                .iter()
+                .map(|(group, kind)| ((*group).to_owned(), (*kind).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_generated_project_derives_whitelists_from_rendered_kinds_by_scope() {
+        let cluster = scoped_cluster();
+        // A CRD rendered in the target decides its kind's scope.
+        let crd = serde_json::json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+            "spec": {"group": "example.com", "scope": "Cluster", "names": {"kind": "Widget"}}});
+        let scopes = ScopeResolver::new(&cluster, [&crd]);
+        let project = generated_project(AppProjectTemplate::default())
+            .finish(
+                &usage(&[
+                    ("", "ConfigMap"),
+                    ("", "Namespace"),
+                    ("rbac.authorization.k8s.io", "ClusterRole"),
+                    ("example.com", "Widget"),
+                ]),
+                &scopes,
+            )
+            .unwrap();
+        assert_eq!(
+            project["spec"]["clusterResourceWhitelist"],
+            serde_json::json!([
+                {"group": "", "kind": "Namespace"},
+                {"group": "example.com", "kind": "Widget"},
+                {"group": "rbac.authorization.k8s.io", "kind": "ClusterRole"},
+            ])
+        );
+        assert_eq!(
+            project["spec"]["namespaceResourceWhitelist"],
+            serde_json::json!([{"group": "", "kind": "ConfigMap"}])
+        );
+        assert_eq!(
+            project["spec"]["destinations"],
+            serde_json::json!([{"server": "https://kubernetes.default.svc", "namespace": "web"}])
+        );
+    }
+
+    #[test]
+    fn test_generated_project_requires_known_scopes_only_for_derived_whitelists() {
+        let cluster = scoped_cluster();
+        let scopes = ScopeResolver::new(&cluster, []);
+        let unknown = usage(&[("example.com", "Widget")]);
+        let error = generated_project(AppProjectTemplate::default())
+            .finish(&unknown, &scopes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("example.com/Widget"), "{error}");
+        assert!(error.contains("nyl capture cluster production"), "{error}");
+        // Declaring both whitelists needs no scope knowledge.
+        let declared = AppProjectTemplate {
+            cluster_resource_whitelist: Some(Vec::new()),
+            namespace_resource_whitelist: Some(vec![AppProjectResourcePattern {
+                group: "example.com".into(),
+                kind: "Widget".into(),
+                name: None,
+            }]),
+            ..AppProjectTemplate::default()
+        };
+        let project = generated_project(declared).finish(&unknown, &scopes).unwrap();
+        // Namespace creation stays admitted under a declared cluster whitelist.
+        assert_eq!(
+            project["spec"]["clusterResourceWhitelist"],
+            serde_json::json!([{"group": "", "kind": "Namespace", "name": "web"}])
+        );
+    }
+
+    #[test]
+    fn test_destination_admits_cluster_by_server_or_name_pattern() {
+        let destination = |server: Option<&str>, name: Option<&str>| AppProjectDestination {
+            server: server.map(ToOwned::to_owned),
+            name: name.map(ToOwned::to_owned),
+            namespace: "*".to_owned(),
+        };
+        let by_server = ClusterDestination {
+            server: Some("https://kubernetes.default.svc".to_owned()),
+            name: None,
+        };
+        let by_name = ClusterDestination {
+            server: None,
+            name: Some("production".to_owned()),
+        };
+        // The default `server: '*'` admits clusters addressed either way.
+        assert!(destination_admits_cluster(&destination(Some("*"), None), &by_server));
+        assert!(destination_admits_cluster(&destination(Some("*"), None), &by_name));
+        assert!(destination_admits_cluster(&destination(None, Some("prod*")), &by_name));
+        assert!(!destination_admits_cluster(
+            &destination(Some("https://*"), None),
+            &by_name
+        ));
+        assert!(!destination_admits_cluster(
+            &destination(None, Some("staging")),
+            &by_name
+        ));
+    }
 
     #[test]
     fn included_manifests_are_not_reported_as_unclaimed() {
