@@ -9,6 +9,10 @@ use serde_json::{Map, Value};
 use crate::resources::{ManagedNamespacePolicy, ManagedResourceDeletionPolicy};
 use crate::{NylError, Result};
 
+/// The directory beneath a target prefix that holds the generated Argo CD
+/// Applications and AppProjects, laid out like any rendered Application.
+pub const CATALOG_DIRECTORY: &str = "_nyl/catalog";
+
 const ARGOCD_SYNC_OPTIONS_ANNOTATION: &str = "argocd.argoproj.io/sync-options";
 const CRD_GROUP: &str = "apiextensions.k8s.io";
 const CRD_KIND: &str = "CustomResourceDefinition";

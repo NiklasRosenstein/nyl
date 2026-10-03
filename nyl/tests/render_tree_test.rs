@@ -606,12 +606,13 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
 
-    let project = fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project = fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap();
     assert!(project.contains("https://charts.example.invalid"));
     assert!(project.contains("https://example.invalid/deploy.git"));
     assert!(!project.contains("ssh://git@example.invalid/deploy.git"));
 
-    let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+    let application =
+        fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd-production/api.yaml")).unwrap();
     assert!(application.contains("targetRevision: deploy/production"));
     assert!(application.contains("path: production/workloads/api"));
     assert!(application.contains("recurse: true"));
@@ -621,13 +622,18 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert!(application.contains("server: https://kubernetes.default.svc"));
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert_eq!(application.matches("- ServerSideApply=true").count(), 1);
-    assert!(!fs::read_dir(root.join("_nyl/catalog/applications/argocd-production"))
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-")));
+    assert!(
+        !fs::read_dir(root.join("_nyl/catalog/application.argoproj.io/argocd-production"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("nyl-namespace-"))
+    );
 
-    assert!(root.join("_nyl/catalog/projects/workloads.yaml").is_file());
-    let catalog = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/production-catalog.yaml")).unwrap();
+    assert!(root
+        .join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")
+        .is_file());
+    let catalog =
+        fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml")).unwrap();
     assert!(catalog.contains("project: default"));
     assert!(catalog.contains("path: production/_nyl/catalog"));
     assert!(catalog.contains("targetRevision: deploy/production"));
@@ -1204,11 +1210,14 @@ spec:
         ])
         .assert()
         .success();
-    let catalog =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/gitops-system/production-catalog.yaml"))
-            .unwrap();
+    let catalog = fs::read_to_string(
+        output.join("production/_nyl/catalog/application.argoproj.io/gitops-system/production-catalog.yaml"),
+    )
+    .unwrap();
     assert!(catalog.contains("namespace: gitops-system"));
-    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project =
+        fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/gitops-system/workloads.yaml"))
+            .unwrap();
     assert!(project.contains("namespace: gitops-system"));
 }
 
@@ -1234,7 +1243,9 @@ fn project_templates_generate_constrained_projects() {
         ])
         .assert()
         .success();
-    let project = fs::read_to_string(output.join("production/_nyl/catalog/projects/workloads.yaml")).unwrap();
+    let project =
+        fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
+            .unwrap();
     assert!(project.contains("sourceRepos:"));
     assert!(project.contains("https://example.invalid/deploy.git"));
     assert!(project.contains("sourceNamespaces:"));
@@ -1382,8 +1393,10 @@ fn test_render_tree_expands_application_name_template_values_per_release() {
         .assert()
         .success();
     let application: serde_json::Value = serde_saphyr::from_str(
-        &fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/production-api.yaml"))
-            .unwrap(),
+        &fs::read_to_string(
+            output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/production-api.yaml"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(application["metadata"]["name"], "production-api");
@@ -1815,7 +1828,8 @@ fn applications_inherit_a_named_cluster_destination() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert!(application.contains("name: in-cluster"));
     assert!(!application.contains("server: https://kubernetes.default.svc"));
 }
@@ -2308,7 +2322,8 @@ fn release_can_append_explicitly_allowed_sync_options() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=true").count(), 1);
     assert!(application.contains("- RespectIgnoreDifferences=false"));
     assert!(!application.contains("+syncOptions"));
@@ -2345,7 +2360,8 @@ fn release_can_replace_the_default_sync_option_with_an_allowed_value() {
         .success();
 
     let application =
-        fs::read_to_string(output.join("production/_nyl/catalog/applications/argocd-production/api.yaml")).unwrap();
+        fs::read_to_string(output.join("production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"))
+            .unwrap();
     assert_eq!(application.matches("- ApplyOutOfSyncOnly=false").count(), 1);
     assert!(!application.contains("ApplyOutOfSyncOnly=true"));
 }
@@ -2649,7 +2665,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .is_ok());
     assert!(tree
         .get_path(std::path::Path::new(
-            "production/_nyl/catalog/applications/argocd-production/api.yaml"
+            "production/_nyl/catalog/application.argoproj.io/argocd-production/api.yaml"
         ))
         .is_ok());
     assert!(tree
@@ -2797,7 +2813,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     let application_diff_contents = fs::read_to_string(&application_diff).unwrap();
     assert!(application_diff_contents.contains("workloads/api/configmap/api/api.yaml"));
     assert!(application_diff_contents.contains("+  environment: changed"));
-    assert!(!application_diff_contents.contains("_nyl/catalog/projects"));
+    assert!(!application_diff_contents.contains("_nyl/catalog/appproject.argoproj.io"));
 
     let failing_diff = fixture.path().join("artifacts/failing.diff");
     Command::cargo_bin("nyl")
@@ -2858,7 +2874,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
         .assert()
         .success();
     let catalog_diff_contents = fs::read_to_string(catalog_diff).unwrap();
-    assert!(catalog_diff_contents.contains("_nyl/catalog/projects/workloads.yaml"));
+    assert!(catalog_diff_contents.contains("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"));
     assert!(!catalog_diff_contents.contains("workloads/api/configmap/api/api.yaml"));
 }
 
@@ -4014,7 +4030,7 @@ fn created_release_is_rendered_by_the_group_that_owns_its_directory() {
 
     let root = fixture.path().join("deploy-worktree/production");
     assert!(root
-        .join("_nyl/catalog/applications/argocd-production/web.yaml")
+        .join("_nyl/catalog/application.argoproj.io/argocd-production/web.yaml")
         .is_file());
 }
 
@@ -4053,7 +4069,7 @@ spec:
 
     let root = fixture.path().join("deploy-worktree/production");
     let project = nyl::yaml::parse_yaml_value_k8s_compatible(
-        &fs::read_to_string(root.join("_nyl/catalog/projects/workloads.yaml")).unwrap(),
+        &fs::read_to_string(root.join("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")).unwrap(),
     )
     .unwrap();
     assert_eq!(project["metadata"]["name"], "workloads");
@@ -4072,7 +4088,7 @@ spec:
         serde_json::json!(["https://example.invalid/deploy.git"])
     );
 
-    let application = fs::read_to_string(root.join("_nyl/catalog/applications/argocd/api.yaml")).unwrap();
+    let application = fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd/api.yaml")).unwrap();
     assert!(application.contains("project: workloads"));
 }
 

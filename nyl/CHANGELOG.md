@@ -104,7 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, and directories left empty by removed files are deleted. The
   next render replaces an indexed `resources.yaml` automatically. CRDs of every
   API version stay in `crd/<name>.yaml`, so the same CRD at two versions is
-  rejected as a duplicate.
+  rejected as a duplicate. The generated catalog uses the same layout beneath
+  `_nyl/catalog`, for example
+  `_nyl/catalog/application.argoproj.io/argocd/<name>.yaml` and
+  `_nyl/catalog/appproject.argoproj.io/argocd/<name>.yaml`; seed a new target's
+  catalog Application from its new path.
 
 - **BREAKING**: `ApplicationGroup.spec.applicationNameTemplate` no longer
   expands `{{ … }}` protected with `{% raw %}`. It must contain at least one

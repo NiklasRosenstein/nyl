@@ -12,11 +12,15 @@ For each release, Nyl writes:
 ```text
 <target-prefix>/<group-output>/<release>/<kind>[.<group>]/[<namespace>/]<name>.yaml
 <target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml
-<target-prefix>/_nyl/catalog/projects/<project-id>.yaml
-<target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml
-<target-prefix>/_nyl/catalog/applications/<argocd-namespace>/<target>-catalog.yaml
+<target-prefix>/_nyl/catalog/appproject.argoproj.io/<namespace>/<project>.yaml
+<target-prefix>/_nyl/catalog/application.argoproj.io/<namespace>/<application>.yaml
+<target-prefix>/_nyl/catalog/application.argoproj.io/<argocd-namespace>/<target>-catalog.yaml
 <target-prefix>/_nyl/index.json
 ```
+
+The catalog uses the same per-resource layout as a release, beneath the fixed
+`_nyl/catalog` directory that the catalog Application, a project-written parent,
+or an ApplicationSet syncs.
 
 Every resource is written to its own file, and Helm `# Source:` comments are
 retained. CRDs live in `crd/<crd-name>.yaml` whatever their API version. Other resources are placed by
