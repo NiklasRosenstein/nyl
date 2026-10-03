@@ -25,7 +25,7 @@ use crate::{NylError, Result};
 
 use super::{
     build_directory_application, ensure_managed_namespace, merge_sync_options, render_manifest_layout_with_provenance,
-    take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession,
+    take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession, CATALOG_DIRECTORY,
 };
 
 const TARGET_CACHE_ACTION: &str = "target-provenance-v3";
@@ -558,6 +558,7 @@ async fn compile_target_tree_inner(
     let input_digests = release_inputs.index_entries()?;
     let mut provenance_by_key = HashMap::new();
     let mut emitted_projects = BTreeSet::new();
+    let mut catalog_manifests = Vec::new();
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
     let mut pending_workloads = Vec::new();
@@ -579,11 +580,7 @@ async fn compile_target_tree_inner(
         let argocd_project_name = project.name;
         if let Some(manifest) = project.manifest {
             if emitted_projects.insert(project.catalog_id.clone()) {
-                insert_yaml(
-                    &mut files,
-                    PathBuf::from("_nyl/catalog/projects").join(format!("{}.yaml", project.catalog_id)),
-                    &manifest,
-                )?;
+                catalog_manifests.push(manifest);
             }
         }
         inputs.extend(source.provenance_inputs.iter().cloned());
@@ -738,11 +735,11 @@ async fn compile_target_tree_inner(
                 )));
             }
         }
-        for (relative, bytes) in
-            render_manifest_layout_with_provenance(&workload.manifests, &workload.manifest_provenance)?
-        {
+        // Every file of the release shares one provenance map.
+        let manifest_provenance = std::sync::Arc::new(workload.manifest_provenance);
+        for (relative, bytes) in render_manifest_layout_with_provenance(&workload.manifests, &manifest_provenance)? {
             let path = workload.release_directory.join(relative);
-            provenance_by_key.insert(path.clone(), workload.manifest_provenance.clone());
+            provenance_by_key.insert(path.clone(), manifest_provenance.clone());
             insert_file(&mut files, path, bytes)?;
         }
 
@@ -762,13 +759,7 @@ async fn compile_target_tree_inner(
             annotations: workload.group.spec.annotations.clone(),
         })?;
         apply_release_application_override(&mut application, &workload.release, &workload.group)?;
-        insert_yaml(
-            &mut files,
-            PathBuf::from("_nyl/catalog/applications")
-                .join(&workload.group.spec.application_namespace)
-                .join(format!("{}.yaml", workload.application_name)),
-            &application,
-        )?;
+        catalog_manifests.push(application);
     }
 
     for ((cluster, namespace), owner) in namespace_owners {
@@ -777,7 +768,7 @@ async fn compile_target_tree_inner(
         let application_name = format!("nyl-namespace-{suffix}");
         let namespace_directory = PathBuf::from("_nyl/namespaces").join(suffix);
         let key = crate::kubernetes::ResourceKey::from_json_value(&owner.manifest)?;
-        let provenance = HashMap::from([(key, owner.provenance.clone())]);
+        let provenance = std::sync::Arc::new(HashMap::from([(key, owner.provenance.clone())]));
         for (relative, bytes) in render_manifest_layout_with_provenance(&[owner.manifest], &provenance)? {
             let path = namespace_directory.join(relative);
             provenance_by_key.insert(path.clone(), provenance.clone());
@@ -798,24 +789,16 @@ async fn compile_target_tree_inner(
             labels: owner.labels,
             annotations: owner.annotations,
         })?;
-        insert_yaml(
-            &mut files,
-            PathBuf::from("_nyl/catalog/applications")
-                .join(&owner.application_namespace)
-                .join(format!("{application_name}.yaml")),
-            &application,
-        )?;
+        catalog_manifests.push(application);
     }
 
     if target.spec.catalog_application.enabled {
-        let (parent_name, application) = build_catalog_application(&target, &repository, &argocd)?;
-        insert_yaml(
-            &mut files,
-            PathBuf::from("_nyl/catalog/applications")
-                .join(&argocd.resource.spec.namespace)
-                .join(format!("{parent_name}.yaml")),
-            &application,
-        )?;
+        let application = build_catalog_application(&target, &repository, &argocd)?;
+        catalog_manifests.push(application);
+    }
+    // The catalog uses the per-resource layout of every rendered Application.
+    for (relative, bytes) in render_manifest_layout_with_provenance(&catalog_manifests, &HashMap::new())? {
+        insert_file(&mut files, Path::new(CATALOG_DIRECTORY).join(relative), bytes)?;
     }
 
     let state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
@@ -1653,7 +1636,7 @@ fn build_catalog_application(
     target: &DeploymentTarget,
     repository: &InlineGitRepository,
     argocd: &EffectiveArgoCDInstance,
-) -> Result<(String, Value)> {
+) -> Result<Value> {
     let defaults = &argocd.resource.spec.catalog_application_defaults;
     let overrides = &target.spec.catalog_application;
     let name = overrides
@@ -1674,7 +1657,7 @@ fn build_catalog_application(
     let mut annotations = defaults.annotations.clone();
     annotations.extend(overrides.annotations.clone());
     set_catalog_prune_option(&mut annotations, self_prune_policy);
-    let rendered_path = join_posix(target.publication_path_prefix(), Path::new("_nyl/catalog"))?;
+    let rendered_path = join_posix(target.publication_path_prefix(), Path::new(CATALOG_DIRECTORY))?;
     let application = build_directory_application(&DirectoryApplicationInput {
         name: name.clone(),
         application_namespace: argocd.resource.spec.namespace.clone(),
@@ -1689,7 +1672,7 @@ fn build_catalog_application(
         labels,
         annotations,
     })?;
-    Ok((name, application))
+    Ok(application)
 }
 
 fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: ManagedResourceDeletionPolicy) {
@@ -1880,8 +1863,8 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
     for tree in trees {
         let argocd = resolve_argocd_instance(inventory, &tree.target, instance_count)?;
         let control_plane = control_plane_identity(&argocd.cluster);
-        for (path, bytes) in tree.files.range(PathBuf::from("_nyl/catalog")..) {
-            if !path.starts_with("_nyl/catalog") {
+        for (path, bytes) in tree.files.range(PathBuf::from(CATALOG_DIRECTORY)..) {
+            if !path.starts_with(CATALOG_DIRECTORY) {
                 break;
             }
             let text = std::str::from_utf8(bytes)
@@ -2846,16 +2829,6 @@ fn collect_leaf_paths(value: &Value, segments: &mut Vec<String>, output: &mut Ve
         }
         _ => output.push(crate::resources::join_field_path_segments(segments)),
     }
-}
-
-fn insert_yaml(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, value: &Value) -> Result<()> {
-    let mut yaml = crate::yaml::serialize_yaml_value(value)
-        .map_err(|error| NylError::config(format!("Failed to serialize {}: {error}", path.display())))?
-        .into_bytes();
-    if !yaml.ends_with(b"\n") {
-        yaml.push(b'\n');
-    }
-    insert_file(files, path, yaml)
 }
 
 fn insert_file(files: &mut BTreeMap<PathBuf, Vec<u8>>, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
