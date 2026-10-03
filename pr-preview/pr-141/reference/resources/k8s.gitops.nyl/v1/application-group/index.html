@@ -129,8 +129,8 @@
 <p>Choose exactly one variant:</p>
 <ul>
 <li><a href="#field-spec.projectRef"><strong>projectRef</strong></a> — Uses the named <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a>, so the project can be shared between groups or managed outside Nyl.</li>
-<li><a href="#field-spec.projectTemplate"><strong>projectTemplate</strong></a> — Generates an AppProject for this group from the declared AppProject fields; omitted fields keep Argo CD’s permissive default-project values.</li>
-<li><strong>Neither</strong> — Generates a permissive AppProject named after the group, like Argo CD’s default project: every source repository, every destination, every cluster-scoped resource.</li>
+<li><a href="#field-spec.projectTemplate"><strong>projectTemplate</strong></a> — Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.</li>
+<li><strong>Neither</strong> — Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> with the group’s <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespaces, and the resource kinds it renders.</li>
 </ul>
 <p><a id="field-spec.annotations"></a></p>
 <h3 id="specannotations">spec.annotations</h3>
@@ -265,7 +265,7 @@
 <p><a id="field-spec.projectRef"></a></p>
 <h3 id="specprojectref">spec.projectRef</h3>
 <p><strong>Optional</strong> · string or null</p>
-<p>Project-local <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Mutually exclusive with <code>projectTemplate</code>; omitting both implies a permissive AppProject named after this group.</p>
+<p>Project-local <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Mutually exclusive with <code>projectTemplate</code>; omitting both implies an AppProject named after this group that admits only what the group deploys.</p>
 <p><a id="field-spec.projectTemplate"></a></p>
 <h3 id="specprojecttemplate">spec.projectTemplate</h3>
 <p><strong>Optional</strong> · object or null</p>
@@ -301,7 +301,7 @@
 <p><a id="field-spec.projectTemplate.clusterResourceWhitelist"></a></p>
 <h3 id="specprojecttemplateclusterresourcewhitelist">spec.projectTemplate.clusterResourceWhitelist</h3>
 <p><strong>Optional</strong> · array or null</p>
-<p><a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>-scoped resources the project admits. Omitted, every cluster-scoped resource; a declared list, including <code>[]</code>, admits only its patterns. Namespace permissions are added for the admitted namespaces when namespace creation is enabled.</p>
+<p><a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including <code>[]</code>, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind’s scope, from a CRD rendered in the target or the <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>’s recorded capabilities.</p>
 <p><a id="field-spec.projectTemplate.clusterResourceWhitelist%5B%5D"></a></p>
 <h3 id="specprojecttemplateclusterresourcewhitelist-1">spec.projectTemplate.clusterResourceWhitelist[]</h3>
 <p><strong>Required</strong> · object</p>
@@ -331,7 +331,7 @@
 <p><a id="field-spec.projectTemplate.destinations"></a></p>
 <h3 id="specprojecttemplatedestinations">spec.projectTemplate.destinations</h3>
 <p><strong>Optional</strong> · array or null</p>
-<p>Permitted destinations. Omitted, the project admits every cluster and namespace. A declared list must admit every effective <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespace and additional namespace on the target workload <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>; a fixed <code>destinationNamespace</code> is added for that <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> when no entry covers it.</p>
+<p>Permitted destinations. Omitted, the project admits the target workload <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> with every effective <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespace and additional namespace of the group. A declared list must admit every effective <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespace and additional namespace on the target workload <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>; a fixed <code>destinationNamespace</code> is added for that <a href="/nyl/pr-preview/pr-141/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> when no entry covers it.</p>
 <p><a id="field-spec.projectTemplate.destinations%5B%5D"></a></p>
 <h3 id="specprojecttemplatedestinations-1">spec.projectTemplate.destinations[]</h3>
 <p><strong>Required</strong> · object</p>
@@ -390,7 +390,7 @@
 <p><a id="field-spec.projectTemplate.namespaceResourceWhitelist"></a></p>
 <h3 id="specprojecttemplatenamespaceresourcewhitelist">spec.projectTemplate.namespaceResourceWhitelist</h3>
 <p><strong>Optional</strong> · array or null</p>
-<p>Namespaced resources the project admits. Omitted, every namespaced resource.</p>
+<p>Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.</p>
 <p><a id="field-spec.projectTemplate.namespaceResourceWhitelist%5B%5D"></a></p>
 <h3 id="specprojecttemplatenamespaceresourcewhitelist-1">spec.projectTemplate.namespaceResourceWhitelist[]</h3>
 <p><strong>Required</strong> · object</p>
@@ -437,7 +437,7 @@
 <p><a id="field-spec.projectTemplate.sourceRepos"></a></p>
 <h3 id="specprojecttemplatesourcerepos">spec.projectTemplate.sourceRepos</h3>
 <p><strong>Optional</strong> · array or null</p>
-<p>Permitted source repository URL patterns. Omitted, the project admits every repository (<code>*</code>).</p>
+<p>Permitted source repository URL patterns. Omitted, the project admits the target publication repository.</p>
 <p><a id="field-spec.projectTemplate.sourceRepos%5B%5D"></a></p>
 <h3 id="specprojecttemplatesourcerepos-1">spec.projectTemplate.sourceRepos[]</h3>
 <p><strong>Required</strong> · string</p>

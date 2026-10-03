@@ -55,7 +55,7 @@
     },
     "AppProjectTemplate": {
       "additionalProperties": false,
-      "description": "An Argo CD AppProject generated for one ApplicationGroup and target.\n\n`name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field takes the value of Argo CD's permissive `default` project, so a bare template only renames the implied project: every source repository, every destination, every cluster-scoped resource. Declare a field to narrow it.",
+      "description": "An Argo CD AppProject generated for one ApplicationGroup and target.\n\n`name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field is derived from what the group's Applications need on the target, so a bare template only renames the implied project: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds the group renders. Declare a field to set it explicitly.",
       "properties": {
         "annotations": {
           "additionalProperties": {
@@ -75,7 +75,7 @@
           ]
         },
         "clusterResourceWhitelist": {
-          "description": "Cluster-scoped resources the project admits. Omitted, every cluster-scoped resource; a declared list, including `[]`, admits only its patterns. Namespace permissions are added for the admitted namespaces when namespace creation is enabled.",
+          "description": "Cluster-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including `[]`, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind's scope, from a CRD rendered in the target or the Cluster's recorded capabilities.",
           "items": {
             "$ref": "#/$defs/AppProjectResourcePattern"
           },
@@ -100,7 +100,7 @@
           ]
         },
         "destinations": {
-          "description": "Permitted destinations. Omitted, the project admits every cluster and namespace. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.",
+          "description": "Permitted destinations. Omitted, the project admits the target workload Cluster with every effective Release namespace and additional namespace of the group. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.",
           "items": {
             "$ref": "#/$defs/AppProjectDestination"
           },
@@ -141,7 +141,7 @@
           ]
         },
         "namespaceResourceWhitelist": {
-          "description": "Namespaced resources the project admits. Omitted, every namespaced resource.",
+          "description": "Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.",
           "items": {
             "$ref": "#/$defs/AppProjectResourcePattern"
           },
@@ -187,7 +187,7 @@
           ]
         },
         "sourceRepos": {
-          "description": "Permitted source repository URL patterns. Omitted, the project admits every repository (`*`).",
+          "description": "Permitted source repository URL patterns. Omitted, the project admits the target publication repository.",
           "items": {
             "type": "string"
           },
@@ -414,7 +414,7 @@
           "title": "projectRef"
         },
         {
-          "description": "Generates an AppProject for this group from the declared AppProject fields; omitted fields keep Argo CD's permissive default-project values.",
+          "description": "Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.",
           "not": {
             "anyOf": [
               {
@@ -444,7 +444,7 @@
           "title": "projectTemplate"
         },
         {
-          "description": "Generates a permissive AppProject named after the group, like Argo CD's default project: every source repository, every destination, every cluster-scoped resource.",
+          "description": "Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders.",
           "properties": {
             "projectRef": {
               "type": "null"
@@ -516,7 +516,7 @@
           ]
         },
         "projectRef": {
-          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.",
+          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies an AppProject named after this group that admits only what the group deploys.",
           "type": [
             "string",
             "null"

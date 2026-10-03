@@ -98,18 +98,23 @@ with the same option key replace the generated or group-level value.</p>
 even when an application source repository is compromised. An
 <code dir="auto">AppProjectDefinition</code> with <code dir="auto">management: External</code> references an administrator-
 managed project without publishing its manifest.</p>
-<p>A group that declares no project gets an implied AppProject as permissive as
-Argo CD’s <code dir="auto">default</code> project: every source repository, every cluster and
-namespace, and every cluster-scoped resource. No Release namespace check
-applies.</p>
-<p><code dir="auto">ApplicationGroup.spec.projectTemplate</code> mirrors the AppProject spec fields and
-narrows exactly the fields it declares; omitted fields keep the permissive
-defaults. Declare <code dir="auto">sourceRepos</code>, <code dir="auto">destinations</code>, and <code dir="auto">clusterResourceWhitelist</code>
-for any group whose repository, namespace, or cluster-resource scope should be
-an enforced boundary. With declared <code dir="auto">destinations</code>, Nyl checks every Release
-namespace against the entries admitting the target workload Cluster, and adds
-Namespace permissions only when namespace creation is enabled and the
-cluster-resource whitelist is narrowed. The generated policy complements, but
+<p>A group that declares no project gets an implied least-privilege AppProject: the
+target publication repository, the target workload Cluster with the group’s
+Release namespaces, and exactly the resource kinds the group renders, split into
+cluster-scoped and namespaced whitelists. The project changes with the rendered
+output, so a Release that adds a ClusterRole also adds it to the project in the
+same render.</p>
+<p><code dir="auto">ApplicationGroup.spec.projectTemplate</code> mirrors the AppProject spec fields;
+declared fields are kept as written and omitted fields take the derived values.
+Declare a field to make it a fixed boundary that rendered output cannot widen.
+With declared <code dir="auto">destinations</code>, Nyl checks every Release namespace against the
+entries admitting the target workload Cluster, and adds Namespace permissions
+only when namespace creation is enabled and the cluster-resource whitelist is
+declared.</p>
+<p>Deriving a whitelist needs each rendered kind’s scope. It comes from a CRD
+rendered in the same target or from the Cluster’s recorded capabilities
+(<code dir="auto">clusterScopedKinds</code> and vendored CRDs); when neither knows a kind, rendering
+fails with a capture hint rather than guessing. The generated policy complements, but
 does not replace, Argo CD admission.</p>
 <p>The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
