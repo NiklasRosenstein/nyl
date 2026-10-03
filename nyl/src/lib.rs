@@ -24,8 +24,8 @@
 pub mod cli;
 
 pub use nyl_render::{
-    components, config, constants, error, generator, git, gitops, helm, kubernetes, postprocess, render, resources,
-    secrets, template, util, validation, yaml,
+    components, config, constants, editor, error, generator, git, gitops, helm, kubernetes, postprocess, render,
+    resources, secrets, template, util, validation, yaml,
 };
 
 // Re-export commonly used types

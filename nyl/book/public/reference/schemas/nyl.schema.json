@@ -46,6 +46,33 @@
       },
       "type": "object"
     },
+    "EditorSchemas": {
+      "description": "Where generated editor schemas live.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Generate them into `.nyl/schemas`, ignored by Git; each checkout runs `nyl schema annotate`.",
+          "type": "string"
+        },
+        {
+          "const": "vendored",
+          "description": "Commit them under the vendor directory in `schemas/editor`.",
+          "type": "string"
+        }
+      ]
+    },
+    "EditorSettings": {
+      "additionalProperties": false,
+      "description": "Editor integration settings.",
+      "properties": {
+        "schemas": {
+          "$ref": "#/$defs/EditorSchemas",
+          "default": "local",
+          "description": "Where `nyl schema annotate` writes the schemas its comments reference."
+        }
+      },
+      "type": "object"
+    },
     "KubeconformSettings": {
       "additionalProperties": false,
       "description": "Kubeconform's schema inputs and bounded execution policy.",
@@ -238,6 +265,13 @@
         }
       },
       "description": "Defaults for explicit cluster capture."
+    },
+    "editor": {
+      "$ref": "#/$defs/EditorSettings",
+      "default": {
+        "schemas": "local"
+      },
+      "description": "Editor integration, such as where `nyl schema annotate` writes schemas."
     },
     "project": {
       "$ref": "#/$defs/ProjectSettings",
