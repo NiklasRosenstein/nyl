@@ -74,9 +74,10 @@ pub fn take_managed_namespace(
 
 /// Serialize manifests into the rendered application directory layout.
 ///
-/// Each v1 CRD is stored as `crd/<metadata.name>.yaml`. Every other resource is
-/// stored in its own file at [`resource_path`]. Paths are returned relative to
-/// the application directory and sorted lexicographically.
+/// Each CRD, whatever its API version, is stored as `crd/<metadata.name>.yaml`.
+/// Every other resource is stored in its own file at [`resource_path`]. Paths
+/// are returned relative to the application directory and sorted
+/// lexicographically.
 pub fn render_manifest_layout(resources: &[Value]) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     render_manifest_layout_with_provenance(resources, &HashMap::new())
 }
