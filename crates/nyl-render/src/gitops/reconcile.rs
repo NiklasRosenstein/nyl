@@ -197,9 +197,10 @@ pub fn reconcile_rendered_tree_with_options(
 
     fs::create_dir_all(output_root)?;
     install_transaction(output_root, &next_index)?;
-    // Remove stale files before installing new ones. On a case-insensitive
-    // filesystem a stale `Admin.yaml` and a desired `admin.yaml` are one file,
-    // and removing the stale name afterwards would delete the new file.
+    // Remove stale files, and the directories they leave empty, before
+    // installing new ones. On a case-insensitive filesystem a stale
+    // `Admin.yaml` and a desired `admin.yaml` are one file, and removing the
+    // stale name afterwards would delete the new file.
     for stale in previous_files
         .keys()
         .filter(|path| !next_index.files.contains_key(*path) && !options.release.contains(Path::new(path)))
@@ -209,6 +210,7 @@ pub fn reconcile_rendered_tree_with_options(
         if stale_path.exists() {
             fs::remove_file(stale_path)?;
         }
+        remove_empty_parents(output_root, Path::new(stale))?;
     }
     for relative in desired.keys() {
         let source = staged.path().join(relative);
@@ -233,28 +235,56 @@ pub fn reconcile_rendered_tree_with_options(
 
 /// Return the existing entry that `relative` resolves to beneath `output_root`.
 ///
-/// On a case-insensitive filesystem, the entry may differ from `relative` in the
-/// case of its file name; the returned path carries the name found on disk, so
+/// On a case-insensitive filesystem, any component of the entry may differ from
+/// `relative` in case; the returned path carries the names found on disk, so
 /// ownership is checked against the file that would be replaced.
 fn existing_entry(output_root: &Path, relative: &Path) -> Result<Option<PathBuf>> {
-    let destination = output_root.join(relative);
-    if !destination.exists() {
+    if !output_root.join(relative).exists() {
         return Ok(None);
     }
-    let (Some(parent), Some(name)) = (destination.parent(), relative.file_name()) else {
-        return Ok(Some(relative.to_path_buf()));
-    };
-    let mut case_variant = None;
-    for entry in fs::read_dir(parent)? {
-        let entry_name = entry?.file_name();
-        if entry_name == name {
-            return Ok(Some(relative.to_path_buf()));
+    let mut resolved = PathBuf::new();
+    for component in relative.components() {
+        let name = component.as_os_str();
+        let mut on_disk = None;
+        for entry in fs::read_dir(output_root.join(&resolved))? {
+            let entry_name = entry?.file_name();
+            if entry_name == name {
+                on_disk = Some(entry_name);
+                break;
+            }
+            if on_disk.is_none() && entry_name.eq_ignore_ascii_case(name) {
+                on_disk = Some(entry_name);
+            }
         }
-        if entry_name.eq_ignore_ascii_case(name) {
-            case_variant = Some(relative.with_file_name(entry_name));
-        }
+        resolved.push(on_disk.as_deref().unwrap_or(name));
     }
-    Ok(Some(case_variant.unwrap_or_else(|| relative.to_path_buf())))
+    Ok(Some(resolved))
+}
+
+/// Remove the directories between `relative` and `output_root` that became empty.
+///
+/// A directory renamed only by case is then recreated under its new name on a
+/// case-insensitive filesystem instead of receiving the new files.
+fn remove_empty_parents(output_root: &Path, relative: &Path) -> Result<()> {
+    let mut directory = relative.parent();
+    while let Some(current) = directory.filter(|current| !current.as_os_str().is_empty()) {
+        let path = output_root.join(current);
+        match fs::read_dir(&path) {
+            Ok(mut entries) => {
+                let empty = entries.next().is_none();
+                // Close the listing first; Windows cannot remove an open directory.
+                drop(entries);
+                if !empty {
+                    break;
+                }
+                fs::remove_dir(&path)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = current.parent();
+    }
+    Ok(())
 }
 
 fn ensure_same_owner(path: &Path, actual: &RenderIndex, expected: &RenderIndex) -> Result<()> {
@@ -493,6 +523,48 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["admin.yaml"]);
         assert_eq!(fs::read(root.join("apps/admin.yaml")).unwrap(), b"role\n");
+    }
+
+    #[test]
+    fn case_only_directory_rename_installs_the_new_directory_name() {
+        // Meaningful on case-insensitive filesystems (macOS and Windows CI),
+        // where both names refer to one directory.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([(PathBuf::from("Web/api/a.yaml"), b"a\n".to_vec())]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+
+        let second = BTreeMap::from([(PathBuf::from("web/api/a.yaml"), b"a\n".to_vec())]);
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "_nyl")
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["web"]);
+        assert_eq!(fs::read(root.join("web/api/a.yaml")).unwrap(), b"a\n");
+    }
+
+    #[test]
+    fn removing_owned_files_prunes_only_directories_left_empty() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("production");
+        let first = BTreeMap::from([
+            (PathBuf::from("api/configmap/api/a.yaml"), b"a\n".to_vec()),
+            (PathBuf::from("api/secret/api/b.yaml"), b"b\n".to_vec()),
+            (PathBuf::from("api/service/api/c.yaml"), b"c\n".to_vec()),
+        ]);
+        reconcile_rendered_tree(&root, &first, index()).unwrap();
+        fs::write(root.join("api/secret/api/unowned.txt"), "keep\n").unwrap();
+
+        let second = BTreeMap::from([(PathBuf::from("api/service/api/c.yaml"), b"c\n".to_vec())]);
+        reconcile_rendered_tree(&root, &second, index()).unwrap();
+
+        assert!(!root.join("api/configmap").exists());
+        assert!(root.join("api/secret/api/unowned.txt").is_file());
+        assert!(root.join("api/service/api/c.yaml").is_file());
     }
 
     #[test]

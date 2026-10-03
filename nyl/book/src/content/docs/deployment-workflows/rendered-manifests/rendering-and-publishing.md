@@ -38,8 +38,9 @@ character encoded (`%63on.yaml`). A segment that would exceed the 255-byte file
 name limit keeps its first characters followed by `_` and a digest of the full
 name; all other names are written unchanged. Nyl rejects two resources whose
 paths differ only in case, because they would collide on case-insensitive
-filesystems. When an object is renamed only by case, the next render replaces
-the file under its new name. Generated Argo CD
+filesystems. When a file or directory is renamed only by case, for example an
+object name or a Release, the next render writes it under its new name.
+Directories left empty by removed files are deleted. Generated Argo CD
 Applications use `source.directory.recurse: true`, so every nested directory
 is included.
 

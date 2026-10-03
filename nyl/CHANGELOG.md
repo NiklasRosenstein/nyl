@@ -100,7 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   percent-encoded so distinct objects never share a file, Windows device names
   are escaped, and a name over the 255-byte file name limit is shortened with a
   digest. Nyl rejects resources that would collide on a case-insensitive
-  filesystem, and a case-only rename replaces the file under its new name. The
+  filesystem, a case-only rename of a file or directory is written under its new
+  name, and directories left empty by removed files are deleted. The
   next render replaces an indexed `resources.yaml` automatically. CRDs of every
   API version stay in `crd/<name>.yaml`, so the same CRD at two versions is
   rejected as a duplicate.
