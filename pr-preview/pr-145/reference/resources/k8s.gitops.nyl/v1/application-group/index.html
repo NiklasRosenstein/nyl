@@ -87,8 +87,9 @@
 <span class="line"><span style="color:#85E89D">  applicationNamespace</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">argocd</span></span>
 <span class="line"><span style="color:#85E89D">  destinationNamespace</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">workloads</span></span>
 <span class="line"><span style="color:#85E89D">  projectTemplate</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#85E89D">    destinationNamespaces</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#9ECBFF">workloads</span></span>
+<span class="line"><span style="color:#85E89D">    destinations</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">namespace</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">workloads</span></span>
+<span class="line"><span style="color:#85E89D">        server</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">https://kubernetes.default.svc</span></span>
 <span class="line"><span style="color:#85E89D">  source</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">    path</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">applications/workloads</span></span></code></pre>
 <h2 id="fields">Fields</h2>
@@ -128,8 +129,8 @@
 <p>Choose exactly one variant:</p>
 <ul>
 <li><a href="#field-spec.projectRef"><strong>projectRef</strong></a> — Uses the named <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a>, so the project can be shared between groups or managed outside Nyl.</li>
-<li><a href="#field-spec.projectTemplate"><strong>projectTemplate</strong></a> — Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.</li>
-<li><strong>Neither</strong> — Generates a permissive AppProject named after the group: the target workload <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>, every namespace, every cluster-scoped resource.</li>
+<li><a href="#field-spec.projectTemplate"><strong>projectTemplate</strong></a> — Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.</li>
+<li><strong>Neither</strong> — Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> with the group’s <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespaces, and the resource kinds it renders.</li>
 </ul>
 <p><a id="field-spec.annotations"></a></p>
 <h3 id="specannotations">spec.annotations</h3>
@@ -264,16 +265,43 @@
 <p><a id="field-spec.projectRef"></a></p>
 <h3 id="specprojectref">spec.projectRef</h3>
 <p><strong>Optional</strong> · string or null</p>
-<p>Project-local <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Mutually exclusive with <code>projectTemplate</code>; omitting both implies a permissive AppProject named after this group.</p>
+<p>Project-local <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/app-project-definition/">AppProjectDefinition</a> identity. Mutually exclusive with <code>projectTemplate</code>; omitting both implies an AppProject named after this group that admits only what the group deploys.</p>
 <p><a id="field-spec.projectTemplate"></a></p>
 <h3 id="specprojecttemplate">spec.projectTemplate</h3>
 <p><strong>Optional</strong> · object or null</p>
 <p>Constrained generated AppProject. Mutually exclusive with <code>projectRef</code>; declaring it requires explicit destination namespaces.</p>
 <p>Unknown fields are rejected.</p>
+<p><a id="field-spec.projectTemplate.annotations"></a></p>
+<h3 id="specprojecttemplateannotations">spec.projectTemplate.annotations</h3>
+<p><strong>Optional</strong> · object</p>
+<p>Annotations on the generated AppProject.</p>
+<p><a id="field-spec.projectTemplate.annotations%5Bkey%5D"></a></p>
+<h3 id="specprojecttemplateannotationskey">spec.projectTemplate.annotations[key]</h3>
+<p><strong>Optional</strong> · string</p>
+<p><a id="field-spec.projectTemplate.clusterResourceBlacklist"></a></p>
+<h3 id="specprojecttemplateclusterresourceblacklist">spec.projectTemplate.clusterResourceBlacklist</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p><a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>-scoped resources the project denies.</p>
+<p><a id="field-spec.projectTemplate.clusterResourceBlacklist%5B%5D"></a></p>
+<h3 id="specprojecttemplateclusterresourceblacklist-1">spec.projectTemplate.clusterResourceBlacklist[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.projectTemplate.clusterResourceBlacklist%5B%5D.group"></a></p>
+<h3 id="specprojecttemplateclusterresourceblacklistgroup">spec.projectTemplate.clusterResourceBlacklist[].group</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
+<p><a id="field-spec.projectTemplate.clusterResourceBlacklist%5B%5D.kind"></a></p>
+<h3 id="specprojecttemplateclusterresourceblacklistkind">spec.projectTemplate.clusterResourceBlacklist[].kind</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes resource kind pattern.</p>
+<p><a id="field-spec.projectTemplate.clusterResourceBlacklist%5B%5D.name"></a></p>
+<h3 id="specprojecttemplateclusterresourceblacklistname">spec.projectTemplate.clusterResourceBlacklist[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional resource name pattern.</p>
 <p><a id="field-spec.projectTemplate.clusterResourceWhitelist"></a></p>
 <h3 id="specprojecttemplateclusterresourcewhitelist">spec.projectTemplate.clusterResourceWhitelist</h3>
-<p><strong>Optional</strong> · array</p>
-<p>Explicit cluster-scoped resource permissions. Namespace permissions are added for approved namespaces when creation is enabled.</p>
+<p><strong>Optional</strong> · array or null</p>
+<p><a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including <code>[]</code>, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind’s scope, from a CRD rendered in the target or the <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>’s recorded capabilities.</p>
 <p><a id="field-spec.projectTemplate.clusterResourceWhitelist%5B%5D"></a></p>
 <h3 id="specprojecttemplateclusterresourcewhitelist-1">spec.projectTemplate.clusterResourceWhitelist[]</h3>
 <p><strong>Required</strong> · object</p>
@@ -290,17 +318,135 @@
 <h3 id="specprojecttemplateclusterresourcewhitelistname">spec.projectTemplate.clusterResourceWhitelist[].name</h3>
 <p><strong>Optional</strong> · string or null</p>
 <p>Optional resource name pattern.</p>
-<p><a id="field-spec.projectTemplate.destinationNamespaces"></a></p>
-<h3 id="specprojecttemplatedestinationnamespaces">spec.projectTemplate.destinationNamespaces</h3>
-<p><strong>Optional</strong> · array</p>
-<p>Permitted destination namespace patterns. Must cover all effective <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespaces and additional namespaces; required when no fixed destination namespace is configured.</p>
-<p><a id="field-spec.projectTemplate.destinationNamespaces%5B%5D"></a></p>
-<h3 id="specprojecttemplatedestinationnamespaces-1">spec.projectTemplate.destinationNamespaces[]</h3>
+<p><a id="field-spec.projectTemplate.description"></a></p>
+<h3 id="specprojecttemplatedescription">spec.projectTemplate.description</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Project description.</p>
+<p><a id="field-spec.projectTemplate.destinationServiceAccounts"></a></p>
+<h3 id="specprojecttemplatedestinationserviceaccounts">spec.projectTemplate.destinationServiceAccounts</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Service accounts used for sync per destination, as Argo CD <code>spec.destinationServiceAccounts</code>.</p>
+<h3 id="specprojecttemplatedestinationserviceaccounts-1">spec.projectTemplate.destinationServiceAccounts[]</h3>
+<p>Any value is allowed.</p>
+<p><a id="field-spec.projectTemplate.destinations"></a></p>
+<h3 id="specprojecttemplatedestinations">spec.projectTemplate.destinations</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Permitted destinations. Omitted, the project admits the target workload <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> with every effective <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespace and additional namespace of the group. A declared list must admit every effective <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/release/">Release</a> namespace and additional namespace on the target workload <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>; a fixed <code>destinationNamespace</code> is added for that <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> when no entry covers it.</p>
+<p><a id="field-spec.projectTemplate.destinations%5B%5D"></a></p>
+<h3 id="specprojecttemplatedestinations-1">spec.projectTemplate.destinations[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>One Argo CD AppProject destination. At least one of <code>server</code> and <code>name</code> is required.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.projectTemplate.destinations%5B%5D.name"></a></p>
+<h3 id="specprojecttemplatedestinationsname">spec.projectTemplate.destinations[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Argo CD cluster name pattern.</p>
+<p><a id="field-spec.projectTemplate.destinations%5B%5D.namespace"></a></p>
+<h3 id="specprojecttemplatedestinationsnamespace">spec.projectTemplate.destinations[].namespace</h3>
 <p><strong>Required</strong> · string</p>
+<p>Namespace pattern, such as <code>apps</code>, <code>preview-*</code>, or <code>*</code>.</p>
+<p><a id="field-spec.projectTemplate.destinations%5B%5D.server"></a></p>
+<h3 id="specprojecttemplatedestinationsserver">spec.projectTemplate.destinations[].server</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p><a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a> API server URL pattern, such as <code>https://kubernetes.default.svc</code> or <code>*</code>.</p>
+<p><a id="field-spec.projectTemplate.finalizers"></a></p>
+<h3 id="specprojecttemplatefinalizers">spec.projectTemplate.finalizers</h3>
+<p><strong>Optional</strong> · array</p>
+<p>Finalizers on the generated AppProject, such as <code>resources-finalizer.argocd.argoproj.io</code>.</p>
+<p><a id="field-spec.projectTemplate.finalizers%5B%5D"></a></p>
+<h3 id="specprojecttemplatefinalizers-1">spec.projectTemplate.finalizers[]</h3>
+<p><strong>Required</strong> · string</p>
+<p><a id="field-spec.projectTemplate.labels"></a></p>
+<h3 id="specprojecttemplatelabels">spec.projectTemplate.labels</h3>
+<p><strong>Optional</strong> · object</p>
+<p>Labels on the generated AppProject.</p>
+<p><a id="field-spec.projectTemplate.labels%5Bkey%5D"></a></p>
+<h3 id="specprojecttemplatelabelskey">spec.projectTemplate.labels[key]</h3>
+<p><strong>Optional</strong> · string</p>
 <p><a id="field-spec.projectTemplate.name"></a></p>
 <h3 id="specprojecttemplatename">spec.projectTemplate.name</h3>
 <p><strong>Optional</strong> · string or null</p>
 <p>Generated AppProject name; defaults to the <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroup</a> name. Must be unambiguous across targets sharing an Argo CD namespace.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceBlacklist"></a></p>
+<h3 id="specprojecttemplatenamespaceresourceblacklist">spec.projectTemplate.namespaceResourceBlacklist</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Namespaced resources the project denies.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceBlacklist%5B%5D"></a></p>
+<h3 id="specprojecttemplatenamespaceresourceblacklist-1">spec.projectTemplate.namespaceResourceBlacklist[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceBlacklist%5B%5D.group"></a></p>
+<h3 id="specprojecttemplatenamespaceresourceblacklistgroup">spec.projectTemplate.namespaceResourceBlacklist[].group</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceBlacklist%5B%5D.kind"></a></p>
+<h3 id="specprojecttemplatenamespaceresourceblacklistkind">spec.projectTemplate.namespaceResourceBlacklist[].kind</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes resource kind pattern.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceBlacklist%5B%5D.name"></a></p>
+<h3 id="specprojecttemplatenamespaceresourceblacklistname">spec.projectTemplate.namespaceResourceBlacklist[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional resource name pattern.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceWhitelist"></a></p>
+<h3 id="specprojecttemplatenamespaceresourcewhitelist">spec.projectTemplate.namespaceResourceWhitelist</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceWhitelist%5B%5D"></a></p>
+<h3 id="specprojecttemplatenamespaceresourcewhitelist-1">spec.projectTemplate.namespaceResourceWhitelist[]</h3>
+<p><strong>Required</strong> · object</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceWhitelist%5B%5D.group"></a></p>
+<h3 id="specprojecttemplatenamespaceresourcewhitelistgroup">spec.projectTemplate.namespaceResourceWhitelist[].group</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes API group pattern, such as <code>apiextensions.k8s.io</code> or <code>*</code>.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceWhitelist%5B%5D.kind"></a></p>
+<h3 id="specprojecttemplatenamespaceresourcewhitelistkind">spec.projectTemplate.namespaceResourceWhitelist[].kind</h3>
+<p><strong>Required</strong> · string</p>
+<p>Kubernetes resource kind pattern.</p>
+<p><a id="field-spec.projectTemplate.namespaceResourceWhitelist%5B%5D.name"></a></p>
+<h3 id="specprojecttemplatenamespaceresourcewhitelistname">spec.projectTemplate.namespaceResourceWhitelist[].name</h3>
+<p><strong>Optional</strong> · string or null</p>
+<p>Optional resource name pattern.</p>
+<p><a id="field-spec.projectTemplate.orphanedResources"></a></p>
+<h3 id="specprojecttemplateorphanedresources">spec.projectTemplate.orphanedResources</h3>
+<p><strong>Optional</strong> · any value</p>
+<p>Orphaned resource monitoring, as Argo CD <code>spec.orphanedResources</code>.</p>
+<p><a id="field-spec.projectTemplate.permitOnlyProjectScopedClusters"></a></p>
+<h3 id="specprojecttemplatepermitonlyprojectscopedclusters">spec.projectTemplate.permitOnlyProjectScopedClusters</h3>
+<p><strong>Optional</strong> · boolean or null</p>
+<p>Whether only clusters scoped to this project are admitted, as Argo CD <code>spec.permitOnlyProjectScopedClusters</code>.</p>
+<p><a id="field-spec.projectTemplate.roles"></a></p>
+<h3 id="specprojecttemplateroles">spec.projectTemplate.roles</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Project roles, as Argo CD <code>spec.roles</code>.</p>
+<h3 id="specprojecttemplateroles-1">spec.projectTemplate.roles[]</h3>
+<p>Any value is allowed.</p>
+<p><a id="field-spec.projectTemplate.signatureKeys"></a></p>
+<h3 id="specprojecttemplatesignaturekeys">spec.projectTemplate.signatureKeys</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>GnuPG keys required to verify source commits, as Argo CD <code>spec.signatureKeys</code>.</p>
+<h3 id="specprojecttemplatesignaturekeys-1">spec.projectTemplate.signatureKeys[]</h3>
+<p>Any value is allowed.</p>
+<p><a id="field-spec.projectTemplate.sourceNamespaces"></a></p>
+<h3 id="specprojecttemplatesourcenamespaces">spec.projectTemplate.sourceNamespaces</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Namespaces whose Applications may use the project. <code>applicationNamespace</code> is always added.</p>
+<p><a id="field-spec.projectTemplate.sourceNamespaces%5B%5D"></a></p>
+<h3 id="specprojecttemplatesourcenamespaces-1">spec.projectTemplate.sourceNamespaces[]</h3>
+<p><strong>Required</strong> · string</p>
+<p><a id="field-spec.projectTemplate.sourceRepos"></a></p>
+<h3 id="specprojecttemplatesourcerepos">spec.projectTemplate.sourceRepos</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Permitted source repository URL patterns. Omitted, the project admits the target publication repository.</p>
+<p><a id="field-spec.projectTemplate.sourceRepos%5B%5D"></a></p>
+<h3 id="specprojecttemplatesourcerepos-1">spec.projectTemplate.sourceRepos[]</h3>
+<p><strong>Required</strong> · string</p>
+<p><a id="field-spec.projectTemplate.syncWindows"></a></p>
+<h3 id="specprojecttemplatesyncwindows">spec.projectTemplate.syncWindows</h3>
+<p><strong>Optional</strong> · array or null</p>
+<p>Sync windows, as Argo CD <code>spec.syncWindows</code>.</p>
+<h3 id="specprojecttemplatesyncwindows-1">spec.projectTemplate.syncWindows[]</h3>
+<p>Any value is allowed.</p>
 <p><a id="field-spec.releaseCustomization"></a></p>
 <h3 id="specreleasecustomization">spec.releaseCustomization</h3>
 <p><strong>Optional</strong> · object</p>

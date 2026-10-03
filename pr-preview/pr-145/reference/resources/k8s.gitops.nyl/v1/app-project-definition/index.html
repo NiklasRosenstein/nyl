@@ -76,7 +76,7 @@
 <p>Required when one project is shared by several <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroups</a>, when the Argo CD AppProject is externally managed, or when the project needs AppProject fields beyond <code>spec.projectTemplate</code>.</p>
 </details>
 <details id="if-omitted"><summary>If omitted</summary>
-<p>An <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroup</a> generates its own AppProject: <code>spec.projectTemplate</code> for a least-privilege project, or the implied permissive project when the group declares neither. Nyl does not assume an existing Argo CD project supplies the required policy contract.</p>
+<p>An <a href="/nyl/pr-preview/pr-145/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroup</a> generates its own AppProject, admitting only what the group’s Applications deploy unless <code>spec.projectTemplate</code> declares otherwise. Nyl does not assume an existing Argo CD project supplies the required policy contract.</p>
 </details>
 <h2 id="example">Example</h2>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">apiVersion</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">k8s.gitops.nyl/v1</span></span>
