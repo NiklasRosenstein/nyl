@@ -531,7 +531,7 @@
               "type": "null"
             }
           ],
-          "description": "Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces."
+          "description": "Generated AppProject fields. Mutually exclusive with `projectRef`; declared fields are kept as written and omitted fields are derived from what the group deploys."
         },
         "releaseCustomization": {
           "$ref": "#/$defs/GitOpsReleaseCustomization",

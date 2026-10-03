@@ -74,11 +74,29 @@
 at a time into its configured publication prefix.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="rendered-layout">Rendered layout</h2><a class="sl-anchor-link" href="#rendered-layout"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Rendered layout”</span></a></div>
 <p>For each release, Nyl writes:</p>
-<div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-141/_astro/ec.w36nc.css"><script type="module" src="/nyl/pr-preview/pr-141/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/resources.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/crd/&#x3C;crd-name>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/projects/&#x3C;project-id>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/applications/&#x3C;namespace>/&#x3C;application>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/applications/&#x3C;argocd-namespace>/&#x3C;target>-catalog.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/index.json</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="<target-prefix>/<group-output>/<release>/resources.yaml<target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml<target-prefix>/_nyl/catalog/projects/<project-id>.yaml<target-prefix>/_nyl/catalog/applications/<namespace>/<application>.yaml<target-prefix>/_nyl/catalog/applications/<argocd-namespace>/<target>-catalog.yaml<target-prefix>/_nyl/index.json"><div></div></button></div></figure></div>
-<p>CRDs are split one per file and retain Helm <code dir="auto"># Source:</code> comments. Other
-resources are ordered deterministically in <code dir="auto">resources.yaml</code>. Generated Argo CD
-Applications use <code dir="auto">source.directory.recurse: true</code>, so nested CRD directories
-are included.</p>
+<div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-141/_astro/ec.w36nc.css"><script type="module" src="/nyl/pr-preview/pr-141/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/&#x3C;kind>[.&#x3C;group>]/[&#x3C;namespace>/]&#x3C;name>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/&#x3C;group-output>/&#x3C;release>/crd/&#x3C;crd-name>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/appproject.argoproj.io/&#x3C;namespace>/&#x3C;project>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/application.argoproj.io/&#x3C;namespace>/&#x3C;application>.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/catalog/application.argoproj.io/&#x3C;argocd-namespace>/&#x3C;target>-catalog.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">&#x3C;target-prefix>/_nyl/index.json</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="<target-prefix>/<group-output>/<release>/<kind>[.<group>]/[<namespace>/]<name>.yaml<target-prefix>/<group-output>/<release>/crd/<crd-name>.yaml<target-prefix>/_nyl/catalog/appproject.argoproj.io/<namespace>/<project>.yaml<target-prefix>/_nyl/catalog/application.argoproj.io/<namespace>/<application>.yaml<target-prefix>/_nyl/catalog/application.argoproj.io/<argocd-namespace>/<target>-catalog.yaml<target-prefix>/_nyl/index.json"><div></div></button></div></figure></div>
+<p>The catalog uses the same per-resource layout as a release, beneath the fixed
+<code dir="auto">_nyl/catalog</code> directory that the catalog Application, a project-written parent,
+or an ApplicationSet syncs.</p>
+<p>Every resource is written to its own file, and Helm <code dir="auto"># Source:</code> comments are
+retained. CRDs live in <code dir="auto">crd/&#x3C;crd-name>.yaml</code> whatever their API version. Other resources are placed by
+identity: the lowercased kind and API group form a directory that matches
+kubectl’s resource syntax, followed by the namespace directory when
+<code dir="auto">metadata.namespace</code> is set, and the object name. For example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">configmap/api/settings.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">deployment.apps/api/web.yaml</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">clusterrole.rbac.authorization.k8s.io/system%3Aaggregate-to-admin.yaml</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="configmap/api/settings.yamldeployment.apps/api/web.yamlclusterrole.rbac.authorization.k8s.io/system%3Aaggregate-to-admin.yaml"><div></div></button></div></figure></div>
+<p>The API version is not part of the path, so changing an object’s
+<code dir="auto">apiVersion</code> updates its file in place. Characters that are unsafe in
+a path segment, such as <code dir="auto">:</code>, are percent-encoded, which keeps distinct objects
+in distinct files. Windows device names such as <code dir="auto">con</code> or <code dir="auto">aux</code> have their first
+character encoded (<code dir="auto">%63on.yaml</code>). A segment that would exceed the 255-byte file
+name limit keeps its first characters followed by <code dir="auto">_</code> and a digest of the full
+name; all other names are written unchanged. Nyl rejects two resources whose
+paths differ only in case, because they would collide on case-insensitive
+filesystems. When a file or directory is renamed only by case, for example an
+object name or a Release, the next render writes it under its new name.
+Directories left empty by removed files are deleted. Generated Argo CD
+Applications use <code dir="auto">source.directory.recurse: true</code>, so every nested directory
+is included.</p>
 <p>Every workload manifest has <code dir="auto"># Nyl-Provenance:</code> comments identifying its
 repository-relative source document and Nyl expansion chain. Synthesized
 resources identify the operation that generated them. These comments are
@@ -86,11 +104,11 @@ serialization metadata and do not add annotations to the Kubernetes object.</p>
 <p>The parent catalog Application points at <code dir="auto">&#x3C;target-prefix>/_nyl/catalog</code> and is
 generated by default. Apply it once after the first publication; automated sync
 then keeps its child Applications, projects, and its own manifest current.</p>
-<p>Managed Namespaces normally live in the owning workload’s <code dir="auto">resources.yaml</code>.
+<p>Managed Namespaces normally live in the owning workload’s release directory.
 When several workload Applications use one namespace, their ApplicationGroups
 must agree on a <code dir="auto">sharedNamespaces</code> owner. <code dir="auto">Release</code> keeps ownership in the
 selected workload, <code dir="auto">External</code> emits no Namespace, and <code dir="auto">Dedicated</code> writes the
-Namespace to <code dir="auto">&#x3C;target-prefix>/_nyl/namespaces/&#x3C;identity>/resources.yaml</code> with a
+Namespace to <code dir="auto">&#x3C;target-prefix>/_nyl/namespaces/&#x3C;identity>/namespace/&#x3C;name>.yaml</code> with a
 separate generated Application. Nyl rejects overlapping resource ownership.</p>
 <p>The versioned index records target identity, source provenance, owned files,
 and SHA-256 hashes. Nyl preserves unowned files and rejects changes to indexed

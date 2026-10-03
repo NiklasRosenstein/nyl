@@ -140,8 +140,9 @@ until <code dir="auto">nyl vendor --prune</code>; blobs referenced by another Cl
 and references its vendored definition blob. Equal definitions are stored once
 across clusters. Volatile resource metadata, status, and conversion webhook CA
 bundles are excluded, so a definition changes only with its API contract.
-Inventories written by earlier Nyl versions remain readable for validation;
-recapture them to vendor whole CRDs. Commit the inventories and blobs with the
+Inventories written by earlier Nyl versions are not read; recapture them with
+<code dir="auto">nyl capture cluster &#x3C;name> --crds</code> and remove their old blobs with
+<code dir="auto">nyl vendor --prune</code>. Commit the inventories and blobs with the
 Cluster configuration. Capture and vendoring generate <code dir="auto">schemas/.gitattributes</code>
 to treat blobs as binary in Git, suppressing text diffs and merges and preserving
 the exact bytes required by their hashes. Blobs remain JSON in ordinary Git;
