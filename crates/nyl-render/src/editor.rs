@@ -171,23 +171,12 @@ impl SchemaCatalog {
                 continue;
             };
             for (crd_name, crd) in &index.crds {
-                for version in &crd.versions {
+                let Ok(definition) = store::read_definition(vendor, crd_name, &crd.definition) else {
+                    continue;
+                };
+                for (version, variants) in definition.versions {
                     let key = (format!("{}/{version}", crd.group), crd.kind.clone());
-                    if crds.contains_key(&key) {
-                        continue;
-                    }
-                    let schema = match &crd.source {
-                        store::CrdSource::Definition(digest) => store::read_definition(vendor, crd_name, digest)
-                            .ok()
-                            .and_then(|definition| definition.versions.get(version).map(|v| v.strict.clone())),
-                        store::CrdSource::Legacy(digests) => digests
-                            .get(version)
-                            .and_then(|digests| store::read_blob(vendor, &digests.strict).ok())
-                            .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
-                    };
-                    if let Some(schema) = schema {
-                        crds.insert(key, allow_templates(schema));
-                    }
+                    crds.entry(key).or_insert_with(|| allow_templates(variants.strict));
                 }
             }
         }
