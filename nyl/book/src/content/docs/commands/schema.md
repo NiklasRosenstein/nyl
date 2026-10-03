@@ -69,17 +69,17 @@ comment when Nyl knows its schema:
   `kubeVersion` among the project's Clusters. A
   [vendored copy](/nyl/commands/manifest-validation/) is used when one
   exists: the strict variant, or the non-strict one that validation vendors
-  when `strict = false`. Otherwise `local` mode downloads the strict schema
-  and `vendored` mode references its pinned URL.
+  when `strict = false`. Otherwise the strict schema is downloaded.
 
 Documents of other kinds, files that are not valid YAML, Helm chart directories,
 and the vendor directory are left untouched.
 
 The schemas Nyl generates accept a `{{ … }}` template expression wherever a
 scalar is expected, so Helm values and structurally templated Nyl resources such
-as `enabled: '{{ values.enabled }}'` do not raise false errors. Built-in
-schemas referenced by URL are served unchanged; vendor built-in schemas to get
-the same leniency in `vendored` mode.
+as `enabled: '{{ values.enabled }}'` do not raise false errors.
+
+Every comment is a relative path from the document to a schema Nyl wrote, never
+a URL, so committed comments work offline and are identical across checkouts.
 
 `[editor] schemas` in `nyl.toml` chooses where the generated schemas live:
 
@@ -90,12 +90,11 @@ schemas = "local"     # default: .nyl/schemas, ignored by Git
 ```
 
 With `local`, each checkout runs `nyl schema annotate` once to generate the
-schemas, and `--check` verifies only the comments. Every comment then points
-into `.nyl/schemas`, so comments are identical across checkouts and `--check`
-never needs the network. A built-in schema that is not vendored is downloaded
-through the validation schema cache in `.nyl/cache`; later runs reuse it and work
-offline. When the download fails, the comment is still written and the command
-warns. With `vendored`, the
+schemas, and `--check` verifies only the comments. With `vendored`, the
 schemas are committed and `--check` also reports stale or missing schema files.
+Built-in schemas that are not vendored are downloaded through the validation
+schema cache in `.nyl/cache`, so later runs work offline. When a download fails,
+the comment is still written and the command warns; with `vendored`, `--check`
+then reports the missing schema file. `--check` itself never downloads.
 `--check` writes nothing and fails when anything is out of date, so CI can
 enforce current comments.

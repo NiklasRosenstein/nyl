@@ -126,92 +126,32 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
         .stderr(predicate::str::contains("Widget_v1.json"));
 }
 
-#[test]
-fn test_schema_annotate_prefers_vendored_builtin_schemas_over_the_pinned_url() {
-    let directory = project();
-    let configmap = directory.path().join("apps/web/configmap.yaml");
-    fs::write(&configmap, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n").unwrap();
-
-    // Without a vendored copy, the comment uses kubeconform's pinned URL for the newest Cluster version.
-    annotate(directory.path(), false).success();
-    let remote = fs::read_to_string(&configmap).unwrap();
-    let url = remote
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("# yaml-language-server: $schema="))
-        .unwrap()
-        .to_owned();
-    assert!(url.starts_with("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/"));
-    assert!(url.ends_with("/v1.31.4-standalone-strict/configmap-v1.json"));
-
-    // A vendored built-in becomes a local, template-friendly copy.
-    let vendor = directory.path().join("vendor");
-    let digest = store::write_blob(
-        &vendor,
-        &store::json_bytes(&json!({"type": "object", "properties": {"immutable": {"type": "boolean"}}})).unwrap(),
-    )
-    .unwrap();
-    store::atomic_write(
-        &vendor.join("schemas/builtins.json"),
-        &store::json_bytes(&json!({"version": 1, "schemas": {url: digest}})).unwrap(),
-    )
-    .unwrap();
-    annotate(directory.path(), false).success();
-    assert!(fs::read_to_string(&configmap).unwrap().starts_with(
-        "# yaml-language-server: $schema=../../vendor/schemas/editor/builtins/v1.31.4/configmap-v1.json\n"
-    ));
-    let schema: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            directory
-                .path()
-                .join("vendor/schemas/editor/builtins/v1.31.4/configmap-v1.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(schema["properties"]["immutable"]["anyOf"][0]["type"], "boolean");
+/// The pinned kubeconform URL of a core/v1 kind for the fixture's Kubernetes version.
+fn pinned_url(kind: &str, strict: bool) -> String {
+    let settings = nyl::validation::KubeconformSettings {
+        strict,
+        ..Default::default()
+    };
+    nyl::validation::builtin_url(&settings, &format!("v1/{kind}"), "1.31.4").unwrap()
 }
 
-#[test]
-fn test_schema_annotate_local_mode_keeps_builtin_comments_local_and_offline() {
-    let directory = project();
-    let configmap = directory.path().join("apps/web/configmap.yaml");
-    fs::write(&configmap, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n").unwrap();
-    let secret = directory.path().join("apps/web/secret.yaml");
-    fs::write(&secret, "apiVersion: v1\nkind: Secret\nmetadata:\n  name: web\n").unwrap();
-    // Vendored mode references the pinned strict URLs of schemas that are not vendored.
-    annotate(directory.path(), false).success();
-    let pinned_url = |path: &Path| {
-        fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .next()
-            .and_then(|line| line.strip_prefix("# yaml-language-server: $schema="))
-            .unwrap()
-            .to_owned()
-    };
-    let (configmap_url, secret_url) = (pinned_url(&configmap), pinned_url(&secret));
-    fs::write(directory.path().join("nyl.toml"), "").unwrap();
-
-    // Validation configured as non-strict vendors only the non-strict copy; editors still use it.
-    let vendor = directory.path().join("vendor");
-    let digest = store::write_blob(
-        &vendor,
-        &store::json_bytes(&json!({"type": "object", "properties": {"immutable": {"type": "boolean"}}})).unwrap(),
-    )
-    .unwrap();
+/// Make built-in schemas available without the network: ConfigMap as a vendored
+/// non-strict copy, as validation with `strict = false` stores it, and Secret
+/// in the download cache. Their schemas carry a marker property naming the source.
+fn provide_builtin_schemas(directory: &Path) {
+    let vendor = directory.join("vendor");
+    let vendored = json!({"type": "object", "properties": {"vendored": {"type": "boolean"}}});
+    let digest = store::write_blob(&vendor, &store::json_bytes(&vendored).unwrap()).unwrap();
     store::atomic_write(
         &vendor.join("schemas/builtins.json"),
-        &store::json_bytes(&json!({"version": 1, "schemas": {configmap_url.replace("-strict/", "/"): digest}}))
-            .unwrap(),
+        &store::json_bytes(&json!({"version": 1, "schemas": {pinned_url("ConfigMap", false): digest}})).unwrap(),
     )
     .unwrap();
-    // A schema that is not vendored comes from the download cache, so this needs no network.
-    let downloaded = json!({"type": "object", "properties": {"cached": {"type": "boolean"}}});
-    let cache = directory
-        .path()
-        .join(".nyl/cache/validation-schemas")
-        .join(format!("{}.json", nyl_core::digest::sha256_hex(secret_url.as_bytes())));
+    let downloaded = json!({"type": "object", "properties": {"downloaded": {"type": "boolean"}}});
+    let cache = directory.join(".nyl/cache/validation-schemas").join(format!(
+        "{}.json",
+        nyl_core::digest::sha256_hex(pinned_url("Secret", true).as_bytes())
+    ));
     store::atomic_write(
         &cache,
         &store::json_bytes(&json!({
@@ -221,22 +161,64 @@ fn test_schema_annotate_local_mode_keeps_builtin_comments_local_and_offline() {
         .unwrap(),
     )
     .unwrap();
+    fs::write(
+        directory.join("apps/web/configmap.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("apps/web/secret.yaml"),
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: web\n",
+    )
+    .unwrap();
+}
 
-    annotate(directory.path(), false).success();
-    // Both comments are local paths, whichever source filled them.
-    for (path, file, property) in [
-        (&configmap, "configmap-v1.json", "immutable"),
-        (&secret, "secret-v1.json", "cached"),
+/// Assert both built-in documents point at their local schema copies.
+fn assert_builtin_comments(directory: &Path, schema_root: &str) {
+    for (kind, file, property) in [
+        ("configmap", "configmap-v1.json", "vendored"),
+        ("secret", "secret-v1.json", "downloaded"),
     ] {
-        assert!(fs::read_to_string(path).unwrap().starts_with(&format!(
-            "# yaml-language-server: $schema=../../.nyl/schemas/builtins/v1.31.4/{file}\n"
+        let document = fs::read_to_string(directory.join(format!("apps/web/{kind}.yaml"))).unwrap();
+        assert!(document.starts_with(&format!(
+            "# yaml-language-server: $schema=../../{schema_root}/builtins/v1.31.4/{file}\n"
         )));
-        let schema: serde_json::Value = serde_json::from_slice(
-            &fs::read(directory.path().join(".nyl/schemas/builtins/v1.31.4").join(file)).unwrap(),
-        )
-        .unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join(schema_root).join("builtins/v1.31.4").join(file)).unwrap())
+                .unwrap();
         assert_eq!(schema["properties"][property]["anyOf"][0]["type"], "boolean");
     }
+}
+
+#[test]
+fn test_schema_annotate_vendored_mode_commits_builtin_schemas_instead_of_urls() {
+    let directory = project();
+    provide_builtin_schemas(directory.path());
+
+    annotate(directory.path(), false).success();
+    assert_builtin_comments(directory.path(), "vendor/schemas/editor");
+
+    annotate(directory.path(), true).success();
+    // A committed built-in schema that went missing is drift, even though checking cannot download it.
+    fs::remove_file(
+        directory
+            .path()
+            .join("vendor/schemas/editor/builtins/v1.31.4/secret-v1.json"),
+    )
+    .unwrap();
+    annotate(directory.path(), true)
+        .failure()
+        .stderr(predicate::str::contains("secret-v1.json"));
+}
+
+#[test]
+fn test_schema_annotate_local_mode_keeps_builtin_comments_local_and_offline() {
+    let directory = project();
+    fs::write(directory.path().join("nyl.toml"), "").unwrap();
+    provide_builtin_schemas(directory.path());
+
+    annotate(directory.path(), false).success();
+    assert_builtin_comments(directory.path(), ".nyl/schemas");
 
     // Checking compares comments only, so a fresh checkout without schemas passes.
     fs::remove_dir_all(directory.path().join(".nyl/schemas")).unwrap();
