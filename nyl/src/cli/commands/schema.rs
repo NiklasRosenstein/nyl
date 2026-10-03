@@ -75,7 +75,8 @@ fn annotate(check: bool) -> Result<()> {
                 .changed_files
                 .iter()
                 .chain(&report.changed_schemas)
-                .map(|path| format!("  {}", path.display()))
+                // Report project paths with `/` on every platform, like other Nyl output.
+                .map(|path| format!("  {}", path.to_string_lossy().replace('\\', "/")))
                 .collect::<Vec<_>>()
                 .join("\n");
             return Err(NylError::validation(format!(
