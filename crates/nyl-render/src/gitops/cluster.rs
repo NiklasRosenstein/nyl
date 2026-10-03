@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::resources::{Cluster, ClusterApiContractMode, GitOpsResource, GitOpsResourceKind};
+use crate::validation::store;
 use crate::{NylError, Result};
 
 use super::GitOpsInventory;
@@ -51,6 +52,9 @@ fn resolve(inventory: &GitOpsInventory, name: &str, chain: &mut Vec<String>) -> 
         schemas_source: name.to_owned(),
         inputs: BTreeSet::from([discovered.source_path.clone()]),
     };
+    if let Some(snapshot) = complete_vendored_capabilities(inventory, name, &mut result.cluster)? {
+        result.inputs.insert(snapshot);
+    }
     if let Some(reference) = &declared.spec.api_contract_from {
         let source = resolve(inventory, &reference.cluster_ref.name, chain)?;
         if reference.mode == ClusterApiContractMode::All {
@@ -64,6 +68,47 @@ fn resolve(inventory: &GitOpsInventory, name: &str, chain: &mut Vec<String>) -> 
     result.cluster.spec.api_contract_from = None;
     chain.pop();
     Ok(result)
+}
+
+/// Add the API versions and scopes a Cluster's vendored CRDs supply to its
+/// recorded capabilities, returning the snapshot path the result depends on.
+fn complete_vendored_capabilities(
+    inventory: &GitOpsInventory,
+    name: &str,
+    cluster: &mut crate::resources::Cluster,
+) -> Result<Option<PathBuf>> {
+    let Some(recorded) = cluster
+        .spec
+        .kubernetes
+        .as_ref()
+        .filter(|capabilities| capabilities.vendored_crds)
+    else {
+        return Ok(None);
+    };
+    let recapture = || format!("run nyl capture cluster {name} --crds");
+    let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let path = store::cluster_index_path(&root, name)?;
+    let index = store::read_cluster_index(&root, name)?
+        .filter(|index| index.version == store::CLUSTER_SCHEMA_INDEX_VERSION)
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "Cluster {name:?} records vendored CRDs, but {} is missing or predates them; {}",
+                path.display(),
+                recapture()
+            ))
+        })?;
+    let complete = store::with_vendored(recorded, &index);
+    if store::capabilities_fingerprint(&complete)? != index.capabilities_fingerprint {
+        return Err(NylError::config(format!(
+            "Cluster {name:?} capabilities do not match its vendored CRD snapshot; {}",
+            recapture()
+        )));
+    }
+    cluster.spec.kubernetes = Some(complete);
+    let relative = path
+        .strip_prefix(&inventory.project_root)
+        .map_err(|_| NylError::config("Schema vendor directory must be beneath the project root"))?;
+    Ok(Some(relative.to_path_buf()))
 }
 
 #[cfg(test)]

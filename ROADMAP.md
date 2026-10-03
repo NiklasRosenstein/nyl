@@ -482,8 +482,13 @@ The lifecycle contract must address:
 Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
 contract from another declared Cluster. Effective capabilities drive both
 rendering and validation; destinations, values, and live connection settings
-remain local. `nyl capture cluster` refreshes committed capabilities and
-CRD schema snapshots by default, with capabilities-only overrides. Project-configured
+remain local. `nyl capture cluster` refreshes committed capabilities, including
+which kinds are cluster-scoped, and vendors whole CRDs by default, with
+capabilities-only overrides. A vendored CRD is the single record of its API
+versions, scope, and schemas: the Cluster omits what the snapshot supplies, and
+rendering fails rather than guessing when the snapshot is missing or stale.
+Effective resource scopes let generated Argo CD AppProjects default to the
+kinds a group actually renders. Project-configured
 validators check final artifacts. Complete tree validation uses desired CRDs for
 rendered resources by default, with an invocation opt-out; compatibility outside
 the rendered input and upgrade ordering require separate handling. Builtin schema
