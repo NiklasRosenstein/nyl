@@ -194,14 +194,25 @@
 <p><a id="field-spec.kubernetes.apiVersions"></a></p>
 <h3 id="speckubernetesapiversions">spec.kubernetes.apiVersions</h3>
 <p><strong>Optional</strong> · array</p>
-<p>API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry.</p>
+<p>API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry. With <code>vendoredCrds</code>, entries served by vendored CustomResourceDefinitions are omitted here and added from the snapshot.</p>
 <p><a id="field-spec.kubernetes.apiVersions%5B%5D"></a></p>
 <h3 id="speckubernetesapiversions-1">spec.kubernetes.apiVersions[]</h3>
+<p><strong>Required</strong> · string</p>
+<p><a id="field-spec.kubernetes.clusterScopedKinds"></a></p>
+<h3 id="speckubernetesclusterscopedkinds">spec.kubernetes.clusterScopedKinds</h3>
+<p><strong>Optional</strong> · array</p>
+<p><a href="/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/">Cluster</a>-scoped kinds as <code>group/Kind</code>, with <code>core</code> for the core API group, such as <code>core/Namespace</code>. Recorded by <code>nyl capture cluster</code>; every other kind listed in <code>apiVersions</code> is namespaced. Empty means the scope is unknown.</p>
+<p><a id="field-spec.kubernetes.clusterScopedKinds%5B%5D"></a></p>
+<h3 id="speckubernetesclusterscopedkinds-1">spec.kubernetes.clusterScopedKinds[]</h3>
 <p><strong>Required</strong> · string</p>
 <p><a id="field-spec.kubernetes.kubeVersion"></a></p>
 <h3 id="speckuberneteskubeversion">spec.kubernetes.kubeVersion</h3>
 <p><strong>Optional</strong> · string or null</p>
 <p>Kubernetes version exposed to Helm. May be omitted for scaffolding; required for target rendering.</p>
+<p><a id="field-spec.kubernetes.vendoredCrds"></a></p>
+<h3 id="speckubernetesvendoredcrds">spec.kubernetes.vendoredCrds</h3>
+<p><strong>Optional</strong> · boolean</p>
+<p>Whether CustomResourceDefinitions were vendored by <code>nyl capture cluster --crds</code>. Their API versions and scopes then come from the vendored snapshot, and rendering fails while it is missing or stale.</p>
 <p><a id="field-spec.live"></a></p>
 <h3 id="speclive">spec.live</h3>
 <p><strong>Optional</strong> · object or null</p>
