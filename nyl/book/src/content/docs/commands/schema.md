@@ -52,7 +52,7 @@ nyl schema annotate --check
 apiVersion: k8s.gitops.nyl/v1
 kind: Cluster
 ---
-# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/…/v1.31.4-standalone-strict/configmap-v1.json
+# yaml-language-server: $schema=../.nyl/schemas/builtins/v1.31.4/configmap-v1.json
 apiVersion: v1
 kind: ConfigMap
 ```
@@ -65,18 +65,21 @@ comment when Nyl knows its schema:
 - **Nyl resources** use the schemas of the running Nyl version.
 - **Custom resources** use the strict schema of a CRD vendored by
   [`nyl capture cluster --crds`](/nyl/commands/manifest-validation/).
-- **Kubernetes built-ins** use kubeconform's strict schema for the newest
-  `kubeVersion` among the project's Clusters: the vendored copy when
-  [built-in schemas are vendored](/nyl/commands/manifest-validation/), the
-  pinned URL otherwise.
+- **Kubernetes built-ins** use kubeconform's schema for the newest
+  `kubeVersion` among the project's Clusters. A
+  [vendored copy](/nyl/commands/manifest-validation/) is used when one
+  exists: the strict variant, or the non-strict one that validation vendors
+  when `strict = false`. Otherwise `local` mode downloads the strict schema
+  and `vendored` mode references its pinned URL.
 
 Documents of other kinds, files that are not valid YAML, Helm chart directories,
 and the vendor directory are left untouched.
 
 The schemas Nyl generates accept a `{{ … }}` template expression wherever a
 scalar is expected, so Helm values and structurally templated Nyl resources such
-as `enabled: '{{ values.enabled }}'` do not raise false errors. Remote built-in
-schemas are served unchanged; vendor built-in schemas to get the same leniency.
+as `enabled: '{{ values.enabled }}'` do not raise false errors. Built-in
+schemas referenced by URL are served unchanged; vendor built-in schemas to get
+the same leniency in `vendored` mode.
 
 `[editor] schemas` in `nyl.toml` chooses where the generated schemas live:
 
@@ -87,7 +90,12 @@ schemas = "local"     # default: .nyl/schemas, ignored by Git
 ```
 
 With `local`, each checkout runs `nyl schema annotate` once to generate the
-schemas, and `--check` verifies only the comments. With `vendored`, the
+schemas, and `--check` verifies only the comments. Every comment then points
+into `.nyl/schemas`, so comments are identical across checkouts and `--check`
+never needs the network. A built-in schema that is not vendored is downloaded
+through the validation schema cache in `.nyl/cache`; later runs reuse it and work
+offline. When the download fails, the comment is still written and the command
+warns. With `vendored`, the
 schemas are committed and `--check` also reports stale or missing schema files.
 `--check` writes nothing and fails when anything is out of date, so CI can
 enforce current comments.

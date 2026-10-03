@@ -2,9 +2,11 @@
 //!
 //! `nyl schema annotate` points every document Nyl can describe at a JSON
 //! Schema: Nyl's own resource schemas, vendored CRD schemas, and Kubernetes
-//! built-in schemas (vendored copies, or kubeconform's URLs otherwise). Local
-//! schemas accept `{{ … }}` template expressions wherever a scalar is expected,
-//! so Helm and structurally templated Nyl files validate in editors.
+//! built-in schemas. Built-ins use a vendored copy when one exists; otherwise
+//! local mode downloads a copy once per checkout and vendored mode references
+//! kubeconform's URL. Local schemas accept `{{ … }}` template expressions
+//! wherever a scalar is expected, so Helm and structurally templated Nyl files
+//! validate in editors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -16,7 +18,8 @@ use serde_json::{json, Value};
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
 use crate::resources::schema::ResourceKind;
 use crate::resources::GitOpsResource;
-use crate::validation::{resolve, store, KubeconformSettings};
+use crate::validation::resolve::{self, SchemaResolver};
+use crate::validation::{store, BuiltinSchemas, KubeconformSettings};
 use crate::{NylError, Result};
 
 /// The comment prefix yaml-language-server reads in each document.
@@ -50,6 +53,8 @@ pub struct AnnotationReport {
     pub changed_schemas: Vec<PathBuf>,
     /// Documents that carry a schema comment.
     pub annotated_documents: usize,
+    /// Built-in schemas that could not be downloaded, with the reason; their comments are still written.
+    pub unavailable_schemas: Vec<(String, String)>,
 }
 
 impl AnnotationReport {
@@ -61,8 +66,9 @@ impl AnnotationReport {
 /// Annotate every YAML document of a project, or with `check` only report what would change.
 ///
 /// Local schemas are compared in `check` mode only when they are vendored; a
-/// local `.nyl/schemas` directory is a per-checkout cache.
-pub fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<AnnotationReport> {
+/// local `.nyl/schemas` directory is a per-checkout cache, so `check` never
+/// downloads.
+pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<AnnotationReport> {
     let project_root = &inventory.project_root;
     let vendor = store::vendor_root(project_root, &inventory.project_config)?;
     let mode = inventory.project_config.config.editor.schemas;
@@ -70,10 +76,11 @@ pub fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<Anno
         EditorSchemas::Local => store::safe_path(project_root, Path::new(".nyl/schemas"))?,
         EditorSchemas::Vendored => store::safe_path(&vendor, Path::new("schemas/editor"))?,
     };
-    let catalog = SchemaCatalog::load(inventory, &vendor)?;
+    let catalog = SchemaCatalog::load(inventory, &vendor, mode)?;
 
     let mut report = AnnotationReport::default();
     let mut generated = BTreeMap::new();
+    let mut downloads = BTreeMap::new();
     let skip = [schema_root.clone(), vendor.clone(), project_root.join(".nyl")];
     for relative in &inventory.yaml_files {
         let path = project_root.join(relative);
@@ -91,9 +98,13 @@ pub fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<Anno
             Some(match target {
                 SchemaTarget::Remote(url) => url,
                 SchemaTarget::Local(file, schema) => {
-                    let location = schema_root.join(&file);
-                    let reference = relative_reference(directory, &location);
+                    let reference = relative_reference(directory, &schema_root.join(&file));
                     generated.entry(file).or_insert(schema);
+                    reference
+                }
+                SchemaTarget::Download(file, url) => {
+                    let reference = relative_reference(directory, &schema_root.join(&file));
+                    downloads.entry(file).or_insert(url);
                     reference
                 }
             })
@@ -107,6 +118,10 @@ pub fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<Anno
         }
     }
 
+    if !check && !downloads.is_empty() {
+        report.unavailable_schemas =
+            download_builtins(inventory, &vendor, &schema_root, downloads, &mut generated).await?;
+    }
     if !(check && mode == EditorSchemas::Local) {
         report.changed_schemas = sync_schemas(&schema_root, &generated, check)?;
     }
@@ -116,12 +131,68 @@ pub fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Result<Anno
     Ok(report)
 }
 
+/// Fetch built-in schemas for local mode through validation's lookup: the
+/// vendored copy, the disposable download cache, then the network. A schema
+/// that cannot be fetched keeps a previously downloaded copy, if any, and is
+/// reported instead of failing the run.
+async fn download_builtins(
+    inventory: &GitOpsInventory,
+    vendor: &Path,
+    schema_root: &Path,
+    downloads: BTreeMap<PathBuf, String>,
+    generated: &mut BTreeMap<PathBuf, Value>,
+) -> Result<Vec<(String, String)>> {
+    let settings = KubeconformSettings {
+        builtin_schemas: BuiltinSchemas::Cached,
+        ..catalog_settings(inventory)
+    };
+    let mut resolver = SchemaResolver::new(&inventory.project_root, vendor.to_path_buf(), &settings, false, false)?;
+    let mut unavailable = Vec::new();
+    for (file, url) in downloads {
+        let reason = match resolver.builtin(&url).await {
+            Ok(Some(document)) => {
+                generated.insert(file, allow_templates(document.value));
+                continue;
+            }
+            Ok(None) => format!("Built-in schema {url} is not published"),
+            Err(NylError::Validation(message)) => message,
+            Err(error) => error.to_string(),
+        };
+        let previous = std::fs::read(store::safe_path(schema_root, &file)?)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        match previous {
+            Some(schema) => {
+                generated.insert(file, schema);
+            }
+            None => unavailable.push((url, reason)),
+        }
+    }
+    Ok(unavailable)
+}
+
+/// The kubeconform settings editor schemas use: the project's, always strict.
+fn catalog_settings(inventory: &GitOpsInventory) -> KubeconformSettings {
+    KubeconformSettings {
+        strict: true,
+        ..inventory
+            .project_config
+            .config
+            .validation
+            .kubeconform
+            .clone()
+            .unwrap_or_default()
+    }
+}
+
 /// Where a document's schema comment points.
 enum SchemaTarget {
     /// A schema served elsewhere, referenced by URL.
     Remote(String),
     /// A generated schema at a path beneath the editor schema directory.
     Local(PathBuf, Value),
+    /// A path beneath the editor schema directory filled from a built-in schema URL.
+    Download(PathBuf, String),
 }
 
 /// The schemas a project can reference, keyed by document identity.
@@ -136,10 +207,11 @@ struct SchemaCatalog {
     builtins: BTreeMap<String, String>,
     settings: KubeconformSettings,
     vendor: PathBuf,
+    mode: EditorSchemas,
 }
 
 impl SchemaCatalog {
-    fn load(inventory: &GitOpsInventory, vendor: &Path) -> Result<Self> {
+    fn load(inventory: &GitOpsInventory, vendor: &Path, mode: EditorSchemas) -> Result<Self> {
         let mut nyl = BTreeMap::new();
         let mut components = None;
         for kind in ResourceKind::ALL {
@@ -190,17 +262,9 @@ impl SchemaCatalog {
                 .map(|index| index.schemas)
                 .unwrap_or_default(),
             // Editors get the strict variant whatever validation enforces.
-            settings: KubeconformSettings {
-                strict: true,
-                ..inventory
-                    .project_config
-                    .config
-                    .validation
-                    .kubeconform
-                    .clone()
-                    .unwrap_or_default()
-            },
+            settings: catalog_settings(inventory),
             vendor: vendor.to_path_buf(),
+            mode,
         })
     }
 
@@ -226,19 +290,31 @@ impl SchemaCatalog {
             return None;
         }
         let version = self.kube_version.as_deref()?;
-        let url = resolve::builtin_url(&self.settings, &format!("{api_version}/{kind}"), version).ok()?;
+        let gvk = format!("{api_version}/{kind}");
+        let url = resolve::builtin_url(&self.settings, &gvk, version).ok()?;
+        // Both variants share a file name, so the comment does not depend on which is vendored.
+        let name = url.rsplit('/').next()?;
+        let file = PathBuf::from("builtins").join(format!("v{version}")).join(name);
+        // Prefer the strict copy; validation configured as non-strict vendors only the other one.
+        let permissive = KubeconformSettings {
+            strict: false,
+            ..self.settings.clone()
+        };
+        let vendored = [Some(url.clone()), resolve::builtin_url(&permissive, &gvk, version).ok()]
+            .into_iter()
+            .flatten()
+            .find_map(|url| {
+                let digest = self.builtins.get(&url)?;
+                serde_json::from_slice::<Value>(&store::read_blob(&self.vendor, digest).ok()?).ok()
+            });
         // Vendored copies are local, so they can accept template expressions too.
-        if let Some(schema) = self
-            .builtins
-            .get(&url)
-            .and_then(|digest| store::read_blob(&self.vendor, digest).ok())
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        {
-            let name = url.rsplit('/').next()?;
-            let file = PathBuf::from("builtins").join(format!("v{version}")).join(name);
+        if let Some(schema) = vendored {
             return Some(SchemaTarget::Local(file, allow_templates(schema)));
         }
-        Some(SchemaTarget::Remote(url))
+        Some(match self.mode {
+            EditorSchemas::Local => SchemaTarget::Download(file, url),
+            EditorSchemas::Vendored => SchemaTarget::Remote(url),
+        })
     }
 }
 

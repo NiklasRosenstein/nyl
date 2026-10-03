@@ -45,7 +45,7 @@ enum SchemaCommand {
     },
 }
 
-pub fn execute(args: SchemaArgs) -> Result<()> {
+pub async fn execute(args: SchemaArgs) -> Result<()> {
     match args.command {
         SchemaCommand::Config => print_schema(&crate::config::schema::generate_project_config_schema()),
         SchemaCommand::Resource { kind, api_version } => {
@@ -62,13 +62,16 @@ pub fn execute(args: SchemaArgs) -> Result<()> {
         }
         SchemaCommand::Gitops => print_schema(&crate::resources::generate_gitops_aggregate_schema()),
         SchemaCommand::All { output_dir } => write_all_schemas(&output_dir),
-        SchemaCommand::Annotate { check } => annotate(check),
+        SchemaCommand::Annotate { check } => annotate(check).await,
     }
 }
 
-fn annotate(check: bool) -> Result<()> {
+async fn annotate(check: bool) -> Result<()> {
     let inventory = crate::gitops::discover_gitops_inventory(&std::env::current_dir()?, None)?;
-    let report = crate::editor::annotate_project(&inventory, check)?;
+    let report = crate::editor::annotate_project(&inventory, check).await?;
+    for (_, reason) in &report.unavailable_schemas {
+        eprintln!("warning: {reason}; its comment is written, rerun nyl schema annotate once it is reachable");
+    }
     if check {
         if !report.is_current() {
             let paths = report
