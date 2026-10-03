@@ -1,0 +1,16 @@
+{
+  "capabilities_fingerprint": "17ce619be6b7c694b4b6e12ea8b1e865eaf4b954b3abe7b246f3e520a01a31db",
+  "cluster": "staging",
+  "crds": {
+    "widgets.example.com": {
+      "definition": "14de9ccab2d8204aef980bcc2e21ed80f1c083c7c49f1e810b8abb9304308589",
+      "group": "example.com",
+      "kind": "Widget",
+      "scope": "Cluster",
+      "versions": [
+        "v1"
+      ]
+    }
+  },
+  "version": 2
+}

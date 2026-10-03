@@ -733,9 +733,26 @@ async fn prepare_partition(
 struct PartitionSchemas {
     desired: BTreeMap<String, schemas::CrdSchemas>,
     captured: Option<store::ClusterSchemaIndex>,
+    /// Schemas derived from vendored CRDs, converted once per partition.
+    vendored: std::sync::Mutex<BTreeMap<String, std::sync::Arc<schemas::CrdSchemas>>>,
 }
 
 impl PartitionSchemas {
+    fn vendored_definition(
+        &self,
+        vendor: &std::path::Path,
+        name: &str,
+        digest: &str,
+    ) -> Result<std::sync::Arc<schemas::CrdSchemas>> {
+        let mut vendored = self.vendored.lock().expect("vendored CRD cache is not poisoned");
+        if let Some(definition) = vendored.get(name) {
+            return Ok(definition.clone());
+        }
+        let definition = std::sync::Arc::new(store::read_definition(vendor, name, digest)?);
+        vendored.insert(name.to_owned(), definition.clone());
+        Ok(definition)
+    }
+
     fn new(
         args: &ValidationArgs,
         partition: &ValidationPartition,
@@ -766,7 +783,11 @@ impl PartitionSchemas {
                 )));
             }
         }
-        Ok(Self { desired, captured })
+        Ok(Self {
+            desired,
+            captured,
+            vendored: std::sync::Mutex::default(),
+        })
     }
 
     async fn resolve(
@@ -779,10 +800,12 @@ impl PartitionSchemas {
         let (api, kind) = resolve::resource_parts(gvk)?;
         let (group, version) = api.split_once('/').unwrap_or(("", api));
         let desired_crd = self.desired.values().find(|crd| crd.group == group && crd.kind == kind);
-        let captured_crd = self
-            .captured
-            .as_ref()
-            .and_then(|index| index.crds.values().find(|crd| crd.group == group && crd.kind == kind));
+        let captured_crd = self.captured.as_ref().and_then(|index| {
+            index
+                .crds
+                .iter()
+                .find(|(_, crd)| crd.group == group && crd.kind == kind)
+        });
         let schema = if let Some(crd) = desired_crd {
             let variants = crd
                 .versions
@@ -799,18 +822,37 @@ impl PartitionSchemas {
             }
         } else if let Some(local) = resolver.local(gvk, &partition.version)? {
             local
-        } else if let Some(crd) = captured_crd {
-            let variants = crd
-                .versions
-                .get(version)
-                .ok_or_else(|| NylError::validation(format!("{gvk}: captured CRD does not serve this version")))?;
-            let hash = if resolver.settings.strict {
-                &variants.strict
-            } else {
-                &variants.permissive
+        } else if let Some((name, crd)) = captured_crd {
+            if !crd.versions.contains(version) {
+                return Err(NylError::validation(format!(
+                    "{gvk}: captured CRD does not serve this version"
+                )));
+            }
+            let value = match &crd.source {
+                store::CrdSource::Definition(digest) => {
+                    let definition = self.vendored_definition(&resolver.vendor, name, digest)?;
+                    let variants = definition.versions.get(version).ok_or_else(|| {
+                        NylError::validation(format!("{gvk}: vendored CRD does not serve this version"))
+                    })?;
+                    if resolver.settings.strict {
+                        &variants.strict
+                    } else {
+                        &variants.permissive
+                    }
+                    .clone()
+                }
+                store::CrdSource::Legacy(versions) => {
+                    let variants = &versions[version];
+                    let hash = if resolver.settings.strict {
+                        &variants.strict
+                    } else {
+                        &variants.permissive
+                    };
+                    serde_json::from_slice(&store::read_blob(&resolver.vendor, hash)?)?
+                }
             };
             SchemaDocument {
-                value: serde_json::from_slice(&store::read_blob(&resolver.vendor, hash)?)?,
+                value,
                 origin: Origin::Captured,
             }
         } else {
@@ -965,7 +1007,7 @@ mod tests {
 
     fn crd(value_type: &str) -> Value {
         json!({"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition",
-            "metadata":{"name":"widgets.example.com"},"spec":{"group":"example.com","names":{"kind":"Widget"},
+            "metadata":{"name":"widgets.example.com"},"spec":{"group":"example.com","scope":"Namespaced","names":{"kind":"Widget"},
             "versions":[{"name":"v1","served":true,"schema":{"openAPIV3Schema":{"type":"object","properties":{
                 "spec":{"type":"object","properties":{"count":{"type":value_type}},"required":["count"]}
             },"required":["spec"]}}}]}})
@@ -1312,19 +1354,16 @@ mod tests {
         let capabilities = crate::resources::ClusterKubernetesCapabilities {
             kube_version: Some("1.30.0".into()),
             api_versions: vec!["v1".into()],
+            cluster_scoped_kinds: Vec::new(),
+            vendored_crds: false,
         };
-        let (index, blobs) = store::prepare_capture(
-            "staging",
-            &capabilities,
-            &schemas::extract_crds(&[crd("integer")]).unwrap(),
-        )
-        .unwrap();
+        let (index, blobs) = store::prepare_capture("staging", &capabilities, &[crd("integer")]).unwrap();
         for bytes in blobs.values() {
             store::write_blob(&root, bytes).unwrap();
         }
         store::atomic_write(
             &store::cluster_index_path(&root, "staging").unwrap(),
-            &store::json_bytes(&index).unwrap(),
+            &index.to_bytes().unwrap(),
         )
         .unwrap();
         partition.schema_source = Some("staging".into());
@@ -1552,14 +1591,14 @@ mod tests {
         assert!(error.to_string().contains("Missing vendored built-in schema"));
         let root = directory.path().join("vendor");
         let index = store::ClusterSchemaIndex {
-            version: 1,
+            version: store::CLUSTER_SCHEMA_INDEX_VERSION,
             cluster: "staging".into(),
             capabilities_fingerprint: "different".into(),
             crds: BTreeMap::new(),
         };
         store::atomic_write(
             &store::cluster_index_path(&root, "staging").unwrap(),
-            &store::json_bytes(&index).unwrap(),
+            &index.to_bytes().unwrap(),
         )
         .unwrap();
         partition.schema_source = Some("staging".into());

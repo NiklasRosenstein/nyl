@@ -33,8 +33,8 @@ validators automatically for `render`, `diff`, `apply`, `render-tree`,
 configured validator is an error.
 
 `strict = true` rejects unknown fields as well as duplicate YAML keys. Captured
-CRD schemas retain both strict and permissive variants so this setting can change
-without recapturing. Both variants validate declared constraints; permissive mode
+CRDs are vendored whole, and both strict and permissive schema variants are
+derived from them, so this setting can change without recapturing. Both variants validate declared constraints; permissive mode
 allows extra fields where the schema does not explicitly constrain them. Strict
 mode respects fields that explicitly preserve unknown properties.
 
@@ -113,13 +113,21 @@ vendor/
   schemas/blobs/<sha256>.json
 ```
 
-The cluster inventory identifies served versions and references shared schema
-blobs. Equal schema content is stored once across clusters. Volatile resource
-metadata and status are excluded. Commit the inventories and blobs with the
+The cluster inventory lists each CRD's group, kind, scope, and served versions,
+and references its vendored definition blob. Equal definitions are stored once
+across clusters. Volatile resource metadata, status, and conversion webhook CA
+bundles are excluded, so a definition changes only with its API contract.
+Inventories written by earlier Nyl versions remain readable for validation;
+recapture them to vendor whole CRDs. Commit the inventories and blobs with the
 Cluster configuration. Capture and vendoring generate `schemas/.gitattributes`
 to treat blobs as binary in Git, suppressing text diffs and merges and preserving
 the exact bytes required by their hashes. Blobs remain JSON in ordinary Git;
 inventories remain diffable.
+
+With CRDs vendored, the Cluster's `spec.kubernetes` records only the APIs and
+cluster-scoped kinds the CRDs do not serve and sets `vendoredCrds: true`.
+Rendering and validation add the CRD-served API versions and scopes back from
+the snapshot.
 
 A snapshot includes its source capabilities fingerprint. Validation rejects a
 mismatch and instructs recapture, including when a capture was interrupted

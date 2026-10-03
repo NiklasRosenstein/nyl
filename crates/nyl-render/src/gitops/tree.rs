@@ -925,6 +925,11 @@ fn prepare_target_cache(
     ] {
         let contract = super::resolve_cluster_contract(inventory, name)?;
         recorder.record_value(format!("cluster-contract-inputs:{name}"), &contract.inputs)?;
+        // Effective capabilities include entries supplied by vendored CRD snapshots.
+        recorder.record_value(
+            format!("cluster-contract-capabilities:{name}"),
+            &contract.cluster.spec.kubernetes,
+        )?;
         for discovered in inventory
             .resources
             .values()

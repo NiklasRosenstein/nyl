@@ -30,6 +30,28 @@ pub struct ClusterCaptureArgs {
 struct ClusterInfo {
     kube_version: String,
     api_versions: Vec<String>,
+    cluster_scoped_kinds: Vec<String>,
+    vendored_crds: bool,
+}
+
+impl ClusterInfo {
+    fn capabilities(&self) -> crate::resources::ClusterKubernetesCapabilities {
+        crate::resources::ClusterKubernetesCapabilities {
+            kube_version: Some(self.kube_version.clone()),
+            api_versions: self.api_versions.clone(),
+            cluster_scoped_kinds: self.cluster_scoped_kinds.clone(),
+            vendored_crds: self.vendored_crds,
+        }
+    }
+
+    fn from_capabilities(capabilities: crate::resources::ClusterKubernetesCapabilities) -> Self {
+        Self {
+            kube_version: capabilities.kube_version.unwrap_or_default(),
+            api_versions: capabilities.api_versions,
+            cluster_scoped_kinds: capabilities.cluster_scoped_kinds,
+            vendored_crds: capabilities.vendored_crds,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +159,7 @@ impl CaptureClient for LiveCapture {
 }
 
 async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client: &impl CaptureClient) -> Result<()> {
-    use crate::validation::{schemas, store};
+    use crate::validation::store;
     let inventory = inventory(start_dir)?;
     let discovered = inventory
         .get(GitOpsResourceKind::Cluster, &args.name)
@@ -160,24 +182,23 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
     )
     .await
     .map_err(|_| NylError::validation("Cluster capture timed out after 60 seconds"))??;
-    let capabilities = crate::resources::ClusterKubernetesCapabilities {
-        kube_version: Some(info.kube_version.clone()),
-        api_versions: info.api_versions.clone(),
-    };
-    let differs = store::capabilities_fingerprint(stored)? != store::capabilities_fingerprint(&capabilities)?;
-    let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    // Discovery reports every API; vendored CRDs then supply their own entries.
+    let complete = info.capabilities();
     let prepared = crds
         .as_ref()
-        .map(|crds| {
-            let definitions = schemas::extract_crds(crds)?;
-            store::prepare_capture(&args.name, &capabilities, &definitions)
-        })
+        .map(|crds| store::prepare_capture(&args.name, &complete, crds))
         .transpose()?;
-    let schemas_differ = if let Some((index, _)) = &prepared {
+    let recorded = match &prepared {
+        Some((index, _)) => store::without_vendored(&complete, index),
+        None => complete,
+    };
+    let differs = store::capabilities_fingerprint(stored)? != store::capabilities_fingerprint(&recorded)?
+        || stored.vendored_crds != recorded.vendored_crds;
+    let info = ClusterInfo::from_capabilities(recorded);
+    let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
+    let schemas_differ = if let Some((index, blobs)) = &prepared {
         store::read_cluster_index(&root, &args.name).ok().flatten().as_ref() != Some(index)
-            || index.crds.values().flat_map(|crd| crd.versions.values()).any(|refs| {
-                store::read_blob(&root, &refs.strict).is_err() || store::read_blob(&root, &refs.permissive).is_err()
-            })
+            || blobs.keys().any(|digest| store::read_blob(&root, digest).is_err())
     } else {
         false
     };
@@ -205,10 +226,7 @@ async fn capture_with_client(args: ClusterCaptureArgs, start_dir: &Path, client:
             debug_assert_eq!(hash, nyl_core::digest::sha256_hex(&bytes));
             store::write_blob(&root, &bytes)?;
         }
-        store::atomic_write(
-            &store::cluster_index_path(&root, &args.name)?,
-            &store::json_bytes(&index)?,
-        )?;
+        store::atomic_write(&store::cluster_index_path(&root, &args.name)?, &index.to_bytes()?)?;
         atomic_replace(&path, &contents, &updated)?;
     } else {
         atomic_replace(&path, &contents, &updated)?;
@@ -233,6 +251,7 @@ async fn fetch_cluster_info(
     let mut api_versions = client.get_api_versions().await?;
     api_versions.sort();
     api_versions.dedup();
+    let cluster_scoped_kinds = client.cluster_scoped_kinds();
     let crds = if capture_crds {
         let resource = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(
             "apiextensions.k8s.io",
@@ -251,6 +270,8 @@ async fn fetch_cluster_info(
         ClusterInfo {
             kube_version,
             api_versions,
+            cluster_scoped_kinds,
+            vendored_crds: false,
         },
         crds,
     ))
@@ -411,6 +432,15 @@ fn replace_kubernetes_block(document: &str, info: &ClusterInfo) -> Result<String
     for api_version in &info.api_versions {
         writeln!(block, "{item}- {api_version}").expect("writing to String cannot fail");
     }
+    if !info.cluster_scoped_kinds.is_empty() {
+        writeln!(block, "{nested}clusterScopedKinds:").expect("writing to String cannot fail");
+        for kind in &info.cluster_scoped_kinds {
+            writeln!(block, "{item}- {kind}").expect("writing to String cannot fail");
+        }
+    }
+    if info.vendored_crds {
+        writeln!(block, "{nested}vendoredCrds: true").expect("writing to String cannot fail");
+    }
     let mut result = String::with_capacity(document.len() + block.len());
     result.push_str(&lines[..start].concat());
     result.push_str(&block);
@@ -443,9 +473,17 @@ mod tests {
                 Err(NylError::Kubernetes("CRD list forbidden".into()))
             } else {
                 Ok((
+                    // Discovery reports CRD-served APIs alongside built-in ones.
                     ClusterInfo {
                         kube_version: self.version.clone(),
-                        api_versions: vec!["v1".into(), "example.com/v1".into()],
+                        api_versions: vec![
+                            "example.com/v1".into(),
+                            "example.com/v1/Widget".into(),
+                            "v1".into(),
+                            "v1/Namespace".into(),
+                        ],
+                        cluster_scoped_kinds: vec!["core/Namespace".into()],
+                        vendored_crds: false,
                     },
                     crds.then(|| self.resources.clone()),
                 ))
@@ -478,7 +516,7 @@ mod tests {
             fail: false,
             resources: vec![serde_json::json!({
                 "apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"widgets.example.com"},
-                "spec":{"group":"example.com","names":{"kind":"Widget"},"versions":[{"name":"v1","served":true,
+                "spec":{"group":"example.com","scope":"Namespaced","names":{"kind":"Widget"},"versions":[{"name":"v1","served":true,
                     "schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":kind}}}}}}}]}
             })],
         }
@@ -511,6 +549,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store::read_cluster_index(&root, "staging").unwrap().unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn test_vendored_crds_supply_their_capabilities_to_rendering() {
+        let directory = capture_fixture();
+        let mut args = capture_args(false);
+        args.crds = true;
+        capture_with_client(args, directory.path(), &capture_stub("integer"))
+            .await
+            .unwrap();
+        let cluster = |directory: &Path| {
+            let inventory = crate::gitops::discover_gitops_inventory(directory, None).unwrap();
+            crate::gitops::resolve_cluster_contract(&inventory, "staging")
+        };
+        let inventory = crate::gitops::discover_gitops_inventory(directory.path(), None).unwrap();
+        let GitOpsResource::Cluster(declared) = inventory
+            .get(GitOpsResourceKind::Cluster, "staging")
+            .unwrap()
+            .resource
+            .clone()
+            .unwrap()
+        else {
+            panic!("expected Cluster");
+        };
+        // The Cluster records only what the vendored CRDs do not supply.
+        let recorded = declared.spec.kubernetes.unwrap();
+        assert_eq!(recorded.api_versions, ["v1", "v1/Namespace"]);
+        assert_eq!(recorded.cluster_scoped_kinds, ["core/Namespace"]);
+        assert!(recorded.vendored_crds);
+        // Rendering sees the complete set Helm and scope lookups need.
+        let effective = cluster(directory.path()).unwrap();
+        let capabilities = effective.cluster.spec.kubernetes.unwrap();
+        assert_eq!(
+            capabilities.api_versions,
+            ["example.com/v1", "example.com/v1/Widget", "v1", "v1/Namespace"]
+        );
+        assert_eq!(
+            capabilities.scope_of("example.com", "Widget"),
+            Some(crate::resources::ResourceScope::Namespaced)
+        );
+        assert!(effective
+            .inputs
+            .contains(Path::new("vendor/clusters/staging/schemas.json")));
+        // A recapture of the same cluster changes nothing.
+        let mut args = capture_args(true);
+        args.crds = true;
+        capture_with_client(args, directory.path(), &capture_stub("integer"))
+            .await
+            .unwrap();
+        // Without the snapshot, rendering cannot know the CRD capabilities.
+        fs::remove_file(directory.path().join("vendor/clusters/staging/schemas.json")).unwrap();
+        let error = cluster(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("nyl capture cluster staging --crds"), "{error}");
     }
 
     #[tokio::test]
@@ -553,10 +644,14 @@ mod tests {
         let index = crate::validation::store::read_cluster_index(&root, "staging")
             .unwrap()
             .unwrap();
-        let schema = &index.crds["widgets.example.com"].versions["v1"];
-        let captured: serde_json::Value =
-            serde_json::from_slice(&crate::validation::store::read_blob(&root, &schema.strict).unwrap()).unwrap();
-        assert_eq!(captured["properties"]["spec"]["properties"]["count"]["type"], "integer");
+        let store::CrdSource::Definition(digest) = &index.crds["widgets.example.com"].source else {
+            panic!("capture vendors the CRD");
+        };
+        let schemas = store::read_definition(&root, "widgets.example.com", digest).unwrap();
+        assert_eq!(
+            schemas.versions["v1"].strict["properties"]["spec"]["properties"]["count"]["type"],
+            "integer"
+        );
     }
 
     #[tokio::test]
@@ -634,13 +729,16 @@ mod tests {
             &ClusterInfo {
                 kube_version: "1.31.2".to_string(),
                 api_versions: vec!["apps/v1".to_string(), "v1".to_string()],
+                cluster_scoped_kinds: vec!["core/Namespace".to_string()],
+                vendored_crds: true,
             },
         )
         .unwrap();
         assert!(output.starts_with("# cluster\napiVersion:"));
         assert!(output.contains("  # cluster facts\n  values:\n    region: eu\n"));
-        assert!(output.contains("    kubeVersion: 1.31.2\n"));
-        assert!(output.contains("      - apps/v1\n      - v1\n"));
+        assert!(output.contains(
+            "  kubernetes:\n    kubeVersion: 1.31.2\n    apiVersions:\n      - apps/v1\n      - v1\n    clusterScopedKinds:\n      - core/Namespace\n    vendoredCrds: true\n"
+        ));
     }
 
     #[test]
@@ -669,6 +767,8 @@ mod tests {
             &ClusterInfo {
                 kube_version: "1.31.2".to_owned(),
                 api_versions: vec!["v1".to_owned()],
+                cluster_scoped_kinds: Vec::new(),
+                vendored_crds: false,
             },
         )
         .unwrap();
@@ -687,6 +787,8 @@ mod tests {
             &ClusterInfo {
                 kube_version: "1.31.2".to_string(),
                 api_versions: vec!["v1".to_string()],
+                cluster_scoped_kinds: Vec::new(),
+                vendored_crds: false,
             },
         )
         .unwrap();
