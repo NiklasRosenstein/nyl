@@ -516,8 +516,8 @@ fn derive_application_views(
         if *path != expected && *path != legacy {
             return Err(NylError::config(format!(
                 "Generated Argo CD Application {identity:?} is at {}, expected {}",
-                path.display(),
-                expected.display()
+                crate::resources::relative_path_to_posix("generated catalog path", path)?,
+                crate::resources::relative_path_to_posix("generated catalog path", &expected)?
             )));
         }
         let rendered_path = required_application_string(&manifest, "/spec/source/path", path)?;
