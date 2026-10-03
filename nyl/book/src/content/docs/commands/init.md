@@ -38,15 +38,15 @@ destination namespace; the generated group does not impose a
 
 No project resource is written. The group keeps its
 [implied AppProject](/nyl/deployment-workflows/rendered-manifests/resource-guides/application-group/#project-assignment):
-named after the group and as permissive as Argo CD's `default` project. Argo
+named after the group and admitting only what its Applications deploy. Argo
 CD receives the credential-free `GitRepository.spec.repoURL`, never the
 publication URL.
 
 `--project-name`, `--allow-namespace`, and `--allow-cluster-resource` narrow
 that project by writing an explicit `spec.projectTemplate`. `--allow-namespace`
 writes `destinations` on the scaffolded Cluster. Each field the options leave out
-stays permissive, so `--allow-namespace apps` restricts destinations while
-cluster-scoped resources remain open.
+keeps its derived default, so `--allow-namespace apps` fixes the destinations
+while the resource whitelists still follow what the group renders.
 
 ## Non-interactive use
 

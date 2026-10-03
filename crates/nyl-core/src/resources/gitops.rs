@@ -402,7 +402,7 @@ pub struct InlineGitRepository {
 ///
 /// ## If omitted
 ///
-/// An ApplicationGroup generates its own AppProject: the implied permissive project, narrowed by whatever `spec.projectTemplate` declares. Nyl does not assume an existing Argo CD project supplies the required policy contract.
+/// An ApplicationGroup generates its own AppProject, admitting only what the group's Applications deploy unless `spec.projectTemplate` declares otherwise. Nyl does not assume an existing Argo CD project supplies the required policy contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::resource_example(super::schema::ResourceKind::AppProjectDefinition))]
@@ -474,7 +474,7 @@ pub struct ApplicationGroupSpec {
     /// Release source selection. Omission derives `applications/<group-name>` for central groups or the containing directory for `_application-group.yaml`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<ApplicationGroupSource>,
-    /// Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.
+    /// Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies an AppProject named after this group that admits only what the group deploys.
     #[serde(rename = "projectRef", skip_serializing_if = "Option::is_none")]
     pub project_ref: Option<String>,
     /// Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces.
@@ -525,7 +525,7 @@ pub struct LabelSelector {
 
 /// An Argo CD AppProject generated for one ApplicationGroup and target.
 ///
-/// `name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field takes the value of Argo CD's permissive `default` project, so a bare template only renames the implied project: every source repository, every destination, every cluster-scoped resource. Declare a field to narrow it.
+/// `name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field is derived from what the group's Applications need on the target, so a bare template only renames the implied project: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds the group renders. Declare a field to set it explicitly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AppProjectTemplate {
@@ -544,22 +544,22 @@ pub struct AppProjectTemplate {
     /// Project description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Permitted source repository URL patterns. Omitted, the project admits every repository (`*`).
+    /// Permitted source repository URL patterns. Omitted, the project admits the target publication repository.
     #[serde(rename = "sourceRepos", skip_serializing_if = "Option::is_none")]
     pub source_repos: Option<Vec<String>>,
     /// Namespaces whose Applications may use the project. `applicationNamespace` is always added.
     #[serde(rename = "sourceNamespaces", skip_serializing_if = "Option::is_none")]
     pub source_namespaces: Option<Vec<String>>,
-    /// Permitted destinations. Omitted, the project admits every cluster and namespace. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.
+    /// Permitted destinations. Omitted, the project admits the target workload Cluster with every effective Release namespace and additional namespace of the group. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destinations: Option<Vec<AppProjectDestination>>,
-    /// Cluster-scoped resources the project admits. Omitted, every cluster-scoped resource; a declared list, including `[]`, admits only its patterns. Namespace permissions are added for the admitted namespaces when namespace creation is enabled.
+    /// Cluster-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including `[]`, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind's scope, from a CRD rendered in the target or the Cluster's recorded capabilities.
     #[serde(rename = "clusterResourceWhitelist", skip_serializing_if = "Option::is_none")]
     pub cluster_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
     /// Cluster-scoped resources the project denies.
     #[serde(rename = "clusterResourceBlacklist", skip_serializing_if = "Option::is_none")]
     pub cluster_resource_blacklist: Option<Vec<AppProjectResourcePattern>>,
-    /// Namespaced resources the project admits. Omitted, every namespaced resource.
+    /// Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.
     #[serde(rename = "namespaceResourceWhitelist", skip_serializing_if = "Option::is_none")]
     pub namespace_resource_whitelist: Option<Vec<AppProjectResourcePattern>>,
     /// Namespaced resources the project denies.
@@ -1299,7 +1299,7 @@ impl ApplicationGroup {
                     "spec.projectRef and spec.projectTemplate are mutually exclusive",
                 ))
             }
-            // Neither declares the implied project: this group's own permissive AppProject.
+            // Neither declares the implied project: this group's own least-privilege AppProject.
             (None, None) => {}
         }
         validate_required("spec.applicationNamespace", &self.spec.application_namespace)?;
@@ -1918,7 +1918,7 @@ mod tests {
             .contains("mutually exclusive"));
         value["spec"].as_object_mut().unwrap().remove("projectRef");
         assert!(parse_gitops_resource(&value).is_ok());
-        // Declaring neither is the implied permissive project, not an error.
+        // Declaring neither is the implied project, not an error.
         value["spec"].as_object_mut().unwrap().remove("projectTemplate");
         let parsed = parse_gitops_resource(&value).unwrap().unwrap();
         let GitOpsResource::ApplicationGroup(parsed) = parsed else {

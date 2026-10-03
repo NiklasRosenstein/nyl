@@ -11,10 +11,10 @@ selection, `spec.enabled` may be structurally templated per target.
 ## Project assignment
 
 A group that declares neither `projectRef` nor `projectTemplate` owns an
-implied AppProject named after the group. It is as permissive as Argo CD's
-`default` project: every source repository, every cluster and namespace, and
-every cluster-scoped resource. Nothing outside the group needs to exist for it
-to render.
+implied AppProject named after the group. It admits only what the group's
+Applications deploy: the target publication repository, the target workload
+Cluster with the group's Release namespaces, and the resource kinds the group
+renders. Nothing outside the group needs to exist for it to render.
 
 `projectRef` retains a reusable AppProjectDefinition contract. A `Rendered`
 definition is copied into the target catalog once; an `External` definition
@@ -27,9 +27,9 @@ spec: `description`, `sourceRepos`, `sourceNamespaces`, `destinations`,
 `clusterResourceWhitelist`, `clusterResourceBlacklist`,
 `namespaceResourceWhitelist`, `namespaceResourceBlacklist`, `roles`,
 `syncWindows`, `orphanedResources`, `signatureKeys`,
-`permitOnlyProjectScopedClusters`, and `destinationServiceAccounts`. Every
-omitted field keeps the permissive default, so a bare template only renames the
-implied project; declare a field to narrow it:
+`permitOnlyProjectScopedClusters`, and `destinationServiceAccounts`. Declared
+fields are kept as written. Every omitted field is derived from the group, so a
+bare template only renames the implied project:
 
 ```yaml
 projectTemplate:
@@ -48,9 +48,15 @@ projectTemplate:
 
 | Omitted field | Generated value |
 | --- | --- |
-| `sourceRepos` | `['*']` |
-| `destinations` | `[{server: '*', namespace: '*'}]` |
-| `clusterResourceWhitelist` | `[{group: '*', kind: '*'}]` |
+| `sourceRepos` | The target publication repository |
+| `destinations` | The target workload Cluster with each Release destination and additional namespace |
+| `clusterResourceWhitelist` | The cluster-scoped kinds the group renders, including Namespaces Nyl creates for it |
+| `namespaceResourceWhitelist` | The namespaced kinds the group renders |
+
+The whitelists need each rendered kind's scope, which comes from a CRD rendered
+in the same target or from the Cluster's recorded capabilities. Recapture a
+Cluster with `nyl capture cluster` when rendering reports an unknown scope, or
+declare both whitelists.
 
 The name defaults to the ApplicationGroup name. Nyl always adds
 `applicationNamespace` to `sourceNamespaces`. Each `destinations` entry names a

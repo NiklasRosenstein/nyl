@@ -309,10 +309,10 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
             ),
             (
                 "projectTemplate",
-                "Generates an AppProject for this group from the declared AppProject fields; omitted fields keep Argo CD's permissive default-project values.",
+                "Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.",
             ),
         ],
-        Some("Generates a permissive AppProject named after the group, like Argo CD's default project: every source repository, every destination, every cluster-scoped resource."),
+        Some("Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders."),
     );
 }
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
