@@ -135,9 +135,27 @@ pub struct ClusterKubernetesCapabilities {
     /// Kubernetes version exposed to Helm. May be omitted for scaffolding; required for target rendering.
     #[serde(rename = "kubeVersion", skip_serializing_if = "Option::is_none")]
     pub kube_version: Option<String>,
-    /// API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry.
+    /// API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry. With `vendoredCrds`, entries served by vendored CustomResourceDefinitions are omitted here and added from the snapshot.
     #[serde(default, rename = "apiVersions", skip_serializing_if = "Vec::is_empty")]
     pub api_versions: Vec<String>,
+    /// Cluster-scoped kinds as `group/Kind`, with `core` for the core API group, such as `core/Namespace`. Recorded by `nyl capture cluster`; every other kind listed in `apiVersions` is namespaced. Empty means the scope is unknown.
+    #[serde(default, rename = "clusterScopedKinds", skip_serializing_if = "Vec::is_empty")]
+    pub cluster_scoped_kinds: Vec<String>,
+    /// Whether CustomResourceDefinitions were vendored by `nyl capture cluster --crds`. Their API versions and scopes then come from the vendored snapshot, and rendering fails while it is missing or stale.
+    #[serde(default, rename = "vendoredCrds", skip_serializing_if = "std::ops::Not::not")]
+    pub vendored_crds: bool,
+}
+
+/// Whether a Kubernetes kind is cluster-scoped or namespaced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResourceScope {
+    Cluster,
+    Namespaced,
+}
+
+/// The `group/Kind` key of `clusterScopedKinds`, with `core` naming the core API group.
+pub fn group_kind_key(group: &str, kind: &str) -> String {
+    format!("{}/{kind}", if group.is_empty() { "core" } else { group })
 }
 
 /// The source and extent of an explicitly borrowed API contract.
@@ -1007,7 +1025,47 @@ impl ClusterKubernetesCapabilities {
         if let Some(kube_version) = &self.kube_version {
             validate_static_required("spec.kubernetes.kubeVersion", kube_version)?;
         }
-        validate_unique_static_names("spec.kubernetes.apiVersions", &self.api_versions)
+        validate_unique_static_names("spec.kubernetes.apiVersions", &self.api_versions)?;
+        validate_unique_static_names("spec.kubernetes.clusterScopedKinds", &self.cluster_scoped_kinds)?;
+        for entry in &self.cluster_scoped_kinds {
+            if !entry
+                .split_once('/')
+                .is_some_and(|(group, kind)| !group.is_empty() && !kind.is_empty() && !kind.contains('/'))
+            {
+                return Err(CoreError::config(format!(
+                    "spec.kubernetes.clusterScopedKinds entry {entry:?} must be group/Kind, with core for the core API group"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The recorded scope of a kind, or `None` when this capture cannot tell.
+    ///
+    /// A kind listed in `clusterScopedKinds` is cluster-scoped; any other kind
+    /// served in `apiVersions` is namespaced, provided scopes were recorded.
+    pub fn scope_of(&self, group: &str, kind: &str) -> Option<ResourceScope> {
+        if self.cluster_scoped_kinds.is_empty() {
+            return None;
+        }
+        if self.cluster_scoped_kinds.contains(&group_kind_key(group, kind)) {
+            return Some(ResourceScope::Cluster);
+        }
+        let served = self.api_versions.iter().any(|entry| {
+            entry.rsplit_once('/').is_some_and(|(api_version, served_kind)| {
+                served_kind == kind && api_version_group(api_version) == Some(group)
+            })
+        });
+        served.then_some(ResourceScope::Namespaced)
+    }
+}
+
+/// The API group of a `group/version` or core `version` entry; `None` for a `group/version/Kind` entry.
+fn api_version_group(api_version: &str) -> Option<&str> {
+    match api_version.split('/').collect::<Vec<_>>().as_slice() {
+        [_version] => Some(""),
+        [group, _version] => Some(group),
+        _ => None,
     }
 }
 
@@ -1738,6 +1796,36 @@ mod tests {
         let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
         assert_eq!(automated.enabled, Some(false));
         assert_eq!(serde_json::to_value(automated).unwrap()["enabled"], false);
+    }
+
+    #[test]
+    fn test_scope_of_reads_recorded_cluster_scoped_kinds() {
+        let capabilities = ClusterKubernetesCapabilities {
+            kube_version: Some("1.31.4".into()),
+            api_versions: vec![
+                "v1".into(),
+                "v1/Namespace".into(),
+                "v1/ConfigMap".into(),
+                "rbac.authorization.k8s.io/v1".into(),
+                "rbac.authorization.k8s.io/v1/ClusterRole".into(),
+            ],
+            cluster_scoped_kinds: vec!["core/Namespace".into(), "rbac.authorization.k8s.io/ClusterRole".into()],
+            vendored_crds: false,
+        };
+        assert_eq!(capabilities.scope_of("", "Namespace"), Some(ResourceScope::Cluster));
+        assert_eq!(
+            capabilities.scope_of("rbac.authorization.k8s.io", "ClusterRole"),
+            Some(ResourceScope::Cluster)
+        );
+        assert_eq!(capabilities.scope_of("", "ConfigMap"), Some(ResourceScope::Namespaced));
+        // A kind the cluster does not serve has no recorded scope.
+        assert_eq!(capabilities.scope_of("example.com", "Widget"), None);
+        // Captures without recorded scopes cannot tell.
+        let unrecorded = ClusterKubernetesCapabilities {
+            cluster_scoped_kinds: Vec::new(),
+            ..capabilities
+        };
+        assert_eq!(unrecorded.scope_of("", "ConfigMap"), None);
     }
 
     #[test]

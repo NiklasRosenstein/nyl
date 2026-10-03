@@ -74,7 +74,10 @@ nyl capture cluster primary --check
 ```
 
 `capture cluster` refreshes `spec.kubernetes`, sorting and deduplicating API
-versions. With CRD capture enabled it also writes the cluster schema snapshot. `--check` reports drift without writing. The explicit `--context`
+versions and recording which kinds are cluster-scoped. With CRD capture enabled
+it also vendors the cluster's CustomResourceDefinitions and records only the
+APIs they do not serve; rendering adds the CRD-served API versions back from the
+snapshot. `--check` reports drift without writing. The explicit `--context`
 wins over `Cluster.spec.live.context`; without either, Nyl uses the current
 kubeconfig context.
 

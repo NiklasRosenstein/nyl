@@ -13,6 +13,12 @@ The capability fields can be absent while scaffolding and updating a Cluster,
 but target rendering requires `kubeVersion` and at least one `apiVersions`
 entry.
 
+`clusterScopedKinds` records which kinds are cluster-scoped, as `group/Kind`
+with `core` for the core API group; every other kind in `apiVersions` is
+namespaced. When `vendoredCrds` is true, the API versions and scopes of
+CustomResourceDefinitions come from the Cluster's vendored CRD snapshot instead
+of these lists, and rendering fails while that snapshot is missing or stale.
+
 ## Rendering behavior
 
 Cluster values are recursively overlaid by target values. Templates receive a

@@ -10,33 +10,130 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ProjectConfig;
-use crate::resources::ClusterKubernetesCapabilities;
+use crate::resources::{group_kind_key, ClusterKubernetesCapabilities, ResourceScope};
 use crate::{NylError, Result};
 
-use super::schemas::CrdSchemas;
+use super::schemas::{extract_crds, CrdSchemas};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaDigests {
-    pub strict: String,
-    pub permissive: String,
-}
-
+/// One CustomResourceDefinition recorded in a Cluster schema snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturedCrd {
     pub group: String,
     pub kind: String,
-    pub versions: BTreeMap<String, SchemaDigests>,
+    pub scope: ResourceScope,
+    /// Served versions.
+    pub versions: BTreeSet<String>,
+    /// Digest of the vendored CustomResourceDefinition; schemas are derived when read.
+    pub definition: String,
 }
 
+/// A Cluster's schema snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterSchemaIndex {
     pub version: u32,
     pub cluster: String,
+    /// Fingerprint of the Cluster's complete capabilities, including those the snapshot supplies.
     pub capabilities_fingerprint: String,
     pub crds: BTreeMap<String, CapturedCrd>,
+}
+
+/// The snapshot format capture writes and rendering reads.
+pub const CLUSTER_SCHEMA_INDEX_VERSION: u32 = 2;
+
+impl ClusterSchemaIndex {
+    /// Parse a snapshot. Other format versions must be recaptured.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        let version = serde_json::from_slice::<Value>(bytes)?
+            .get("version")
+            .and_then(Value::as_u64);
+        if version != Some(u64::from(CLUSTER_SCHEMA_INDEX_VERSION)) {
+            let cluster = serde_json::from_slice::<Value>(bytes)?
+                .get("cluster")
+                .and_then(Value::as_str)
+                .unwrap_or("<name>")
+                .to_owned();
+            return Err(NylError::validation(format!(
+                "Cluster schema snapshot for {cluster} uses an unsupported format; run nyl capture cluster {cluster} --crds"
+            )));
+        }
+        let index: Self = serde_json::from_slice(bytes)?;
+        for crd in index.crds.values() {
+            validate_digest(&crd.definition)?;
+        }
+        Ok(index)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        json_bytes(self)
+    }
+
+    /// `apiVersions` entries the vendored CRDs serve: `group/version` and `group/version/Kind`.
+    pub fn api_versions(&self) -> BTreeSet<String> {
+        self.crds
+            .values()
+            .flat_map(|crd| {
+                crd.versions.iter().flat_map(move |version| {
+                    [
+                        format!("{}/{version}", crd.group),
+                        format!("{}/{version}/{}", crd.group, crd.kind),
+                    ]
+                })
+            })
+            .collect()
+    }
+
+    /// `clusterScopedKinds` entries of the vendored cluster-scoped CRDs.
+    pub fn cluster_scoped_kinds(&self) -> BTreeSet<String> {
+        self.crds
+            .values()
+            .filter(|crd| crd.scope == ResourceScope::Cluster)
+            .map(|crd| group_kind_key(&crd.group, &crd.kind))
+            .collect()
+    }
+}
+
+/// Recorded capabilities with the entries the vendored CRDs supply removed.
+pub fn without_vendored(
+    complete: &ClusterKubernetesCapabilities,
+    index: &ClusterSchemaIndex,
+) -> ClusterKubernetesCapabilities {
+    let api_versions = index.api_versions();
+    let cluster_scoped_kinds = index.cluster_scoped_kinds();
+    ClusterKubernetesCapabilities {
+        kube_version: complete.kube_version.clone(),
+        api_versions: complete
+            .api_versions
+            .iter()
+            .filter(|entry| !api_versions.contains(*entry))
+            .cloned()
+            .collect(),
+        cluster_scoped_kinds: complete
+            .cluster_scoped_kinds
+            .iter()
+            .filter(|entry| !cluster_scoped_kinds.contains(*entry))
+            .cloned()
+            .collect(),
+        vendored_crds: true,
+    }
+}
+
+/// Recorded capabilities completed with the entries the vendored CRDs supply.
+pub fn with_vendored(
+    recorded: &ClusterKubernetesCapabilities,
+    index: &ClusterSchemaIndex,
+) -> ClusterKubernetesCapabilities {
+    let mut api_versions: BTreeSet<String> = recorded.api_versions.iter().cloned().collect();
+    api_versions.extend(index.api_versions());
+    let mut cluster_scoped_kinds: BTreeSet<String> = recorded.cluster_scoped_kinds.iter().cloned().collect();
+    cluster_scoped_kinds.extend(index.cluster_scoped_kinds());
+    ClusterKubernetesCapabilities {
+        kube_version: recorded.kube_version.clone(),
+        api_versions: api_versions.into_iter().collect(),
+        cluster_scoped_kinds: cluster_scoped_kinds.into_iter().collect(),
+        vendored_crds: false,
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,10 +151,14 @@ pub fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(nyl_core::digest::canonical_json_bytes(value)?)
 }
 
+/// Fingerprint of complete capabilities, independent of order and of which entries were vendored.
 pub fn capabilities_fingerprint(capabilities: &ClusterKubernetesCapabilities) -> Result<String> {
     let mut normalized = capabilities.clone();
     normalized.api_versions.sort();
     normalized.api_versions.dedup();
+    normalized.cluster_scoped_kinds.sort();
+    normalized.cluster_scoped_kinds.dedup();
+    normalized.vendored_crds = false;
     Ok(sha256_hex(&json_bytes(&normalized)?))
 }
 
@@ -153,44 +254,83 @@ pub fn write_blob(root: &Path, bytes: &[u8]) -> Result<String> {
     Ok(hash)
 }
 
+/// Strip server-managed and rotating fields so a vendored CRD changes only with its contract.
+pub fn clean_crd(resource: &Value) -> Value {
+    let mut spec = resource.get("spec").cloned().unwrap_or(Value::Null);
+    // Webhook CA bundles rotate with certificates and do not describe the API.
+    if let Some(client_config) = spec
+        .pointer_mut("/conversion/webhook/clientConfig")
+        .and_then(Value::as_object_mut)
+    {
+        client_config.remove("caBundle");
+    }
+    serde_json::json!({
+        "apiVersion": resource.get("apiVersion").cloned().unwrap_or(Value::Null),
+        "kind": resource.get("kind").cloned().unwrap_or(Value::Null),
+        "metadata": {"name": resource.pointer("/metadata/name").cloned().unwrap_or(Value::Null)},
+        "spec": spec,
+    })
+}
+
+/// Build a snapshot from listed CRDs. `complete` holds every capability the cluster
+/// reported, CRD-served entries included.
 pub fn prepare_capture(
     name: &str,
-    capabilities: &ClusterKubernetesCapabilities,
-    definitions: &BTreeMap<String, CrdSchemas>,
+    complete: &ClusterKubernetesCapabilities,
+    resources: &[Value],
 ) -> Result<(ClusterSchemaIndex, BTreeMap<String, Vec<u8>>)> {
+    // Reject CRDs whose schemas cannot be converted before vendoring them.
+    let definitions = extract_crds(resources)?;
     let mut blobs = BTreeMap::new();
     let mut crds = BTreeMap::new();
-    for (name, definition) in definitions {
-        let mut versions = BTreeMap::new();
-        for (version, schemas) in &definition.versions {
-            let strict = json_bytes(&schemas.strict)?;
-            let permissive = json_bytes(&schemas.permissive)?;
-            let refs = SchemaDigests {
-                strict: sha256_hex(&strict),
-                permissive: sha256_hex(&permissive),
-            };
-            blobs.insert(refs.strict.clone(), strict);
-            blobs.insert(refs.permissive.clone(), permissive);
-            versions.insert(version.clone(), refs);
-        }
+    for resource in resources {
+        let Some(crd_name) = resource.pointer("/metadata/name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(definition) = definitions.get(crd_name) else {
+            continue;
+        };
+        let scope = match resource.pointer("/spec/scope").and_then(Value::as_str) {
+            Some("Cluster") => ResourceScope::Cluster,
+            Some("Namespaced") => ResourceScope::Namespaced,
+            other => {
+                return Err(NylError::validation(format!(
+                    "CRD {crd_name} has unsupported spec.scope {other:?}"
+                )))
+            }
+        };
+        let bytes = json_bytes(&clean_crd(resource))?;
+        let digest = sha256_hex(&bytes);
+        blobs.insert(digest.clone(), bytes);
         crds.insert(
-            name.clone(),
+            crd_name.to_owned(),
             CapturedCrd {
                 group: definition.group.clone(),
                 kind: definition.kind.clone(),
-                versions,
+                scope,
+                versions: definition.versions.keys().cloned().collect(),
+                definition: digest,
             },
         );
     }
-    Ok((
-        ClusterSchemaIndex {
-            version: 1,
-            cluster: name.to_owned(),
-            capabilities_fingerprint: capabilities_fingerprint(capabilities)?,
-            crds,
-        },
-        blobs,
-    ))
+    let mut index = ClusterSchemaIndex {
+        version: CLUSTER_SCHEMA_INDEX_VERSION,
+        cluster: name.to_owned(),
+        capabilities_fingerprint: String::new(),
+        crds,
+    };
+    // Fingerprint what rendering reconstructs, so a CRD discovery has not yet
+    // reported still yields a consistent snapshot.
+    index.capabilities_fingerprint = capabilities_fingerprint(&with_vendored(complete, &index))?;
+    Ok((index, blobs))
+}
+
+/// Read a vendored CRD and derive its schemas.
+pub fn read_definition(root: &Path, name: &str, digest: &str) -> Result<CrdSchemas> {
+    let resource: Value = serde_json::from_slice(&read_blob(root, digest)?)?;
+    extract_crds(&[resource])?
+        .remove(name)
+        .ok_or_else(|| NylError::validation(format!("Vendored CRD {name} does not match its snapshot entry")))
 }
 
 pub fn cluster_index_path(root: &Path, name: &str) -> Result<PathBuf> {
@@ -207,8 +347,8 @@ pub fn read_cluster_index(root: &Path, name: &str) -> Result<Option<ClusterSchem
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let index: ClusterSchemaIndex = serde_json::from_slice(&bytes)?;
-    if index.version != 1 || index.cluster != name {
+    let index = ClusterSchemaIndex::from_slice(&bytes)?;
+    if index.cluster != name {
         return Err(NylError::validation(format!(
             "Invalid schema snapshot for Cluster {name}"
         )));
@@ -286,15 +426,11 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
                 return Err(NylError::config("Symlink in cluster schema inventory"));
             }
             if entry.file_type().is_file() && entry.file_name() == "schemas.json" {
-                let index: ClusterSchemaIndex = serde_json::from_slice(&fs::read(entry.path())?)?;
-                if index.version != 1 || cluster_index_path(root, &index.cluster)? != entry.path() {
+                let index = ClusterSchemaIndex::from_slice(&fs::read(entry.path())?)?;
+                if cluster_index_path(root, &index.cluster)? != entry.path() {
                     return Err(NylError::config("Invalid cluster schema inventory identity"));
                 }
-                for crd in index.crds.values() {
-                    for schema in crd.versions.values() {
-                        referenced.extend([schema.strict.clone(), schema.permissive.clone()]);
-                    }
-                }
+                referenced.extend(index.crds.values().map(|crd| crd.definition.clone()));
             }
         }
     }
@@ -338,25 +474,45 @@ mod tests {
     fn capabilities() -> ClusterKubernetesCapabilities {
         ClusterKubernetesCapabilities {
             kube_version: Some("1.31.4".into()),
-            api_versions: vec!["v1".into(), "example.com/v1".into()],
+            api_versions: vec![
+                "v1".into(),
+                "v1/Namespace".into(),
+                "example.com/v1".into(),
+                "example.com/v1/Widget".into(),
+            ],
+            cluster_scoped_kinds: vec!["core/Namespace".into(), "example.com/Widget".into()],
+            vendored_crds: false,
         }
     }
 
-    fn definitions() -> BTreeMap<String, CrdSchemas> {
-        super::super::schemas::extract_crds(&[json!({
+    /// A listed CRD as the API server returns it, with server-managed fields.
+    fn crd() -> Value {
+        json!({
             "apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition",
-            "metadata":{"name":"widgets.example.com"},"spec":{"group":"example.com","names":{"kind":"Widget"},
-            "versions":[{"name":"v1","served":true,"schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":"integer"}}}}}}}]}
-        })]).unwrap()
+            "metadata":{"name":"widgets.example.com","uid":"1234","resourceVersion":"99",
+                "managedFields":[{"manager":"kubectl"}],"annotations":{"kubectl.kubernetes.io/last-applied-configuration":"{}"}},
+            "spec":{"group":"example.com","scope":"Cluster","names":{"kind":"Widget","plural":"widgets"},
+                "conversion":{"strategy":"Webhook","webhook":{"conversionReviewVersions":["v1"],
+                    "clientConfig":{"caBundle":"Y2VydA==","service":{"name":"widgets","namespace":"system"}}}},
+                "versions":[
+                    {"name":"v1","served":true,"storage":true,"schema":{"openAPIV3Schema":{"type":"object","properties":{"spec":{"type":"object","properties":{"count":{"type":"integer"}}}}}}},
+                    {"name":"v0","served":false,"storage":false,"schema":{"openAPIV3Schema":{"type":"object"}}}
+                ]},
+            "status":{"acceptedNames":{"kind":"Widget"}}
+        })
     }
 
     fn write_capture(root: &Path, name: &str) -> ClusterSchemaIndex {
-        let (index, blobs) = prepare_capture(name, &capabilities(), &definitions()).unwrap();
+        let (index, blobs) = prepare_capture(name, &capabilities(), &[crd()]).unwrap();
         for bytes in blobs.values() {
             write_blob(root, bytes).unwrap();
         }
-        atomic_write(&cluster_index_path(root, name).unwrap(), &json_bytes(&index).unwrap()).unwrap();
+        atomic_write(&cluster_index_path(root, name).unwrap(), &index.to_bytes().unwrap()).unwrap();
         index
+    }
+
+    fn definition_digest(index: &ClusterSchemaIndex) -> String {
+        index.crds["widgets.example.com"].definition.clone()
     }
 
     #[test]
@@ -365,16 +521,73 @@ mod tests {
         let first = write_capture(directory.path(), "staging");
         let second = write_capture(directory.path(), "production");
         assert_eq!(first.crds, second.crds);
-        let refs = &first.crds["widgets.example.com"].versions["v1"];
-        assert_ne!(refs.strict, refs.permissive);
+        let digest = definition_digest(&first);
         let unused = write_blob(directory.path(), b"{\"unused\":true}").unwrap();
         assert_eq!(check_and_prune(directory.path(), false).unwrap(), 1);
         read_blob(directory.path(), &unused).unwrap();
         assert_eq!(check_and_prune(directory.path(), true).unwrap(), 1);
         std::fs::remove_file(cluster_index_path(directory.path(), "staging").unwrap()).unwrap();
         assert_eq!(check_and_prune(directory.path(), true).unwrap(), 0);
-        read_blob(directory.path(), &refs.strict).unwrap();
-        read_blob(directory.path(), &refs.permissive).unwrap();
+        read_blob(directory.path(), &digest).unwrap();
+    }
+
+    #[test]
+    fn test_capture_vendors_the_crd_contract_without_server_state() {
+        let directory = TempDir::new().unwrap();
+        let index = write_capture(directory.path(), "staging");
+        let captured = &index.crds["widgets.example.com"];
+        assert_eq!(captured.scope, ResourceScope::Cluster);
+        // Only served versions are part of the API contract.
+        assert_eq!(captured.versions, BTreeSet::from(["v1".to_owned()]));
+        let vendored: Value =
+            serde_json::from_slice(&read_blob(directory.path(), &definition_digest(&index)).unwrap()).unwrap();
+        assert_eq!(vendored["metadata"], json!({"name": "widgets.example.com"}));
+        assert_eq!(vendored.get("status"), None);
+        assert_eq!(
+            vendored["spec"]["conversion"]["webhook"]["clientConfig"],
+            json!({"service": {"name": "widgets", "namespace": "system"}})
+        );
+        assert_eq!(vendored["spec"]["names"]["plural"], "widgets");
+        // Validation derives schemas from the vendored definition.
+        let schemas = read_definition(directory.path(), "widgets.example.com", &definition_digest(&index)).unwrap();
+        assert_eq!(
+            schemas.versions["v1"].strict["properties"]["spec"]["properties"]["count"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn test_vendored_entries_are_recorded_once_and_restored_for_rendering() {
+        let (index, _) = prepare_capture("staging", &capabilities(), &[crd()]).unwrap();
+        let recorded = without_vendored(&capabilities(), &index);
+        assert_eq!(recorded.api_versions, ["v1", "v1/Namespace"]);
+        assert_eq!(recorded.cluster_scoped_kinds, ["core/Namespace"]);
+        assert!(recorded.vendored_crds);
+        let restored = with_vendored(&recorded, &index);
+        assert_eq!(
+            restored.api_versions,
+            ["example.com/v1", "example.com/v1/Widget", "v1", "v1/Namespace"]
+        );
+        assert_eq!(restored.cluster_scoped_kinds, ["core/Namespace", "example.com/Widget"]);
+        assert_eq!(
+            capabilities_fingerprint(&restored).unwrap(),
+            index.capabilities_fingerprint
+        );
+    }
+
+    #[test]
+    fn test_snapshot_format_matches_golden_file() {
+        let (index, _) = prepare_capture("staging", &capabilities(), &[crd()]).unwrap();
+        let golden = include_str!("testdata/cluster-schemas-v2.json");
+        assert_eq!(String::from_utf8(index.to_bytes().unwrap()).unwrap(), golden);
+        assert_eq!(ClusterSchemaIndex::from_slice(golden.as_bytes()).unwrap(), index);
+        // Snapshots in other formats are recaptured, not read.
+        let error = ClusterSchemaIndex::from_slice(
+            br#"{"version":1,"cluster":"staging","capabilities_fingerprint":"","crds":{}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nyl capture cluster staging --crds"), "{error}");
     }
 
     #[cfg(unix)]
@@ -397,7 +610,7 @@ mod tests {
     fn test_corruption_blocks_reads_and_pruning_without_removing_other_blobs() {
         let directory = TempDir::new().unwrap();
         let index = write_capture(directory.path(), "staging");
-        let hash = &index.crds["widgets.example.com"].versions["v1"].strict;
+        let hash = &definition_digest(&index);
         let unused = write_blob(directory.path(), b"{}").unwrap();
         fs::write(blob_path(directory.path(), hash).unwrap(), b"{}").unwrap();
         assert!(read_blob(directory.path(), hash).is_err());
@@ -411,6 +624,13 @@ mod tests {
         let mut reordered = original.clone();
         reordered.api_versions.reverse();
         reordered.api_versions.push("v1".into());
+        assert_eq!(
+            capabilities_fingerprint(&original).unwrap(),
+            capabilities_fingerprint(&reordered).unwrap()
+        );
+        // Which entries a snapshot supplies does not change the complete contract.
+        reordered.vendored_crds = true;
+        reordered.cluster_scoped_kinds.reverse();
         assert_eq!(
             capabilities_fingerprint(&original).unwrap(),
             capabilities_fingerprint(&reordered).unwrap()
