@@ -15,39 +15,23 @@ use crate::{NylError, Result};
 
 use super::schemas::{extract_crds, CrdSchemas};
 
-/// Converted schema digests of one served version in a version 1 snapshot.
+/// One CustomResourceDefinition recorded in a Cluster schema snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SchemaDigests {
-    pub strict: String,
-    pub permissive: String,
-}
-
-/// Where a captured CRD's schemas come from.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CrdSource {
-    /// Digest of the vendored CustomResourceDefinition; schemas are derived when read.
-    Definition(String),
-    /// Converted schemas per served version, as stored by snapshot version 1.
-    Legacy(BTreeMap<String, SchemaDigests>),
-}
-
-/// One CustomResourceDefinition recorded in a Cluster schema snapshot.
-#[derive(Debug, Clone, PartialEq)]
 pub struct CapturedCrd {
     pub group: String,
     pub kind: String,
-    /// Declared scope; unknown for version 1 snapshots.
-    pub scope: Option<ResourceScope>,
+    pub scope: ResourceScope,
     /// Served versions.
     pub versions: BTreeSet<String>,
-    pub source: CrdSource,
+    /// Digest of the vendored CustomResourceDefinition; schemas are derived when read.
+    pub definition: String,
 }
 
-/// A Cluster's schema snapshot, read from either supported format version.
-#[derive(Debug, Clone, PartialEq)]
+/// A Cluster's schema snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterSchemaIndex {
-    /// Format version the snapshot was read from; capture always writes the current one.
     pub version: u32,
     pub cluster: String,
     /// Fingerprint of the Cluster's complete capabilities, including those the snapshot supplies.
@@ -55,135 +39,34 @@ pub struct ClusterSchemaIndex {
     pub crds: BTreeMap<String, CapturedCrd>,
 }
 
-/// The snapshot format capture writes.
+/// The snapshot format capture writes and rendering reads.
 pub const CLUSTER_SCHEMA_INDEX_VERSION: u32 = 2;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IndexFile<C> {
-    version: u32,
-    cluster: String,
-    capabilities_fingerprint: String,
-    crds: BTreeMap<String, C>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CrdFileV1 {
-    group: String,
-    kind: String,
-    versions: BTreeMap<String, SchemaDigests>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CrdFileV2 {
-    group: String,
-    kind: String,
-    scope: ResourceScope,
-    versions: BTreeSet<String>,
-    definition: String,
-}
-
 impl ClusterSchemaIndex {
-    /// Parse either format version; version 1 snapshots lack scopes and vendored definitions.
+    /// Parse a snapshot. Other format versions must be recaptured.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         let version = serde_json::from_slice::<Value>(bytes)?
             .get("version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| NylError::validation("Cluster schema snapshot has no version"))?;
-        match version {
-            1 => {
-                let file: IndexFile<CrdFileV1> = serde_json::from_slice(bytes)?;
-                Ok(Self {
-                    version: 1,
-                    cluster: file.cluster,
-                    capabilities_fingerprint: file.capabilities_fingerprint,
-                    crds: file
-                        .crds
-                        .into_iter()
-                        .map(|(name, crd)| {
-                            let captured = CapturedCrd {
-                                group: crd.group,
-                                kind: crd.kind,
-                                scope: None,
-                                versions: crd.versions.keys().cloned().collect(),
-                                source: CrdSource::Legacy(crd.versions),
-                            };
-                            (name, captured)
-                        })
-                        .collect(),
-                })
-            }
-            2 => {
-                let file: IndexFile<CrdFileV2> = serde_json::from_slice(bytes)?;
-                for crd in file.crds.values() {
-                    validate_digest(&crd.definition)?;
-                }
-                Ok(Self {
-                    version: 2,
-                    cluster: file.cluster,
-                    capabilities_fingerprint: file.capabilities_fingerprint,
-                    crds: file
-                        .crds
-                        .into_iter()
-                        .map(|(name, crd)| {
-                            let captured = CapturedCrd {
-                                group: crd.group,
-                                kind: crd.kind,
-                                scope: Some(crd.scope),
-                                versions: crd.versions,
-                                source: CrdSource::Definition(crd.definition),
-                            };
-                            (name, captured)
-                        })
-                        .collect(),
-                })
-            }
-            other => Err(NylError::validation(format!(
-                "Unsupported Cluster schema snapshot version {other}; upgrade Nyl"
-            ))),
+            .and_then(Value::as_u64);
+        if version != Some(u64::from(CLUSTER_SCHEMA_INDEX_VERSION)) {
+            let cluster = serde_json::from_slice::<Value>(bytes)?
+                .get("cluster")
+                .and_then(Value::as_str)
+                .unwrap_or("<name>")
+                .to_owned();
+            return Err(NylError::validation(format!(
+                "Cluster schema snapshot for {cluster} uses an unsupported format; run nyl capture cluster {cluster} --crds"
+            )));
         }
+        let index: Self = serde_json::from_slice(bytes)?;
+        for crd in index.crds.values() {
+            validate_digest(&crd.definition)?;
+        }
+        Ok(index)
     }
 
-    /// Serialize in the current format. Only snapshots with vendored definitions can be written.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let crds = self
-            .crds
-            .iter()
-            .map(|(name, crd)| match (&crd.source, crd.scope) {
-                (CrdSource::Definition(definition), Some(scope)) => Ok((
-                    name.clone(),
-                    CrdFileV2 {
-                        group: crd.group.clone(),
-                        kind: crd.kind.clone(),
-                        scope,
-                        versions: crd.versions.clone(),
-                        definition: definition.clone(),
-                    },
-                )),
-                _ => Err(NylError::validation(format!(
-                    "Cannot write version 1 schema snapshot entry {name}; recapture the Cluster"
-                ))),
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        json_bytes(&IndexFile {
-            version: CLUSTER_SCHEMA_INDEX_VERSION,
-            cluster: self.cluster.clone(),
-            capabilities_fingerprint: self.capabilities_fingerprint.clone(),
-            crds,
-        })
-    }
-
-    /// Blob digests the snapshot references.
-    fn referenced_blobs(&self) -> impl Iterator<Item = String> + '_ {
-        self.crds.values().flat_map(|crd| match &crd.source {
-            CrdSource::Definition(digest) => vec![digest.clone()],
-            CrdSource::Legacy(versions) => versions
-                .values()
-                .flat_map(|schema| [schema.strict.clone(), schema.permissive.clone()])
-                .collect(),
-        })
+        json_bytes(self)
     }
 
     /// `apiVersions` entries the vendored CRDs serve: `group/version` and `group/version/Kind`.
@@ -205,7 +88,7 @@ impl ClusterSchemaIndex {
     pub fn cluster_scoped_kinds(&self) -> BTreeSet<String> {
         self.crds
             .values()
-            .filter(|crd| crd.scope == Some(ResourceScope::Cluster))
+            .filter(|crd| crd.scope == ResourceScope::Cluster)
             .map(|crd| group_kind_key(&crd.group, &crd.kind))
             .collect()
     }
@@ -424,9 +307,9 @@ pub fn prepare_capture(
             CapturedCrd {
                 group: definition.group.clone(),
                 kind: definition.kind.clone(),
-                scope: Some(scope),
+                scope,
                 versions: definition.versions.keys().cloned().collect(),
-                source: CrdSource::Definition(digest),
+                definition: digest,
             },
         );
     }
@@ -547,7 +430,7 @@ pub fn check_and_prune(root: &Path, prune: bool) -> Result<usize> {
                 if cluster_index_path(root, &index.cluster)? != entry.path() {
                     return Err(NylError::config("Invalid cluster schema inventory identity"));
                 }
-                referenced.extend(index.referenced_blobs());
+                referenced.extend(index.crds.values().map(|crd| crd.definition.clone()));
             }
         }
     }
@@ -629,10 +512,7 @@ mod tests {
     }
 
     fn definition_digest(index: &ClusterSchemaIndex) -> String {
-        match &index.crds["widgets.example.com"].source {
-            CrdSource::Definition(digest) => digest.clone(),
-            CrdSource::Legacy(_) => panic!("capture writes vendored definitions"),
-        }
+        index.crds["widgets.example.com"].definition.clone()
     }
 
     #[test]
@@ -656,7 +536,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let index = write_capture(directory.path(), "staging");
         let captured = &index.crds["widgets.example.com"];
-        assert_eq!(captured.scope, Some(ResourceScope::Cluster));
+        assert_eq!(captured.scope, ResourceScope::Cluster);
         // Only served versions are part of the API contract.
         assert_eq!(captured.versions, BTreeSet::from(["v1".to_owned()]));
         let vendored: Value =
@@ -696,21 +576,18 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_format_matches_golden_files() {
-        // Version 2 is what capture writes; version 1 snapshots remain readable.
+    fn test_snapshot_format_matches_golden_file() {
         let (index, _) = prepare_capture("staging", &capabilities(), &[crd()]).unwrap();
         let golden = include_str!("testdata/cluster-schemas-v2.json");
         assert_eq!(String::from_utf8(index.to_bytes().unwrap()).unwrap(), golden);
         assert_eq!(ClusterSchemaIndex::from_slice(golden.as_bytes()).unwrap(), index);
-
-        let legacy = ClusterSchemaIndex::from_slice(include_bytes!("testdata/cluster-schemas-v1.json")).unwrap();
-        assert_eq!(legacy.version, 1);
-        let widget = &legacy.crds["widgets.example.com"];
-        assert_eq!(widget.scope, None);
-        assert_eq!(widget.versions, BTreeSet::from(["v1".to_owned()]));
-        assert!(matches!(&widget.source, CrdSource::Legacy(versions) if versions.contains_key("v1")));
-        // Version 1 entries carry no vendored definition to write back.
-        assert!(legacy.to_bytes().is_err());
+        // Snapshots in other formats are recaptured, not read.
+        let error = ClusterSchemaIndex::from_slice(
+            br#"{"version":1,"cluster":"staging","capabilities_fingerprint":"","crds":{}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nyl capture cluster staging --crds"), "{error}");
     }
 
     #[cfg(unix)]

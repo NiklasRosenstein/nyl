@@ -117,8 +117,9 @@ The cluster inventory lists each CRD's group, kind, scope, and served versions,
 and references its vendored definition blob. Equal definitions are stored once
 across clusters. Volatile resource metadata, status, and conversion webhook CA
 bundles are excluded, so a definition changes only with its API contract.
-Inventories written by earlier Nyl versions remain readable for validation;
-recapture them to vendor whole CRDs. Commit the inventories and blobs with the
+Inventories written by earlier Nyl versions are not read; recapture them with
+`nyl capture cluster <name> --crds` and remove their old blobs with
+`nyl vendor --prune`. Commit the inventories and blobs with the
 Cluster configuration. Capture and vendoring generate `schemas/.gitattributes`
 to treat blobs as binary in Git, suppressing text diffs and merges and preserving
 the exact bytes required by their hashes. Blobs remain JSON in ordinary Git;
