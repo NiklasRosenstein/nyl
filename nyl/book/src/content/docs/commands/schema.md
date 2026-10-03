@@ -35,3 +35,59 @@ literal `kind: Component`.
 the GitOps aggregate, the project schema, and `resources.json`. The generated
 manifest drives the [resource catalog](/nyl/reference/resources/) and navigation.
 Resource purposes, field descriptions, and examples come from the Rust models.
+
+## Editor schema comments
+
+`nyl schema annotate` points each YAML document in the project at its schema
+with a [yaml-language-server](https://github.com/redhat-developer/yaml-language-server)
+comment, so editors validate and complete it:
+
+```bash
+nyl schema annotate
+nyl schema annotate --check
+```
+
+```yaml
+# yaml-language-server: $schema=../.nyl/schemas/nyl/k8s.gitops.nyl/v1/cluster.schema.json
+apiVersion: k8s.gitops.nyl/v1
+kind: Cluster
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/…/v1.31.4-standalone-strict/configmap-v1.json
+apiVersion: v1
+kind: ConfigMap
+```
+
+Each document after a `---` gets its own comment, so files mixing kinds validate
+document by document. The command replaces an existing schema comment at the
+top of a document and leaves every other byte unchanged. A document gets a
+comment when Nyl knows its schema:
+
+- **Nyl resources** use the schemas of the running Nyl version.
+- **Custom resources** use the strict schema of a CRD vendored by
+  [`nyl capture cluster --crds`](/nyl/commands/manifest-validation/).
+- **Kubernetes built-ins** use kubeconform's strict schema for the newest
+  `kubeVersion` among the project's Clusters: the vendored copy when
+  [built-in schemas are vendored](/nyl/commands/manifest-validation/), the
+  pinned URL otherwise.
+
+Documents of other kinds, files that are not valid YAML, Helm chart directories,
+and the vendor directory are left untouched.
+
+The schemas Nyl generates accept a `{{ … }}` template expression wherever a
+scalar is expected, so Helm values and structurally templated Nyl resources such
+as `enabled: '{{ values.enabled }}'` do not raise false errors. Remote built-in
+schemas are served unchanged; vendor built-in schemas to get the same leniency.
+
+`[editor] schemas` in `nyl.toml` chooses where the generated schemas live:
+
+```toml
+[editor]
+schemas = "local"     # default: .nyl/schemas, ignored by Git
+# schemas = "vendored"  # vendor/schemas/editor, committed with the project
+```
+
+With `local`, each checkout runs `nyl schema annotate` once to generate the
+schemas, and `--check` verifies only the comments. With `vendored`, the
+schemas are committed and `--check` also reports stale or missing schema files.
+`--check` writes nothing and fails when anything is out of date, so CI can
+enforce current comments.

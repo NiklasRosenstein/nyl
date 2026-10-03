@@ -35,6 +35,14 @@ enum SchemaCommand {
         #[arg(long)]
         output_dir: PathBuf,
     },
+
+    /// Point each YAML document in the project at its schema with a
+    /// `# yaml-language-server: $schema=` comment.
+    Annotate {
+        /// Report documents or vendored schemas that are out of date without writing.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 pub fn execute(args: SchemaArgs) -> Result<()> {
@@ -54,7 +62,36 @@ pub fn execute(args: SchemaArgs) -> Result<()> {
         }
         SchemaCommand::Gitops => print_schema(&crate::resources::generate_gitops_aggregate_schema()),
         SchemaCommand::All { output_dir } => write_all_schemas(&output_dir),
+        SchemaCommand::Annotate { check } => annotate(check),
     }
+}
+
+fn annotate(check: bool) -> Result<()> {
+    let inventory = crate::gitops::discover_gitops_inventory(&std::env::current_dir()?, None)?;
+    let report = crate::editor::annotate_project(&inventory, check)?;
+    if check {
+        if !report.is_current() {
+            let paths = report
+                .changed_files
+                .iter()
+                .chain(&report.changed_schemas)
+                .map(|path| format!("  {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(NylError::validation(format!(
+                "Schema comments are out of date; run nyl schema annotate:\n{paths}"
+            )));
+        }
+        println!("Schema comments are current ({} documents)", report.annotated_documents);
+    } else {
+        println!(
+            "Annotated {} documents; updated {} files and {} schemas",
+            report.annotated_documents,
+            report.changed_files.len(),
+            report.changed_schemas.len()
+        );
+    }
+    Ok(())
 }
 
 fn print_schema(schema: &serde_json::Value) -> Result<()> {

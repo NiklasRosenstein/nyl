@@ -3,7 +3,7 @@
 mod collections;
 mod config;
 mod report;
-mod resolve;
+pub(crate) mod resolve;
 mod runner;
 pub use report::{
     Finding, ResourceIdentity, ResourceLocation, ResourceResult, ResourceStatus, SchemaOrigin, ValidationOutput,

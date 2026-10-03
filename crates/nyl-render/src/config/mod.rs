@@ -132,6 +132,9 @@ pub struct ProjectFile {
 
     /// Optional project-global artifact vendoring policy.
     pub vendor: Option<VendorSettings>,
+
+    /// Editor integration, such as where `nyl schema annotate` writes schemas.
+    pub editor: crate::editor::EditorSettings,
 }
 
 /// Wrapper for project configuration file.
