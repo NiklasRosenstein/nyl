@@ -89,7 +89,7 @@ separates the Argo CD control plane from workload destinations and owns
 parent-catalog defaults.</li>
 <li>An <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/"><code dir="auto">ApplicationGroup</code></a>
 declares source releases and generated Application and Namespace policy. It
-owns an implied permissive AppProject unless it narrows one with
+owns an implied least-privilege AppProject unless it shapes one with
 <code dir="auto">projectTemplate</code> or shares one through an AppProjectDefinition.</li>
 </ol>
 <p>These resources are compiler inputs. They are not installed in Kubernetes.
