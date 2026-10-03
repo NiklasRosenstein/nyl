@@ -136,7 +136,6 @@ struct SchemaCatalog {
     builtins: BTreeMap<String, String>,
     settings: KubeconformSettings,
     vendor: PathBuf,
-    project: PathBuf,
 }
 
 impl SchemaCatalog {
@@ -213,7 +212,6 @@ impl SchemaCatalog {
                     .unwrap_or_default()
             },
             vendor: vendor.to_path_buf(),
-            project: inventory.project_root.clone(),
         })
     }
 
@@ -239,9 +237,7 @@ impl SchemaCatalog {
             return None;
         }
         let version = self.kube_version.as_deref()?;
-        let resolver =
-            resolve::SchemaResolver::new(&self.project, self.vendor.clone(), &self.settings, false, false).ok()?;
-        let url = resolver.builtin_url(&format!("{api_version}/{kind}"), version).ok()?;
+        let url = resolve::builtin_url(&self.settings, &format!("{api_version}/{kind}"), version).ok()?;
         // Vendored copies are local, so they can accept template expressions too.
         if let Some(schema) = self
             .builtins

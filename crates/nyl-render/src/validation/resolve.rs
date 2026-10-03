@@ -96,15 +96,7 @@ impl<'a> SchemaResolver<'a> {
     }
 
     pub fn builtin_url(&self, gvk: &str, version: &str) -> Result<String> {
-        let (api_version, kind) = resource_parts(gvk)?;
-        let (_, _, suffix) = lookup_parts(api_version);
-        let revision = self
-            .settings
-            .builtin_schema_revision
-            .as_deref()
-            .unwrap_or(BUILTIN_REVISION);
-        let strict = if self.settings.strict { "-strict" } else { "" };
-        Ok(format!("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{revision}/v{version}-standalone{strict}/{}{suffix}.json", kind.to_lowercase()))
+        builtin_url(self.settings, gvk, version)
     }
 
     /// Resolve native resources, retaining references for recursive CRD schemas.
@@ -564,6 +556,15 @@ fn visit_schema_refs(
         }
     }
     Ok(())
+}
+
+/// The pinned kubeconform schema URL of a built-in `apiVersion/kind` for a Kubernetes version.
+pub fn builtin_url(settings: &KubeconformSettings, gvk: &str, version: &str) -> Result<String> {
+    let (api_version, kind) = resource_parts(gvk)?;
+    let (_, _, suffix) = lookup_parts(api_version);
+    let revision = settings.builtin_schema_revision.as_deref().unwrap_or(BUILTIN_REVISION);
+    let strict = if settings.strict { "-strict" } else { "" };
+    Ok(format!("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{revision}/v{version}-standalone{strict}/{}{suffix}.json", kind.to_lowercase()))
 }
 
 pub fn resource_parts(gvk: &str) -> Result<(&str, &str)> {

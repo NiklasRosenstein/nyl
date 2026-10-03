@@ -125,3 +125,49 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
         .failure()
         .stderr(predicate::str::contains("Widget_v1.json"));
 }
+
+#[test]
+fn test_schema_annotate_prefers_vendored_builtin_schemas_over_the_pinned_url() {
+    let directory = project();
+    let configmap = directory.path().join("apps/web/configmap.yaml");
+    fs::write(&configmap, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n").unwrap();
+
+    // Without a vendored copy, the comment uses kubeconform's pinned URL for the newest Cluster version.
+    annotate(directory.path(), false).success();
+    let remote = fs::read_to_string(&configmap).unwrap();
+    let url = remote
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# yaml-language-server: $schema="))
+        .unwrap()
+        .to_owned();
+    assert!(url.starts_with("https://raw.githubusercontent.com/yannh/kubernetes-json-schema/"));
+    assert!(url.ends_with("/v1.31.4-standalone-strict/configmap-v1.json"));
+
+    // A vendored built-in becomes a local, template-friendly copy.
+    let vendor = directory.path().join("vendor");
+    let digest = store::write_blob(
+        &vendor,
+        &store::json_bytes(&json!({"type": "object", "properties": {"immutable": {"type": "boolean"}}})).unwrap(),
+    )
+    .unwrap();
+    store::atomic_write(
+        &vendor.join("schemas/builtins.json"),
+        &store::json_bytes(&json!({"version": 1, "schemas": {url: digest}})).unwrap(),
+    )
+    .unwrap();
+    annotate(directory.path(), false).success();
+    assert!(fs::read_to_string(&configmap).unwrap().starts_with(
+        "# yaml-language-server: $schema=../../vendor/schemas/editor/builtins/v1.31.4/configmap-v1.json\n"
+    ));
+    let schema: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            directory
+                .path()
+                .join("vendor/schemas/editor/builtins/v1.31.4/configmap-v1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(schema["properties"]["immutable"]["anyOf"][0]["type"], "boolean");
+}
