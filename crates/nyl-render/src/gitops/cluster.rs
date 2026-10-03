@@ -88,15 +88,13 @@ fn complete_vendored_capabilities(
     let recapture = || format!("run nyl capture cluster {name} --crds");
     let root = store::vendor_root(&inventory.project_root, &inventory.project_config)?;
     let path = store::cluster_index_path(&root, name)?;
-    let index = store::read_cluster_index(&root, name)?
-        .filter(|index| index.version == store::CLUSTER_SCHEMA_INDEX_VERSION)
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "Cluster {name:?} records vendored CRDs, but {} is missing or predates them; {}",
-                path.display(),
-                recapture()
-            ))
-        })?;
+    let index = store::read_cluster_index(&root, name)?.ok_or_else(|| {
+        NylError::config(format!(
+            "Cluster {name:?} records vendored CRDs, but {} is missing; {}",
+            path.display(),
+            recapture()
+        ))
+    })?;
     let complete = store::with_vendored(recorded, &index);
     if store::capabilities_fingerprint(&complete)? != index.capabilities_fingerprint {
         return Err(NylError::config(format!(

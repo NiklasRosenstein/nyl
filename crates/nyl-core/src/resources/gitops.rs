@@ -477,7 +477,7 @@ pub struct ApplicationGroupSpec {
     /// Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies an AppProject named after this group that admits only what the group deploys.
     #[serde(rename = "projectRef", skip_serializing_if = "Option::is_none")]
     pub project_ref: Option<String>,
-    /// Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces.
+    /// Generated AppProject fields. Mutually exclusive with `projectRef`; declared fields are kept as written and omitted fields are derived from what the group deploys.
     #[serde(rename = "projectTemplate", skip_serializing_if = "Option::is_none")]
     pub project_template: Option<AppProjectTemplate>,
     /// Namespace containing generated Argo CD Applications.
