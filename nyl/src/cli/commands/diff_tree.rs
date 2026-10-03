@@ -195,7 +195,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
     args.validation.validate_outputs(false, &protected, &[])?;
     report::validate_outputs(&args.output, &args.stats_output)?;
     let mut report = Report::new(&args);
-    evaluate(&args, &mut report).await;
+    Box::pin(evaluate(&args, &mut report)).await;
     // Each artifact is independently useful, including after another write fails.
     let mut delivery_errors = Vec::new();
     if let Some(patch) = &report.patch {

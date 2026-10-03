@@ -291,7 +291,7 @@ spec:
   destinationNamespace: '{{ values.namespace | default("web") }}'
   projectTemplate:
     name: '{{ target.metadata.name }}-web'
-    destinationNamespaces: ['{{ values.namespace | default("web") }}']
+    destinations: [{server: '*', namespace: '{{ values.namespace | default("web") }}'}]
 ---
 # platform.yaml: database (block-style envelope, because the document is
 # not valid YAML before rendering)

@@ -68,6 +68,12 @@ spec:
     apiVersions:
       - v1
       - apps/v1
+      - v1/ConfigMap
+      - v1/Namespace
+      - v1/Service
+      - apps/v1/Deployment
+    clusterScopedKinds:
+      - core/Namespace
 "#,
     )
     .unwrap();
@@ -1227,7 +1233,27 @@ fn project_templates_generate_constrained_projects() {
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
         "  projectRef: workloads\n",
-        "  projectTemplate:\n    destinationNamespaces:\n      - api\n      - shared-*\n",
+        "  projectTemplate:
+    labels:
+      team: platform
+    finalizers:
+      - resources-finalizer.argocd.argoproj.io
+    description: Workload project
+    sourceRepos:
+      - https://example.invalid/deploy.git
+    destinations:
+      - server: https://kubernetes.default.svc
+        namespace: api
+      - server: https://kubernetes.default.svc
+        namespace: shared-*
+      - name: elsewhere
+        namespace: other
+    clusterResourceWhitelist: []
+    syncWindows:
+      - kind: deny
+        schedule: '0 22 * * *'
+        duration: 1h
+",
     );
     fs::write(group_path, group).unwrap();
     let output = fixture.path().join("deploy");
@@ -1243,16 +1269,87 @@ fn project_templates_generate_constrained_projects() {
         ])
         .assert()
         .success();
-    let project =
-        fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
-            .unwrap();
-    assert!(project.contains("sourceRepos:"));
-    assert!(project.contains("https://example.invalid/deploy.git"));
-    assert!(project.contains("sourceNamespaces:"));
-    assert!(project.contains("argocd-production"));
-    assert!(project.contains("namespace: api"));
-    assert!(project.contains("kind: Namespace"));
-    assert!(project.contains("name: api"));
+    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+        &fs::read_to_string(output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        project["metadata"],
+        serde_json::json!({
+            "name": "workloads",
+            "namespace": "argocd",
+            "labels": {"team": "platform"},
+            "finalizers": ["resources-finalizer.argocd.argoproj.io"],
+        })
+    );
+    // Declared AppProject fields pass through; Nyl adds the Application
+    // namespace and Namespace permissions for the target Cluster's namespaces.
+    assert_eq!(
+        project["spec"],
+        serde_json::json!({
+            "description": "Workload project",
+            "sourceRepos": ["https://example.invalid/deploy.git"],
+            "sourceNamespaces": ["argocd-production"],
+            "destinations": [
+                {"server": "https://kubernetes.default.svc", "namespace": "api"},
+                {"server": "https://kubernetes.default.svc", "namespace": "shared-*"},
+                {"name": "elsewhere", "namespace": "other"},
+            ],
+            "clusterResourceWhitelist": [
+                {"group": "", "kind": "Namespace", "name": "api"},
+                {"group": "", "kind": "Namespace", "name": "shared-*"},
+            ],
+            // The omitted namespaced whitelist admits the kinds the group renders.
+            "namespaceResourceWhitelist": [{"group": "", "kind": "ConfigMap"}],
+            "syncWindows": [{"kind": "deny", "schedule": "0 22 * * *", "duration": "1h"}],
+        })
+    );
+}
+
+#[test]
+fn bare_project_template_derives_least_privilege_defaults() {
+    let fixture = fixture();
+    let group_path = fixture.path().join("config/application-groups/workloads.yaml");
+    let group = fs::read_to_string(&group_path).unwrap().replace(
+        "  projectRef: workloads\n",
+        "  projectTemplate:\n    name: workloads-production\n",
+    );
+    fs::write(group_path, group).unwrap();
+    let output = fixture.path().join("deploy");
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let project = nyl::yaml::parse_yaml_value_k8s_compatible(
+        &fs::read_to_string(
+            output.join("production/_nyl/catalog/appproject.argoproj.io/argocd/workloads-production.yaml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Omitted fields admit only what the group's Applications deploy: the
+    // publication repository, the target Cluster's Release namespaces, and the
+    // rendered kinds by scope.
+    assert_eq!(project["metadata"]["name"], "workloads-production");
+    assert_eq!(
+        project["spec"],
+        serde_json::json!({
+            "sourceRepos": ["https://example.invalid/deploy.git"],
+            "sourceNamespaces": ["argocd-production"],
+            "destinations": [{"server": "https://kubernetes.default.svc", "namespace": "api"}],
+            "clusterResourceWhitelist": [{"group": "", "kind": "Namespace"}],
+            "namespaceResourceWhitelist": [{"group": "", "kind": "ConfigMap"}],
+        })
+    );
 }
 
 #[test]
@@ -1261,7 +1358,7 @@ fn project_templates_reject_release_namespace_expansion() {
     let group_path = fixture.path().join("config/application-groups/workloads.yaml");
     let group = fs::read_to_string(&group_path).unwrap().replace(
         "  projectRef: workloads\n",
-        "  projectTemplate:\n    destinationNamespaces:\n      - platform\n",
+        "  projectTemplate:\n    destinations:\n      - server: '*'\n        namespace: platform\n",
     );
     fs::write(group_path, group).unwrap();
     Command::cargo_bin("nyl")
@@ -1610,7 +1707,7 @@ fn target_rendering_requires_complete_cluster_capabilities() {
         .unwrap()
         .replace("    kubeVersion: 1.31.4\n", "")
         .replace(
-            "    apiVersions:\n      - v1\n      - apps/v1\n",
+            "    apiVersions:\n      - v1\n      - apps/v1\n      - v1/ConfigMap\n      - v1/Namespace\n      - v1/Service\n      - apps/v1/Deployment\n",
             "    apiVersions: []\n",
         );
     fs::write(&cluster_path, cluster).unwrap();
@@ -4035,7 +4132,7 @@ fn created_release_is_rendered_by_the_group_that_owns_its_directory() {
 }
 
 #[test]
-fn group_without_a_declared_project_generates_a_permissive_app_project() {
+fn group_without_a_declared_project_generates_a_least_privilege_app_project() {
     let fixture = fixture();
     // The group declares neither projectRef nor projectTemplate.
     fs::remove_file(fixture.path().join("config/projects/workloads.yaml")).unwrap();
@@ -4074,18 +4171,16 @@ spec:
     .unwrap();
     assert_eq!(project["metadata"]["name"], "workloads");
     assert_eq!(project["metadata"]["namespace"], "argocd");
+    // The implied project admits exactly what the group's Applications deploy.
     assert_eq!(
-        project["spec"]["destinations"],
-        serde_json::json!([{"namespace": "*", "server": "https://kubernetes.default.svc"}])
-    );
-    assert_eq!(
-        project["spec"]["clusterResourceWhitelist"],
-        serde_json::json!([{"group": "*", "kind": "*"}])
-    );
-    // The in-cluster destination and the publication repository stay fixed.
-    assert_eq!(
-        project["spec"]["sourceRepos"],
-        serde_json::json!(["https://example.invalid/deploy.git"])
+        project["spec"],
+        serde_json::json!({
+            "sourceRepos": ["https://example.invalid/deploy.git"],
+            "sourceNamespaces": ["argocd"],
+            "destinations": [{"server": "https://kubernetes.default.svc", "namespace": "api"}],
+            "clusterResourceWhitelist": [{"group": "", "kind": "Namespace"}],
+            "namespaceResourceWhitelist": [{"group": "", "kind": "ConfigMap"}],
+        })
     );
 
     let application = fs::read_to_string(root.join("_nyl/catalog/application.argoproj.io/argocd/api.yaml")).unwrap();

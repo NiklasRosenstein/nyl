@@ -35,19 +35,26 @@ even when an application source repository is compromised. An
 `AppProjectDefinition` with `management: External` references an administrator-
 managed project without publishing its manifest.
 
-`ApplicationGroup.spec.projectTemplate` is a constrained alternative. Nyl fixes
-its source repository and destination cluster from the selected target, checks
-every Release namespace against its declared destination patterns, and only
-adds Namespace permissions when namespace creation is enabled. Other
-cluster-scoped permissions remain explicit. The generated policy complements,
-but does not replace, Argo CD admission.
+A group that declares no project gets an implied least-privilege AppProject: the
+target publication repository, the target workload Cluster with the group's
+Release namespaces, and exactly the resource kinds the group renders, split into
+cluster-scoped and namespaced whitelists. The project changes with the rendered
+output, so a Release that adds a ClusterRole also adds it to the project in the
+same render.
 
-A group that declares no project at all keeps the implied AppProject, which is
-permissive: it still confines the group to one destination cluster and to the
-target publication repository, but it admits every namespace and every
-cluster-scoped resource, and no Release namespace check applies. Declare
-`projectTemplate` for any group whose namespace or cluster-resource scope
-should be an enforced boundary.
+`ApplicationGroup.spec.projectTemplate` mirrors the AppProject spec fields;
+declared fields are kept as written and omitted fields take the derived values.
+Declare a field to make it a fixed boundary that rendered output cannot widen.
+With declared `destinations`, Nyl checks every Release namespace against the
+entries admitting the target workload Cluster, and adds Namespace permissions
+only when namespace creation is enabled and the cluster-resource whitelist is
+declared.
+
+Deriving a whitelist needs each rendered kind's scope. It comes from a CRD
+rendered in the same target or from the Cluster's recorded capabilities
+(`clusterScopedKinds` and vendored CRDs); when neither knows a kind, rendering
+fails with a capture hint rather than guessing. The generated policy complements, but
+does not replace, Argo CD admission.
 
 The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
