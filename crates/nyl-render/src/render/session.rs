@@ -35,6 +35,7 @@ pub struct RenderSession {
     template_context: TemplateContext,
     missing_capabilities_error: Option<String>,
     cache: Option<RenderCache>,
+    git_offline: bool,
 }
 
 /// Options that select one bundle and control its recursive expansion.
@@ -257,6 +258,7 @@ impl RenderSession {
             template_context,
             missing_capabilities_error: None,
             cache: None,
+            git_offline: false,
         })
     }
 
@@ -285,6 +287,7 @@ impl RenderSession {
                 template_context: TemplateContext::build(serde_json::json!({}), &secrets)?,
                 missing_capabilities_error,
                 cache: None,
+                git_offline: false,
             }
         };
         Ok(session)
@@ -305,6 +308,18 @@ impl RenderSession {
     #[must_use]
     pub fn with_cache(mut self, cache: Option<RenderCache>) -> Self {
         self.cache = cache;
+        self
+    }
+
+    /// Resolve Git chart selectors from cached refs without contacting remotes.
+    pub fn set_git_offline(&mut self, offline: bool) {
+        self.git_offline = offline;
+    }
+
+    /// Select cached-ref resolution for Git chart versions.
+    #[must_use]
+    pub fn with_git_offline(mut self, offline: bool) -> Self {
+        self.set_git_offline(offline);
         self
     }
 
@@ -435,7 +450,8 @@ impl RenderSession {
         let mut helm_render_count = 0;
         let mut pending = resources;
         let artifact_resolver =
-            super::artifact::ArtifactResolver::new(&self.project_root, &self.project_config, self.cache.clone())?;
+            super::artifact::ArtifactResolver::new(&self.project_root, &self.project_config, self.cache.clone())?
+                .with_git_offline(self.git_offline);
         for _ in 0..request.max_depth {
             let mut next = Vec::new();
             for resource in pending {
@@ -795,10 +811,7 @@ fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig)
         && resource.get("kind").and_then(Value::as_str) == Some("HelmChart")
     {
         return match serde_json::from_value::<HelmChart>(resource.clone()) {
-            Ok(chart) if chart.spec.chart.repository.is_some() && chart.spec.chart.version.is_none() => {
-                Some("unpinned remote Helm chart".to_string())
-            }
-            Ok(_) => None,
+            Ok(chart) => chart_render_cache_bypass_reason(&chart.spec.chart, config),
             Err(_) => Some("invalid HelmChart dependency".to_string()),
         };
     }
@@ -816,10 +829,39 @@ fn resource_render_cache_bypass_reason(resource: &Value, config: &ProjectConfig)
         return None;
     }
     let chart_ref = component_kind_to_chart_ref(&parse_component_kind(effective));
-    chart_ref
-        .version
-        .is_none()
-        .then(|| "unpinned remote Helm chart".to_string())
+    chart_render_cache_bypass_reason(&chart_ref, config)
+}
+
+fn chart_render_cache_bypass_reason(chart: &crate::resources::ChartRef, config: &ProjectConfig) -> Option<String> {
+    let repository = chart.repository.as_deref()?;
+    let Some(repository) = repository.strip_prefix("git+") else {
+        return chart.version.is_none().then(|| "unpinned remote Helm chart".to_owned());
+    };
+    let revision = chart.version.as_deref().unwrap_or("HEAD");
+    if revision.len() == 40 && git2::Oid::from_str(revision).is_ok() {
+        return None;
+    }
+    // A vendor lock pins the selector. Otherwise a complete output cache hit
+    // would bypass the ref resolution that determines the chart's input bytes.
+    if let Some(vendor) = config
+        .vendor()
+        .filter(|vendor| vendor.mode != crate::config::VendorMode::Disabled)
+    {
+        use super::artifact::VendorStore as _;
+        let request = super::artifact::ArtifactRequest::GitSource {
+            repository: repository.to_owned(),
+            revision: revision.to_owned(),
+            commit: None,
+            subpath: chart.name.clone(),
+        };
+        if super::artifact::DirectoryVendorStore::load(vendor.path.clone())
+            .and_then(|store| store.lookup(&request))
+            .is_ok_and(|artifact| artifact.is_some())
+        {
+            return None;
+        }
+    }
+    Some("mutable Git Helm chart".to_owned())
 }
 
 fn resources_render_cache_bypass_reasons(resources: &[RenderResource], config: &ProjectConfig) -> BTreeSet<String> {
@@ -918,6 +960,88 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn mutable_git_chart_selectors_cannot_reuse_complete_render_output() {
+        let config = ProjectConfig {
+            file: None,
+            config: crate::config::ProjectFile::default(),
+        };
+        for revision in [None, Some("main"), Some("stable"), Some("abcdef0")] {
+            let chart = crate::resources::ChartRef {
+                repository: Some("git+https://example.invalid/charts.git".to_owned()),
+                version: revision.map(str::to_owned),
+                name: Some("chart".to_owned()),
+            };
+            assert_eq!(
+                chart_render_cache_bypass_reason(&chart, &config).as_deref(),
+                Some("mutable Git Helm chart")
+            );
+        }
+        let chart = crate::resources::ChartRef {
+            repository: Some("git+https://example.invalid/charts.git".to_owned()),
+            version: Some("a".repeat(40)),
+            name: Some("chart".to_owned()),
+        };
+        assert_eq!(chart_render_cache_bypass_reason(&chart, &config), None);
+    }
+
+    #[test]
+    fn verified_vendor_pin_allows_mutable_git_chart_output_reuse() {
+        use super::super::artifact::{
+            ArtifactFormat, ArtifactOrigin, ArtifactRequest, DirectoryVendorWriter, ResolvedArtifact,
+        };
+        let project = TempDir::new().unwrap();
+        fs::write(
+            project.path().join("nyl.toml"),
+            "[vendor]\nmode = \"preferred\"\npath = \"vendor\"\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(project.path())).unwrap();
+        let chart = crate::resources::ChartRef {
+            repository: Some("git+https://example.invalid/charts.git".to_owned()),
+            version: Some("main".to_owned()),
+            name: Some("chart".to_owned()),
+        };
+        let request = ArtifactRequest::GitSource {
+            repository: "https://example.invalid/charts.git".to_owned(),
+            revision: "main".to_owned(),
+            commit: None,
+            subpath: Some("chart".to_owned()),
+        };
+        let archive = project.path().join("source.tar.zst");
+        let source = TempDir::new().unwrap();
+        fs::write(
+            source.path().join("Chart.yaml"),
+            "apiVersion: v2\nname: application\nversion: 1.0.0\n",
+        )
+        .unwrap();
+        super::super::artifact::ArtifactResolver::archive_git_tree(source.path(), &archive).unwrap();
+        let artifact = ResolvedArtifact {
+            path: archive.clone(),
+            digest: nyl_core::digest::sha256_hex(&fs::read(&archive).unwrap()),
+            format: ArtifactFormat::GitArchive,
+            resolved_ref: Some("a".repeat(40)),
+            origin: ArtifactOrigin::Remote,
+        };
+        DirectoryVendorWriter::from_config(&config)
+            .unwrap()
+            .sync(&std::collections::BTreeMap::from([(request.clone(), artifact)]), false)
+            .unwrap();
+        assert_eq!(chart_render_cache_bypass_reason(&chart, &config), None);
+        fs::remove_file(
+            config
+                .vendor()
+                .unwrap()
+                .path
+                .join(request.vendor_relative_path().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            chart_render_cache_bypass_reason(&chart, &config).as_deref(),
+            Some("mutable Git Helm chart")
+        );
     }
 
     #[test]

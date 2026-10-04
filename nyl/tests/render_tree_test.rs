@@ -5943,3 +5943,95 @@ fn test_render_tree_leaves_publication_inputs_unbound_before_the_branch_exists()
     // The Release default applies while the state file does not exist.
     assert!(rendered.contains("tag: none"), "{rendered}");
 }
+
+fn assert_git_helm_chart_offline_command(tree: bool) {
+    let fixture = fixture();
+    let remote = TempDir::new().unwrap();
+    let repository = Repository::init(remote.path()).unwrap();
+    repository.set_head("refs/heads/main").unwrap();
+    let chart = remote.path().join("chart");
+    fs::create_dir_all(chart.join("templates")).unwrap();
+    fs::write(chart.join("templates/config.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: git-chart\n  namespace: '{{ .Release.Namespace }}'\ndata:\n  chartVersion: '{{ .Chart.Version }}'\n").unwrap();
+    let commit_chart = |version: &str| {
+        fs::write(
+            chart.join("Chart.yaml"),
+            format!("apiVersion: v2\nname: application\nversion: {version}\n"),
+        )
+        .unwrap();
+        commit_all(&repository, version);
+    };
+    commit_chart("1.0.0");
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        format!(
+            r#"apiVersion: k8s.gitops.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: api
+---
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: api
+  namespace: api
+spec:
+  chart:
+    repository: git+file://{}
+    version: main
+    name: chart
+"#,
+            remote.path().display()
+        ),
+    )
+    .unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Git Helm release");
+    let output = TempDir::new().unwrap();
+    let render = |offline: bool, version: Option<&str>| {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .timeout(std::time::Duration::from_secs(30));
+        if tree {
+            command
+                .args(["render-tree", "--target", "production", "--output-dir"])
+                .arg(output.path());
+        } else {
+            command.args(["render", "applications/workloads/api.yaml", "--target", "production"]);
+        }
+        command.arg("--no-validate");
+        if offline {
+            command.arg("--offline");
+        }
+        let assertion = command.assert();
+        if let Some(version) = version {
+            let assertion = assertion.success();
+            let rendered = if tree {
+                read_resources(&output.path().join("production/workloads/api"))
+            } else {
+                String::from_utf8(assertion.get_output().stdout.clone()).unwrap()
+            };
+            assert!(rendered.contains(version), "{rendered}");
+        } else {
+            assertion.failure().stderr(predicate::str::contains("No cached copy"));
+        }
+    };
+    render(true, None);
+    render(false, Some("1.0.0"));
+    commit_chart("2.0.0");
+    render(true, Some("1.0.0"));
+    render(false, Some("2.0.0"));
+    drop(repository);
+    fs::remove_dir_all(remote.path()).unwrap();
+    render(true, Some("2.0.0"));
+}
+
+#[test]
+fn test_render_git_helm_chart_obeys_offline_and_refreshes_moved_refs() {
+    assert_git_helm_chart_offline_command(false);
+}
+
+#[test]
+fn test_render_tree_git_helm_chart_obeys_offline_and_refreshes_moved_refs() {
+    assert_git_helm_chart_offline_command(true);
+}

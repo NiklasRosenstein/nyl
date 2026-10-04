@@ -259,7 +259,7 @@ impl HelmChartResolver {
             subpath: chart_ref.name.clone(),
         };
         if let Some(resolver) = &self.artifact_resolver {
-            if let Some(artifact) = resolver.lookup(&request)? {
+            if let Some(artifact) = resolver.lookup_vendor(&request)? {
                 let chart_path = resolver.materialize_git(&artifact)?;
                 return Self::verify_and_prepare_git_chart(chart_path, chart_ref, false);
             }
@@ -274,24 +274,44 @@ impl HelmChartResolver {
         // Use 'name' field as subpath for Git repos
         let subpath = chart_ref.name.as_deref();
 
-        let checkout = git_manager.resolve_ref(repository_url, chart_ref.version.as_deref(), None)?;
+        let offline = self
+            .artifact_resolver
+            .as_ref()
+            .is_some_and(|resolver| resolver.git_offline());
+        let checkout = if offline {
+            git_manager.resolve_ref_cached(repository_url, Some(revision), None)?
+        } else {
+            git_manager.resolve_ref(repository_url, Some(revision), None)?
+        };
+        let repository = git2::Repository::open(&checkout)
+            .map_err(|error| NylError::config(format!("Failed to inspect Git chart source: {error}")))?;
+        let commit = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .map_err(crate::git::GitError::from)?
+            .id()
+            .to_string();
+        let cache_key = crate::render::artifact::ArtifactRequest::GitSource {
+            repository: repository_url.to_owned(),
+            revision: revision.to_owned(),
+            commit: Some(commit.clone()),
+            subpath: chart_ref.name.clone(),
+        };
         if let Some(resolver) = &self.artifact_resolver {
             let chart_path = subpath.map_or(checkout.clone(), |subpath| checkout.join(subpath));
-            let prepared = Self::verify_and_prepare_git_chart(chart_path, chart_ref, true)?;
-            let repository = git2::Repository::discover(&checkout)
-                .map_err(|error| NylError::config(format!("Failed to inspect Git chart source: {error}")))?;
-            let commit = repository
-                .head()
-                .ok()
-                .and_then(|head| head.target())
-                .map(|oid| oid.to_string());
+            if let Some(artifact) = resolver.lookup_cache(&request, &cache_key)? {
+                let chart_path = resolver.materialize_git(&artifact)?;
+                return Self::verify_and_prepare_git_chart(chart_path, chart_ref, false);
+            }
+            let prepared = Self::verify_and_prepare_git_chart(chart_path, chart_ref, !offline)?;
             let archive = tempfile::NamedTempFile::new()?;
             crate::render::artifact::ArtifactResolver::archive_git_tree(&prepared.path, archive.path())?;
-            let artifact = resolver.store(
+            let artifact = resolver.store_with_cache_key(
                 &request,
+                &cache_key,
                 archive.path(),
                 crate::render::artifact::ArtifactFormat::GitArchive,
-                commit,
+                Some(commit),
             )?;
             let chart_path = resolver.materialize_git(&artifact)?;
             return Self::verify_and_prepare_git_chart(chart_path, chart_ref, false);
@@ -456,6 +476,300 @@ mod tests {
             format!("apiVersion: v2\nname: {}\nversion: 1.0.0\n", name),
         )
         .unwrap();
+    }
+
+    struct GitChartFixture {
+        remote: TempDir,
+        project: TempDir,
+        cache_dir: TempDir,
+        config: crate::config::ProjectConfig,
+        chart: ChartRef,
+    }
+
+    impl GitChartFixture {
+        fn new(revision: Option<&str>) -> Self {
+            let remote = TempDir::new().unwrap();
+            let repo = git2::Repository::init(remote.path()).unwrap();
+            repo.set_head("refs/heads/main").unwrap();
+            let project = TempDir::new().unwrap();
+            let config_path = project.path().join("nyl.toml");
+            fs::write(&config_path, "[vendor]\nmode = \"preferred\"\npath = \"vendor\"\n").unwrap();
+            let config = crate::config::ProjectConfig::load(Some(config_path)).unwrap();
+            let chart = ChartRef {
+                repository: Some(format!("git+file://{}", remote.path().display())),
+                version: revision.map(str::to_owned),
+                name: Some("charts/application".to_owned()),
+            };
+            let fixture = Self {
+                remote,
+                project,
+                cache_dir: TempDir::new().unwrap(),
+                config,
+                chart,
+            };
+            fixture.commit("1.0.0");
+            fixture
+        }
+
+        fn commit(&self, version: &str) -> String {
+            let repo = git2::Repository::open(self.remote.path()).unwrap();
+            let path = self.remote.path().join("charts/application");
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("Chart.yaml"),
+                format!("apiVersion: v2\nname: application\nversion: {version}\n"),
+            )
+            .unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("charts/application/Chart.yaml")).unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+            let parents = parent.iter().collect::<Vec<_>>();
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, version, &tree, &parents)
+                .unwrap()
+                .to_string()
+        }
+
+        fn tag(&self, annotated: bool) {
+            let repo = git2::Repository::open(self.remote.path()).unwrap();
+            let object = repo.head().unwrap().peel_to_commit().unwrap().into_object();
+            if annotated {
+                let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+                repo.tag("stable", &object, &sig, "Stable chart", true).unwrap();
+            } else {
+                repo.tag_lightweight("stable", &object, true).unwrap();
+            }
+        }
+
+        fn resolver(
+            &self,
+            offline: bool,
+            mode: crate::render::cache::CacheMode,
+        ) -> (HelmChartResolver, crate::render::cache::RenderCache) {
+            let cache = crate::render::cache::RenderCache::with_root(self.cache_dir.path(), mode).unwrap();
+            self.resolver_with_cache(offline, cache)
+        }
+
+        fn resolver_with_cache(
+            &self,
+            offline: bool,
+            cache: crate::render::cache::RenderCache,
+        ) -> (HelmChartResolver, crate::render::cache::RenderCache) {
+            let artifacts =
+                crate::render::artifact::ArtifactResolver::new(self.project.path(), &self.config, Some(cache.clone()))
+                    .unwrap()
+                    .with_git_offline(offline);
+            let resolver = HelmChartResolver::with_cache_dir(
+                vec![],
+                self.project.path().to_path_buf(),
+                Some(artifacts.cache_base().to_path_buf()),
+            )
+            .with_render_cache(Some(cache.clone()))
+            .with_artifact_resolver(Some(artifacts));
+            (resolver, cache)
+        }
+
+        fn assert_version(&self, resolver: &HelmChartResolver, version: &str) -> ResolvedChart {
+            let resolved = resolver.resolve_chart(&self.chart).unwrap();
+            let content = fs::read_to_string(resolved.path.join("Chart.yaml")).unwrap();
+            assert!(content.contains(&format!("version: {version}\n")), "{content}");
+            resolved
+        }
+    }
+
+    fn assert_moved_chart_ref(revision: Option<&str>, annotated_tag: Option<bool>) {
+        use crate::render::artifact::{ArtifactOrigin, ArtifactRequest};
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(revision);
+        if let Some(annotated) = annotated_tag {
+            fixture.tag(annotated);
+        }
+        let (resolver, cache) = fixture.resolver(false, CacheMode::Default);
+        let first = fixture.assert_version(&resolver, "1.0.0");
+        // Old selector-only records must not win over a newly resolved commit.
+        let request = cache.observed_artifacts().into_keys().next().unwrap();
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        crate::render::artifact::ArtifactResolver::archive_git_tree(&first.path, archive.path()).unwrap();
+        resolver
+            .artifact_resolver
+            .as_ref()
+            .unwrap()
+            .store(
+                &request,
+                archive.path(),
+                crate::render::artifact::ArtifactFormat::GitArchive,
+                None,
+            )
+            .unwrap();
+        let commit = fixture.commit("2.0.0");
+        if let Some(annotated) = annotated_tag {
+            fixture.tag(annotated);
+        }
+        // Each resolver represents a new invocation sharing only persistent cache state.
+        let (resolver, cache) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "2.0.0");
+        fixture.assert_version(&resolver, "2.0.0");
+        let observed = cache.observed_artifacts();
+        assert_eq!(observed.len(), 1);
+        let (request, artifact) = observed.into_iter().next().unwrap();
+        assert!(matches!(request, ArtifactRequest::GitSource { commit: None, .. }));
+        assert_eq!(artifact.resolved_ref.as_deref(), Some(commit.as_str()));
+        assert_eq!(artifact.origin, ArtifactOrigin::Cache);
+    }
+
+    #[test]
+    fn test_git_chart_cache_tracks_moved_branch() {
+        assert_moved_chart_ref(Some("main"), None);
+    }
+
+    #[test]
+    fn test_git_chart_cache_tracks_moved_lightweight_tag() {
+        assert_moved_chart_ref(Some("stable"), Some(false));
+    }
+
+    #[test]
+    fn test_git_chart_cache_tracks_moved_annotated_tag() {
+        assert_moved_chart_ref(Some("stable"), Some(true));
+    }
+
+    #[test]
+    fn test_git_chart_cache_tracks_default_head() {
+        assert_moved_chart_ref(None, None);
+    }
+
+    #[test]
+    fn test_git_chart_offline_uses_cached_ref_then_online_refreshes() {
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(Some("main"));
+        let (online, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&online, "1.0.0");
+        fixture.commit("2.0.0");
+        let (offline, cache) = fixture.resolver(true, CacheMode::Default);
+        fixture.assert_version(&offline, "1.0.0");
+        assert!(serde_json::to_value(cache.stats()).unwrap()["sources"]["git_ref_refresh"].is_null());
+        let (online, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&online, "2.0.0");
+    }
+
+    #[test]
+    fn test_git_chart_unavailable_remote_falls_back_to_cached_ref() {
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(Some("main"));
+        let (resolver, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        fs::remove_dir_all(fixture.remote.path()).unwrap();
+        let (resolver, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        let mut missing = fixture.chart.clone();
+        missing.version = Some("missing".to_owned());
+        assert!(resolver
+            .resolve_chart(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("no cached ref"));
+    }
+
+    #[test]
+    fn test_git_chart_offline_rejects_uncached_repository_and_ref() {
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(Some("main"));
+        let (offline, _) = fixture.resolver(true, CacheMode::Default);
+        assert!(offline
+            .resolve_chart(&fixture.chart)
+            .unwrap_err()
+            .to_string()
+            .contains("No cached copy"));
+        let (online, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&online, "1.0.0");
+        let mut missing = fixture.chart.clone();
+        missing.version = Some(fixture.commit("2.0.0"));
+        assert!(offline
+            .resolve_chart(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("not in the local Git cache"));
+    }
+
+    #[test]
+    fn test_git_chart_offline_rebuilds_missing_archive_from_cached_git_objects() {
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(Some("main"));
+        let (resolver, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        fs::remove_dir_all(fixture.cache_dir.path().join("sources")).unwrap();
+        fs::remove_dir_all(fixture.remote.path()).unwrap();
+        let (resolver, _) = fixture.resolver(true, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+    }
+
+    #[test]
+    fn test_git_chart_required_vendor_miss_fails_before_fetch() {
+        use crate::render::cache::CacheMode;
+        let mut fixture = GitChartFixture::new(Some("main"));
+        fixture.config.config.vendor.as_mut().unwrap().mode = crate::config::VendorMode::Required;
+        let (resolver, cache) = fixture.resolver(false, CacheMode::Default);
+        let error = resolver.resolve_chart(&fixture.chart).unwrap_err().to_string();
+        assert!(error.contains("required vendor lock"), "{error}");
+        assert!(cache.stats().is_empty());
+    }
+
+    #[test]
+    fn test_git_chart_refresh_and_no_cache_read_current_commit() {
+        use crate::render::artifact::ArtifactOrigin;
+        use crate::render::cache::CacheMode;
+        let fixture = GitChartFixture::new(Some("main"));
+        let (resolver, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        fixture.commit("2.0.0");
+        for mode in [CacheMode::Refresh, CacheMode::Disabled] {
+            let (resolver, cache) = fixture.resolver(false, mode);
+            fixture.assert_version(&resolver, "2.0.0");
+            assert_eq!(
+                cache.observed_artifacts().into_values().next().unwrap().origin,
+                ArtifactOrigin::Remote
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_chart_pinned_commit_remains_usable_without_remote() {
+        use crate::render::cache::CacheMode;
+        let mut fixture = GitChartFixture::new(Some("main"));
+        let repo = git2::Repository::open(fixture.remote.path()).unwrap();
+        fixture.chart.version = Some(repo.head().unwrap().peel_to_commit().unwrap().id().to_string());
+        let (resolver, _) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        fixture.commit("2.0.0");
+        fs::remove_dir_all(fixture.remote.path()).unwrap();
+        let (resolver, cache) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        assert!(serde_json::to_value(cache.stats()).unwrap()["sources"]["git_ref_refresh"].is_null());
+    }
+
+    #[test]
+    fn test_git_chart_vendor_pin_survives_moved_ref_and_empty_git_cache() {
+        use crate::render::artifact::DirectoryVendorWriter;
+        use crate::render::cache::{CacheMode, RenderCache};
+        let fixture = GitChartFixture::new(Some("main"));
+        let (resolver, cache) = fixture.resolver(false, CacheMode::Default);
+        fixture.assert_version(&resolver, "1.0.0");
+        let writer = DirectoryVendorWriter::from_config(&fixture.config).unwrap();
+        writer.sync(&cache.observed_artifacts(), false).unwrap();
+        fixture.commit("2.0.0");
+        let (resolver, _) = fixture.resolver(false, CacheMode::Refresh);
+        fixture.assert_version(&resolver, "1.0.0");
+        // Vendor refresh deliberately bypasses the old pin, and keeps the selector key.
+        let cache = RenderCache::with_root(fixture.cache_dir.path(), CacheMode::Refresh)
+            .unwrap()
+            .with_vendor_population(true);
+        let (resolver, cache) = fixture.resolver_with_cache(false, cache);
+        fixture.assert_version(&resolver, "2.0.0");
+        writer.sync(&cache.observed_artifacts(), false).unwrap();
+        fs::remove_dir_all(fixture.cache_dir.path()).unwrap();
+        fs::remove_dir_all(fixture.remote.path()).unwrap();
+        let (resolver, _) = fixture.resolver(true, CacheMode::Default);
+        fixture.assert_version(&resolver, "2.0.0");
     }
 
     #[test]

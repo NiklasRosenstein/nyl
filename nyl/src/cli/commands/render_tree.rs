@@ -52,7 +52,7 @@ pub struct RenderTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Read fromPublication state at the cached publication branch head.
+    /// Resolve Git charts from cached refs and read fromPublication state at the cached publication branch head.
     #[arg(long)]
     pub offline: bool,
 }
