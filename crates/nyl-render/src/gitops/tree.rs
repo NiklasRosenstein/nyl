@@ -28,7 +28,7 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession, CATALOG_DIRECTORY,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-provenance-v3";
+const TARGET_CACHE_ACTION: &str = "target-provenance-v4";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -431,7 +431,8 @@ async fn compile_target_tree_inner(
     } else {
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
     }
-    .with_cache(cache.cloned());
+    .with_cache(cache.cloned())
+    .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
     let mut git_manager = None;
 
     let (groups, disabled_groups) = selected_groups(inventory, &target, &central_session)?;
@@ -456,6 +457,7 @@ async fn compile_target_tree_inner(
         )?;
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
+            session.set_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
         }
         prepared_groups.push(PreparedGroup {
             group_resource_path,
