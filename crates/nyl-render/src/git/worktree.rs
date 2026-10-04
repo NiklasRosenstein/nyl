@@ -47,11 +47,11 @@ impl WorktreeManager {
         // Use git worktree add command (git2-rs doesn't have direct worktree support)
         let output = Command::new("git")
             .arg("-C")
-            .arg(bare_repo_path)
+            .arg(git_cli_path(bare_repo_path))
             .arg("worktree")
             .arg("add")
             .arg("--detach")
-            .arg(worktree_path)
+            .arg(git_cli_path(worktree_path))
             .arg(&oid_str)
             .output()
             .map_err(|e| {
@@ -108,11 +108,11 @@ impl WorktreeManager {
     pub fn remove_worktree(bare_repo_path: &Path, worktree_path: &Path) -> Result<()> {
         let output = Command::new("git")
             .arg("-C")
-            .arg(bare_repo_path)
+            .arg(git_cli_path(bare_repo_path))
             .arg("worktree")
             .arg("remove")
             .arg("--force")
-            .arg(worktree_path)
+            .arg(git_cli_path(worktree_path))
             .output()?;
 
         if !output.status.success() {
@@ -130,7 +130,7 @@ impl WorktreeManager {
     pub fn prune_worktrees(bare_repo_path: &Path) -> Result<()> {
         let output = Command::new("git")
             .arg("-C")
-            .arg(bare_repo_path)
+            .arg(git_cli_path(bare_repo_path))
             .arg("worktree")
             .arg("prune")
             .output()?;
@@ -146,11 +146,86 @@ impl WorktreeManager {
     }
 }
 
+/// Git for Windows needs ordinary drive/UNC paths when writing worktree links.
+/// Rust's canonical paths retain their verbatim prefix for filesystem access;
+/// convert only the arguments crossing the Git command-line boundary.
+fn git_cli_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut ordinary = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = PathBuf::from(r"\\");
+                    unc.push(server);
+                    unc.push(share);
+                    unc
+                }
+                _ => return path.to_path_buf(),
+            };
+            ordinary.push(components.as_path());
+            return ordinary;
+        }
+    }
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
     #[test]
-    fn test_worktree_manager_structure() {
-        // Basic structure test - actual functionality requires a real Git repository
-        // More comprehensive tests would be integration tests
+    fn test_worktree_lifecycle_with_canonical_paths() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let bare_path = root.join("bare repository");
+        let repository = Repository::init_bare(&bare_path).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        let tree = repository
+            .find_tree(repository.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let first = repository
+            .commit(Some("refs/heads/main"), &signature, &signature, "First", &tree, &[])
+            .unwrap();
+        let second = repository
+            .commit(
+                Some("refs/heads/main"),
+                &signature,
+                &signature,
+                "Second",
+                &tree,
+                &[&repository.find_commit(first).unwrap()],
+            )
+            .unwrap();
+        let worktree_path = root.join("nested/worktree with spaces");
+        let checkout = WorktreeManager::get_or_create_worktree(&bare_path, "main", first, &worktree_path).unwrap();
+        assert_eq!(
+            Repository::open(&checkout).unwrap().head().unwrap().target(),
+            Some(first)
+        );
+        let checkout = WorktreeManager::get_or_create_worktree(&bare_path, "main", second, &worktree_path).unwrap();
+        assert_eq!(
+            Repository::open(&checkout).unwrap().head().unwrap().target(),
+            Some(second)
+        );
+        WorktreeManager::remove_worktree(&bare_path, &worktree_path).unwrap();
+        assert!(!worktree_path.exists());
+        WorktreeManager::prune_worktrees(&bare_path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_git_cli_paths_preserve_drive_unc_and_unicode() {
+        for (canonical, ordinary) in [
+            (r"\\?\C:\cache\worktree with spaces", r"C:\cache\worktree with spaces"),
+            (r"\\?\UNC\server\share\cache\chärt", r"\\server\share\cache\chärt"),
+            (r"C:\cache\worktree", r"C:\cache\worktree"),
+            (r"\\server\share\cache", r"\\server\share\cache"),
+        ] {
+            assert_eq!(git_cli_path(Path::new(canonical)), PathBuf::from(ordinary));
+        }
     }
 }
