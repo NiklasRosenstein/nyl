@@ -99,14 +99,14 @@ destination namespace; the generated group does not impose a
 <code dir="auto">destinationNamespace</code>.</p>
 <p>No project resource is written. The group keeps its
 <a href="/nyl/pr-preview/pr-143/deployment-workflows/rendered-manifests/resource-guides/application-group/#project-assignment">implied AppProject</a>:
-named after the group, confined to the target cluster and the publication
-repository, and permissive about namespaces and cluster-scoped resources. Argo
+named after the group and admitting only what its Applications deploy. Argo
 CD receives the credential-free <code dir="auto">GitRepository.spec.repoURL</code>, never the
 publication URL.</p>
 <p><code dir="auto">--project-name</code>, <code dir="auto">--allow-namespace</code>, and <code dir="auto">--allow-cluster-resource</code> narrow
-that project by writing an explicit <code dir="auto">spec.projectTemplate</code>. Each dimension the
-options leave out stays permissive, so <code dir="auto">--allow-namespace apps</code> restricts
-namespaces while cluster-scoped resources remain open.</p>
+that project by writing an explicit <code dir="auto">spec.projectTemplate</code>. <code dir="auto">--allow-namespace</code>
+writes <code dir="auto">destinations</code> on the scaffolded Cluster. Each field the options leave out
+keeps its derived default, so <code dir="auto">--allow-namespace apps</code> fixes the destinations
+while the resource whitelists still follow what the group renders.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="non-interactive-use">Non-interactive use</h2><a class="sl-anchor-link" href="#non-interactive-use"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Non-interactive use”</span></a></div>
 <p><code dir="auto">--yes</code> accepts detected values and defaults without prompting. Important
 options include:</p>

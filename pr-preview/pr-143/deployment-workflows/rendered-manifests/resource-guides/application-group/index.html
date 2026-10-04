@@ -76,28 +76,65 @@ static metadata labels. An empty target selector matches every group. After
 selection, <code dir="auto">spec.enabled</code> may be structurally templated per target.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="project-assignment">Project assignment</h2><a class="sl-anchor-link" href="#project-assignment"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Project assignment”</span></a></div>
 <p>A group that declares neither <code dir="auto">projectRef</code> nor <code dir="auto">projectTemplate</code> owns an
-implied AppProject named after the group. It is permissive: the target workload
-Cluster as its only destination, every namespace, and every cluster-scoped
-resource. Nothing outside the group needs to exist for it to render, and Argo CD
-still confines the project to that one cluster and to the target publication
-repository.</p>
+implied AppProject named after the group. It admits only what the group’s
+Applications deploy: the target publication repository, the target workload
+Cluster with the group’s Release namespaces, and the resource kinds the group
+renders. Nothing outside the group needs to exist for it to render.</p>
 <p><code dir="auto">projectRef</code> retains a reusable AppProjectDefinition contract. A <code dir="auto">Rendered</code>
 definition is copied into the target catalog once; an <code dir="auto">External</code> definition
 only supplies the project name.</p>
-<p><code dir="auto">projectTemplate</code> replaces the implied project with a least-privilege one.
-Declaring it opts into explicit scope, so it requires <code dir="auto">destinationNamespaces</code>
-unless <code dir="auto">spec.destinationNamespace</code> fixes the namespace:</p>
-<div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-143/_astro/ec.w36nc.css"><script type="module" src="/nyl/pr-preview/pr-143/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="yaml"><code><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">projectTemplate</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">name</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">destinationNamespaces</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">preview-*</span><span style="--0:#D9F5DD;--1:#111111">'</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">clusterResourceWhitelist</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">group</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">apiextensions.k8s.io</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">CustomResourceDefinition</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="projectTemplate:  name: workloads  destinationNamespaces:    - workloads    - &#x27;preview-*&#x27;  clusterResourceWhitelist:    - group: apiextensions.k8s.io      kind: CustomResourceDefinition"><div></div></button></div></figure></div>
-<p>The name defaults to the ApplicationGroup name. Remove the whole
-<code dir="auto">projectTemplate</code> to go back to the implied permissive project. Nyl fixes
-<code dir="auto">sourceRepos</code> to the target publication repository, <code dir="auto">sourceNamespaces</code> to <code dir="auto">applicationNamespace</code>,
-and destinations to the target workload Cluster. A fixed
-<code dir="auto">destinationNamespace</code> is automatically added. Without one, at least one
-destination namespace pattern is required. Every effective Release destination
-and <code dir="auto">additionalNamespaces</code> entry must match the declared policy.</p>
-<p>When namespace creation is enabled, Nyl adds Namespace permissions for the
-approved destination patterns. Other cluster-scoped permissions remain
-explicit. Argo CD’s AppProject admission remains the authorization boundary.</p>
+<p><code dir="auto">projectTemplate</code> generates the group’s AppProject. <code dir="auto">name</code>, <code dir="auto">labels</code>,
+<code dir="auto">annotations</code>, and <code dir="auto">finalizers</code> set its metadata, and the remaining fields mirror the
+<a href="https://argo-cd.readthedocs.io/en/stable/user-guide/projects/">Argo CD AppProject</a>
+spec: <code dir="auto">description</code>, <code dir="auto">sourceRepos</code>, <code dir="auto">sourceNamespaces</code>, <code dir="auto">destinations</code>,
+<code dir="auto">clusterResourceWhitelist</code>, <code dir="auto">clusterResourceBlacklist</code>,
+<code dir="auto">namespaceResourceWhitelist</code>, <code dir="auto">namespaceResourceBlacklist</code>, <code dir="auto">roles</code>,
+<code dir="auto">syncWindows</code>, <code dir="auto">orphanedResources</code>, <code dir="auto">signatureKeys</code>,
+<code dir="auto">permitOnlyProjectScopedClusters</code>, and <code dir="auto">destinationServiceAccounts</code>. Declared
+fields are kept as written. Every omitted field is derived from the group, so a
+bare template only renames the implied project:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-143/_astro/ec.w36nc.css"><script type="module" src="/nyl/pr-preview/pr-143/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="yaml"><code><div class="ec-line"><div class="code"><span style="--0:#7FDBCA;--1:#111111">projectTemplate</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">name</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">sourceRepos</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#ECC48D;--1:#3B61B0">https://git.example.com/deploy.git</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">destinations</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">server</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">https://kubernetes.default.svc</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">namespace</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">workloads</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">server</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">https://kubernetes.default.svc</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">namespace</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">preview-*</span><span style="--0:#D9F5DD;--1:#111111">'</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#111111">clusterResourceWhitelist</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">- </span><span style="--0:#7FDBCA;--1:#111111">group</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">apiextensions.k8s.io</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#111111">kind</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#ECC48D;--1:#3B61B0">CustomResourceDefinition</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="projectTemplate:  name: workloads  sourceRepos:    - https://git.example.com/deploy.git  destinations:    - server: https://kubernetes.default.svc      namespace: workloads    - server: https://kubernetes.default.svc      namespace: &#x27;preview-*&#x27;  clusterResourceWhitelist:    - group: apiextensions.k8s.io      kind: CustomResourceDefinition"><div></div></button></div></figure></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Omitted field</th><th>Generated value</th></tr></thead><tbody><tr><td><code dir="auto">sourceRepos</code></td><td>The target publication repository</td></tr><tr><td><code dir="auto">destinations</code></td><td>The target workload Cluster with each Release destination and additional namespace</td></tr><tr><td><code dir="auto">clusterResourceWhitelist</code></td><td>The cluster-scoped kinds the group renders, including Namespaces Nyl creates for it</td></tr><tr><td><code dir="auto">namespaceResourceWhitelist</code></td><td>The namespaced kinds the group renders</td></tr></tbody></table>
+<p>The whitelists need each rendered kind’s scope, which comes from a CRD rendered
+in the same target or from the Cluster’s recorded capabilities. Recapture a
+Cluster with <code dir="auto">nyl capture cluster</code> when rendering reports an unknown scope, or
+declare both whitelists.</p>
+<p>The name defaults to the ApplicationGroup name. Nyl always adds
+<code dir="auto">applicationNamespace</code> to <code dir="auto">sourceNamespaces</code>. Each <code dir="auto">destinations</code> entry names a
+<code dir="auto">server</code> or <code dir="auto">name</code> pattern and a <code dir="auto">namespace</code> pattern. A fixed
+<code dir="auto">destinationNamespace</code> not covered by an entry for the target workload Cluster
+is added for that Cluster. Every effective Release destination and
+<code dir="auto">additionalNamespaces</code> entry must match an entry that admits the target
+workload Cluster.</p>
+<p>A declared <code dir="auto">clusterResourceWhitelist</code>, including <code dir="auto">[]</code>, admits only its
+patterns; when namespace creation is enabled, Nyl then adds Namespace
+permissions for the target Cluster’s admitted namespace patterns. Argo CD’s
+AppProject admission remains the authorization boundary.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="application-names">Application names</h2><a class="sl-anchor-link" href="#application-names"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Application names”</span></a></div>
 <p>Each Release produces one workload Application named after the Release. When
 several targets place Applications into the same Argo CD namespace on the same
