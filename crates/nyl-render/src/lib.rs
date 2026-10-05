@@ -22,6 +22,7 @@
 
 pub mod components;
 pub mod config;
+pub mod editor;
 pub mod error;
 pub mod generator;
 pub mod git;
