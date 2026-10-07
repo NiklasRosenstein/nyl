@@ -50,8 +50,9 @@ pub struct ApplyArgs {
     /// Maximum number of resources applied or pruned at the same time.
     ///
     /// Resources are applied in waves of equal ordering priority (Namespaces,
-    /// CRDs, ServiceAccounts, RBAC, configuration, Services, workloads, other);
-    /// a wave completes before the next one starts. Use 1 to apply serially.
+    /// CRDs, ServiceAccounts, roles, role bindings, configuration, Services,
+    /// workloads, other, APIServices, admission webhooks); a wave completes
+    /// before the next one starts. Use 1 to apply serially.
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
 }
@@ -302,7 +303,7 @@ pub(crate) async fn collect_live_state(
 async fn mark_superseded(storage: &dyn ReleaseStorage, mut previous: ReleaseState) {
     previous.status = ReleaseStatus::Superseded;
     previous.error = None;
-    if let Err(err) = storage.save_release(&previous).await {
+    if let Err(err) = storage.update_release(&previous).await {
         tracing::warn!(
             "Failed to mark release {} revision {} superseded: {}",
             previous.release_name,
@@ -354,6 +355,8 @@ fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manif
 ///
 /// The release namespace must already exist; callers create it before applying
 /// so namespaced resources in it succeed on the first run.
+// Shared by `apply` and `release rollback`, which each pass their own release
+// identity, mode, and concurrency; a parameter struct would only restate them.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn apply_and_record_release(
     storage: &KubernetesReleaseStorage,
@@ -517,7 +520,9 @@ pub(crate) async fn apply_and_record_release(
 /// Every wave finishes before the next starts, so Namespaces precede the resources
 /// in them and CustomResourceDefinitions precede their custom resources; after a
 /// wave that applied a CRD, discovery is refreshed before the next wave. A failed
-/// resource does not stop the others, matching serial apply. `on_result` is called
+/// resource does not stop the others, matching serial apply. When several manifests
+/// share a resource key, only the last is applied, as the duplicate warning states;
+/// concurrent server-side applies of both would race. `on_result` is called
 /// as each resource completes so progress is visible before the whole apply ends;
 /// the returned outcomes and keys keep manifest order regardless of completion order.
 pub(crate) async fn apply_sorted_manifests(
@@ -531,6 +536,8 @@ pub(crate) async fn apply_sorted_manifests(
         .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
     let waves = ResourceOrdering::apply_waves(manifests);
+    let last_occurrence: HashMap<&ResourceKey, usize> = keys.iter().enumerate().map(|(i, key)| (key, i)).collect();
+    let is_applied = |index: &usize| last_occurrence[&keys[*index]] == *index;
     tracing::info!(
         "Applying {} resources in {} waves (up to {} at a time)",
         manifests.len(),
@@ -559,7 +566,7 @@ pub(crate) async fn apply_sorted_manifests(
             discovery_refreshed = true;
         }
 
-        let mut applies = stream::iter(wave)
+        let mut applies = stream::iter(wave.filter(is_applied))
             .map(|index| async move { (index, apply_manifest(client, &manifests[index]).await) })
             .buffer_unordered(concurrency);
         while let Some((index, result)) = applies.next().await {
@@ -574,11 +581,14 @@ pub(crate) async fn apply_sorted_manifests(
     let mut outcomes = Vec::new();
     let mut failed_count = 0;
     let mut resource_keys = Vec::new();
-    for (key, result) in keys.into_iter().zip(results) {
-        match result.expect("every manifest belongs to exactly one apply wave") {
+    for (index, (key, result)) in keys.iter().zip(results).enumerate() {
+        if !is_applied(&index) {
+            continue;
+        }
+        match result.expect("every applied manifest belongs to exactly one apply wave") {
             Ok(outcome) => {
                 outcomes.push(outcome);
-                resource_keys.push(key);
+                resource_keys.push(key.clone());
             }
             Err(_) => failed_count += 1,
         }
@@ -1012,6 +1022,32 @@ mod tests {
             .collect();
         assert_eq!(result.resource_keys, expected_keys);
         assert_eq!(result.failed_count, 0);
+    }
+
+    /// Documents that resolve to the same resource are not applied concurrently;
+    /// the last one wins, as with serial apply.
+    #[tokio::test(start_paused = true)]
+    async fn test_apply_sorted_manifests_applies_only_last_duplicate() {
+        let client = LatencyClient::new("");
+        let manifests = vec![
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": "app"}, "data": {"v": "first"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "other", "namespace": "app"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": "app"}, "data": {"v": "last"}}),
+        ];
+
+        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |_, _| {})
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = result.resource_keys.iter().map(|key| key.name.as_str()).collect();
+        assert_eq!(names, vec!["other", "cm"]);
+        let stored = client.inner.get_all_resources();
+        let cm = stored
+            .values()
+            .find(|object| object.metadata.name.as_deref() == Some("cm"))
+            .unwrap();
+        assert_eq!(cm.data["data"]["v"], "last");
+        assert_eq!(client.events().iter().filter(|e| *e == "start cm").count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

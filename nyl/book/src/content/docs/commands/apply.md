@@ -46,12 +46,14 @@ For shared rendering behavior and namespace resolution details, see
 ## Apply order and progress
 
 Resources are sorted by kind priority (Namespaces, CustomResourceDefinitions,
-ServiceAccounts, RBAC, ConfigMaps and Secrets, Services, workloads, everything
-else) and applied in waves: resources of the same priority are applied
+ServiceAccounts, Roles and ClusterRoles, their bindings, ConfigMaps and Secrets,
+Services, workloads, everything else, then APIServices and admission webhook
+configurations) and applied in waves: resources of the same priority are applied
 concurrently, up to `--concurrency` at a time, and each wave finishes before the
 next starts. Namespaces therefore exist before the resources in them, and after
 a wave that applies CustomResourceDefinitions Nyl refreshes API discovery until
-the new kinds are served. A resource that fails to apply does not stop the
+the new kinds are served. When several documents resolve to the same resource,
+only the last one is applied. A resource that fails to apply does not stop the
 others; the release is recorded as failed and the command exits non-zero.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is

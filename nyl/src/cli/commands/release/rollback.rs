@@ -37,6 +37,10 @@ pub struct RollbackArgs {
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
+
+    /// Maximum number of resources applied or pruned at the same time (see `nyl apply --concurrency`).
+    #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
+    pub concurrency: u16,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
@@ -87,7 +91,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // Sort resources by priority (Namespace → CRD → RBAC → Config → Workload) and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
     ensure_namespace_exists(&kube_client, &args.namespace).await?;
-    let concurrency = usize::from(DEFAULT_APPLY_CONCURRENCY);
+    let concurrency = usize::from(args.concurrency);
     let no_duplicates = std::collections::HashMap::new();
     let apply_result = apply_sorted_manifests(&kube_client, &manifests, concurrency, &mut |key, result| {
         print_apply_result(key, result, &no_duplicates);

@@ -81,6 +81,13 @@ pub trait ReleaseStorage: Send + Sync {
     /// List all revision numbers for a release
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>>;
 
+    /// Save a revision that is expected to exist already, such as one whose status
+    /// changes. Storage backends may optimize for the update; the result is the same
+    /// as [`Self::save_release`].
+    async fn update_release(&self, release: &ReleaseState) -> Result<()> {
+        self.save_release(release).await
+    }
+
     /// Update the status of a release
     async fn update_release_status(
         &self,
@@ -338,6 +345,22 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         }
     }
 
+    async fn update_release(&self, release: &ReleaseState) -> Result<()> {
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), &release.release_namespace);
+        let secret = Self::to_secret(release)?;
+        let name = Self::secret_name(&release.release_name, release.revision);
+
+        // Replace first: the revision normally exists, so this is a single write.
+        match api.replace(&name, &kube::api::PostParams::default(), &secret).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                api.create(&kube::api::PostParams::default(), &secret).await?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
         let revisions = self.list_revisions(release_name, namespace).await?;
         if revisions.is_empty() {
@@ -405,7 +428,7 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         }
 
         // Save updated release
-        self.save_release(&release).await
+        self.update_release(&release).await
     }
 
     async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {

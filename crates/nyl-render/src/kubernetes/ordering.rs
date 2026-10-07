@@ -19,11 +19,18 @@ use std::ops::Range;
 const PRIORITY_NAMESPACE: u32 = 0;
 const PRIORITY_CRD: u32 = 10;
 const PRIORITY_SERVICE_ACCOUNT: u32 = 20;
-const PRIORITY_RBAC: u32 = 25; // Role, RoleBinding, ClusterRole, ClusterRoleBinding
+const PRIORITY_ROLE: u32 = 25; // Role, ClusterRole
+                               // Bindings follow roles: the API server resolves the referenced role when checking
+                               // that a binding does not escalate privileges.
+const PRIORITY_ROLE_BINDING: u32 = 26; // RoleBinding, ClusterRoleBinding
 const PRIORITY_CONFIG: u32 = 30; // ConfigMap, Secret
 const PRIORITY_SERVICE: u32 = 40;
 const PRIORITY_WORKLOAD: u32 = 50; // Deployment, StatefulSet, DaemonSet, Job
 const PRIORITY_OTHER: u32 = 100;
+// Aggregated APIs and admission webhooks gate other requests, so like Helm they
+// are applied after the resources that may back them.
+const PRIORITY_API_SERVICE: u32 = 110;
+const PRIORITY_WEBHOOK: u32 = 120;
 
 /// Resource ordering utility
 pub struct ResourceOrdering;
@@ -84,7 +91,8 @@ impl ResourceOrdering {
             "ServiceAccount" => PRIORITY_SERVICE_ACCOUNT,
 
             // RBAC resources
-            "Role" | "RoleBinding" | "ClusterRole" | "ClusterRoleBinding" => PRIORITY_RBAC,
+            "Role" | "ClusterRole" => PRIORITY_ROLE,
+            "RoleBinding" | "ClusterRoleBinding" => PRIORITY_ROLE_BINDING,
 
             // Config resources (often referenced by workloads)
             "ConfigMap" | "Secret" => PRIORITY_CONFIG,
@@ -94,6 +102,9 @@ impl ResourceOrdering {
 
             // Workload resources
             "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob" | "ReplicaSet" | "Pod" => PRIORITY_WORKLOAD,
+
+            "APIService" => PRIORITY_API_SERVICE,
+            "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration" => PRIORITY_WEBHOOK,
 
             // Everything else
             _ => PRIORITY_OTHER,
@@ -141,6 +152,36 @@ mod tests {
                 vec!["ConfigMap", "Secret"],
                 vec!["Deployment"],
                 vec!["Widget"],
+            ]
+        );
+    }
+
+    /// Kinds that depend on another kind at admission never share a wave with it.
+    #[test]
+    fn test_apply_waves_separate_admission_dependencies() {
+        let mut resources = vec![
+            manifest("admissionregistration.k8s.io/v1", "ValidatingWebhookConfiguration"),
+            manifest("apiregistration.k8s.io/v1", "APIService"),
+            manifest("example.com/v1", "Widget"),
+            manifest("rbac.authorization.k8s.io/v1", "RoleBinding"),
+            manifest("rbac.authorization.k8s.io/v1", "ClusterRoleBinding"),
+            manifest("rbac.authorization.k8s.io/v1", "Role"),
+            manifest("rbac.authorization.k8s.io/v1", "ClusterRole"),
+        ];
+        ResourceOrdering::sort_by_priority(&mut resources).unwrap();
+
+        let kinds: Vec<Vec<&str>> = ResourceOrdering::apply_waves(&resources)
+            .into_iter()
+            .map(|wave| resources[wave].iter().map(|r| r["kind"].as_str().unwrap()).collect())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                vec!["Role", "ClusterRole"],
+                vec!["RoleBinding", "ClusterRoleBinding"],
+                vec!["Widget"],
+                vec!["APIService"],
+                vec!["ValidatingWebhookConfiguration"],
             ]
         );
     }

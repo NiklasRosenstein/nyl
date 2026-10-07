@@ -75,6 +75,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
   immediately before the latest one (i.e. undo the most recent deployment).
 - `-y, --yes` - Skip the confirmation prompt
 - `--context <CONTEXT>` - Kubernetes context to use
+- `--concurrency <N>` - Maximum number of resources applied or pruned at the same
+  time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/commands/apply/#apply-order-and-progress).
 
 #### Examples
 
