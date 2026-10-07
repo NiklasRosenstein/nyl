@@ -326,20 +326,16 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         let secret = Self::to_secret(release)?;
         let name = Self::secret_name(&release.release_name, release.revision);
 
-        // Try to get existing secret
-        match api.get(&name).await {
-            Ok(_) => {
-                // Update existing secret
+        // New revisions are the common case, so create first and replace only when
+        // the revision already exists; this saves a read per saved revision.
+        match api.create(&kube::api::PostParams::default(), &secret).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 409 => {
                 api.replace(&name, &kube::api::PostParams::default(), &secret).await?;
+                Ok(())
             }
-            Err(kube::Error::Api(err)) if err.code == 404 => {
-                // Create new secret
-                api.create(&kube::api::PostParams::default(), &secret).await?;
-            }
-            Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
         }
-
-        Ok(())
     }
 
     async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>> {

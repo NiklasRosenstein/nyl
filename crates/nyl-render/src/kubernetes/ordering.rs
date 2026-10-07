@@ -5,10 +5,15 @@
 //! - Namespaces must be created before resources in them
 //! - CRDs must be created before custom resources
 //! - ConfigMaps/Secrets should be created before Deployments that reference them
+//!
+//! Resources sharing a priority have no ordering dependency on each other, so
+//! [`ResourceOrdering::apply_waves`] groups them into waves that may be applied
+//! concurrently while every wave still completes before the next one starts.
 
 use crate::kubernetes::{extract_gvk, GroupVersionKind};
 use crate::Result;
 use serde_json::Value;
+use std::ops::Range;
 
 /// Priority levels for resource ordering (lower number = applied first)
 const PRIORITY_NAMESPACE: u32 = 0;
@@ -42,6 +47,28 @@ impl ResourceOrdering {
         });
 
         Ok(())
+    }
+
+    /// Split manifests into consecutive apply waves of equal priority.
+    ///
+    /// Each returned range is a run of adjacent manifests with the same priority.
+    /// Manifests within a wave may be applied concurrently; a wave must finish
+    /// before the next begins, which keeps Namespaces ahead of the resources in
+    /// them and CustomResourceDefinitions ahead of their custom resources. Input
+    /// that is not sorted still yields a barrier at every priority change, so the
+    /// given order is never violated across priorities.
+    pub fn apply_waves(resources: &[Value]) -> Vec<Range<usize>> {
+        let mut waves: Vec<Range<usize>> = Vec::new();
+        let mut current_priority = None;
+        for (index, resource) in resources.iter().enumerate() {
+            let priority = Self::priority(resource);
+            match waves.last_mut() {
+                Some(wave) if current_priority == Some(priority) => wave.end = index + 1,
+                _ => waves.push(index..index + 1),
+            }
+            current_priority = Some(priority);
+        }
+        waves
     }
 
     /// Get priority for a resource based on its GVK
@@ -78,6 +105,56 @@ impl ResourceOrdering {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn manifest(api_version: &str, kind: &str) -> Value {
+        json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": "x"}})
+    }
+
+    #[test]
+    fn test_apply_waves_group_equal_priorities() {
+        let mut resources = vec![
+            manifest("apps/v1", "Deployment"),
+            manifest("v1", "ConfigMap"),
+            manifest("example.com/v1", "Widget"),
+            manifest("v1", "Namespace"),
+            manifest("apiextensions.k8s.io/v1", "CustomResourceDefinition"),
+            manifest("v1", "Secret"),
+            manifest("v1", "Namespace"),
+        ];
+        ResourceOrdering::sort_by_priority(&mut resources).unwrap();
+
+        let waves = ResourceOrdering::apply_waves(&resources);
+        let kinds: Vec<Vec<&str>> = waves
+            .iter()
+            .map(|wave| {
+                resources[wave.clone()]
+                    .iter()
+                    .map(|r| r["kind"].as_str().unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                vec!["Namespace", "Namespace"],
+                vec!["CustomResourceDefinition"],
+                vec!["ConfigMap", "Secret"],
+                vec!["Deployment"],
+                vec!["Widget"],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_apply_waves_keep_barriers_for_unsorted_input() {
+        let resources = vec![
+            manifest("v1", "ConfigMap"),
+            manifest("v1", "Namespace"),
+            manifest("v1", "ConfigMap"),
+        ];
+        assert_eq!(ResourceOrdering::apply_waves(&resources), vec![0..1, 1..2, 2..3]);
+        assert!(ResourceOrdering::apply_waves(&[]).is_empty());
+    }
 
     #[test]
     fn test_namespace_sorted_first() {

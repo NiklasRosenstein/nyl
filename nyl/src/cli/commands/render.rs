@@ -303,6 +303,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             .ok_or_else(|| NylError::config("This operation requires --target so Nyl can select a trusted cluster"))?;
         let config = load_cluster_kube_config(&resolved.cluster, options.context_override).await?;
         let client = Client::try_from(config)?;
+        tracing::info!("Discovering Kubernetes API resources");
         (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
     } else {
         (None, None)

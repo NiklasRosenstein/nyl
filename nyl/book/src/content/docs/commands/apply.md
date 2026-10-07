@@ -41,6 +41,24 @@ For shared rendering behavior and namespace resolution details, see
 ### Cluster Options
 
 - `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--concurrency <N>` - Maximum number of resources applied or pruned at the same time (default: 8; `1` applies serially)
+
+## Apply order and progress
+
+Resources are sorted by kind priority (Namespaces, CustomResourceDefinitions,
+ServiceAccounts, RBAC, ConfigMaps and Secrets, Services, workloads, everything
+else) and applied in waves: resources of the same priority are applied
+concurrently, up to `--concurrency` at a time, and each wave finishes before the
+next starts. Namespaces therefore exist before the resources in them, and after
+a wave that applies CustomResourceDefinitions Nyl refreshes API discovery until
+the new kinds are served. A resource that fails to apply does not stop the
+others; the release is recorded as failed and the command exits non-zero.
+
+Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
+printed as soon as it completes, in completion order. The summary is followed by
+the time spent in API discovery, validation, apply, and release bookkeeping.
+Nyl uses aggregated API discovery (two requests) when the API server supports it
+and falls back to per-group discovery otherwise; the timing line names the mode.
 
 ## Examples
 

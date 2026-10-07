@@ -75,3 +75,9 @@ id = "4d5cb2e1-7ba9-4935-8afe-69403f409a20"
 type = "improvement"
 description = "Label the generated schema branches for mutually exclusive fields with what choosing each one does, so the resource reference lists them as named variants linking to their fields (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
+type = "improvement"
+description = "Reduce `nyl apply` latency: use aggregated API discovery with a per-group fallback, apply resources of equal ordering priority concurrently (`--concurrency`, default 8) while keeping Namespace and CRD barriers, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+author = "@NiklasRosenstein"
