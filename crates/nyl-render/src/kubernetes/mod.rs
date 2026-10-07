@@ -11,7 +11,7 @@ mod resource;
 mod state;
 
 pub use client::is_known_cluster_scoped_gvk;
-pub use client::{KubeClient, KubeRsClient, MockKubeClient};
+pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
 pub use diff::DiffEngine;
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};

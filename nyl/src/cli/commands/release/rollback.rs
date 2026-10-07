@@ -3,7 +3,10 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::{
-    cli::commands::apply::{apply_and_record_release, apply_sorted_manifests, print_apply_summary},
+    cli::commands::apply::{
+        apply_and_record_release, apply_sorted_manifests, ensure_namespace_exists, print_apply_result,
+        print_apply_summary, DEFAULT_APPLY_CONCURRENCY,
+    },
     cli::commands::cluster::load_target_kube_config,
     config::ProjectConfig,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
@@ -84,7 +87,13 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
 
     // Sort resources by priority (Namespace → CRD → RBAC → Config → Workload) and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
-    let apply_result = apply_sorted_manifests(&kube_client, &manifests).await?;
+    ensure_namespace_exists(&kube_client, &args.namespace).await?;
+    let concurrency = usize::from(DEFAULT_APPLY_CONCURRENCY);
+    let no_duplicates = std::collections::HashMap::new();
+    let apply_result = apply_sorted_manifests(&kube_client, &manifests, concurrency, &mut |key, result| {
+        print_apply_result(key, result, &no_duplicates);
+    })
+    .await?;
 
     // Record the rollback as a new revision (supersede previous + prune + history
     // limit), reusing the apply path.
@@ -97,14 +106,14 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         &args.name,
         &args.namespace,
         false,
-        history_limit,
+        concurrency,
     )
     .await?;
 
     print_apply_summary(
         &apply_result.outcomes,
         Some(&release),
-        &std::collections::HashMap::new(),
+        &no_duplicates,
         apply_result.failed_count,
     );
 
@@ -396,8 +405,9 @@ mod tests {
 
         // Recording rev5 (e.g. a rollback): live state is rev3 + rev4's partials,
         // and the superseded revision is the last Deployed one (rev3).
-        let (superseded, live) = collect_live_state(&storage, "app", "ns", 5).await.unwrap();
-        assert_eq!(superseded, Some(3));
+        let revisions = storage.list_revisions("app", "ns").await.unwrap();
+        let (superseded, live) = collect_live_state(&storage, "app", "ns", &revisions, 5).await.unwrap();
+        assert_eq!(superseded.map(|release| release.revision), Some(3));
         let names: std::collections::HashSet<&str> = live.iter().map(|k| k.name.as_str()).collect();
         assert_eq!(names, ["a", "x", "y"].into_iter().collect());
     }

@@ -77,7 +77,7 @@ description = "Label the generated schema branches for mutually exclusive fields
 author = "@NiklasRosenstein"
 
 [[entries]]
-id = "36f53974-eda3-4035-a2d9-fc552bb8ef78"
-type = "feature"
-description = "Bound release history with `[release] history_limit` in `nyl.toml` or `nyl apply --history-limit`, keeping five revisions per release by default; after a successful apply or rollback the oldest revisions beyond the limit are deleted. Set `history_limit = 0` to keep every revision as before"
+id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
+type = "improvement"
+description = "Reduce `nyl apply` latency: use aggregated API discovery with a per-group fallback, apply resources of equal ordering priority concurrently (`--concurrency`, default 8) while keeping Namespace and CRD barriers, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
 author = "@NiklasRosenstein"

@@ -30,6 +30,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 colored = { workspace = true }
 dialoguer = { workspace = true }
+futures = { workspace = true }
 git2 = { workspace = true }
 hex = { workspace = true }
 k8s-openapi = { workspace = true }
@@ -49,6 +50,7 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 criterion = { workspace = true }
 predicates = { workspace = true }
 serde-saphyr = { workspace = true }
