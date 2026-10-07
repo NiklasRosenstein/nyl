@@ -90,6 +90,10 @@ nyl apply --target production --no-release manifest.yaml
   applied. Nyl does not own that namespace and never prunes it. Other namespaces
   a release writes to, including `spec.additionalNamespaces`, need their own
   `Namespace` manifest.
+- Namespaces and then CustomResourceDefinitions are applied before other resources. When custom
+  resources use a kind from a CRD applied in the same run, `nyl apply` waits up
+  to two minutes for the API server to serve that kind, printing a note while
+  it waits, so one run installs both.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
 - See [Rendering Pipeline](/nyl/commands/rendering-pipeline/) for namespace resolution and filter semantics.
 

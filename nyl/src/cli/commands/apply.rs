@@ -2,6 +2,7 @@ use chrono::Utc;
 use clap::Args;
 use kube::api::DynamicObject;
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use colored::Colorize;
 
@@ -11,8 +12,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
-        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+        crd_served_kinds, ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage,
+        ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -457,36 +458,30 @@ pub(crate) async fn apply_sorted_manifests(
     let mut outcomes = Vec::new();
     let mut failed_count = 0;
     let mut resource_keys = Vec::new();
-    let mut crd_applied = false;
-    let mut discovery_refreshed = false;
+    // Kinds served by CRDs applied in this run that the API server did not serve yet.
+    let mut pending_crd_kinds: HashSet<GroupVersionKind> = HashSet::new();
 
     for (i, manifest) in manifests.iter().enumerate() {
         let key = ResourceKey::from_json_value(manifest)?;
-        let is_crd = key.gvk.kind == "CustomResourceDefinition" && key.gvk.group == "apiextensions.k8s.io";
 
-        // If a CRD was applied earlier in this batch, refresh the discovery cache
-        // before applying the first resource of a CRD-defined kind, so the newly
-        // registered kind is resolvable (otherwise apply fails with ApiResourceNotFound).
-        // Retry until the kinds of the remaining resources are served, since a freshly
-        // applied CRD may not be Established the instant its apply returns.
-        if !is_crd && crd_applied && !discovery_refreshed {
-            let needed: Vec<GroupVersionKind> = manifests[i..]
-                .iter()
-                .filter_map(|m| ResourceKey::from_json_value(m).ok())
-                .map(|k| k.gvk)
-                .filter(|gvk| gvk.kind != "CustomResourceDefinition")
-                .collect();
-            client.refresh_discovery_until_available(&needed).await?;
-            discovery_refreshed = true;
+        // A custom resource whose CRD was applied earlier in this run can only be
+        // applied once the API server serves its kind. Wait for every pending kind
+        // the remaining manifests need at once, so the wait happens a single time.
+        if pending_crd_kinds.contains(&key.gvk) {
+            let needed = kinds_awaiting_crds(&manifests[i..], &pending_crd_kinds);
+            wait_for_crd_kinds(client, &needed).await?;
+            pending_crd_kinds.clear();
         }
 
         match apply_manifest(client, manifest).await {
             Ok(outcome) => {
                 outcomes.push(outcome);
                 resource_keys.push(key);
-                if is_crd {
-                    crd_applied = true;
-                }
+                pending_crd_kinds.extend(
+                    crd_served_kinds(manifest)
+                        .into_iter()
+                        .filter(|gvk| !client.has_api_resource(gvk)),
+                );
             }
             Err(e) => {
                 let error_msg = format!("(failed to apply resource: {})", e);
@@ -501,6 +496,61 @@ pub(crate) async fn apply_sorted_manifests(
         failed_count,
         resource_keys,
     })
+}
+
+/// How long to wait for kinds of CRDs applied in the same run to be served.
+const CRD_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The pending CRD kinds that `remaining` manifests use, in first-use order.
+fn kinds_awaiting_crds(remaining: &[serde_json::Value], pending: &HashSet<GroupVersionKind>) -> Vec<GroupVersionKind> {
+    let mut needed: Vec<GroupVersionKind> = Vec::new();
+    for gvk in remaining
+        .iter()
+        .filter_map(|m| ResourceKey::from_json_value(m).ok())
+        .map(|k| k.gvk)
+    {
+        if pending.contains(&gvk) && !needed.contains(&gvk) {
+            needed.push(gvk);
+        }
+    }
+    needed
+}
+
+/// Wait for the API server to serve `kinds`, telling the user why apply pauses.
+///
+/// Kinds that are still not served after the timeout are reported; applying their
+/// resources then fails with the usual "API resource not found" error.
+async fn wait_for_crd_kinds(client: &KubeRsClient, kinds: &[GroupVersionKind]) -> Result<()> {
+    let names: Vec<String> = kinds.iter().map(|gvk| gvk.kind.clone()).collect();
+    eprintln!(
+        "{} Waiting for the API server to serve {} kind(s) from CustomResourceDefinitions applied in this run (up to {}s): {}",
+        "…".cyan(),
+        kinds.len(),
+        CRD_ESTABLISH_TIMEOUT.as_secs(),
+        names.join(", ")
+    );
+
+    let started = Instant::now();
+    let missing = client.wait_for_api_resources(kinds, CRD_ESTABLISH_TIMEOUT).await?;
+    if missing.is_empty() {
+        eprintln!(
+            "{} Custom resource kinds available after {:.1}s",
+            "✓".green(),
+            started.elapsed().as_secs_f64()
+        );
+    } else {
+        let missing: Vec<String> = missing
+            .iter()
+            .map(|gvk| format!("{}/{}/{}", gvk.group, gvk.version, gvk.kind))
+            .collect();
+        eprintln!(
+            "{} Still not served after {}s, their resources will fail to apply: {}",
+            "!".yellow().bold(),
+            CRD_ESTABLISH_TIMEOUT.as_secs(),
+            missing.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Convert manifests to YAML string
@@ -754,6 +804,41 @@ async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str) -> Resu
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_kinds_awaiting_crds_selects_pending_kinds_once() {
+        let gvk = |version: &str, kind: &str| GroupVersionKind {
+            group: "operator.victoriametrics.com".to_string(),
+            version: version.to_string(),
+            kind: kind.to_string(),
+        };
+        let resource = |kind: &str| {
+            json!({
+                "apiVersion": "operator.victoriametrics.com/v1beta1",
+                "kind": kind,
+                "metadata": {"name": "x", "namespace": "observability"}
+            })
+        };
+        let remaining = vec![
+            resource("VMAgent"),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "x", "namespace": "observability"}}),
+            resource("VMServiceScrape"),
+            resource("VMAgent"),
+            resource("VaultAuth"),
+        ];
+        let pending: HashSet<GroupVersionKind> = [
+            gvk("v1beta1", "VMAgent"),
+            gvk("v1beta1", "VMServiceScrape"),
+            gvk("v1beta1", "VMRule"),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            kinds_awaiting_crds(&remaining, &pending),
+            vec![gvk("v1beta1", "VMAgent"), gvk("v1beta1", "VMServiceScrape")]
+        );
+    }
 
     #[test]
     fn test_manifests_to_yaml() {

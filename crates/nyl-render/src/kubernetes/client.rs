@@ -61,7 +61,7 @@ pub trait KubeClient: Send + Sync {
 pub struct KubeRsClient {
     client: Client,
     discovery: Arc<Discovery>,
-    /// API resource index, rebuildable via [`Self::refresh_discovery`] after CRDs
+    /// API resource index, extended via [`Self::wait_for_api_resources`] after CRDs
     /// are applied so newly registered custom resource kinds become resolvable.
     api_resources: RwLock<HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>>,
     crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
@@ -160,66 +160,77 @@ impl KubeRsClient {
         })
     }
 
-    /// Re-run API discovery and rebuild the resource index.
-    ///
-    /// The index is captured once at construction. After applying a
-    /// CustomResourceDefinition, the kinds it introduces are not yet present in
-    /// the index, so applying their custom resources in the same batch would fail
-    /// with `ApiResourceNotFound`. Calling this after CRDs are applied refreshes
-    /// the index so those kinds become resolvable.
-    pub async fn refresh_discovery(&self) -> Result<()> {
-        let discovery = Discovery::new(self.client.clone()).run().await?;
-        let index = Self::build_api_resource_index(&discovery);
-        *self.api_resources.write().unwrap() = index;
-        Ok(())
+    /// Return true if the API server served `gvk` at the last discovery.
+    pub fn has_api_resource(&self, gvk: &GroupVersionKind) -> bool {
+        self.api_resources.read().unwrap().contains_key(gvk)
     }
 
-    /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
-    /// index or the attempts are exhausted.
+    /// Re-run discovery for the API groups of `required` until every GVK is served
+    /// or `timeout` elapses, and return the GVKs that are still not served.
     ///
-    /// A newly-applied CustomResourceDefinition is not served by the API server the
-    /// instant the apply returns — it must first become `Established`. A single
-    /// [`Self::refresh_discovery`] can therefore rebuild the index before the new
-    /// kind is published, so a custom resource applied right after would still fail
-    /// with `ApiResourceNotFound`. This retries with a short delay until the kinds
-    /// are discoverable. Best-effort: if some kinds never appear it returns `Ok` and
-    /// the subsequent apply surfaces a clear `ApiResourceNotFound`.
-    pub async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
-        const MAX_ATTEMPTS: u32 = 10;
-        const DELAY: Duration = Duration::from_millis(500);
+    /// The index is captured once at construction, so kinds introduced by a
+    /// CustomResourceDefinition applied in the same run are unknown to it. Such a
+    /// kind is also not served the instant the CRD apply returns: the API server
+    /// must first accept its names and establish it, which takes longer with many
+    /// or large CRDs. Only the affected groups are re-discovered, keeping each poll
+    /// cheap on clusters with many API groups.
+    pub async fn wait_for_api_resources(
+        &self,
+        required: &[GroupVersionKind],
+        timeout: Duration,
+    ) -> Result<Vec<GroupVersionKind>> {
+        const INITIAL_DELAY: Duration = Duration::from_millis(250);
+        const MAX_DELAY: Duration = Duration::from_secs(2);
 
-        for attempt in 1..=MAX_ATTEMPTS {
-            self.refresh_discovery().await?;
+        let mut groups: Vec<&str> = required.iter().map(|gvk| gvk.group.as_str()).collect();
+        groups.sort_unstable();
+        groups.dedup();
 
-            let all_known = {
-                let index = self.api_resources.read().unwrap();
-                required.iter().all(|gvk| index.contains_key(gvk))
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut delay = INITIAL_DELAY;
+        loop {
+            let discovery = Discovery::new(self.client.clone()).filter(&groups).run().await?;
+            let refreshed = Self::build_api_resource_index(&discovery);
+            let missing: Vec<GroupVersionKind> = {
+                let mut index = self.api_resources.write().unwrap();
+                index.extend(refreshed);
+                required
+                    .iter()
+                    .filter(|gvk| !index.contains_key(gvk))
+                    .cloned()
+                    .collect()
             };
-            if all_known || attempt == MAX_ATTEMPTS {
-                break;
+
+            let now = tokio::time::Instant::now();
+            if missing.is_empty() || now >= deadline {
+                return Ok(missing);
             }
 
             tracing::debug!(
-                attempt,
-                "Waiting for newly-applied CRD kinds to become discoverable before applying their resources"
+                missing = missing.len(),
+                "Waiting for newly-applied CRD kinds to be served before applying their resources"
             );
-            tokio::time::sleep(DELAY).await;
+            tokio::time::sleep(delay.min(deadline - now)).await;
+            delay = (delay * 2).min(MAX_DELAY);
         }
-
-        Ok(())
     }
 
+    /// Index every served version of every kind, not only each group's preferred
+    /// version: a group commonly serves kinds at different versions (for example
+    /// `v1` kinds next to `v1beta1`-only kinds), and manifests may target any of them.
     fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
         let mut index = HashMap::new();
 
         for group in discovery.groups() {
-            for (ar, caps) in group.recommended_resources() {
-                let gvk = GroupVersionKind {
-                    group: ar.group.clone(),
-                    version: ar.version.clone(),
-                    kind: ar.kind.clone(),
-                };
-                index.entry(gvk).or_insert_with(|| (ar.clone(), caps.clone()));
+            for version in group.versions() {
+                for (ar, caps) in group.versioned_resources(version) {
+                    let gvk = GroupVersionKind {
+                        group: ar.group.clone(),
+                        version: ar.version.clone(),
+                        kind: ar.kind.clone(),
+                    };
+                    index.entry(gvk).or_insert((ar, caps));
+                }
             }
         }
 
@@ -636,6 +647,39 @@ fn crd_api_resource() -> ApiResource {
         kind: "CustomResourceDefinition".to_string(),
         plural: "customresourcedefinitions".to_string(),
     }
+}
+
+/// The GVKs a CustomResourceDefinition manifest serves, or none when `manifest` is
+/// not a CRD. Unserved versions are excluded since the API server never exposes them.
+pub fn crd_served_kinds(manifest: &serde_json::Value) -> Vec<GroupVersionKind> {
+    let is_crd = manifest.get("kind").and_then(serde_json::Value::as_str) == Some("CustomResourceDefinition")
+        && manifest
+            .get("apiVersion")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| v.starts_with("apiextensions.k8s.io/"));
+    let spec = manifest.get("spec");
+    let group = spec.and_then(|s| s.get("group")).and_then(serde_json::Value::as_str);
+    let kind = spec
+        .and_then(|s| s.get("names"))
+        .and_then(|n| n.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    let versions = spec
+        .and_then(|s| s.get("versions"))
+        .and_then(serde_json::Value::as_array);
+    let (true, Some(group), Some(kind), Some(versions)) = (is_crd, group, kind, versions) else {
+        return Vec::new();
+    };
+
+    versions
+        .iter()
+        .filter(|v| v.get("served").and_then(serde_json::Value::as_bool).unwrap_or(false))
+        .filter_map(|v| v.get("name").and_then(serde_json::Value::as_str))
+        .map(|version| GroupVersionKind {
+            group: group.to_string(),
+            version: version.to_string(),
+            kind: kind.to_string(),
+        })
+        .collect()
 }
 
 fn scope_from_crd_for_gvk(crd: &DynamicObject, gvk: &GroupVersionKind) -> Option<bool> {
@@ -1151,5 +1195,44 @@ mod tests {
         };
 
         assert_eq!(scope_from_crd_for_gvk(&crd, &gvk), None);
+    }
+
+    #[test]
+    fn test_crd_served_kinds_lists_served_versions_only() {
+        let crd = json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "vmagents.operator.victoriametrics.com"},
+            "spec": {
+                "group": "operator.victoriametrics.com",
+                "names": {"kind": "VMAgent"},
+                "scope": "Namespaced",
+                "versions": [
+                    {"name": "v1beta1", "served": true},
+                    {"name": "v1alpha1", "served": false}
+                ]
+            }
+        });
+
+        assert_eq!(
+            crd_served_kinds(&crd),
+            vec![GroupVersionKind {
+                group: "operator.victoriametrics.com".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "VMAgent".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_crd_served_kinds_ignores_other_resources() {
+        let config_map = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "test"},
+            "spec": {"group": "example.com", "names": {"kind": "Fake"}, "versions": [{"name": "v1", "served": true}]}
+        });
+
+        assert!(crd_served_kinds(&config_map).is_empty());
     }
 }

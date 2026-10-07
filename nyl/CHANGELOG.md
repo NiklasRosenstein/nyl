@@ -82,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `apply`, `diff`, and `release rollback` resolve kinds at every served
+  version of an API group, not only its preferred version, so `v1beta1`-only
+  kinds in a group that also serves `v1` kinds are no longer reported as "API
+  resource not found".
+- `apply` and `release rollback` wait up to two minutes for kinds of
+  CustomResourceDefinitions applied in the same run to be served before
+  applying their custom resources, and print a note while waiting. Only the
+  affected API groups are re-discovered while waiting.
+
 - `diff-tree --against source` renders the baseline from the project directory
   of the checkout, so projects whose `nyl.toml` is not at the repository root
   can be compared. When the baseline has the project elsewhere, it tries the
