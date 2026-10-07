@@ -1,0 +1,300 @@
+{
+  "$defs": {
+    "BuiltinSchemas": {
+      "description": "Built-in schema download and vendoring policy.",
+      "oneOf": [
+        {
+          "const": "cached",
+          "description": "Download schemas into a disposable cache as needed.",
+          "type": "string"
+        },
+        {
+          "const": "vendor-used",
+          "description": "Vendor schemas needed by selected target renders; validate offline.",
+          "type": "string"
+        },
+        {
+          "const": "vendor-all",
+          "description": "Vendor complete Kubernetes version directories; validate offline.",
+          "type": "string"
+        }
+      ]
+    },
+    "CaptureSettings": {
+      "additionalProperties": false,
+      "description": "Defaults for explicit live capture commands.",
+      "properties": {
+        "cluster": {
+          "$ref": "#/$defs/ClusterCaptureSettings",
+          "default": {
+            "crds": true
+          },
+          "description": "Cluster capture defaults."
+        }
+      },
+      "type": "object"
+    },
+    "ClusterCaptureSettings": {
+      "additionalProperties": false,
+      "description": "Optional cluster API schema capture.",
+      "properties": {
+        "crds": {
+          "default": true,
+          "description": "Capture schemas for all served CRD versions.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "KubeconformSettings": {
+      "additionalProperties": false,
+      "description": "Kubeconform's schema inputs and bounded execution policy.",
+      "properties": {
+        "builtin_schema_revision": {
+          "default": null,
+          "description": "Immutable commit of yannh/kubernetes-json-schema. Omitted uses Nyl's pinned revision.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "builtin_schemas": {
+          "$ref": "#/$defs/BuiltinSchemas",
+          "default": "cached",
+          "description": "Built-in schema download and vendoring policy."
+        },
+        "schema_locations": {
+          "default": [],
+          "description": "Ordered local schema lookup templates, relative to nyl.toml.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skip": {
+          "default": [],
+          "description": "Explicit apiVersion/kind exclusions. Skipped resources appear in the summary.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strict": {
+          "default": true,
+          "description": "Reject unknown properties and duplicate YAML keys.",
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Maximum duration in seconds for one validator invocation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "description": "Project settings in `[project]` section of `nyl.toml`.",
+      "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Aliases for component-like resources keyed as `<apiVersion>/<kind>`.\nValues are component kind targets (local component path or remote shortcut URL).",
+          "type": "object"
+        },
+        "components_search_paths": {
+          "default": [
+            "components"
+          ],
+          "description": "Search paths for local component charts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gitops_scaffold_path": {
+          "default": "config",
+          "description": "Directory where GitOps configuration resources are scaffolded.",
+          "type": "string"
+        },
+        "helm_chart_search_paths": {
+          "default": [
+            "."
+          ],
+          "description": "Search paths for Helm chart names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "previous_paths": {
+          "default": [],
+          "description": "Earlier locations of this project's directory, as paths from the Git\nworktree root such as `/` or `/platform`. Commands that render another\nrevision of the repository, such as `diff-tree --against source`, look\nfor the project there when the revision has none at the current\nlocation, so a move stays comparable. Entries are harmless once every\ncompared revision has the project at its current location.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strip_empty_metadata_labels": {
+          "$ref": "#/$defs/StripEmptyMetadataLabelsMode",
+          "default": "always",
+          "description": "Control when empty `metadata.labels` maps are stripped from emitted manifests."
+        }
+      },
+      "type": "object"
+    },
+    "ReleaseSettings": {
+      "additionalProperties": false,
+      "description": "Release history settings in the `[release]` section of `nyl.toml`.",
+      "properties": {
+        "history_limit": {
+          "default": 0,
+          "description": "Maximum number of revisions `nyl apply` keeps per release. After\nrecording a revision, the oldest revisions beyond this limit are deleted.\nThe most recently deployed revision and every revision after it are always\nkept. `0` keeps every revision.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StripEmptyMetadataLabelsMode": {
+      "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "Always strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never strip empty `metadata.labels` maps from emitted manifests.",
+          "type": "string"
+        },
+        {
+          "const": "argocd",
+          "description": "Strip empty `metadata.labels` maps only when running in an ArgoCD environment.",
+          "type": "string"
+        }
+      ]
+    },
+    "ValidationSettings": {
+      "additionalProperties": false,
+      "description": "Project-wide validation policy. Named validator sections select implementations.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Run configured validators automatically on rendering commands.",
+          "type": "boolean"
+        },
+        "kubeconform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KubeconformSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Configure kubeconform schema validation."
+        }
+      },
+      "type": "object"
+    },
+    "VendorMode": {
+      "description": "Controls whether remote renderer inputs may use an in-tree vendor snapshot.",
+      "enum": [
+        "disabled",
+        "preferred",
+        "required"
+      ],
+      "type": "string"
+    },
+    "VendorSettings": {
+      "additionalProperties": false,
+      "description": "Project-global remote artifact vendoring settings.",
+      "properties": {
+        "lfs_threshold_bytes": {
+          "default": 1048576,
+          "description": "Text blobs at least this large are tracked through Git LFS.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/VendorMode",
+          "description": "Resolution policy for vendored remote inputs."
+        },
+        "path": {
+          "default": "vendor",
+          "description": "In-tree directory containing the generated lock and artifact blobs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Root structure of `nyl.toml`.",
+  "properties": {
+    "capture": {
+      "$ref": "#/$defs/CaptureSettings",
+      "default": {
+        "cluster": {
+          "crds": true
+        }
+      },
+      "description": "Defaults for explicit cluster capture."
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSettings",
+      "default": {
+        "aliases": {},
+        "components_search_paths": [
+          "components"
+        ],
+        "gitops_scaffold_path": "config",
+        "helm_chart_search_paths": [
+          "."
+        ],
+        "previous_paths": [],
+        "strip_empty_metadata_labels": "always"
+      }
+    },
+    "release": {
+      "$ref": "#/$defs/ReleaseSettings",
+      "default": {
+        "history_limit": 0
+      },
+      "description": "Release history retention for direct `nyl apply`."
+    },
+    "validation": {
+      "$ref": "#/$defs/ValidationSettings",
+      "default": {
+        "enabled": false
+      },
+      "description": "Final rendered-manifest validation policy."
+    },
+    "vendor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VendorSettings"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional project-global artifact vendoring policy."
+    }
+  },
+  "title": "ProjectFile",
+  "type": "object"
+}
