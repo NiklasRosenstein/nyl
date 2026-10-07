@@ -85,16 +85,24 @@ impl std::fmt::Display for DiscoveryMode {
     }
 }
 
+/// One discovery result together with the resource index built from it, swapped
+/// as a unit so readers never pair a new index with an old [`Discovery`].
+struct DiscoveryState {
+    discovery: Arc<Discovery>,
+    index: Arc<ApiResourceIndex>,
+}
+
+type ApiResourceIndex = HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>;
+
 /// Production Kubernetes client using kube-rs
 pub struct KubeRsClient {
     client: Client,
-    discovery: RwLock<Arc<Discovery>>,
-    /// Whether the server answered aggregated discovery; refreshes skip it otherwise.
+    /// Whether the server supports aggregated discovery; refreshes skip it otherwise.
     aggregated_discovery: AtomicBool,
     initial_discovery: (DiscoveryMode, Duration),
-    /// API resource index, rebuildable via [`Self::refresh_discovery`] after CRDs
-    /// are applied so newly registered custom resource kinds become resolvable.
-    api_resources: RwLock<HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)>>,
+    /// API discovery and resource index, rebuildable via [`Self::refresh_discovery`]
+    /// after CRDs are applied so newly registered custom resource kinds become resolvable.
+    state: RwLock<DiscoveryState>,
     crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
 }
 
@@ -175,16 +183,14 @@ impl KubeRsClient {
     /// Create a new Kubernetes client from an existing kube::Client
     pub async fn from_client(client: Client) -> Result<Self> {
         let started = Instant::now();
-        let (discovery, mode) = run_discovery(&client, true).await?;
+        let run = run_discovery(&client, true).await?;
         let elapsed = started.elapsed();
-        tracing::debug!(%mode, ?elapsed, "Kubernetes API discovery complete");
-        let api_resources = Self::build_api_resource_index(&discovery);
+        tracing::debug!(mode = %run.mode, ?elapsed, "Kubernetes API discovery complete");
         Ok(Self {
             client,
-            discovery: RwLock::new(Arc::new(discovery)),
-            aggregated_discovery: AtomicBool::new(mode == DiscoveryMode::Aggregated),
-            initial_discovery: (mode, elapsed),
-            api_resources: RwLock::new(api_resources),
+            aggregated_discovery: AtomicBool::new(!run.aggregated_unsupported),
+            initial_discovery: (run.mode, elapsed),
+            state: RwLock::new(DiscoveryState::new(run.discovery)),
             crd_scope_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -195,7 +201,11 @@ impl KubeRsClient {
     }
 
     fn discovery(&self) -> Arc<Discovery> {
-        self.discovery.read().unwrap().clone()
+        self.state.read().unwrap().discovery.clone()
+    }
+
+    fn api_resource_index(&self) -> Arc<ApiResourceIndex> {
+        self.state.read().unwrap().index.clone()
     }
 
     /// Re-run API discovery and rebuild the resource index.
@@ -207,13 +217,12 @@ impl KubeRsClient {
     /// the index so those kinds become resolvable.
     pub async fn refresh_discovery(&self) -> Result<()> {
         let prefer_aggregated = self.aggregated_discovery.load(Ordering::Relaxed);
-        let (discovery, mode) = run_discovery(&self.client, prefer_aggregated).await?;
-        if mode != DiscoveryMode::Aggregated {
+        let run = run_discovery(&self.client, prefer_aggregated).await?;
+        if run.aggregated_unsupported {
             self.aggregated_discovery.store(false, Ordering::Relaxed);
         }
-        let index = Self::build_api_resource_index(&discovery);
-        *self.api_resources.write().unwrap() = index;
-        *self.discovery.write().unwrap() = Arc::new(discovery);
+        let state = DiscoveryState::new(run.discovery);
+        *self.state.write().unwrap() = state;
         Ok(())
     }
 
@@ -235,7 +244,7 @@ impl KubeRsClient {
             self.refresh_discovery().await?;
 
             let all_known = {
-                let index = self.api_resources.read().unwrap();
+                let index = self.api_resource_index();
                 required.iter().all(|gvk| index.contains_key(gvk))
             };
             if all_known || attempt == MAX_ATTEMPTS {
@@ -252,7 +261,7 @@ impl KubeRsClient {
         Ok(())
     }
 
-    fn build_api_resource_index(discovery: &Discovery) -> HashMap<GroupVersionKind, (ApiResource, ApiCapabilities)> {
+    fn build_api_resource_index(discovery: &Discovery) -> ApiResourceIndex {
         let mut index = HashMap::new();
 
         for group in discovery.groups() {
@@ -271,7 +280,7 @@ impl KubeRsClient {
 
     /// Discover the API resource for a given GVK
     fn discover_api_resource(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-        let api_resources = self.api_resources.read().unwrap();
+        let api_resources = self.api_resource_index();
         if let Some((ar, caps)) = api_resources.get(gvk) {
             return Ok((ar.clone(), caps.clone()));
         }
@@ -594,21 +603,73 @@ impl KubeClient for KubeRsClient {
     }
 }
 
+/// Outcome of one discovery run.
+struct DiscoveryRun {
+    discovery: Discovery,
+    mode: DiscoveryMode,
+    /// The server answered in a way showing it does not serve aggregated discovery.
+    aggregated_unsupported: bool,
+}
+
+impl DiscoveryState {
+    fn new(discovery: Discovery) -> Self {
+        let index = Arc::new(KubeRsClient::build_api_resource_index(&discovery));
+        Self {
+            discovery: Arc::new(discovery),
+            index,
+        }
+    }
+}
+
 /// Run API discovery, preferring aggregated discovery when `prefer_aggregated` is set.
 ///
 /// Aggregated discovery (Kubernetes 1.26+) answers with two requests where legacy
 /// discovery issues one per API group, which dominates client setup latency against
 /// a remote API server. Servers without it, or whose answer lacks the core group,
-/// fall back to legacy discovery so the index is never silently incomplete.
-async fn run_discovery(client: &Client, prefer_aggregated: bool) -> Result<(Discovery, DiscoveryMode)> {
+/// fall back to legacy discovery so the index is never silently incomplete. Only a
+/// response showing the server lacks aggregated discovery marks it unsupported; a
+/// transient failure falls back for this run alone.
+async fn run_discovery(client: &Client, prefer_aggregated: bool) -> Result<DiscoveryRun> {
+    let mut aggregated_unsupported = !prefer_aggregated;
     if prefer_aggregated {
         match Discovery::new(client.clone()).run_aggregated().await {
-            Ok(discovery) if discovery.has_group("") => return Ok((discovery, DiscoveryMode::Aggregated)),
-            Ok(_) => tracing::debug!("Aggregated discovery returned no core API group; using per-group discovery"),
-            Err(err) => tracing::debug!(error = %err, "Aggregated discovery unavailable; using per-group discovery"),
+            Ok(discovery) if discovery.has_group("") => {
+                return Ok(DiscoveryRun {
+                    discovery,
+                    mode: DiscoveryMode::Aggregated,
+                    aggregated_unsupported: false,
+                })
+            }
+            Ok(_) => {
+                tracing::debug!("Aggregated discovery returned no core API group; using per-group discovery");
+                aggregated_unsupported = true;
+            }
+            Err(err) => {
+                aggregated_unsupported = aggregated_discovery_unsupported(&err);
+                tracing::debug!(
+                    error = %err,
+                    unsupported = aggregated_unsupported,
+                    "Aggregated discovery failed; using per-group discovery"
+                );
+            }
         }
     }
-    Ok((Discovery::new(client.clone()).run().await?, DiscoveryMode::PerGroup))
+    Ok(DiscoveryRun {
+        discovery: Discovery::new(client.clone()).run().await?,
+        mode: DiscoveryMode::PerGroup,
+        aggregated_unsupported,
+    })
+}
+
+/// Whether an aggregated discovery error shows the server does not serve it, as
+/// opposed to a transient failure. Servers without it answer with the legacy
+/// document, which does not decode, or refuse the requested media type.
+fn aggregated_discovery_unsupported(err: &kube::Error) -> bool {
+    match err {
+        kube::Error::SerdeError(_) => true,
+        kube::Error::Api(status) => matches!(status.code, 404 | 406 | 415),
+        _ => false,
+    }
 }
 
 /// Mock Kubernetes client for testing
