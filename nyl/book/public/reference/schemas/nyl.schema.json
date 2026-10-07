@@ -147,6 +147,20 @@
       },
       "type": "object"
     },
+    "ReleaseSettings": {
+      "additionalProperties": false,
+      "description": "Release history settings in the `[release]` section of `nyl.toml`.",
+      "properties": {
+        "history_limit": {
+          "default": 0,
+          "description": "Maximum number of revisions `nyl apply` keeps per release. After\nrecording a revision, the oldest revisions beyond this limit are deleted.\nThe most recently deployed revision and every revision after it are always\nkept. `0` keeps every revision.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "StripEmptyMetadataLabelsMode": {
       "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
       "oneOf": [
@@ -253,6 +267,13 @@
         "previous_paths": [],
         "strip_empty_metadata_labels": "always"
       }
+    },
+    "release": {
+      "$ref": "#/$defs/ReleaseSettings",
+      "default": {
+        "history_limit": 0
+      },
+      "description": "Release history retention for direct `nyl apply`."
     },
     "validation": {
       "$ref": "#/$defs/ValidationSettings",

@@ -118,11 +118,25 @@ impl Default for ProjectSettings {
     }
 }
 
+/// Release history settings in the `[release]` section of `nyl.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReleaseSettings {
+    /// Maximum number of revisions `nyl apply` keeps per release. After
+    /// recording a revision, the oldest revisions beyond this limit are deleted.
+    /// The most recently deployed revision and every revision after it are always
+    /// kept. `0` keeps every revision.
+    pub history_limit: u32,
+}
+
 /// Root structure of `nyl.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectFile {
     pub project: ProjectSettings,
+
+    /// Release history retention for direct `nyl apply`.
+    pub release: ReleaseSettings,
 
     /// Final rendered-manifest validation policy.
     pub validation: crate::validation::ValidationSettings,
@@ -363,6 +377,11 @@ impl ProjectConfig {
     /// Return the configured empty-label stripping mode for emitted manifests.
     pub fn get_strip_empty_metadata_labels_mode(&self) -> StripEmptyMetadataLabelsMode {
         self.config.project.strip_empty_metadata_labels
+    }
+
+    /// Maximum number of release revisions to keep, where `0` keeps every revision.
+    pub fn release_history_limit(&self) -> u32 {
+        self.config.release.history_limit
     }
 
     /// Project-global artifact vendoring settings.
@@ -760,5 +779,17 @@ strip_empty_metadata_labels = "sometimes"
         let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
         assert!(err.contains("Failed to parse TOML config"));
         assert!(err.contains("strip_empty_metadata_labels"));
+    }
+
+    #[test]
+    fn test_release_history_limit_defaults_to_unlimited_and_loads_from_toml() {
+        assert_eq!(ProjectFile::default().release.history_limit, 0);
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[release]\nhistory_limit = 5\n").unwrap();
+
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        assert_eq!(config.release_history_limit(), 5);
     }
 }

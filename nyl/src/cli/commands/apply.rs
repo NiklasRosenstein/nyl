@@ -11,8 +11,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
-        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+        enforce_release_history_limit, ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient,
+        KubernetesReleaseStorage, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -44,6 +44,12 @@ pub struct ApplyArgs {
     /// Apply resources without creating release revisions or pruning.
     #[arg(long, conflicts_with_all = ["append_release", "name", "namespace"])]
     pub no_release: bool,
+
+    /// Maximum number of release revisions to keep; older revisions are deleted
+    /// after this apply. 0 keeps every revision. Overrides `[release] history_limit`
+    /// in nyl.toml.
+    #[arg(long, value_name = "N", conflicts_with = "no_release")]
+    pub history_limit: Option<u32>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -162,7 +168,13 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     )
     .await?;
 
-    // 13. Print summary
+    // 13. Delete revisions beyond the configured history limit.
+    let history_limit = args
+        .history_limit
+        .unwrap_or_else(|| preflight.project_config.release_history_limit());
+    prune_release_history(&storage, &release_name, &release_namespace, history_limit).await;
+
+    // 14. Print summary
     print_apply_summary(
         &apply_result.outcomes,
         Some(&release),
@@ -448,6 +460,34 @@ pub(crate) async fn apply_and_record_release(
     }
 
     Ok(release)
+}
+
+/// Delete release revisions beyond `history_limit`, warning instead of failing:
+/// the resources are already applied and recorded, and the next apply retries.
+async fn prune_release_history(
+    storage: &dyn ReleaseStorage,
+    release_name: &str,
+    release_namespace: &str,
+    history_limit: u32,
+) {
+    match enforce_release_history_limit(storage, release_name, release_namespace, history_limit).await {
+        Ok(deleted) if !deleted.is_empty() => {
+            tracing::info!(
+                "Deleted {} release revision(s) beyond the history limit of {}: {:?}",
+                deleted.len(),
+                history_limit,
+                deleted
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                "Failed to delete release revisions beyond the history limit of {}: {}",
+                history_limit,
+                e
+            );
+        }
+    }
 }
 
 pub(crate) async fn apply_sorted_manifests(
