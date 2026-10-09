@@ -75,3 +75,15 @@ id = "4d5cb2e1-7ba9-4935-8afe-69403f409a20"
 type = "improvement"
 description = "Label the generated schema branches for mutually exclusive fields with what choosing each one does, so the resource reference lists them as named variants linking to their fields (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
+type = "improvement"
+description = "Reduce `nyl apply` and `nyl release rollback` latency: use aggregated API discovery with a per-group fallback, apply resources in Argo CD's kind order with each kind's resources applied concurrently (`--concurrency`, default 8), prune in reverse apply order with each kind's resources deleted concurrently, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
+type = "breaking change"
+description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC; admission webhook configurations are applied last) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last in apply and diff; a revision is recorded before applying, so a concurrent apply of the same release fails before changing the cluster; and a release that renders no resources is recorded and prunes its previous resources instead of being skipped"
+author = "@NiklasRosenstein"

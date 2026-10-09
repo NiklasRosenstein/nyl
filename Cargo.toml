@@ -58,6 +58,9 @@ flate2 = "1.1.9"
 tar = "0.4"
 zstd = "0.14"
 async-trait = "0.1"
+# Bounded concurrent apply and prune (`StreamExt::buffer_unordered`); already a
+# transitive dependency of kube, so it adds no new crates.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Git
