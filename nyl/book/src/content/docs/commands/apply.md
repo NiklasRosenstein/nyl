@@ -63,9 +63,10 @@ is applied and recorded. A resource that fails to apply does not stop the others
 the release is recorded as failed and the command exits non-zero.
 
 Pruning deletes the resources a release no longer contains concurrently, like Argo
-CD. APIServices and admission webhook configurations are deleted last, after every
-other pruned resource, so they keep serving and admitting requests while the
-resources related to them are removed.
+CD. CustomResourceDefinitions, APIServices, and admission webhook configurations
+are deleted last, after every other pruned resource, so they keep defining,
+serving, and admitting the resources being removed; deleting a CRD first would
+cascade to its custom resources.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by

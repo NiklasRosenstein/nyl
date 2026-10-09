@@ -79,7 +79,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
 type = "improvement"
-description = "Reduce `nyl apply` and `nyl release rollback` latency: use aggregated API discovery with a per-group fallback, apply resources in Argo CD's kind order with each kind's resources applied concurrently (`--concurrency`, default 8), prune concurrently with APIServices and admission webhooks last, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+description = "Reduce `nyl apply` and `nyl release rollback` latency: use aggregated API discovery with a per-group fallback, apply resources in Argo CD's kind order with each kind's resources applied concurrently (`--concurrency`, default 8), prune concurrently with CRDs, APIServices, and admission webhooks last, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
 author = "@NiklasRosenstein"
 
 [[entries]]

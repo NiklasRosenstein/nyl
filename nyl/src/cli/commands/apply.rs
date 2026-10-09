@@ -321,9 +321,9 @@ async fn mark_superseded(storage: &dyn ReleaseStorage, previous: &ReleaseState) 
 /// Delete resources no longer desired, at most `concurrency` at a time.
 ///
 /// Like Argo CD, pruned resources are deleted concurrently without kind order,
-/// except that APIServices and admission webhook configurations
-/// ([`ResourceOrdering::is_prune_last`]) are deleted after all others, so they keep
-/// serving and admitting requests while the resources related to them are deleted.
+/// except that CustomResourceDefinitions, APIServices, and admission webhook
+/// configurations ([`ResourceOrdering::is_prune_last`]) are deleted after all others,
+/// so they keep defining, serving, and admitting the resources being deleted.
 async fn prune_resources(
     client: &dyn KubeClient,
     keys: Vec<&ResourceKey>,
@@ -1066,8 +1066,8 @@ mod tests {
         assert_eq!(client.inner.get_all_resources().len(), 2);
     }
 
-    /// Pruning deletes concurrently, but APIServices and admission webhooks are
-    /// deleted only after the resources related to them are gone.
+    /// Pruning deletes concurrently, but CRDs, APIServices, and admission webhooks
+    /// are deleted only after the resources related to them are gone.
     #[tokio::test(start_paused = true)]
     async fn test_prune_resources_deletes_api_services_and_webhooks_last() {
         let client = LatencyClient::new("");
@@ -1086,6 +1086,13 @@ mod tests {
             key("apps/v1", "Deployment", Some("app"), "backend"),
             key("apiregistration.k8s.io/v1", "APIService", None, "api"),
             key("v1", "Service", Some("app"), "svc"),
+            key(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                None,
+                "widgets.example.com",
+            ),
+            key("example.com/v1", "Widget", Some("app"), "widget"),
         ];
 
         let started = tokio::time::Instant::now();
@@ -1098,9 +1105,9 @@ mod tests {
         .await;
 
         assert_eq!(started.elapsed(), client.latency * 2);
-        assert_eq!(pruned.len(), 4);
-        for last in ["hook", "api"] {
-            for first in ["backend", "svc"] {
+        assert_eq!(pruned.len(), 6);
+        for last in ["hook", "api", "widgets.example.com"] {
+            for first in ["backend", "svc", "widget"] {
                 assert!(
                     client.position(&format!("delete-end {first}")) < client.position(&format!("delete-start {last}"))
                 );
