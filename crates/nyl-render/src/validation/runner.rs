@@ -732,6 +732,8 @@ async fn prepare_partition(
 
 struct PartitionSchemas {
     desired: BTreeMap<String, schemas::CrdSchemas>,
+    /// Whether `desired` was extracted, so missing schemas can suggest it.
+    use_desired_crds: bool,
     captured: Option<store::ClusterSchemaIndex>,
     /// Schemas derived from vendored CRDs, converted once per partition.
     vendored: std::sync::Mutex<BTreeMap<String, std::sync::Arc<schemas::CrdSchemas>>>,
@@ -785,6 +787,7 @@ impl PartitionSchemas {
         }
         Ok(Self {
             desired,
+            use_desired_crds: args.use_desired_crds,
             captured,
             vendored: std::sync::Mutex::default(),
         })
@@ -848,14 +851,18 @@ impl PartitionSchemas {
                 if builtin_only {
                     return Ok(None);
                 }
-                let capture_hint = partition
-                    .schema_source
-                    .as_deref()
-                    .map(|source| format!("run nyl capture cluster {source} --crds or "))
-                    .unwrap_or_default();
+                let mut hints = Vec::new();
+                if !self.use_desired_crds {
+                    hints.push("pass --use-desired-crds to use CRDs from the rendered output".to_owned());
+                }
+                if let Some(source) = partition.schema_source.as_deref() {
+                    hints.push(format!("run nyl capture cluster {source} --crds"));
+                }
+                hints.push("configure schema_locations".to_owned());
                 return Err(NylError::validation(format!(
-                    "no schema for {gvk} in destination {}; {capture_hint}configure schema_locations",
-                    partition.destination
+                    "no schema for {gvk} in destination {}; {}",
+                    partition.destination,
+                    hints.join(" or ")
                 )));
             }
             match resolver.builtin_resource(gvk, &partition.version).await? {
@@ -1538,20 +1545,33 @@ mod tests {
             "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
             "metadata": {"name": "test"}
         }))];
-        for source in [Some("production"), Some("staging"), None] {
+        for (source, use_desired_crds) in [
+            (Some("production"), false),
+            (Some("staging"), true),
+            (None, false),
+            (None, true),
+        ] {
             partition.schema_source = source.map(str::to_owned);
             let error = validate_partitions(
-                &ValidationArgs::default(),
+                &ValidationArgs {
+                    use_desired_crds,
+                    ..Default::default()
+                },
                 &config,
                 directory.path(),
                 std::slice::from_ref(&partition),
             )
             .await
             .unwrap_err();
-            let hint = match source {
-                Some(source) => format!("run nyl capture cluster {source} --crds or configure schema_locations"),
-                None => "configure schema_locations".into(),
+            let desired_hint = if use_desired_crds {
+                ""
+            } else {
+                "pass --use-desired-crds to use CRDs from the rendered output or "
             };
+            let capture_hint = source
+                .map(|source| format!("run nyl capture cluster {source} --crds or "))
+                .unwrap_or_default();
+            let hint = format!("{desired_hint}{capture_hint}configure schema_locations");
             assert_eq!(
                 match error {
                     NylError::Validation(message) => message,
