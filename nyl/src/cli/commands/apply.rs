@@ -3,18 +3,17 @@ use clap::Args;
 use futures::stream::{self, StreamExt};
 use kube::api::DynamicObject;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-
-use colored::Colorize;
+use std::time::Instant;
 
 use crate::{
     cli::{
+        apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, PhaseTiming},
         commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, GroupVersionKind, KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState,
-        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+        ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus,
+        ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -49,10 +48,9 @@ pub struct ApplyArgs {
 
     /// Maximum number of resources applied or pruned at the same time.
     ///
-    /// Resources are applied in waves of equal ordering priority (Namespaces,
-    /// CRDs, ServiceAccounts, roles, role bindings, configuration, Services,
-    /// workloads, other, APIServices, admission webhooks); a wave completes
-    /// before the next one starts. Use 1 to apply serially.
+    /// Resources are applied in Argo CD's kind order, one batch per kind; the
+    /// resources of a batch are applied concurrently and a batch completes before
+    /// the next one starts. Use 1 to apply serially.
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
 }
@@ -73,6 +71,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         resolve_namespaces: false,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,
+        discovery_progress: crate::cli::commands::render::DiscoveryProgress::Announce,
     })
     .await?;
 
@@ -86,9 +85,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         .raw_client
         .ok_or_else(|| NylError::Config("Raw Kubernetes client unavailable in online mode".to_string()))?;
     let concurrency = usize::from(args.concurrency);
-    let mut timings = PhaseTimings::default();
     let (discovery_mode, discovery_elapsed) = kube_client.initial_discovery();
-    timings.record(format!("discovery ({discovery_mode})"), discovery_elapsed);
+    let mut timings = vec![PhaseTiming {
+        phase: format!("discovery ({discovery_mode})"),
+        elapsed: discovery_elapsed,
+    }];
 
     if desired_manifests.is_empty() {
         tracing::info!("No manifests to apply");
@@ -104,13 +105,16 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     resolve_manifest_namespaces(&kube_client, &mut desired_manifests, release_namespace_hint).await?;
     duplicates =
         adjust_duplicate_keys_for_namespace_resolution(&kube_client, &duplicates, release_namespace_hint).await?;
+    // Namespace resolution and API versions can make distinct documents describe one
+    // object; keep the last, so the applied and recorded manifests agree.
+    desired_manifests = collapse_duplicate_objects(desired_manifests, &mut duplicates)?;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {
         print_duplicate_warning(&duplicates);
     }
 
-    // 3. Sort resources by priority (Namespace → CRD → RBAC → Config → Workload).
+    // 3. Sort resources into apply order (Argo CD's kind order).
     // Sort in place so the recorded release manifest is stored in the same order it
     // is applied (and consistent with `release rollback`, which also stores sorted).
     ResourceOrdering::sort_by_priority(&mut desired_manifests)?;
@@ -133,7 +137,10 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         },
     )
     .await?;
-    timings.record("validation", validation_started.elapsed());
+    timings.push(PhaseTiming {
+        phase: "validation".to_string(),
+        elapsed: validation_started.elapsed(),
+    });
 
     // 4. Resolve the release identity before touching the cluster, so a missing
     //    --name/--namespace fails before anything is applied.
@@ -152,16 +159,24 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     }
 
     // 6. Apply manifests, printing each outcome as it completes.
+    let renderer = ApplyRenderer::new(&duplicates);
     let apply_started = Instant::now();
-    let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |key, result| {
-        print_apply_result(key, result, &duplicates);
+    let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |event| {
+        renderer.event(event);
     })
     .await?;
-    timings.record("apply", apply_started.elapsed());
+    timings.push(PhaseTiming {
+        phase: "apply".to_string(),
+        elapsed: apply_started.elapsed(),
+    });
 
     if args.no_release {
-        print_apply_summary(&apply_result.outcomes, None, &duplicates, apply_result.failed_count);
-        timings.print();
+        renderer.summary(&ApplyReport {
+            outcomes: &apply_result.outcomes,
+            failed_count: apply_result.failed_count,
+            release: None,
+            timings: &timings,
+        });
         if apply_result.failed_count > 0 {
             return Err(NylError::Other(format!(
                 "Apply completed with {} error(s)",
@@ -189,18 +204,21 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         &release_namespace,
         args.append_release,
         concurrency,
+        &mut |event| renderer.event(event),
     )
     .await?;
-    timings.record("release", release_started.elapsed());
+    timings.push(PhaseTiming {
+        phase: "release".to_string(),
+        elapsed: release_started.elapsed(),
+    });
 
     // 13. Print summary
-    print_apply_summary(
-        &apply_result.outcomes,
-        Some(&release),
-        &duplicates,
-        apply_result.failed_count,
-    );
-    timings.print();
+    renderer.summary(&ApplyReport {
+        outcomes: &apply_result.outcomes,
+        failed_count: apply_result.failed_count,
+        release: Some(&release),
+        timings: &timings,
+    });
 
     if apply_result.failed_count > 0 {
         return Err(NylError::Other(format!(
@@ -226,26 +244,6 @@ fn resolve_release_identity(
     let namespace = namespace
         .ok_or_else(|| NylError::Config("No Release resource found. Specify --name and --namespace".to_string()))?;
     Ok((name, namespace))
-}
-
-/// Wall-clock duration of each apply phase, printed after the summary so slow
-/// phases are attributable.
-#[derive(Default)]
-struct PhaseTimings(Vec<(String, Duration)>);
-
-impl PhaseTimings {
-    fn record(&mut self, phase: impl Into<String>, elapsed: Duration) {
-        self.0.push((phase.into(), elapsed));
-    }
-
-    fn print(&self) {
-        let parts: Vec<String> = self
-            .0
-            .iter()
-            .map(|(phase, elapsed)| format!("{phase} {:.2}s", elapsed.as_secs_f64()))
-            .collect();
-        println!("{}", format!("Timings: {}", parts.join(", ")).bright_black());
-    }
 }
 
 pub(crate) struct ApplyExecutionResult {
@@ -298,12 +296,19 @@ pub(crate) async fn collect_live_state(
     Ok((None, live_keys))
 }
 
-/// Mark an already-loaded revision superseded. Best-effort, like the rest of
-/// superseding: the new revision is already recorded.
-async fn mark_superseded(storage: &dyn ReleaseStorage, mut previous: ReleaseState) {
-    previous.status = ReleaseStatus::Superseded;
-    previous.error = None;
-    if let Err(err) = storage.update_release(&previous).await {
+/// Mark a revision superseded. Best-effort, like the rest of superseding: the new
+/// revision is already recorded.
+async fn mark_superseded(storage: &dyn ReleaseStorage, previous: &ReleaseState) {
+    if let Err(err) = storage
+        .update_release_status(
+            &previous.release_name,
+            &previous.release_namespace,
+            previous.revision,
+            ReleaseStatus::Superseded,
+            None,
+        )
+        .await
+    {
         tracing::warn!(
             "Failed to mark release {} revision {} superseded: {}",
             previous.release_name,
@@ -311,6 +316,87 @@ async fn mark_superseded(storage: &dyn ReleaseStorage, mut previous: ReleaseStat
             err
         );
     }
+}
+
+/// Delete resources no longer desired, at most `concurrency` at a time.
+///
+/// Like Argo CD, pruned resources are deleted concurrently without kind order,
+/// except that APIServices and admission webhook configurations
+/// ([`ResourceOrdering::is_prune_last`]) are deleted after all others, so they keep
+/// serving and admitting requests while the resources related to them are deleted.
+async fn prune_resources(
+    client: &dyn KubeClient,
+    keys: Vec<&ResourceKey>,
+    concurrency: usize,
+    on_event: &mut ApplyEventSink<'_>,
+) {
+    if keys.is_empty() {
+        return;
+    }
+    on_event(ApplyEvent::PruneStarted { count: keys.len() });
+    let (last, first): (Vec<&ResourceKey>, Vec<&ResourceKey>) = keys
+        .into_iter()
+        .partition(|key| ResourceOrdering::is_prune_last(&key.gvk));
+    for step in [first, last] {
+        let mut deletions = stream::iter(step)
+            .map(|key| async move {
+                let result = client
+                    .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                    .await;
+                (key, result)
+            })
+            .buffer_unordered(concurrency);
+        while let Some((key, result)) = deletions.next().await {
+            on_event(ApplyEvent::Pruned { key, result: &result });
+        }
+    }
+    on_event(ApplyEvent::PruneFinished);
+}
+
+/// Collapse manifests that describe the same Kubernetes object, keeping the last.
+///
+/// Objects are identified by API group, kind, namespace, and name, not API version:
+/// two versions of one object are one object, and applying both concurrently would
+/// race. The surviving document takes the position of the first occurrence, as in
+/// render-time deduplication, and `duplicates` is updated with the total occurrence
+/// count under the surviving document's key.
+pub(crate) fn collapse_duplicate_objects(
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut HashMap<ResourceKey, usize>,
+) -> Result<Vec<serde_json::Value>> {
+    type ObjectIdentity = (String, String, Option<String>, String);
+
+    let mut position: HashMap<ObjectIdentity, usize> = HashMap::new();
+    let mut collapsed: Vec<(serde_json::Value, Vec<ResourceKey>)> = Vec::new();
+    for manifest in manifests {
+        let key = ResourceKey::from_json_value(&manifest)?;
+        let identity = (
+            key.gvk.group.clone(),
+            key.gvk.kind.clone(),
+            key.namespace.clone(),
+            key.name.clone(),
+        );
+        if let Some(&index) = position.get(&identity) {
+            tracing::warn!("Duplicate resource: {} (keeping last occurrence)", key);
+            collapsed[index].0 = manifest;
+            collapsed[index].1.push(key);
+        } else {
+            position.insert(identity, collapsed.len());
+            collapsed.push((manifest, vec![key]));
+        }
+    }
+
+    Ok(collapsed
+        .into_iter()
+        .map(|(manifest, keys)| {
+            if keys.len() > 1 {
+                let total = keys.iter().map(|key| duplicates.remove(key).unwrap_or(1)).sum();
+                let kept = keys.last().expect("a collapsed object has a key").clone();
+                duplicates.insert(kept, total);
+            }
+            manifest
+        })
+        .collect())
 }
 
 /// Build the manifest to store for an `--append-release` revision.
@@ -360,13 +446,14 @@ fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manif
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn apply_and_record_release(
     storage: &KubernetesReleaseStorage,
-    kube_client: &KubeRsClient,
+    kube_client: &dyn KubeClient,
     desired_manifests: &[serde_json::Value],
     apply_result: &ApplyExecutionResult,
     release_name: &str,
     release_namespace: &str,
     append_release: bool,
     concurrency: usize,
+    on_event: &mut ApplyEventSink<'_>,
 ) -> Result<ReleaseState> {
     // Determine next revision number
     let revisions = storage.list_revisions(release_name, release_namespace).await?;
@@ -471,7 +558,7 @@ pub(crate) async fn apply_and_record_release(
         if append_release {
             // Append mode validated that the immediately previous revision is Deployed
             // and does not prune; just mark it superseded.
-            if let Some(previous) = appended_to {
+            if let Some(previous) = &appended_to {
                 mark_superseded(storage, previous).await;
             }
         } else {
@@ -484,95 +571,92 @@ pub(crate) async fn apply_and_record_release(
             let (superseded, live_keys) =
                 collect_live_state(storage, release_name, release_namespace, &revisions, next_revision).await?;
 
-            if let Some(previous) = superseded {
+            if let Some(previous) = &superseded {
                 mark_superseded(storage, previous).await;
             }
 
             let current_keys: HashSet<&ResourceKey> = release.resource_keys.iter().collect();
-            let mut to_prune = keys_to_prune(&live_keys, &current_keys);
-            if !to_prune.is_empty() {
-                to_prune.sort_by_key(|key| key.to_string());
-                println!("\nPruning {} resources...", to_prune.len());
-                let mut deletions = stream::iter(to_prune)
-                    .map(|key| async move {
-                        let result = kube_client
-                            .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                            .await;
-                        (key, result)
-                    })
-                    .buffer_unordered(concurrency);
-                while let Some((key, result)) = deletions.next().await {
-                    match result {
-                        Ok(()) => println!("  ✓ Deleted {}", key),
-                        Err(e) => println!("  ✗ Failed to delete {}: {}", key, e),
-                    }
-                }
-                println!();
-            }
+            prune_resources(
+                kube_client,
+                keys_to_prune(&live_keys, &current_keys),
+                concurrency,
+                on_event,
+            )
+            .await;
         }
     }
 
     Ok(release)
 }
 
-/// Apply manifests in [`ResourceOrdering::apply_waves`], at most `concurrency` at a time.
+/// Apply manifests in [`ResourceOrdering::apply_batches`], at most `concurrency` at a time.
 ///
-/// Every wave finishes before the next starts, so Namespaces precede the resources
-/// in them and CustomResourceDefinitions precede their custom resources; after a
-/// wave that applied a CRD, discovery is refreshed before the next wave. A failed
-/// resource does not stop the others, matching serial apply. When several manifests
-/// share a resource key, only the last is applied, as the duplicate warning states;
-/// concurrent server-side applies of both would race. `on_result` is called
-/// as each resource completes so progress is visible before the whole apply ends;
-/// the returned outcomes and keys keep manifest order regardless of completion order.
+/// As in Argo CD, the resources of one kind form a batch that is applied
+/// concurrently, and every batch finishes before the next starts, so Namespaces
+/// precede the resources in them and CustomResourceDefinitions and APIServices
+/// precede the kinds they register. Before the first batch containing a kind of an
+/// API group registered earlier in this apply, discovery is refreshed until the
+/// registered kinds are served. A failed resource does not stop the others, matching
+/// serial apply. Callers collapse duplicate objects first
+/// ([`collapse_duplicate_objects`]); concurrent applies of one object would race.
+///
+/// `on_event` receives each result as it completes so progress is visible before the
+/// whole apply ends; the returned outcomes and keys keep manifest order regardless of
+/// completion order.
 pub(crate) async fn apply_sorted_manifests(
     client: &dyn KubeClient,
     manifests: &[serde_json::Value],
     concurrency: usize,
-    on_result: &mut (dyn FnMut(&ResourceKey, &Result<ApplyOutcome>) + Send),
+    on_event: &mut ApplyEventSink<'_>,
 ) -> Result<ApplyExecutionResult> {
     let keys: Vec<ResourceKey> = manifests
         .iter()
         .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
-    let waves = ResourceOrdering::apply_waves(manifests);
-    let last_occurrence: HashMap<&ResourceKey, usize> = keys.iter().enumerate().map(|(i, key)| (key, i)).collect();
-    let is_applied = |index: &usize| last_occurrence[&keys[*index]] == *index;
+    let batches = ResourceOrdering::apply_batches(manifests);
     tracing::info!(
-        "Applying {} resources in {} waves (up to {} at a time)",
+        "Applying {} resources in {} batches (up to {} at a time)",
         manifests.len(),
-        waves.len(),
+        batches.len(),
         concurrency
     );
 
     let mut results: Vec<Option<Result<ApplyOutcome>>> = (0..manifests.len()).map(|_| None).collect();
-    let mut crd_applied = false;
-    let mut discovery_refreshed = false;
+    // API groups registered by CRDs or APIServices applied so far and not yet
+    // confirmed in discovery.
+    let mut registered_groups: HashSet<String> = HashSet::new();
 
-    for wave in waves {
-        // If a CRD was applied in an earlier wave, refresh the discovery cache before
-        // applying the first wave that may contain CRD-defined kinds, so newly
-        // registered kinds are resolvable (otherwise apply fails with
-        // ApiResourceNotFound). Retry until the kinds of the remaining resources are
-        // served, since a freshly applied CRD may not be Established the instant its
-        // apply returns.
-        if crd_applied && !discovery_refreshed && !keys[wave.clone()].iter().all(is_crd) {
-            let needed: Vec<GroupVersionKind> = keys[wave.start..]
+    for batch in batches {
+        // Kinds of a newly registered group are not resolvable until discovery is
+        // refreshed (otherwise apply fails with ApiResourceNotFound), and a fresh CRD
+        // or APIService may not be served the instant its apply returns.
+        if keys[batch.clone()]
+            .iter()
+            .any(|key| registered_groups.contains(&key.gvk.group))
+        {
+            let mut needed: Vec<GroupVersionKind> = keys[batch.start..]
                 .iter()
-                .filter(|key| key.gvk.kind != "CustomResourceDefinition")
+                .filter(|key| registered_groups.contains(&key.gvk.group))
                 .map(|key| key.gvk.clone())
                 .collect();
+            needed.sort_by(|a, b| (&a.group, &a.version, &a.kind).cmp(&(&b.group, &b.version, &b.kind)));
+            needed.dedup();
             client.refresh_discovery_until_available(&needed).await?;
-            discovery_refreshed = true;
+            registered_groups.clear();
         }
 
-        let mut applies = stream::iter(wave.filter(is_applied))
+        let mut applies = stream::iter(batch)
             .map(|index| async move { (index, apply_manifest(client, &manifests[index]).await) })
             .buffer_unordered(concurrency);
         while let Some((index, result)) = applies.next().await {
-            on_result(&keys[index], &result);
-            if result.is_ok() && is_crd(&keys[index]) {
-                crd_applied = true;
+            on_event(ApplyEvent::Applied {
+                key: &keys[index],
+                result: &result,
+            });
+            if result.is_ok() {
+                if let Some(group) = registered_api_group(&keys[index], &manifests[index]) {
+                    registered_groups.insert(group);
+                }
             }
             results[index] = Some(result);
         }
@@ -581,14 +665,11 @@ pub(crate) async fn apply_sorted_manifests(
     let mut outcomes = Vec::new();
     let mut failed_count = 0;
     let mut resource_keys = Vec::new();
-    for (index, (key, result)) in keys.iter().zip(results).enumerate() {
-        if !is_applied(&index) {
-            continue;
-        }
-        match result.expect("every applied manifest belongs to exactly one apply wave") {
+    for (key, result) in keys.into_iter().zip(results) {
+        match result.expect("every manifest belongs to exactly one apply batch") {
             Ok(outcome) => {
                 outcomes.push(outcome);
-                resource_keys.push(key.clone());
+                resource_keys.push(key);
             }
             Err(_) => failed_count += 1,
         }
@@ -601,8 +682,20 @@ pub(crate) async fn apply_sorted_manifests(
     })
 }
 
-fn is_crd(key: &ResourceKey) -> bool {
-    key.gvk.kind == "CustomResourceDefinition" && key.gvk.group == "apiextensions.k8s.io"
+/// The API group whose kinds this manifest registers: a CustomResourceDefinition's or
+/// an APIService's `spec.group`.
+fn registered_api_group(key: &ResourceKey, manifest: &serde_json::Value) -> Option<String> {
+    let registers_kinds = matches!(
+        (key.gvk.group.as_str(), key.gvk.kind.as_str()),
+        ("apiextensions.k8s.io", "CustomResourceDefinition") | ("apiregistration.k8s.io", "APIService")
+    );
+    if !registers_kinds {
+        return None;
+    }
+    manifest["spec"]["group"]
+        .as_str()
+        .filter(|group| !group.is_empty())
+        .map(str::to_string)
 }
 
 /// Convert manifests to YAML string
@@ -626,119 +719,6 @@ async fn apply_manifest(client: &dyn KubeClient, manifest: &serde_json::Value) -
     client.apply_resource(&resource, "nyl", false).await
 }
 
-/// Print apply summary
-#[allow(clippy::too_many_lines)]
-pub(crate) fn print_apply_summary(
-    outcomes: &[ApplyOutcome],
-    release: Option<&ReleaseState>,
-    duplicates: &HashMap<ResourceKey, usize>,
-    failed_count: usize,
-) {
-    // Per-resource lines are printed as each apply completes; see `print_apply_result`.
-    if !outcomes.is_empty() || failed_count > 0 {
-        println!();
-    }
-
-    // Print summary counts
-    let mut created = 0;
-    let mut updated = 0;
-    let mut unchanged = 0;
-
-    for outcome in outcomes {
-        match outcome {
-            ApplyOutcome::Created { .. } => created += 1,
-            ApplyOutcome::Updated { .. } => updated += 1,
-            ApplyOutcome::Unchanged { .. } => unchanged += 1,
-            ApplyOutcome::DryRun { would_be } => match **would_be {
-                ApplyOutcome::Created { .. } => created += 1,
-                ApplyOutcome::Updated { .. } => updated += 1,
-                ApplyOutcome::Unchanged { .. } => unchanged += 1,
-                ApplyOutcome::DryRun { .. } => {} // shouldn't happen
-            },
-        }
-    }
-
-    let total_duplicates_ignored: usize = duplicates.values().map(|count| count - 1).sum();
-
-    let mut parts = vec![
-        format!("{} created", created.to_string().green()),
-        format!("{} updated", updated.to_string().yellow()),
-        format!("{} unchanged", unchanged),
-    ];
-
-    if total_duplicates_ignored > 0 {
-        let plural = if total_duplicates_ignored == 1 {
-            "duplicate"
-        } else {
-            "duplicates"
-        };
-        parts.push(format!(
-            "{} {} ignored",
-            total_duplicates_ignored.to_string().bright_black(),
-            plural
-        ));
-    }
-
-    if failed_count > 0 {
-        parts.push(format!("{} failed", failed_count.to_string().red()));
-    }
-
-    println!("Summary: {}", parts.join(", "));
-
-    if let Some(release) = release {
-        println!();
-        if release.status == ReleaseStatus::Deployed {
-            println!(
-                "Release: {} revision {} deployed successfully to namespace {}",
-                release.release_name, release.revision, release.release_namespace
-            );
-        } else {
-            println!("Release: {} revision {} failed", release.release_name, release.revision);
-        }
-    }
-}
-
-/// Print the line for one completed apply.
-pub(crate) fn print_apply_result(
-    key: &ResourceKey,
-    result: &Result<ApplyOutcome>,
-    duplicates: &HashMap<ResourceKey, usize>,
-) {
-    match result {
-        Ok(outcome) => println!("{}", format_outcome_line(outcome, duplicates)),
-        Err(e) => {
-            let error_msg = format!("(failed to apply resource: {})", e);
-            println!("{} {} {}", "✗".red().bold(), key, error_msg.red());
-        }
-    }
-}
-
-/// Format one successful apply outcome.
-fn format_outcome_line(outcome: &ApplyOutcome, duplicates: &HashMap<ResourceKey, usize>) -> String {
-    let (marker, resource_key) = match outcome {
-        ApplyOutcome::Created { resource_key } => ("+".green().bold(), resource_key),
-        ApplyOutcome::Updated { resource_key } => ("~".yellow().bold(), resource_key),
-        ApplyOutcome::Unchanged { resource_key } => ("=".bright_black().bold(), resource_key),
-        ApplyOutcome::DryRun { would_be } => return format_outcome_line(would_be, duplicates),
-    };
-    format!(
-        "{} {} {}{}",
-        marker,
-        outcome.kind(),
-        format_namespace_name(outcome.namespace(), outcome.name()),
-        get_duplicate_annotation(resource_key, duplicates)
-    )
-}
-
-/// Format namespace and name for display
-fn format_namespace_name(namespace: Option<&str>, name: &str) -> String {
-    if let Some(ns) = namespace {
-        format!("{}/{}", ns, name)
-    } else {
-        name.to_string()
-    }
-}
-
 /// Print a warning trace about duplicate resources
 fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     if duplicates.is_empty() {
@@ -755,20 +735,8 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     );
 }
 
-/// Get duplicate annotation for a resource if it's a duplicate
-fn get_duplicate_annotation(resource_key: &ResourceKey, duplicates: &HashMap<ResourceKey, usize>) -> String {
-    // Use direct HashMap lookup with the full ResourceKey (including apiVersion/kind)
-    // to avoid incorrectly matching resources with the same kind from different API versions
-    if let Some(count) = duplicates.get(resource_key) {
-        let ignored_count = count - 1;
-        let plural = if ignored_count == 1 { "duplicate" } else { "duplicates" };
-        return format!(" {}", format!("({} {} ignored)", ignored_count, plural).yellow());
-    }
-    String::new()
-}
-
 /// Ensure a namespace exists, creating it if necessary
-pub(crate) async fn ensure_namespace_exists(client: &KubeRsClient, namespace: &str) -> Result<()> {
+pub(crate) async fn ensure_namespace_exists(client: &dyn KubeClient, namespace: &str) -> Result<()> {
     use crate::kubernetes::GroupVersionKind;
     use kube::api::DynamicObject;
     use serde_json::json;
@@ -807,6 +775,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     #[test]
     fn test_manifests_to_yaml() {
@@ -827,16 +796,6 @@ mod tests {
         assert!(yaml.contains("test1"));
         assert!(yaml.contains("test2"));
         assert!(yaml.contains("---"));
-    }
-
-    #[test]
-    fn test_format_namespace_name_with_namespace() {
-        assert_eq!(format_namespace_name(Some("default"), "myapp"), "default/myapp");
-    }
-
-    #[test]
-    fn test_format_namespace_name_without_namespace() {
-        assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
     }
 
     fn resource_key(name: &str) -> ResourceKey {
@@ -970,6 +929,9 @@ mod tests {
         }
 
         async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+            self.events.lock().unwrap().push(format!("delete-start {name}"));
+            tokio::time::sleep(self.latency).await;
+            self.events.lock().unwrap().push(format!("delete-end {name}"));
             self.inner.delete_resource(gvk, namespace, name).await
         }
 
@@ -1001,14 +963,14 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let mut reported_at = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |_, _| {
+        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |_| {
             reported_at.push(started.elapsed());
         })
         .await
         .unwrap();
         let elapsed = started.elapsed();
 
-        // One round trip for the Namespace wave, two for 16 ConfigMaps at 8 at a
+        // One round trip for the Namespace batch, two for 16 ConfigMaps at 8 at a
         // time, instead of 17 sequential round trips.
         assert_eq!(elapsed, client.latency * 3);
         assert_eq!(client.max_in_flight.load(std::sync::atomic::Ordering::SeqCst), 8);
@@ -1024,39 +986,13 @@ mod tests {
         assert_eq!(result.failed_count, 0);
     }
 
-    /// Documents that resolve to the same resource are not applied concurrently;
-    /// the last one wins, as with serial apply.
-    #[tokio::test(start_paused = true)]
-    async fn test_apply_sorted_manifests_applies_only_last_duplicate() {
-        let client = LatencyClient::new("");
-        let manifests = vec![
-            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": "app"}, "data": {"v": "first"}}),
-            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "other", "namespace": "app"}}),
-            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": "app"}, "data": {"v": "last"}}),
-        ];
-
-        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |_, _| {})
-            .await
-            .unwrap();
-
-        let names: Vec<&str> = result.resource_keys.iter().map(|key| key.name.as_str()).collect();
-        assert_eq!(names, vec!["other", "cm"]);
-        let stored = client.inner.get_all_resources();
-        let cm = stored
-            .values()
-            .find(|object| object.metadata.name.as_deref() == Some("cm"))
-            .unwrap();
-        assert_eq!(cm.data["data"]["v"], "last");
-        assert_eq!(client.events().iter().filter(|e| *e == "start cm").count(), 1);
-    }
-
     #[tokio::test(start_paused = true)]
     async fn test_apply_sorted_manifests_concurrency_one_is_serial() {
         let client = LatencyClient::new("");
         let manifests = config_maps(4);
 
         let started = tokio::time::Instant::now();
-        apply_sorted_manifests(&client, &manifests, 1, &mut |_, _| {})
+        apply_sorted_manifests(&client, &manifests, 1, &mut |_| {})
             .await
             .unwrap();
 
@@ -1064,27 +1000,47 @@ mod tests {
         assert_eq!(client.max_in_flight.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// Namespaces finish before namespaced resources start, and a CRD is applied and
-    /// discovery refreshed before its custom resources are applied.
+    /// Namespaces finish before namespaced resources start; a CRD is applied before
+    /// its custom resources, and discovery is refreshed for the CRD's group only once
+    /// a batch needs it, so built-in batches in between do not wait for it.
     #[tokio::test(start_paused = true)]
-    async fn test_apply_sorted_manifests_keeps_namespace_and_crd_barriers() {
+    async fn test_apply_sorted_manifests_keeps_barriers_and_defers_discovery_refresh() {
         let client = LatencyClient::new("");
         let mut manifests = vec![
             json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "widget", "namespace": "app"}}),
-            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "config", "namespace": "app"}}),
-            json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": {"name": "widgets.example.com"}}),
+            json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "deploy", "namespace": "app"}}),
+            json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": {"name": "widgets.example.com"}, "spec": {"group": "example.com"}}),
             json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
         ];
         ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
 
-        apply_sorted_manifests(&client, &manifests, 8, &mut |_, _| {})
+        apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
             .await
             .unwrap();
 
         assert!(client.position("end app") < client.position("start widgets.example.com"));
-        assert!(client.position("end widgets.example.com") < client.position("refresh ConfigMap,Widget"));
-        assert!(client.position("refresh ConfigMap,Widget") < client.position("start config"));
-        assert!(client.position("end config") < client.position("start widget"));
+        assert!(client.position("end widgets.example.com") < client.position("start deploy"));
+        assert!(client.position("end deploy") < client.position("refresh Widget"));
+        assert!(client.position("refresh Widget") < client.position("start widget"));
+    }
+
+    /// An APIService is applied, and discovery refreshed for its group, before the
+    /// objects it serves.
+    #[tokio::test(start_paused = true)]
+    async fn test_apply_sorted_manifests_registers_api_service_before_served_objects() {
+        let client = LatencyClient::new("");
+        let mut manifests = vec![
+            json!({"apiVersion": "metrics.example.com/v1", "kind": "Metric", "metadata": {"name": "metric", "namespace": "app"}}),
+            json!({"apiVersion": "apiregistration.k8s.io/v1", "kind": "APIService", "metadata": {"name": "v1.metrics.example.com"}, "spec": {"group": "metrics.example.com", "version": "v1"}}),
+        ];
+        ResourceOrdering::sort_by_priority(&mut manifests).unwrap();
+
+        apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(client.position("end v1.metrics.example.com") < client.position("refresh Metric"));
+        assert!(client.position("refresh Metric") < client.position("start metric"));
     }
 
     /// A failed resource is reported and counted without stopping the rest, and it is
@@ -1095,8 +1051,8 @@ mod tests {
         let manifests = config_maps(3);
 
         let mut failures = Vec::new();
-        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |key, result| {
-            if result.is_err() {
+        let result = apply_sorted_manifests(&client, &manifests, 8, &mut |event| {
+            if let ApplyEvent::Applied { key, result: Err(_) } = event {
                 failures.push(key.name.clone());
             }
         })
@@ -1108,6 +1064,71 @@ mod tests {
         let names: Vec<&str> = result.resource_keys.iter().map(|key| key.name.as_str()).collect();
         assert_eq!(names, vec!["cm-00", "cm-02"]);
         assert_eq!(client.inner.get_all_resources().len(), 2);
+    }
+
+    /// Pruning deletes concurrently, but APIServices and admission webhooks are
+    /// deleted only after the resources related to them are gone.
+    #[tokio::test(start_paused = true)]
+    async fn test_prune_resources_deletes_api_services_and_webhooks_last() {
+        let client = LatencyClient::new("");
+        let key = |api_version: &str, kind: &str, namespace: Option<&str>, name: &str| ResourceKey {
+            gvk: GroupVersionKind::from_api_version_kind(api_version, kind).unwrap(),
+            namespace: namespace.map(str::to_string),
+            name: name.to_string(),
+        };
+        let keys = [
+            key(
+                "admissionregistration.k8s.io/v1",
+                "ValidatingWebhookConfiguration",
+                None,
+                "hook",
+            ),
+            key("apps/v1", "Deployment", Some("app"), "backend"),
+            key("apiregistration.k8s.io/v1", "APIService", None, "api"),
+            key("v1", "Service", Some("app"), "svc"),
+        ];
+
+        let started = tokio::time::Instant::now();
+        let mut pruned = Vec::new();
+        prune_resources(&client, keys.iter().collect(), 8, &mut |event| {
+            if let ApplyEvent::Pruned { key, result: Ok(()) } = event {
+                pruned.push(key.name.clone());
+            }
+        })
+        .await;
+
+        assert_eq!(started.elapsed(), client.latency * 2);
+        assert_eq!(pruned.len(), 4);
+        for last in ["hook", "api"] {
+            for first in ["backend", "svc"] {
+                assert!(
+                    client.position(&format!("delete-end {first}")) < client.position(&format!("delete-start {last}"))
+                );
+            }
+        }
+    }
+
+    /// Documents for one object collapse to the last, even across API versions and
+    /// after namespace resolution, and the duplicate count covers every occurrence.
+    #[test]
+    fn test_collapse_duplicate_objects_keeps_last_across_api_versions() {
+        let manifests = vec![
+            json!({"apiVersion": "autoscaling/v1", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "app"}, "spec": {"v": "first"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "other", "namespace": "app"}}),
+            json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "app"}, "spec": {"v": "last"}}),
+        ];
+        let first_key = ResourceKey::from_json_value(&manifests[0]).unwrap();
+        let last_key = ResourceKey::from_json_value(&manifests[2]).unwrap();
+        // Render already collapsed two identical autoscaling/v1 documents.
+        let mut duplicates = HashMap::from([(first_key.clone(), 2)]);
+
+        let collapsed = collapse_duplicate_objects(manifests, &mut duplicates).unwrap();
+
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[0]["apiVersion"], "autoscaling/v2");
+        assert_eq!(collapsed[0]["spec"]["v"], "last");
+        assert_eq!(collapsed[1]["metadata"]["name"], "other");
+        assert_eq!(duplicates, HashMap::from([(last_key, 3)]));
     }
 
     #[test]

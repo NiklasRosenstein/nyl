@@ -3,9 +3,10 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::{
+    cli::apply_output::{ApplyRenderer, ApplyReport, PhaseTiming},
     cli::commands::apply::{
-        apply_and_record_release, apply_sorted_manifests, ensure_namespace_exists, print_apply_result,
-        print_apply_summary, DEFAULT_APPLY_CONCURRENCY,
+        apply_and_record_release, apply_sorted_manifests, collapse_duplicate_objects, ensure_namespace_exists,
+        DEFAULT_APPLY_CONCURRENCY,
     },
     cli::commands::cluster::load_target_kube_config,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
@@ -54,7 +55,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let target = resolve_rollback_target(&storage, &args.name, &args.namespace, args.revision).await?;
 
     // Parse the stored manifest back into individual documents.
-    let mut manifests = crate::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
+    let manifests = crate::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
         .map_err(|e| NylError::Config(format!("Failed to parse stored manifest for rollback: {}", e)))?;
     if manifests.is_empty() {
         return Err(NylError::Config(format!(
@@ -88,17 +89,28 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         args.name, target.revision
     );
 
-    // Sort resources by priority (Namespace → CRD → RBAC → Config → Workload) and apply.
+    // Revisions recorded before duplicates were collapsed at apply time may still
+    // hold several documents for one object; apply only the last, as apply did.
+    let mut duplicates = std::collections::HashMap::new();
+    let mut manifests = collapse_duplicate_objects(manifests, &mut duplicates)?;
+
+    // Sort resources into apply order (Argo CD's kind order) and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
     ensure_namespace_exists(&kube_client, &args.namespace).await?;
     let concurrency = usize::from(args.concurrency);
-    let no_duplicates = std::collections::HashMap::new();
-    let apply_result = apply_sorted_manifests(&kube_client, &manifests, concurrency, &mut |key, result| {
-        print_apply_result(key, result, &no_duplicates);
+    let renderer = ApplyRenderer::new(&duplicates);
+    let apply_started = std::time::Instant::now();
+    let apply_result = apply_sorted_manifests(&kube_client, &manifests, concurrency, &mut |event| {
+        renderer.event(event);
     })
     .await?;
+    let mut timings = vec![PhaseTiming {
+        phase: "apply".to_string(),
+        elapsed: apply_started.elapsed(),
+    }];
 
     // Record the rollback as a new revision (supersede previous + prune), reusing the apply path.
+    let release_started = std::time::Instant::now();
     let release = apply_and_record_release(
         &storage,
         &kube_client,
@@ -108,15 +120,20 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         &args.namespace,
         false,
         concurrency,
+        &mut |event| renderer.event(event),
     )
     .await?;
+    timings.push(PhaseTiming {
+        phase: "release".to_string(),
+        elapsed: release_started.elapsed(),
+    });
 
-    print_apply_summary(
-        &apply_result.outcomes,
-        Some(&release),
-        &no_duplicates,
-        apply_result.failed_count,
-    );
+    renderer.summary(&ApplyReport {
+        outcomes: &apply_result.outcomes,
+        failed_count: apply_result.failed_count,
+        release: Some(&release),
+        timings: &timings,
+    });
 
     if apply_result.failed_count > 0 {
         return Err(NylError::Other(format!(

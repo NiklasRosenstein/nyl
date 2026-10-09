@@ -69,7 +69,11 @@ pub struct ReleaseState {
 /// Trait for storing and retrieving release state
 #[async_trait]
 pub trait ReleaseStorage: Send + Sync {
-    /// Save a release state
+    /// Record a new release revision.
+    ///
+    /// Revisions are immutable records; status changes go through
+    /// [`Self::update_release_status`]. The Kubernetes backend fails when the
+    /// revision already exists, which means another apply recorded it concurrently.
     async fn save_release(&self, release: &ReleaseState) -> Result<()>;
 
     /// Get the latest release for a release name and namespace
@@ -80,13 +84,6 @@ pub trait ReleaseStorage: Send + Sync {
 
     /// List all revision numbers for a release
     async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>>;
-
-    /// Save a revision that is expected to exist already, such as one whose status
-    /// changes. Storage backends may optimize for the update; the result is the same
-    /// as [`Self::save_release`].
-    async fn update_release(&self, release: &ReleaseState) -> Result<()> {
-        self.save_release(release).await
-    }
 
     /// Update the status of a release
     async fn update_release_status(
@@ -134,6 +131,35 @@ impl KubernetesReleaseStorage {
     /// Encode string to ByteString
     fn encode_base64(data: &str) -> ByteString {
         ByteString(data.as_bytes().to_vec())
+    }
+
+    /// JSON merge patch for a release Secret that changes only its status fields.
+    ///
+    /// A missing `error` removes the stored error; `applied_at` is set only when given.
+    fn status_patch(
+        status: &ReleaseStatus,
+        error: Option<&str>,
+        applied_at: Option<DateTime<Utc>>,
+    ) -> Result<serde_json::Value> {
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "status".to_string(),
+            serde_json::to_value(Self::encode_base64(&serde_json::to_string(status)?))?,
+        );
+        data.insert(
+            "error".to_string(),
+            match error {
+                Some(error) => serde_json::to_value(Self::encode_base64(error))?,
+                None => serde_json::Value::Null,
+            },
+        );
+        if let Some(applied_at) = applied_at {
+            data.insert(
+                "applied_at".to_string(),
+                serde_json::to_value(Self::encode_base64(&applied_at.to_rfc3339()))?,
+            );
+        }
+        Ok(serde_json::json!({ "data": data }))
     }
 
     /// Decode ByteString to string
@@ -331,32 +357,15 @@ impl ReleaseStorage for KubernetesReleaseStorage {
     async fn save_release(&self, release: &ReleaseState) -> Result<()> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), &release.release_namespace);
         let secret = Self::to_secret(release)?;
-        let name = Self::secret_name(&release.release_name, release.revision);
 
-        // New revisions are the common case, so create first and replace only when
-        // the revision already exists; this saves a read per saved revision.
+        // Revisions are immutable records: a conflict means another apply recorded
+        // the same revision concurrently, and replacing it would lose that record.
         match api.create(&kube::api::PostParams::default(), &secret).await {
             Ok(_) => Ok(()),
-            Err(kube::Error::Api(err)) if err.code == 409 => {
-                api.replace(&name, &kube::api::PostParams::default(), &secret).await?;
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn update_release(&self, release: &ReleaseState) -> Result<()> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &release.release_namespace);
-        let secret = Self::to_secret(release)?;
-        let name = Self::secret_name(&release.release_name, release.revision);
-
-        // Replace first: the revision normally exists, so this is a single write.
-        match api.replace(&name, &kube::api::PostParams::default(), &secret).await {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(err)) if err.code == 404 => {
-                api.create(&kube::api::PostParams::default(), &secret).await?;
-                Ok(())
-            }
+            Err(kube::Error::Api(err)) if err.code == 409 => Err(NylError::Kubernetes(format!(
+                "release {} revision {} was recorded concurrently by another apply; re-run to record a new revision",
+                release.release_name, release.revision
+            ))),
             Err(e) => Err(e.into()),
         }
     }
@@ -412,23 +421,35 @@ impl ReleaseStorage for KubernetesReleaseStorage {
         status: ReleaseStatus,
         error: Option<String>,
     ) -> Result<()> {
-        // Get existing release
-        let mut release = self
-            .get_release(release_name, namespace, revision)
-            .await?
-            .ok_or_else(|| NylError::Config(format!("Release {} revision {} not found", release_name, revision)))?;
+        let not_found = || NylError::Config(format!("Release {} revision {} not found", release_name, revision));
 
-        // Update status
-        release.status = status;
-        release.error = error;
+        // Patch only the status fields, so the stored manifest and resource keys are
+        // neither resent nor overwritten by a stale copy, and a revision deleted in
+        // the meantime is reported instead of recreated.
+        let applied_at = if status == ReleaseStatus::Deployed {
+            let current = self
+                .get_release(release_name, namespace, revision)
+                .await?
+                .ok_or_else(not_found)?;
+            current.applied_at.is_none().then(Utc::now)
+        } else {
+            None
+        };
 
-        // If status is Deployed, set applied_at
-        if release.status == ReleaseStatus::Deployed && release.applied_at.is_none() {
-            release.applied_at = Some(Utc::now());
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        let patch = kube::api::Patch::Merge(Self::status_patch(&status, error.as_deref(), applied_at)?);
+        match api
+            .patch(
+                &Self::secret_name(release_name, revision),
+                &kube::api::PatchParams::default(),
+                &patch,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => Err(not_found()),
+            Err(e) => Err(e.into()),
         }
-
-        // Save updated release
-        self.update_release(&release).await
     }
 
     async fn list_releases(&self, namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
@@ -747,6 +768,24 @@ mod tests {
 
         let revisions = storage.list_revisions("myapp", "default").await.unwrap();
         assert_eq!(revisions, vec![1, 2, 3]);
+    }
+
+    /// A status update patches only the status fields, so it never resends or
+    /// overwrites the stored manifest and resource keys, and clears a stale error.
+    #[test]
+    fn test_status_patch_touches_only_status_fields() {
+        let patch = KubernetesReleaseStorage::status_patch(&ReleaseStatus::Superseded, None, None).unwrap();
+
+        let data = patch["data"].as_object().unwrap();
+        let fields: Vec<&str> = data.keys().map(String::as_str).collect();
+        assert_eq!(fields, vec!["error", "status"]);
+        assert!(data["error"].is_null());
+        let status =
+            KubernetesReleaseStorage::decode_base64(&serde_json::from_value(data["status"].clone()).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ReleaseStatus>(&status).unwrap(),
+            ReleaseStatus::Superseded
+        );
     }
 
     #[tokio::test]

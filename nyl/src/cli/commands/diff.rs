@@ -75,6 +75,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         resolve_namespaces: false,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,
+        discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
     })
     .await?;
 

@@ -59,8 +59,8 @@ pub trait KubeClient: Send + Sync {
 
     /// Refresh API discovery until every `required` kind is resolvable, or give up.
     ///
-    /// Called after CustomResourceDefinitions are applied so their custom resources
-    /// can be applied in the same batch. Clients without a discovery cache need no
+    /// Called after CustomResourceDefinitions or APIServices are applied so the kinds
+    /// they register can be applied in the same run. Clients without a discovery cache need no
     /// refresh, which is the default.
     async fn refresh_discovery_until_available(&self, _required: &[GroupVersionKind]) -> Result<()> {
         Ok(())
@@ -229,7 +229,8 @@ impl KubeRsClient {
     /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
     /// index or the attempts are exhausted.
     ///
-    /// A newly-applied CustomResourceDefinition is not served by the API server the
+    /// Returns immediately when every kind is already known. A newly-applied
+    /// CustomResourceDefinition is not served by the API server the
     /// instant the apply returns — it must first become `Established`. A single
     /// [`Self::refresh_discovery`] can therefore rebuild the index before the new
     /// kind is published, so a custom resource applied right after would still fail
@@ -240,20 +241,24 @@ impl KubeRsClient {
         const MAX_ATTEMPTS: u32 = 10;
         const DELAY: Duration = Duration::from_millis(500);
 
+        let all_known = || {
+            let index = self.api_resource_index();
+            required.iter().all(|gvk| index.contains_key(gvk))
+        };
+        // Re-applying unchanged CRDs registers nothing new, so skip the refresh.
+        if all_known() {
+            return Ok(());
+        }
+
         for attempt in 1..=MAX_ATTEMPTS {
             self.refresh_discovery().await?;
-
-            let all_known = {
-                let index = self.api_resource_index();
-                required.iter().all(|gvk| index.contains_key(gvk))
-            };
-            if all_known || attempt == MAX_ATTEMPTS {
+            if all_known() || attempt == MAX_ATTEMPTS {
                 break;
             }
 
             tracing::debug!(
                 attempt,
-                "Waiting for newly-applied CRD kinds to become discoverable before applying their resources"
+                "Waiting for newly registered kinds to become discoverable before applying their resources"
             );
             tokio::time::sleep(DELAY).await;
         }

@@ -45,16 +45,27 @@ For shared rendering behavior and namespace resolution details, see
 
 ## Apply order and progress
 
-Resources are sorted by kind priority (Namespaces, CustomResourceDefinitions,
-ServiceAccounts, Roles and ClusterRoles, their bindings, ConfigMaps and Secrets,
-Services, workloads, everything else, then APIServices and admission webhook
-configurations) and applied in waves: resources of the same priority are applied
-concurrently, up to `--concurrency` at a time, and each wave finishes before the
-next starts. Namespaces therefore exist before the resources in them, and after
-a wave that applies CustomResourceDefinitions Nyl refreshes API discovery until
-the new kinds are served. When several documents resolve to the same resource,
-only the last one is applied. A resource that fails to apply does not stop the
-others; the release is recorded as failed and the command exits non-zero.
+Nyl applies resources in the same order as Argo CD: Namespaces, cluster policy
+(NetworkPolicies, ResourceQuotas, LimitRanges, PodDisruptionBudgets),
+ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
+Services, workloads, Ingresses, and APIServices, followed by every other kind,
+including custom resources and admission webhook configurations. As in Argo CD,
+the resources of one kind form a batch that is applied concurrently, up to
+`--concurrency` at a time, and each batch finishes before the next starts. Kinds
+therefore never race a kind they may depend on, while resources of one kind do
+not wait for each other.
+
+Before applying the first resource of an API group that a CustomResourceDefinition
+or APIService registered earlier in the same apply, Nyl refreshes API discovery
+until the new kinds are served. When several documents describe the same object
+(the same group, kind, namespace, and name, in any API version), only the last one
+is applied and recorded. A resource that fails to apply does not stop the others;
+the release is recorded as failed and the command exits non-zero.
+
+Pruning deletes the resources a release no longer contains concurrently, like Argo
+CD. APIServices and admission webhook configurations are deleted last, after every
+other pruned resource, so they keep serving and admitting requests while the
+resources related to them are removed.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by
