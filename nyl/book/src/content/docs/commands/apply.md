@@ -71,10 +71,12 @@ apply of the same release fails before it changes the cluster. A release that
 renders no resources is still recorded, and its previously deployed resources are
 pruned.
 
-Pruning deletes the resources a release no longer contains concurrently, like Argo
-CD. CustomResourceDefinitions, APIServices, and admission webhook configurations
-are deleted last, after every other pruned resource; deleting a CRD first would
-cascade to its custom resources. A resource that fails to delete stays recorded
+Pruning deletes the resources a release no longer contains in the reverse of the
+apply order, so dependents go before what they depend on: admission webhook
+configurations before the backends they call, custom resources and objects of
+aggregated APIs before the CustomResourceDefinitions and APIServices behind them,
+APIServices before their backends, and Namespaces last. As with apply, the
+resources of one kind are deleted concurrently. A resource that fails to delete stays recorded
 in the new revision, so the next apply retries deleting it. Changing a resource's
 apiVersion does not prune it.
 

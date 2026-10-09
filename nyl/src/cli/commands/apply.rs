@@ -375,13 +375,12 @@ async fn run_concurrently<T, R, Fut>(
 /// Delete resources no longer desired, at most `concurrency` at a time, and return
 /// the keys that failed to delete.
 ///
-/// Like Argo CD, pruned resources are deleted concurrently without kind order,
-/// except that CustomResourceDefinitions, APIServices, and admission webhook
-/// configurations ([`ResourceOrdering::is_prune_last`]) are deleted after all others,
-/// so they keep defining, serving, and admitting the resources being deleted.
+/// Resources are deleted in reverse apply order ([`ResourceOrdering::prune_batches`]),
+/// dependents first; the resources of one kind are deleted concurrently and each
+/// batch finishes before the next starts.
 async fn prune_resources<'k>(
     client: &dyn KubeClient,
-    keys: Vec<&'k ResourceKey>,
+    mut keys: Vec<&'k ResourceKey>,
     concurrency: usize,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Vec<&'k ResourceKey> {
@@ -390,12 +389,10 @@ async fn prune_resources<'k>(
         return failed;
     }
     on_event(ApplyEvent::PruneStarted { count: keys.len() });
-    let (last, first): (Vec<&ResourceKey>, Vec<&ResourceKey>) = keys
-        .into_iter()
-        .partition(|key| ResourceOrdering::is_prune_last(&key.gvk));
-    for step in [first, last] {
+    let batches = ResourceOrdering::prune_batches(&mut keys);
+    for batch in batches {
         run_concurrently(
-            step,
+            keys[batch].iter().copied(),
             concurrency,
             |key: &ResourceKey| client.delete_resource(&key.gvk, key.namespace.as_deref(), &key.name),
             |key, result| {
@@ -1162,10 +1159,10 @@ mod tests {
         assert_eq!(client.inner.get_all_resources().len(), 2);
     }
 
-    /// Pruning deletes concurrently, but CRDs, APIServices, and admission webhooks
-    /// are deleted only after the resources related to them are gone.
+    /// Pruning deletes each kind concurrently and dependents before what they depend
+    /// on: the webhook before its backend, the custom resource before its CRD.
     #[tokio::test(start_paused = true)]
-    async fn test_prune_resources_deletes_api_services_and_webhooks_last() {
+    async fn test_prune_resources_deletes_in_reverse_apply_order() {
         let client = LatencyClient::new("");
         let key = |api_version: &str, kind: &str, namespace: Option<&str>, name: &str| ResourceKey {
             gvk: GroupVersionKind::from_api_version_kind(api_version, kind).unwrap(),
@@ -1200,16 +1197,13 @@ mod tests {
         })
         .await;
 
-        assert_eq!(started.elapsed(), client.latency * 2);
-        assert_eq!(pruned.len(), 6);
+        // One round trip per kind: six kinds, one resource each.
+        assert_eq!(started.elapsed(), client.latency * 6);
+        assert_eq!(
+            pruned,
+            vec!["hook", "widget", "api", "backend", "svc", "widgets.example.com"]
+        );
         assert!(failed.is_empty());
-        for last in ["hook", "api", "widgets.example.com"] {
-            for first in ["backend", "svc", "widget"] {
-                assert!(
-                    client.position(&format!("delete-end {first}")) < client.position(&format!("delete-start {last}"))
-                );
-            }
-        }
     }
 
     /// Documents for one object collapse to the last, even across API versions and

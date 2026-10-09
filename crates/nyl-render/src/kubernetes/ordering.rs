@@ -16,8 +16,9 @@
 //! Like Argo CD, [`ResourceOrdering::apply_batches`] groups consecutive resources of
 //! one kind into a batch. Resources in a batch are applied concurrently and each batch
 //! finishes before the next starts, so a kind never races a kind it may depend on.
+//! [`ResourceOrdering::prune_batches`] deletes in the reverse order, dependents first.
 
-use crate::kubernetes::{extract_gvk, GroupVersionKind};
+use crate::kubernetes::{extract_gvk, GroupVersionKind, ResourceKey};
 use crate::Result;
 use serde_json::Value;
 use std::ops::Range;
@@ -151,14 +152,19 @@ impl ResourceOrdering {
             )
     }
 
-    /// Whether pruning defers this kind until every other pruned resource is gone.
+    /// Sort resources to prune into deletion order and split them into deletion
+    /// batches: the apply batches in reverse.
     ///
-    /// CustomResourceDefinitions define, APIServices serve, and admission webhooks admit
-    /// other resources, so they stay in place while those resources are deleted.
-    /// Deleting a CRD first would cascade to its custom resources, racing their own
-    /// prune and any controller finalizers.
-    pub fn is_prune_last(gvk: &GroupVersionKind) -> bool {
-        Self::registers_api_group(gvk) || Self::is_admission_webhook(gvk)
+    /// Apply order puts every kind after the kinds it depends on, so the reverse
+    /// deletes dependents first: admission webhooks before the backends they call,
+    /// custom resources and aggregated-API objects before the CustomResourceDefinitions
+    /// and APIServices that define and serve them, APIServices before their backends,
+    /// and Namespaces last. Resources within a batch may be deleted concurrently.
+    pub fn prune_batches(keys: &mut [&ResourceKey]) -> Vec<Range<usize>> {
+        keys.sort_by_cached_key(|key| (Self::gvk_order_key(&key.gvk), key.namespace.clone(), key.name.clone()));
+        let mut batches = Self::apply_batches(keys.iter().map(|key| &key.gvk));
+        batches.reverse();
+        batches
     }
 }
 
@@ -317,26 +323,49 @@ mod tests {
         assert!(batches_of(&[]).is_empty());
     }
 
+    /// Pruning deletes in reverse apply order: webhooks before their backends,
+    /// served and custom objects before the APIService and CRD behind them, and the
+    /// APIService before its backend.
     #[test]
-    fn test_is_prune_last_requires_the_built_in_group() {
-        let gvk = |group: &str, kind: &str| GroupVersionKind {
-            group: group.to_string(),
-            version: "v1".to_string(),
-            kind: kind.to_string(),
+    fn test_prune_batches_reverse_apply_order() {
+        let key = |api_version: &str, kind: &str, name: &str| ResourceKey {
+            gvk: GroupVersionKind::from_api_version_kind(api_version, kind).unwrap(),
+            namespace: None,
+            name: name.to_string(),
         };
-        assert!(ResourceOrdering::is_prune_last(&gvk(
-            "apiregistration.k8s.io",
-            "APIService"
-        )));
-        assert!(ResourceOrdering::is_prune_last(&gvk(
-            "admissionregistration.k8s.io",
-            "ValidatingWebhookConfiguration"
-        )));
-        assert!(ResourceOrdering::is_prune_last(&gvk(
-            "apiextensions.k8s.io",
-            "CustomResourceDefinition"
-        )));
-        assert!(!ResourceOrdering::is_prune_last(&gvk("example.com", "APIService")));
-        assert!(!ResourceOrdering::is_prune_last(&gvk("apps", "Deployment")));
+        let owned = [
+            key("v1", "Namespace", "ns"),
+            key("apps/v1", "Deployment", "backend-b"),
+            key("apiextensions.k8s.io/v1", "CustomResourceDefinition", "crd"),
+            key("example.com/v1", "Widget", "widget"),
+            key(
+                "admissionregistration.k8s.io/v1",
+                "ValidatingWebhookConfiguration",
+                "hook",
+            ),
+            key("apiregistration.k8s.io/v1", "APIService", "api"),
+            key("metrics.example.com/v1", "Metric", "metric"),
+            key("apps/v1", "Deployment", "backend-a"),
+        ];
+        let mut keys: Vec<&ResourceKey> = owned.iter().collect();
+
+        let batches = ResourceOrdering::prune_batches(&mut keys);
+
+        let names: Vec<Vec<&str>> = batches
+            .into_iter()
+            .map(|batch| keys[batch].iter().map(|key| key.name.as_str()).collect())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                vec!["hook"],
+                vec!["metric"],
+                vec!["widget"],
+                vec!["api"],
+                vec!["backend-a", "backend-b"],
+                vec!["crd"],
+                vec!["ns"],
+            ]
+        );
     }
 }
