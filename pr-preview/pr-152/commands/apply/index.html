@@ -120,9 +120,10 @@ until the new kinds are served. When several documents describe the same object
 is applied and recorded. A resource that fails to apply does not stop the others;
 the release is recorded as failed and the command exits non-zero.</p>
 <p>Pruning deletes the resources a release no longer contains concurrently, like Argo
-CD. APIServices and admission webhook configurations are deleted last, after every
-other pruned resource, so they keep serving and admitting requests while the
-resources related to them are removed.</p>
+CD. CustomResourceDefinitions, APIServices, and admission webhook configurations
+are deleted last, after every other pruned resource, so they keep defining,
+serving, and admitting the resources being removed; deleting a CRD first would
+cascade to its custom resources.</p>
 <p>Each resource’s outcome (<code dir="auto">+</code> created, <code dir="auto">~</code> updated, <code dir="auto">=</code> unchanged, <code dir="auto">✗</code> failed) is
 printed as soon as it completes, in completion order. The summary is followed by
 the time spent in API discovery, validation, apply, and release bookkeeping.
