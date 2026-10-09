@@ -11,7 +11,7 @@ use std::time::Duration;
 use colored::Colorize;
 
 use crate::{
-    kubernetes::{ApplyOutcome, ReleaseState, ReleaseStatus, ResourceKey},
+    kubernetes::{ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey},
     Result,
 };
 
@@ -36,10 +36,36 @@ pub(crate) enum ApplyEvent<'a> {
 /// Receiver of [`ApplyEvent`]s.
 pub(crate) type ApplyEventSink<'s> = dyn FnMut(ApplyEvent<'_>) + Send + 's;
 
+/// A phase of an apply whose duration is reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Discovery(DiscoveryMode),
+    Validation,
+    Apply,
+    Release,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discovery(mode) => write!(f, "discovery ({mode})"),
+            Self::Validation => f.write_str("validation"),
+            Self::Apply => f.write_str("apply"),
+            Self::Release => f.write_str("release"),
+        }
+    }
+}
+
 /// Wall-clock duration of one apply phase.
 pub(crate) struct PhaseTiming {
-    pub(crate) phase: String,
+    pub(crate) phase: Phase,
     pub(crate) elapsed: Duration,
+}
+
+impl PhaseTiming {
+    pub(crate) fn new(phase: Phase, elapsed: Duration) -> Self {
+        Self { phase, elapsed }
+    }
 }
 
 /// The final result of an apply, rendered as the summary.
@@ -146,20 +172,13 @@ impl<'a> ApplyRenderer<'a> {
     }
 
     fn outcome_line(&self, outcome: &ApplyOutcome) -> String {
-        let outcome = effective_outcome(outcome);
-        let (marker, resource_key) = match outcome {
+        let (marker, resource_key) = match effective_outcome(outcome) {
             ApplyOutcome::Created { resource_key } => ("+".green().bold(), resource_key),
             ApplyOutcome::Updated { resource_key } => ("~".yellow().bold(), resource_key),
             ApplyOutcome::Unchanged { resource_key } => ("=".bright_black().bold(), resource_key),
             ApplyOutcome::DryRun { .. } => unreachable!("effective_outcome unwraps dry runs"),
         };
-        format!(
-            "{} {} {}{}",
-            marker,
-            outcome.kind(),
-            format_namespace_name(outcome.namespace(), outcome.name()),
-            self.duplicate_annotation(resource_key)
-        )
+        format!("{} {}{}", marker, resource_key, self.duplicate_annotation(resource_key))
     }
 
     fn duplicate_annotation(&self, resource_key: &ResourceKey) -> String {
@@ -179,29 +198,5 @@ fn effective_outcome(outcome: &ApplyOutcome) -> &ApplyOutcome {
     match outcome {
         ApplyOutcome::DryRun { would_be } => effective_outcome(would_be),
         other => other,
-    }
-}
-
-/// Format namespace and name for display.
-fn format_namespace_name(namespace: Option<&str>, name: &str) -> String {
-    if let Some(ns) = namespace {
-        format!("{}/{}", ns, name)
-    } else {
-        name.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_namespace_name_with_namespace() {
-        assert_eq!(format_namespace_name(Some("default"), "myapp"), "default/myapp");
-    }
-
-    #[test]
-    fn test_format_namespace_name_without_namespace() {
-        assert_eq!(format_namespace_name(None, "mynamespace"), "mynamespace");
     }
 }

@@ -25,6 +25,28 @@ impl ReleaseStorage for MockReleaseStorage {
             format!("{}/{}", release.release_namespace, release.release_name),
             release.revision,
         );
+        if store.contains_key(&key) {
+            return Err(nyl::NylError::Kubernetes(format!(
+                "revision {} already exists",
+                release.revision
+            )));
+        }
+        store.insert(key, release.clone());
+        Ok(())
+    }
+
+    async fn complete_release(&self, release: &ReleaseState) -> nyl::Result<()> {
+        let mut store = self.releases.lock().unwrap();
+        let key = (
+            format!("{}/{}", release.release_namespace, release.release_name),
+            release.revision,
+        );
+        if !store.contains_key(&key) {
+            return Err(nyl::NylError::Config(format!(
+                "revision {} not found",
+                release.revision
+            )));
+        }
         store.insert(key, release.clone());
         Ok(())
     }

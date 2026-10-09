@@ -3,17 +3,20 @@ use clap::Args;
 use futures::stream::{self, StreamExt};
 use kube::api::DynamicObject;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::time::Instant;
 
 use crate::{
     cli::{
-        apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, PhaseTiming},
-        commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+        apply_output::{ApplyEvent, ApplyEventSink, ApplyRenderer, ApplyReport, Phase, PhaseTiming},
+        commands::render::{
+            run_render_preflight, ClusterClientRequirement, DiscoveryProgress, RenderOptions, RenderPreflightOptions,
+        },
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseState, ReleaseStatus,
-        ReleaseStorage, ResourceKey, ResourceOrdering,
+        ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseState,
+        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -71,7 +74,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         resolve_namespaces: false,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,
-        discovery_progress: crate::cli::commands::render::DiscoveryProgress::Announce,
+        discovery_progress: DiscoveryProgress::Announce,
     })
     .await?;
 
@@ -86,12 +89,12 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         .ok_or_else(|| NylError::Config("Raw Kubernetes client unavailable in online mode".to_string()))?;
     let concurrency = usize::from(args.concurrency);
     let (discovery_mode, discovery_elapsed) = kube_client.initial_discovery();
-    let mut timings = vec![PhaseTiming {
-        phase: format!("discovery ({discovery_mode})"),
-        elapsed: discovery_elapsed,
-    }];
+    let mut timings = vec![PhaseTiming::new(Phase::Discovery(discovery_mode), discovery_elapsed)];
 
-    if desired_manifests.is_empty() {
+    // A release that renders nothing is still recorded, so the resources of its
+    // previous revision are pruned. Without a release identity there is nothing to do.
+    let has_release_identity = release.is_some() || args.name.is_some() || args.namespace.is_some();
+    if desired_manifests.is_empty() && (args.no_release || !has_release_identity) {
         tracing::info!("No manifests to apply");
         return Ok(());
     }
@@ -101,13 +104,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         .map(|release| release.metadata.namespace.as_str())
         .or(args.namespace.as_deref());
 
-    // Resolve missing namespaces for namespaced resources.
-    resolve_manifest_namespaces(&kube_client, &mut desired_manifests, release_namespace_hint).await?;
-    duplicates =
-        adjust_duplicate_keys_for_namespace_resolution(&kube_client, &duplicates, release_namespace_hint).await?;
-    // Namespace resolution and API versions can make distinct documents describe one
-    // object; keep the last, so the applied and recorded manifests agree.
-    desired_manifests = collapse_duplicate_objects(desired_manifests, &mut duplicates)?;
+    let (collapsed, mut scopes) =
+        prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, release_namespace_hint).await?;
+    desired_manifests = collapsed;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {
@@ -137,10 +136,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         },
     )
     .await?;
-    timings.push(PhaseTiming {
-        phase: "validation".to_string(),
-        elapsed: validation_started.elapsed(),
-    });
+    timings.push(PhaseTiming::new(Phase::Validation, validation_started.elapsed()));
 
     // 4. Resolve the release identity before touching the cluster, so a missing
     //    --name/--namespace fails before anything is applied.
@@ -150,73 +146,60 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         Some(resolve_release_identity(release.as_ref(), args.name, args.namespace)?)
     };
 
-    // 5. Create the release namespace before the resources that live in it.
-    //    Nyl creates this namespace either way to store release state; creating
-    //    it after the apply left the first run failing for every namespaced
-    //    resource and succeeding only on a retry.
-    if let Some((_, release_namespace)) = &release_identity {
-        ensure_namespace_exists(&kube_client, release_namespace).await?;
-    }
+    // 5. Create the release namespace before the resources that live in it, and
+    //    record the new revision before touching anything else, so a concurrent
+    //    apply of the same release fails here rather than after both changed the
+    //    cluster. Nyl creates this namespace either way to store release state.
+    let storage = KubernetesReleaseStorage::new(client);
+    let renderer = ApplyRenderer::new(&duplicates);
+    let recorder = match &release_identity {
+        Some((release_name, release_namespace)) => {
+            ensure_namespace_exists(&kube_client, release_namespace).await?;
+            tracing::info!("Recording release {release_name} in namespace {release_namespace}");
+            Some(
+                ReleaseRecorder::reserve(
+                    &storage,
+                    release_name,
+                    release_namespace,
+                    &desired_manifests,
+                    args.append_release,
+                    &kube_client,
+                    &mut scopes,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
 
     // 6. Apply manifests, printing each outcome as it completes.
-    let renderer = ApplyRenderer::new(&duplicates);
     let apply_started = Instant::now();
     let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |event| {
         renderer.event(event);
     })
     .await?;
-    timings.push(PhaseTiming {
-        phase: "apply".to_string(),
-        elapsed: apply_started.elapsed(),
-    });
+    timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
 
-    if args.no_release {
-        renderer.summary(&ApplyReport {
-            outcomes: &apply_result.outcomes,
-            failed_count: apply_result.failed_count,
-            release: None,
-            timings: &timings,
-        });
-        if apply_result.failed_count > 0 {
-            return Err(NylError::Other(format!(
-                "Apply completed with {} error(s)",
-                apply_result.failed_count
-            )));
+    // 7. Complete the revision, prune resources no longer desired, and supersede the
+    //    previous revision.
+    let release = match recorder {
+        Some(recorder) => {
+            let release_started = Instant::now();
+            let release = recorder
+                .complete(&kube_client, &apply_result, &mut scopes, concurrency, &mut |event| {
+                    renderer.event(event);
+                })
+                .await?;
+            timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
+            Some(release)
         }
-        return Ok(());
-    }
+        None => None,
+    };
 
-    let (release_name, release_namespace) =
-        release_identity.expect("a release identity is resolved unless --no-release is set");
-
-    // 7. Initialize release storage
-    let storage = KubernetesReleaseStorage::new(client);
-
-    // 8-12. Record the new revision, mark the previous one superseded, and prune.
-    tracing::info!("Recording release {release_name} in namespace {release_namespace}");
-    let release_started = Instant::now();
-    let release = apply_and_record_release(
-        &storage,
-        &kube_client,
-        &desired_manifests,
-        &apply_result,
-        &release_name,
-        &release_namespace,
-        args.append_release,
-        concurrency,
-        &mut |event| renderer.event(event),
-    )
-    .await?;
-    timings.push(PhaseTiming {
-        phase: "release".to_string(),
-        elapsed: release_started.elapsed(),
-    });
-
-    // 13. Print summary
     renderer.summary(&ApplyReport {
         outcomes: &apply_result.outcomes,
         failed_count: apply_result.failed_count,
-        release: Some(&release),
+        release: release.as_ref(),
         timings: &timings,
     });
 
@@ -252,13 +235,64 @@ pub(crate) struct ApplyExecutionResult {
     pub(crate) resource_keys: Vec<ResourceKey>,
 }
 
+/// Whether each kind is namespaced, so keys can be compared by [`ObjectIdentity`].
+///
+/// Kinds the cluster does not know keep the namespace their manifest names.
+#[derive(Default)]
+pub(crate) struct ObjectScopes {
+    namespaced: HashMap<(String, String), bool>,
+}
+
+impl ObjectScopes {
+    /// Look up the scope of every kind among `keys` not yet known.
+    pub(crate) async fn load(&mut self, client: &dyn KubeClient, keys: &[ResourceKey]) {
+        for key in keys {
+            let group_kind = (key.gvk.group.clone(), key.gvk.kind.clone());
+            if self.namespaced.contains_key(&group_kind) {
+                continue;
+            }
+            match client.is_namespaced(&key.gvk).await {
+                Ok(namespaced) => {
+                    self.namespaced.insert(group_kind, namespaced);
+                }
+                Err(err) => tracing::debug!(resource = %key, error = %err, "Kind scope unknown; keeping its namespace"),
+            }
+        }
+    }
+
+    pub(crate) fn identity(&self, key: &ResourceKey) -> ObjectIdentity {
+        let namespaced = self
+            .namespaced
+            .get(&(key.gvk.group.clone(), key.gvk.kind.clone()))
+            .copied()
+            .unwrap_or(true);
+        key.object_identity(namespaced)
+    }
+}
+
+fn manifest_keys(manifests: &[serde_json::Value]) -> Result<Vec<ResourceKey>> {
+    manifests.iter().map(ResourceKey::from_json_value).collect()
+}
+
 /// Determine which previously-live resources are no longer present in `current_keys`
 /// and should therefore be pruned from the cluster.
+///
+/// Keys are compared by [`ObjectIdentity`], so an object whose manifest moved to
+/// another API version is not pruned.
 pub(crate) fn keys_to_prune<'a>(
     live_keys: &'a HashSet<ResourceKey>,
-    current_keys: &HashSet<&ResourceKey>,
+    current_keys: &[ResourceKey],
+    scopes: &ObjectScopes,
 ) -> Vec<&'a ResourceKey> {
-    live_keys.iter().filter(|k| !current_keys.contains(k)).collect()
+    let current: HashSet<ObjectIdentity> = current_keys.iter().map(|key| scopes.identity(key)).collect();
+    let mut to_prune: Vec<&ResourceKey> = live_keys
+        .iter()
+        .filter(|key| !current.contains(&scopes.identity(key)))
+        .collect();
+    // Two recorded versions of one removed object are one delete.
+    let mut seen = HashSet::new();
+    to_prune.retain(|key| seen.insert(scopes.identity(key)));
+    to_prune
 }
 
 /// Determine the resources currently live on the cluster for a release, and which
@@ -318,66 +352,114 @@ async fn mark_superseded(storage: &dyn ReleaseStorage, previous: &ReleaseState) 
     }
 }
 
-/// Delete resources no longer desired, at most `concurrency` at a time.
+/// Run `op` for every item, at most `concurrency` at a time, reporting each result
+/// to `on_done` as it completes. The one bounded executor behind apply and prune.
+async fn run_concurrently<T, R, Fut>(
+    items: impl IntoIterator<Item = T>,
+    concurrency: usize,
+    op: impl Fn(T) -> Fut,
+    mut on_done: impl FnMut(T, R),
+) where
+    T: Copy,
+    Fut: Future<Output = R>,
+{
+    let op = &op;
+    let mut running = stream::iter(items)
+        .map(|item| async move { (item, op(item).await) })
+        .buffer_unordered(concurrency);
+    while let Some((item, result)) = running.next().await {
+        on_done(item, result);
+    }
+}
+
+/// Delete resources no longer desired, at most `concurrency` at a time, and return
+/// the keys that failed to delete.
 ///
 /// Like Argo CD, pruned resources are deleted concurrently without kind order,
 /// except that CustomResourceDefinitions, APIServices, and admission webhook
 /// configurations ([`ResourceOrdering::is_prune_last`]) are deleted after all others,
 /// so they keep defining, serving, and admitting the resources being deleted.
-async fn prune_resources(
+async fn prune_resources<'k>(
     client: &dyn KubeClient,
-    keys: Vec<&ResourceKey>,
+    keys: Vec<&'k ResourceKey>,
     concurrency: usize,
     on_event: &mut ApplyEventSink<'_>,
-) {
+) -> Vec<&'k ResourceKey> {
+    let mut failed = Vec::new();
     if keys.is_empty() {
-        return;
+        return failed;
     }
     on_event(ApplyEvent::PruneStarted { count: keys.len() });
     let (last, first): (Vec<&ResourceKey>, Vec<&ResourceKey>) = keys
         .into_iter()
         .partition(|key| ResourceOrdering::is_prune_last(&key.gvk));
     for step in [first, last] {
-        let mut deletions = stream::iter(step)
-            .map(|key| async move {
-                let result = client
-                    .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
-                    .await;
-                (key, result)
-            })
-            .buffer_unordered(concurrency);
-        while let Some((key, result)) = deletions.next().await {
-            on_event(ApplyEvent::Pruned { key, result: &result });
-        }
+        run_concurrently(
+            step,
+            concurrency,
+            |key: &ResourceKey| client.delete_resource(&key.gvk, key.namespace.as_deref(), &key.name),
+            |key, result| {
+                on_event(ApplyEvent::Pruned { key, result: &result });
+                if result.is_err() {
+                    failed.push(key);
+                }
+            },
+        )
+        .await;
     }
     on_event(ApplyEvent::PruneFinished);
+    failed
+}
+
+/// Resolve missing namespaces and collapse documents describing one object, the
+/// shared preparation of rendered manifests for `apply` and `diff`, so a diff shows
+/// what apply applies.
+///
+/// Namespace resolution and API versions can make distinct documents describe one
+/// object; the last is kept, so the applied and recorded manifests agree.
+pub(crate) async fn prepare_desired_manifests(
+    client: &dyn KubeClient,
+    mut manifests: Vec<serde_json::Value>,
+    duplicates: &mut HashMap<ResourceKey, usize>,
+    release_namespace: Option<&str>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    resolve_manifest_namespaces(client, &mut manifests, release_namespace).await?;
+    *duplicates = adjust_duplicate_keys_for_namespace_resolution(client, duplicates, release_namespace).await?;
+    collapse_rendered_duplicates(client, manifests, duplicates).await
+}
+
+/// Load the scope of every rendered kind and collapse documents describing one
+/// object ([`collapse_duplicate_objects`]). Returns the collapsed manifests and the
+/// loaded scopes, which later identity comparisons extend.
+pub(crate) async fn collapse_rendered_duplicates(
+    client: &dyn KubeClient,
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut HashMap<ResourceKey, usize>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    let mut scopes = ObjectScopes::default();
+    scopes.load(client, &manifest_keys(&manifests)?).await;
+    let manifests = collapse_duplicate_objects(manifests, duplicates, &scopes)?;
+    Ok((manifests, scopes))
 }
 
 /// Collapse manifests that describe the same Kubernetes object, keeping the last.
 ///
-/// Objects are identified by API group, kind, namespace, and name, not API version:
-/// two versions of one object are one object, and applying both concurrently would
-/// race. The surviving document takes the position of the first occurrence, as in
-/// render-time deduplication, and `duplicates` is updated with the total occurrence
-/// count under the surviving document's key.
+/// Objects are compared by [`ObjectIdentity`]: two versions of one object, or a
+/// cluster-scoped object written with and without a namespace, are one object, and
+/// applying both concurrently would race. The surviving document takes the position
+/// of the first occurrence, as in render-time deduplication, and `duplicates` is
+/// updated with the total occurrence count under the surviving document's key.
 pub(crate) fn collapse_duplicate_objects(
     manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
+    scopes: &ObjectScopes,
 ) -> Result<Vec<serde_json::Value>> {
-    type ObjectIdentity = (String, String, Option<String>, String);
-
     let mut position: HashMap<ObjectIdentity, usize> = HashMap::new();
     let mut collapsed: Vec<(serde_json::Value, Vec<ResourceKey>)> = Vec::new();
     for manifest in manifests {
         let key = ResourceKey::from_json_value(&manifest)?;
-        let identity = (
-            key.gvk.group.clone(),
-            key.gvk.kind.clone(),
-            key.namespace.clone(),
-            key.name.clone(),
-        );
+        let identity = scopes.identity(&key);
         if let Some(&index) = position.get(&identity) {
-            tracing::warn!("Duplicate resource: {} (keeping last occurrence)", key);
             collapsed[index].0 = manifest;
             collapsed[index].1.push(key);
         } else {
@@ -402,26 +484,29 @@ pub(crate) fn collapse_duplicate_objects(
 /// Build the manifest to store for an `--append-release` revision.
 ///
 /// Combines the current (newly-rendered) manifests with the previous revision's
-/// manifest documents for resources that are not part of the current set, so the
+/// manifest documents for objects that are not part of the current set, so the
 /// stored manifest matches the merged `resource_keys`. This keeps `release rollback`
 /// faithful: rolling back to an appended revision re-applies the complete desired
-/// state rather than only the newly-rendered resources.
-fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manifest: &str) -> Result<String> {
-    // Dedup against the keys present in the current manifest (all rendered docs),
-    // not just successfully-applied ones — otherwise a current doc that failed to
-    // apply would be carried over again from the previous manifest, producing a
-    // duplicate document for the same resource.
-    let current_keys: HashSet<ResourceKey> = desired_manifests
+/// state rather than only the newly-rendered resources. Objects are compared by
+/// [`ObjectIdentity`], so a current document replaces the previous one even when
+/// its API version changed.
+fn merge_append_manifest(
+    desired_manifests: &[serde_json::Value],
+    previous_docs: Vec<serde_json::Value>,
+    scopes: &ObjectScopes,
+) -> Result<String> {
+    // Dedup against the objects in the current manifest (all rendered docs), not
+    // just successfully-applied ones — otherwise a current doc that failed to apply
+    // would be carried over again from the previous manifest, producing a duplicate
+    // document for the same object.
+    let current: HashSet<ObjectIdentity> = manifest_keys(desired_manifests)?
         .iter()
-        .map(ResourceKey::from_json_value)
-        .collect::<Result<_>>()?;
+        .map(|key| scopes.identity(key))
+        .collect();
 
-    let prev_docs = crate::yaml::parse_yaml_documents_k8s_compatible(previous_manifest)
-        .map_err(|e| NylError::Config(format!("Failed to parse previous release manifest: {}", e)))?;
     let mut merged_docs: Vec<serde_json::Value> = desired_manifests.to_vec();
-    for doc in prev_docs {
-        let doc_key = ResourceKey::from_json_value(&doc)?;
-        if !current_keys.contains(&doc_key) {
+    for doc in previous_docs {
+        if !current.contains(&scopes.identity(&ResourceKey::from_json_value(&doc)?)) {
             merged_docs.push(doc);
         }
     }
@@ -429,164 +514,178 @@ fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manif
     manifests_to_yaml(&merged_docs)
 }
 
-/// Record a freshly applied set of manifests as a new release revision.
+/// Records one apply as a release revision.
 ///
-/// This is the shared apply+record path used by both `apply` and `release rollback`:
-/// it computes the next revision number, builds and saves the [`ReleaseState`]
-/// (carrying the full rendered manifest), optionally merges with the previous
-/// revision when `append_release` is set, marks the previous revision
-/// [`ReleaseStatus::Superseded`], and prunes resources that existed in the previous
-/// revision but not the new one. Returns the recorded [`ReleaseState`] so callers
-/// can print a summary.
-///
-/// The release namespace must already exist; callers create it before applying
-/// so namespaced resources in it succeed on the first run.
-// Shared by `apply` and `release rollback`, which each pass their own release
-// identity, mode, and concurrency; a parameter struct would only restate them.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(crate) async fn apply_and_record_release(
-    storage: &KubernetesReleaseStorage,
-    kube_client: &dyn KubeClient,
-    desired_manifests: &[serde_json::Value],
-    apply_result: &ApplyExecutionResult,
-    release_name: &str,
-    release_namespace: &str,
-    append_release: bool,
-    concurrency: usize,
-    on_event: &mut ApplyEventSink<'_>,
-) -> Result<ReleaseState> {
-    // Determine next revision number
-    let revisions = storage.list_revisions(release_name, release_namespace).await?;
-    let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
+/// [`Self::reserve`] records the revision before the cluster is touched, so a
+/// concurrent apply of the same release fails before changing anything; it is
+/// recorded `Rendered` with the keys the apply intends to write, which later applies
+/// treat like a partial revision if this one is interrupted. [`Self::complete`] then
+/// records the outcome, prunes resources no longer desired, and supersedes the
+/// previous revision. `apply` and `release rollback` share this path.
+pub(crate) struct ReleaseRecorder<'s> {
+    storage: &'s dyn ReleaseStorage,
+    release: ReleaseState,
+    /// Revisions stored before this one.
+    revisions: Vec<u32>,
+    /// The previous revision merged into this one (`--append-release`).
+    appended_to: Option<ReleaseState>,
+}
 
-    // Create initial release state
-    let mut release = ReleaseState {
-        release_name: release_name.to_string(),
-        release_namespace: release_namespace.to_string(),
-        revision: next_revision,
-        resource_keys: apply_result.resource_keys.clone(),
-        manifest: manifests_to_yaml(desired_manifests)?,
-        status: ReleaseStatus::Rendered,
-        rendered_at: Utc::now(),
-        applied_at: None,
-        error: None,
-    };
+impl<'s> ReleaseRecorder<'s> {
+    /// Record the next revision of a release as `Rendered`.
+    ///
+    /// With `append_release`, the previous revision must be `Deployed`; its objects
+    /// that the current manifests do not contain are carried into this revision.
+    pub(crate) async fn reserve(
+        storage: &'s dyn ReleaseStorage,
+        release_name: &str,
+        release_namespace: &str,
+        desired_manifests: &[serde_json::Value],
+        append_release: bool,
+        client: &dyn KubeClient,
+        scopes: &mut ObjectScopes,
+    ) -> Result<Self> {
+        let revisions = storage.list_revisions(release_name, release_namespace).await?;
+        let next_revision = revisions.iter().max().map_or(1, |r| r + 1);
+        let desired_keys = manifest_keys(desired_manifests)?;
 
-    // Append-release mode: merge with previous release
-    let mut appended_to = None;
-    if append_release && next_revision > 1 {
-        // Fetch previous release
-        if let Ok(Some(previous_release)) = storage
-            .get_release(release_name, release_namespace, next_revision - 1)
-            .await
-        {
-            // Validate that previous release was successfully deployed
-            // Only Deployed releases have complete resource sets safe to merge from
-            if previous_release.status != ReleaseStatus::Deployed {
-                return Err(NylError::Config(format!(
-                    "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
-                     The previous release must be in Deployed state to safely merge resources.",
-                    previous_release.revision, previous_release.status
-                )));
-            }
+        let mut release = ReleaseState {
+            release_name: release_name.to_string(),
+            release_namespace: release_namespace.to_string(),
+            revision: next_revision,
+            resource_keys: desired_keys.clone(),
+            manifest: manifests_to_yaml(desired_manifests)?,
+            status: ReleaseStatus::Rendered,
+            rendered_at: Utc::now(),
+            applied_at: None,
+            error: None,
+        };
 
-            // Use HashSet for deduplication
-            let current_keys: HashSet<_> = release.resource_keys.iter().cloned().collect();
-
-            // Add previous resources not in current set
-            let mut merged_keys = Vec::new();
-            let mut added_from_previous = 0;
-            for prev_key in &previous_release.resource_keys {
-                if !current_keys.contains(prev_key) {
-                    merged_keys.push(prev_key.clone());
-                    added_from_previous += 1;
+        let mut appended_to = None;
+        if append_release && next_revision > 1 {
+            let previous_revision = next_revision - 1;
+            if let Some(previous) = storage
+                .get_release(release_name, release_namespace, previous_revision)
+                .await?
+            {
+                // Only Deployed releases have complete resource sets safe to merge from.
+                if previous.status != ReleaseStatus::Deployed {
+                    return Err(NylError::Config(format!(
+                        "Cannot use --append-release when previous release (revision {}) is in {:?} state. \
+                         The previous release must be in Deployed state to safely merge resources.",
+                        previous.revision, previous.status
+                    )));
                 }
-            }
-
-            // Add all current resources (current wins on duplicates)
-            merged_keys.extend(release.resource_keys.clone());
-
-            // Merge the stored manifest too, so the recorded manifest matches the
-            // merged resource set. Without this, the manifest would contain only the
-            // newly-rendered resources while resource_keys tracks the union — which
-            // breaks `release rollback` (it would re-apply only the new resources and
-            // prune the carried-over ones).
-            release.manifest = merge_append_manifest(desired_manifests, &previous_release.manifest)?;
-
-            // Calculate overlap for better logging
-            let overlap = previous_release.resource_keys.len() - added_from_previous;
-            if overlap > 0 {
+                let previous_docs = crate::yaml::parse_yaml_documents_k8s_compatible(&previous.manifest)
+                    .map_err(|e| NylError::Config(format!("Failed to parse previous release manifest: {}", e)))?;
+                scopes.load(client, &previous.resource_keys).await;
+                scopes.load(client, &manifest_keys(&previous_docs)?).await;
+                // Merge the stored manifest too, so the recorded manifest matches
+                // the merged resource set and `release rollback` re-applies all of it.
+                release.manifest = merge_append_manifest(desired_manifests, previous_docs, scopes)?;
+                release.resource_keys = append_keys(&previous.resource_keys, &desired_keys, scopes);
                 tracing::info!(
-                    "Append-release mode: merged {} from previous + {} current ({} overlap, {} total)",
-                    added_from_previous,
-                    release.resource_keys.len(),
-                    overlap,
-                    merged_keys.len()
+                    "Append-release mode: carried over {} resources from revision {} ({} total)",
+                    release.resource_keys.len() - desired_keys.len(),
+                    previous.revision,
+                    release.resource_keys.len()
                 );
+                appended_to = Some(previous);
             } else {
-                tracing::info!(
-                    "Append-release mode: merged {} from previous + {} current ({} total)",
-                    added_from_previous,
-                    release.resource_keys.len(),
-                    merged_keys.len()
+                tracing::warn!(
+                    "Append-release mode: no previous release found (revision {}), treating as initial apply",
+                    previous_revision
                 );
             }
-
-            release.resource_keys = merged_keys;
-            appended_to = Some(previous_release);
-        } else {
-            tracing::warn!(
-                "Append-release mode: no previous release found (revision {}), treating as initial apply",
-                next_revision - 1
-            );
         }
+
+        storage.save_release(&release).await?;
+        Ok(Self {
+            storage,
+            release,
+            revisions,
+            appended_to,
+        })
     }
 
-    // Update release status based on apply outcome
-    if apply_result.failed_count == 0 {
-        release.status = ReleaseStatus::Deployed;
-        release.applied_at = Some(Utc::now());
-    } else {
-        release.status = ReleaseStatus::Failed;
-        release.error = Some(format!("{} resource(s) failed to apply", apply_result.failed_count));
-    }
+    /// Record the apply's outcome, prune, and supersede the previous revision.
+    ///
+    /// Keys that fail to prune stay in the new revision, so the next apply retries
+    /// deleting them.
+    pub(crate) async fn complete(
+        self,
+        client: &dyn KubeClient,
+        apply_result: &ApplyExecutionResult,
+        scopes: &mut ObjectScopes,
+        concurrency: usize,
+        on_event: &mut ApplyEventSink<'_>,
+    ) -> Result<ReleaseState> {
+        let Self {
+            storage,
+            mut release,
+            revisions,
+            appended_to,
+        } = self;
 
-    storage.save_release(&release).await?;
-
-    // Supersede the previous revision and prune resources no longer desired.
-    if release.status == ReleaseStatus::Deployed && next_revision > 1 {
-        if append_release {
-            // Append mode validated that the immediately previous revision is Deployed
-            // and does not prune; just mark it superseded.
-            if let Some(previous) = &appended_to {
-                mark_superseded(storage, previous).await;
-            }
+        release.resource_keys = match &appended_to {
+            Some(previous) => append_keys(&previous.resource_keys, &apply_result.resource_keys, scopes),
+            None => apply_result.resource_keys.clone(),
+        };
+        if apply_result.failed_count == 0 {
+            release.status = ReleaseStatus::Deployed;
+            release.applied_at = Some(Utc::now());
         } else {
-            // Reconcile against the resources currently live on the cluster, not just
-            // the numerically previous secret. The live state is the most recent
-            // Deployed revision's resources plus anything partially applied by Failed
-            // revisions after it (Failed revisions never prune). Pruning against only
-            // `next_revision - 1` would orphan resources from an older Deployed revision
-            // when the immediately previous revision Failed.
-            let (superseded, live_keys) =
-                collect_live_state(storage, release_name, release_namespace, &revisions, next_revision).await?;
-
-            if let Some(previous) = &superseded {
-                mark_superseded(storage, previous).await;
-            }
-
-            let current_keys: HashSet<&ResourceKey> = release.resource_keys.iter().collect();
-            prune_resources(
-                kube_client,
-                keys_to_prune(&live_keys, &current_keys),
-                concurrency,
-                on_event,
-            )
-            .await;
+            release.status = ReleaseStatus::Failed;
+            release.error = Some(format!("{} resource(s) failed to apply", apply_result.failed_count));
         }
-    }
 
-    Ok(release)
+        // Only a fully applied revision supersedes and prunes; a Failed one leaves
+        // the previous live state in place.
+        let mut superseded = None;
+        if release.status == ReleaseStatus::Deployed {
+            if let Some(previous) = appended_to {
+                // Append mode does not prune; it only supersedes the revision it merged.
+                superseded = Some(previous);
+            } else if release.revision > 1 {
+                // Reconcile against the resources currently live on the cluster, not
+                // just the numerically previous revision: the most recent Deployed
+                // revision plus anything partially applied after it.
+                let (previous, live_keys) = collect_live_state(
+                    storage,
+                    &release.release_name,
+                    &release.release_namespace,
+                    &revisions,
+                    release.revision,
+                )
+                .await?;
+                superseded = previous;
+
+                let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
+                scopes.load(client, &live_keys_list).await;
+                let to_prune = keys_to_prune(&live_keys, &release.resource_keys, scopes);
+                let failed = prune_resources(client, to_prune, concurrency, on_event).await;
+                release.resource_keys.extend(failed.into_iter().cloned());
+            }
+        }
+
+        storage.complete_release(&release).await?;
+        if let Some(previous) = &superseded {
+            mark_superseded(storage, previous).await;
+        }
+        Ok(release)
+    }
+}
+
+/// The keys of an appended revision: the previous revision's objects that `current`
+/// does not contain, then `current` (current wins on duplicates).
+fn append_keys(previous: &[ResourceKey], current: &[ResourceKey], scopes: &ObjectScopes) -> Vec<ResourceKey> {
+    let current_identities: HashSet<ObjectIdentity> = current.iter().map(|key| scopes.identity(key)).collect();
+    previous
+        .iter()
+        .filter(|key| !current_identities.contains(&scopes.identity(key)))
+        .chain(current)
+        .cloned()
+        .collect()
 }
 
 /// Apply manifests in [`ResourceOrdering::apply_batches`], at most `concurrency` at a time.
@@ -609,11 +708,8 @@ pub(crate) async fn apply_sorted_manifests(
     concurrency: usize,
     on_event: &mut ApplyEventSink<'_>,
 ) -> Result<ApplyExecutionResult> {
-    let keys: Vec<ResourceKey> = manifests
-        .iter()
-        .map(ResourceKey::from_json_value)
-        .collect::<Result<_>>()?;
-    let batches = ResourceOrdering::apply_batches(manifests);
+    let keys = manifest_keys(manifests)?;
+    let batches = ResourceOrdering::apply_batches(keys.iter().map(|key| &key.gvk));
     tracing::info!(
         "Applying {} resources in {} batches (up to {} at a time)",
         manifests.len(),
@@ -645,21 +741,24 @@ pub(crate) async fn apply_sorted_manifests(
             registered_groups.clear();
         }
 
-        let mut applies = stream::iter(batch)
-            .map(|index| async move { (index, apply_manifest(client, &manifests[index]).await) })
-            .buffer_unordered(concurrency);
-        while let Some((index, result)) = applies.next().await {
-            on_event(ApplyEvent::Applied {
-                key: &keys[index],
-                result: &result,
-            });
-            if result.is_ok() {
-                if let Some(group) = registered_api_group(&keys[index], &manifests[index]) {
-                    registered_groups.insert(group);
+        run_concurrently(
+            batch,
+            concurrency,
+            |index| apply_manifest(client, &manifests[index]),
+            |index, result| {
+                on_event(ApplyEvent::Applied {
+                    key: &keys[index],
+                    result: &result,
+                });
+                if result.is_ok() {
+                    if let Some(group) = registered_api_group(&keys[index], &manifests[index]) {
+                        registered_groups.insert(group);
+                    }
                 }
-            }
-            results[index] = Some(result);
-        }
+                results[index] = Some(result);
+            },
+        )
+        .await;
     }
 
     let mut outcomes = Vec::new();
@@ -685,11 +784,7 @@ pub(crate) async fn apply_sorted_manifests(
 /// The API group whose kinds this manifest registers: a CustomResourceDefinition's or
 /// an APIService's `spec.group`.
 fn registered_api_group(key: &ResourceKey, manifest: &serde_json::Value) -> Option<String> {
-    let registers_kinds = matches!(
-        (key.gvk.group.as_str(), key.gvk.kind.as_str()),
-        ("apiextensions.k8s.io", "CustomResourceDefinition") | ("apiregistration.k8s.io", "APIService")
-    );
-    if !registers_kinds {
+    if !ResourceOrdering::registers_api_group(&key.gvk) {
         return None;
     }
     manifest["spec"]["group"]
@@ -720,7 +815,7 @@ async fn apply_manifest(client: &dyn KubeClient, manifest: &serde_json::Value) -
 }
 
 /// Print a warning trace about duplicate resources
-fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
+pub(crate) fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
     if duplicates.is_empty() {
         return;
     }
@@ -737,8 +832,6 @@ fn print_duplicate_warning(duplicates: &HashMap<ResourceKey, usize>) {
 
 /// Ensure a namespace exists, creating it if necessary
 pub(crate) async fn ensure_namespace_exists(client: &dyn KubeClient, namespace: &str) -> Result<()> {
-    use crate::kubernetes::GroupVersionKind;
-    use kube::api::DynamicObject;
     use serde_json::json;
 
     // Build namespace GVK
@@ -816,9 +909,8 @@ mod tests {
             .into_iter()
             .collect();
         let current = [resource_key("a"), resource_key("c")];
-        let current_keys: HashSet<&ResourceKey> = current.iter().collect();
 
-        let to_prune = keys_to_prune(&live, &current_keys);
+        let to_prune = keys_to_prune(&live, &current, &ObjectScopes::default());
         assert_eq!(to_prune.len(), 1);
         assert_eq!(to_prune[0].name, "b");
     }
@@ -836,7 +928,8 @@ mod tests {
         let current =
             vec![json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "b", "namespace": "default"}})];
 
-        let merged = merge_append_manifest(&current, &previous).unwrap();
+        let previous = crate::yaml::parse_yaml_documents_k8s_compatible(&previous).unwrap();
+        let merged = merge_append_manifest(&current, previous, &ObjectScopes::default()).unwrap();
         let docs = crate::yaml::parse_yaml_documents_k8s_compatible(&merged).unwrap();
 
         // The stored manifest carries over A (not in the current set) plus B, with no
@@ -932,6 +1025,9 @@ mod tests {
             self.events.lock().unwrap().push(format!("delete-start {name}"));
             tokio::time::sleep(self.latency).await;
             self.events.lock().unwrap().push(format!("delete-end {name}"));
+            if name == self.failing {
+                return Err(NylError::Other("failed calling webhook".to_string()));
+            }
             self.inner.delete_resource(gvk, namespace, name).await
         }
 
@@ -1097,7 +1193,7 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let mut pruned = Vec::new();
-        prune_resources(&client, keys.iter().collect(), 8, &mut |event| {
+        let failed = prune_resources(&client, keys.iter().collect(), 8, &mut |event| {
             if let ApplyEvent::Pruned { key, result: Ok(()) } = event {
                 pruned.push(key.name.clone());
             }
@@ -1106,6 +1202,7 @@ mod tests {
 
         assert_eq!(started.elapsed(), client.latency * 2);
         assert_eq!(pruned.len(), 6);
+        assert!(failed.is_empty());
         for last in ["hook", "api", "widgets.example.com"] {
             for first in ["backend", "svc", "widget"] {
                 assert!(
@@ -1129,7 +1226,7 @@ mod tests {
         // Render already collapsed two identical autoscaling/v1 documents.
         let mut duplicates = HashMap::from([(first_key.clone(), 2)]);
 
-        let collapsed = collapse_duplicate_objects(manifests, &mut duplicates).unwrap();
+        let collapsed = collapse_duplicate_objects(manifests, &mut duplicates, &ObjectScopes::default()).unwrap();
 
         assert_eq!(collapsed.len(), 2);
         assert_eq!(collapsed[0]["apiVersion"], "autoscaling/v2");
@@ -1142,9 +1239,8 @@ mod tests {
     fn test_keys_to_prune_nothing_when_superset() {
         let live: HashSet<ResourceKey> = [resource_key("a"), resource_key("b")].into_iter().collect();
         let current = [resource_key("a"), resource_key("b"), resource_key("c")];
-        let current_keys: HashSet<&ResourceKey> = current.iter().collect();
 
-        assert!(keys_to_prune(&live, &current_keys).is_empty());
+        assert!(keys_to_prune(&live, &current, &ObjectScopes::default()).is_empty());
     }
 
     #[test]
@@ -1166,12 +1262,169 @@ mod tests {
 
         let mut updated = manifests[0].clone();
         updated["data"] = json!({"revision": "updated"});
-        let appended = merge_append_manifest(&[updated.clone()], &stored).unwrap();
+        let previous = crate::yaml::parse_yaml_documents_k8s_compatible(&stored).unwrap();
+        let appended = merge_append_manifest(&[updated.clone()], previous, &ObjectScopes::default()).unwrap();
         let restored = crate::yaml::parse_yaml_documents_k8s_compatible(&appended).unwrap();
         assert_eq!(restored.len(), manifests.len());
         assert!(restored.contains(&updated));
         for manifest in &manifests[1..] {
             assert!(restored.contains(manifest));
         }
+    }
+
+    fn key(api_version: &str, kind: &str, namespace: Option<&str>, name: &str) -> ResourceKey {
+        ResourceKey {
+            gvk: GroupVersionKind::from_api_version_kind(api_version, kind).unwrap(),
+            namespace: namespace.map(str::to_string),
+            name: name.to_string(),
+        }
+    }
+
+    /// Moving a manifest to another API version changes its key, not its object, so
+    /// prune must not delete the object it was just applied as.
+    #[test]
+    fn test_keys_to_prune_ignores_api_version_changes() {
+        let live: HashSet<ResourceKey> = [
+            key("example.com/v1beta1", "Widget", Some("app"), "w"),
+            key("example.com/v1beta1", "Widget", Some("app"), "gone"),
+        ]
+        .into_iter()
+        .collect();
+        let current = [key("example.com/v1", "Widget", Some("app"), "w")];
+
+        let to_prune = keys_to_prune(&live, &current, &ObjectScopes::default());
+
+        let names: Vec<&str> = to_prune.iter().map(|key| key.name.as_str()).collect();
+        assert_eq!(names, vec!["gone"]);
+    }
+
+    /// A cluster-scoped object written with and without a namespace is one object.
+    #[tokio::test]
+    async fn test_collapse_duplicate_objects_ignores_namespace_of_cluster_scoped_kinds() {
+        let manifests = vec![
+            json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "reader", "namespace": "app"}, "rules": ["first"]}),
+            json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "reader"}, "rules": ["last"]}),
+        ];
+        let mut scopes = ObjectScopes::default();
+        scopes
+            .load(
+                &crate::kubernetes::MockKubeClient::new(),
+                &manifest_keys(&manifests).unwrap(),
+            )
+            .await;
+
+        let collapsed = collapse_duplicate_objects(manifests, &mut HashMap::new(), &scopes).unwrap();
+
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0]["rules"][0], "last");
+    }
+
+    fn release_with_keys(revision: u32, status: ReleaseStatus, keys: Vec<ResourceKey>) -> ReleaseState {
+        let mut release = crate::cli::commands::release::rollback::tests::make_release("app", "app", revision, status);
+        release.resource_keys = keys;
+        release
+    }
+
+    /// The recorder records the revision before the apply, prunes what the previous
+    /// revision had and the new one does not, keeps keys that failed to prune so the
+    /// next apply retries them, and supersedes the previous revision.
+    #[tokio::test(start_paused = true)]
+    async fn test_release_recorder_reserves_prunes_and_keeps_failed_prunes() {
+        let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+        let client = LatencyClient::new("stuck");
+        storage
+            .save_release(&release_with_keys(
+                1,
+                ReleaseStatus::Deployed,
+                vec![
+                    key("v1", "ConfigMap", Some("app"), "kept"),
+                    key("v1", "ConfigMap", Some("app"), "removed"),
+                    key("v1", "ConfigMap", Some("app"), "stuck"),
+                ],
+            ))
+            .await
+            .unwrap();
+        let manifests =
+            vec![json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "kept", "namespace": "app"}})];
+        let mut scopes = ObjectScopes::default();
+
+        let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &manifests, false, &client, &mut scopes)
+            .await
+            .unwrap();
+        let reserved = storage.get_release("app", "app", 2).await.unwrap().unwrap();
+        assert_eq!(reserved.status, ReleaseStatus::Rendered);
+        assert_eq!(reserved.resource_keys, manifest_keys(&manifests).unwrap());
+
+        let applied = apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
+            .await
+            .unwrap();
+        let release = recorder
+            .complete(&client, &applied, &mut scopes, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(release.status, ReleaseStatus::Deployed);
+        let names: Vec<&str> = release.resource_keys.iter().map(|key| key.name.as_str()).collect();
+        assert_eq!(names, vec!["kept", "stuck"]);
+        let stored = storage.get_release("app", "app", 2).await.unwrap().unwrap();
+        assert_eq!(stored.status, ReleaseStatus::Deployed);
+        assert_eq!(stored.resource_keys, release.resource_keys);
+        let previous = storage.get_release("app", "app", 1).await.unwrap().unwrap();
+        assert_eq!(previous.status, ReleaseStatus::Superseded);
+    }
+
+    /// A release that renders nothing is still recorded and prunes everything the
+    /// previous revision deployed.
+    #[tokio::test(start_paused = true)]
+    async fn test_release_recorder_empty_release_prunes_previous_resources() {
+        let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+        let client = LatencyClient::new("");
+        storage
+            .save_release(&release_with_keys(
+                1,
+                ReleaseStatus::Deployed,
+                vec![key("v1", "ConfigMap", Some("app"), "old")],
+            ))
+            .await
+            .unwrap();
+        let mut scopes = ObjectScopes::default();
+
+        let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &[], false, &client, &mut scopes)
+            .await
+            .unwrap();
+        let applied = apply_sorted_manifests(&client, &[], 8, &mut |_| {}).await.unwrap();
+        let release = recorder
+            .complete(&client, &applied, &mut scopes, 8, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(release.status, ReleaseStatus::Deployed);
+        assert!(release.resource_keys.is_empty());
+        assert!(client.events().contains(&"delete-end old".to_string()));
+    }
+
+    /// `--append-release` requires a Deployed previous revision and fails before the
+    /// cluster is touched otherwise.
+    #[tokio::test]
+    async fn test_release_recorder_append_rejects_undeployed_previous_revision() {
+        let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+        storage
+            .save_release(&release_with_keys(1, ReleaseStatus::Failed, vec![]))
+            .await
+            .unwrap();
+
+        let result = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &[],
+            true,
+            &crate::kubernetes::MockKubeClient::new(),
+            &mut ObjectScopes::default(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1]);
     }
 }

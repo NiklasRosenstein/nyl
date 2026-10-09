@@ -49,24 +49,34 @@ Nyl applies resources in the same order as Argo CD: Namespaces, cluster policy
 (NetworkPolicies, ResourceQuotas, LimitRanges, PodDisruptionBudgets),
 ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
 Services, workloads, Ingresses, and APIServices, followed by every other kind,
-including custom resources and admission webhook configurations. As in Argo CD,
-the resources of one kind form a batch that is applied concurrently, up to
-`--concurrency` at a time, and each batch finishes before the next starts. Kinds
-therefore never race a kind they may depend on, while resources of one kind do
-not wait for each other.
+including custom resources. Built-in kinds are matched by API group and kind, so a
+custom kind named like a built-in one, such as a CNI's `NetworkPolicy`, is ordered
+as a custom resource. Admission webhook configurations are applied last, so a
+webhook is not registered before the resources it admits while its backend may
+still be starting. As in Argo CD, the resources of one kind form a batch that is
+applied concurrently, up to `--concurrency` at a time, and each batch finishes
+before the next starts. Kinds therefore never race a kind they may depend on,
+while resources of one kind do not wait for each other.
 
 Before applying the first resource of an API group that a CustomResourceDefinition
 or APIService registered earlier in the same apply, Nyl refreshes API discovery
 until the new kinds are served. When several documents describe the same object
-(the same group, kind, namespace, and name, in any API version), only the last one
-is applied and recorded. A resource that fails to apply does not stop the others;
-the release is recorded as failed and the command exits non-zero.
+(the same group, kind, namespace, and name, in any API version; cluster-scoped
+objects ignore a namespace), only the last one is applied and recorded. A resource
+that fails to apply does not stop the others; the release is recorded as failed
+and the command exits non-zero.
+
+Nyl records the new release revision before applying anything, so a concurrent
+apply of the same release fails before it changes the cluster. A release that
+renders no resources is still recorded, and its previously deployed resources are
+pruned.
 
 Pruning deletes the resources a release no longer contains concurrently, like Argo
 CD. CustomResourceDefinitions, APIServices, and admission webhook configurations
-are deleted last, after every other pruned resource, so they keep defining,
-serving, and admitting the resources being removed; deleting a CRD first would
-cascade to its custom resources.
+are deleted last, after every other pruned resource; deleting a CRD first would
+cascade to its custom resources. A resource that fails to delete stays recorded
+in the new revision, so the next apply retries deleting it. Changing a resource's
+apiVersion does not prune it.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by

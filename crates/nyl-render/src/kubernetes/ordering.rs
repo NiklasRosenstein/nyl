@@ -4,80 +4,103 @@
 //! which adopted Helm's install order: Namespaces first, then cluster policy,
 //! ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
 //! Services, workloads, Ingresses, and APIServices. Every other kind, including custom
-//! resources and admission webhook configurations, follows the known kinds.
+//! resources, follows these built-in kinds. A built-in kind is matched by API group and
+//! kind, so a custom kind that shares a built-in name (such as a CNI's
+//! `NetworkPolicy`) still follows the CustomResourceDefinition or APIService that
+//! registers it.
+//!
+//! Admission webhook configurations are applied after everything else: registering a
+//! webhook before the resources it admits would send their requests to a backend
+//! that was created moments earlier and may not be ready.
 //!
 //! Like Argo CD, [`ResourceOrdering::apply_batches`] groups consecutive resources of
 //! one kind into a batch. Resources in a batch are applied concurrently and each batch
 //! finishes before the next starts, so a kind never races a kind it may depend on.
-//!
-//! Pruning deletes concurrently, as Argo CD does, except that CustomResourceDefinitions,
-//! APIServices, and admission webhook configurations are deleted after everything else
-//! (Argo CD's `PruneLast`), so they are never removed before the resources that relate
-//! to them.
 
 use crate::kubernetes::{extract_gvk, GroupVersionKind};
 use crate::Result;
 use serde_json::Value;
 use std::ops::Range;
 
-/// Known kinds in apply order, mirroring Argo CD's `kindOrder`.
-const KIND_ORDER: &[&str] = &[
-    "Namespace",
-    "NetworkPolicy",
-    "ResourceQuota",
-    "LimitRange",
-    "PodSecurityPolicy",
-    "PodDisruptionBudget",
-    "ServiceAccount",
-    "Secret",
-    "SecretList",
-    "ConfigMap",
-    "StorageClass",
-    "PersistentVolume",
-    "PersistentVolumeClaim",
-    "CustomResourceDefinition",
-    "ClusterRole",
-    "ClusterRoleList",
-    "ClusterRoleBinding",
-    "ClusterRoleBindingList",
-    "Role",
-    "RoleList",
-    "RoleBinding",
-    "RoleBindingList",
-    "Service",
-    "DaemonSet",
-    "Pod",
-    "ReplicationController",
-    "ReplicaSet",
-    "Deployment",
-    "HorizontalPodAutoscaler",
-    "StatefulSet",
-    "Job",
-    "CronJob",
-    "IngressClass",
-    "Ingress",
-    "APIService",
+/// Built-in kinds in apply order, mirroring Argo CD's `kindOrder`, each with the API
+/// groups that serve it.
+const KIND_ORDER: &[(&[&str], &str)] = &[
+    (&[""], "Namespace"),
+    (&["networking.k8s.io", "extensions"], "NetworkPolicy"),
+    (&[""], "ResourceQuota"),
+    (&[""], "LimitRange"),
+    (&["policy", "extensions"], "PodSecurityPolicy"),
+    (&["policy"], "PodDisruptionBudget"),
+    (&[""], "ServiceAccount"),
+    (&[""], "Secret"),
+    (&[""], "SecretList"),
+    (&[""], "ConfigMap"),
+    (&["storage.k8s.io"], "StorageClass"),
+    (&[""], "PersistentVolume"),
+    (&[""], "PersistentVolumeClaim"),
+    (&[API_EXTENSIONS_GROUP], "CustomResourceDefinition"),
+    (&[RBAC_GROUP], "ClusterRole"),
+    (&[RBAC_GROUP], "ClusterRoleList"),
+    (&[RBAC_GROUP], "ClusterRoleBinding"),
+    (&[RBAC_GROUP], "ClusterRoleBindingList"),
+    (&[RBAC_GROUP], "Role"),
+    (&[RBAC_GROUP], "RoleList"),
+    (&[RBAC_GROUP], "RoleBinding"),
+    (&[RBAC_GROUP], "RoleBindingList"),
+    (&[""], "Service"),
+    (&["apps", "extensions"], "DaemonSet"),
+    (&[""], "Pod"),
+    (&[""], "ReplicationController"),
+    (&["apps", "extensions"], "ReplicaSet"),
+    (&["apps", "extensions"], "Deployment"),
+    (&["autoscaling"], "HorizontalPodAutoscaler"),
+    (&["apps"], "StatefulSet"),
+    (&["batch"], "Job"),
+    (&["batch"], "CronJob"),
+    (&["networking.k8s.io"], "IngressClass"),
+    (&["networking.k8s.io", "extensions"], "Ingress"),
+    (&[API_REGISTRATION_GROUP], "APIService"),
 ];
 
-/// Sort key: known kinds by their position, then unknown kinds grouped by group and
-/// kind so each forms one batch. Unparseable manifests sort last.
-type OrderKey = (usize, String, String);
+const API_EXTENSIONS_GROUP: &str = "apiextensions.k8s.io";
+const API_REGISTRATION_GROUP: &str = "apiregistration.k8s.io";
+const ADMISSION_REGISTRATION_GROUP: &str = "admissionregistration.k8s.io";
+const RBAC_GROUP: &str = "rbac.authorization.k8s.io";
+
+/// Position in apply order. Variants sort in declaration order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum OrderKey {
+    /// A built-in kind, by its position in [`KIND_ORDER`].
+    BuiltIn(usize),
+    /// Any other kind, grouped by API group and kind so each forms one batch.
+    Other { group: String, kind: String },
+    /// Admission webhook configurations, applied after the resources they admit.
+    AdmissionWebhook,
+    /// Manifests without a parseable apiVersion and kind.
+    Unparseable,
+}
 
 /// Resource ordering utility
 pub struct ResourceOrdering;
 
 impl ResourceOrdering {
     fn order_key(resource: &Value) -> OrderKey {
-        match extract_gvk(resource) {
-            Ok(gvk) => Self::gvk_order_key(&gvk),
-            Err(_) => (KIND_ORDER.len() + 1, String::new(), String::new()),
-        }
+        extract_gvk(resource).map_or(OrderKey::Unparseable, |gvk| Self::gvk_order_key(&gvk))
     }
 
     fn gvk_order_key(gvk: &GroupVersionKind) -> OrderKey {
-        match KIND_ORDER.iter().position(|kind| *kind == gvk.kind) {
-            Some(position) => (position, String::new(), String::new()),
-            None => (KIND_ORDER.len(), gvk.group.clone(), gvk.kind.clone()),
+        if Self::is_admission_webhook(gvk) {
+            return OrderKey::AdmissionWebhook;
+        }
+        let built_in = KIND_ORDER
+            .iter()
+            .position(|(groups, kind)| *kind == gvk.kind && groups.contains(&gvk.group.as_str()));
+        match built_in {
+            Some(position) => OrderKey::BuiltIn(position),
+            None => OrderKey::Other {
+                group: gvk.group.clone(),
+                kind: gvk.kind.clone(),
+            },
         }
     }
 
@@ -89,17 +112,18 @@ impl ResourceOrdering {
         Ok(())
     }
 
-    /// Split manifests into consecutive apply batches of one kind.
+    /// Split resources, given by their group/version/kind in apply order, into
+    /// consecutive apply batches of one kind.
     ///
-    /// Each returned range is a run of adjacent manifests with the same order key.
-    /// Manifests within a batch may be applied concurrently; a batch must finish
+    /// Each returned range is a run of adjacent resources with the same order key.
+    /// Resources within a batch may be applied concurrently; a batch must finish
     /// before the next begins. Input that is not sorted still yields a barrier at
     /// every kind change, so the given order is never violated across kinds.
-    pub fn apply_batches(resources: &[Value]) -> Vec<Range<usize>> {
+    pub fn apply_batches<'a>(gvks: impl IntoIterator<Item = &'a GroupVersionKind>) -> Vec<Range<usize>> {
         let mut batches: Vec<Range<usize>> = Vec::new();
         let mut current = None;
-        for (index, resource) in resources.iter().enumerate() {
-            let key = Self::order_key(resource);
+        for (index, gvk) in gvks.into_iter().enumerate() {
+            let key = Self::gvk_order_key(gvk);
             match batches.last_mut() {
                 Some(batch) if current.as_ref() == Some(&key) => batch.end = index + 1,
                 _ => batches.push(index..index + 1),
@@ -109,6 +133,24 @@ impl ResourceOrdering {
         batches
     }
 
+    /// Whether this kind registers the kinds of another API group: a
+    /// CustomResourceDefinition or an APIService, whose `spec.group` names that group.
+    pub fn registers_api_group(gvk: &GroupVersionKind) -> bool {
+        matches!(
+            (gvk.group.as_str(), gvk.kind.as_str()),
+            (API_EXTENSIONS_GROUP, "CustomResourceDefinition") | (API_REGISTRATION_GROUP, "APIService")
+        )
+    }
+
+    /// Whether this kind is an admission webhook configuration.
+    pub fn is_admission_webhook(gvk: &GroupVersionKind) -> bool {
+        gvk.group == ADMISSION_REGISTRATION_GROUP
+            && matches!(
+                gvk.kind.as_str(),
+                "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration"
+            )
+    }
+
     /// Whether pruning defers this kind until every other pruned resource is gone.
     ///
     /// CustomResourceDefinitions define, APIServices serve, and admission webhooks admit
@@ -116,15 +158,7 @@ impl ResourceOrdering {
     /// Deleting a CRD first would cascade to its custom resources, racing their own
     /// prune and any controller finalizers.
     pub fn is_prune_last(gvk: &GroupVersionKind) -> bool {
-        matches!(
-            (gvk.group.as_str(), gvk.kind.as_str()),
-            ("apiextensions.k8s.io", "CustomResourceDefinition")
-                | ("apiregistration.k8s.io", "APIService")
-                | (
-                    "admissionregistration.k8s.io",
-                    "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration"
-                )
-        )
+        Self::registers_api_group(gvk) || Self::is_admission_webhook(gvk)
     }
 }
 
@@ -139,6 +173,11 @@ mod tests {
 
     fn kinds(resources: &[Value]) -> Vec<&str> {
         resources.iter().map(|r| r["kind"].as_str().unwrap()).collect()
+    }
+
+    fn batches_of(resources: &[Value]) -> Vec<Range<usize>> {
+        let gvks: Vec<GroupVersionKind> = resources.iter().map(|r| extract_gvk(r).unwrap()).collect();
+        ResourceOrdering::apply_batches(&gvks)
     }
 
     #[test]
@@ -179,8 +218,42 @@ mod tests {
                 "Service",
                 "Deployment",
                 "APIService",
-                "ValidatingWebhookConfiguration",
                 "Widget",
+                "ValidatingWebhookConfiguration",
+            ]
+        );
+    }
+
+    /// A custom kind named like a built-in kind is ordered as a custom resource, after
+    /// the CustomResourceDefinition or APIService that registers its group.
+    #[test]
+    fn test_sort_orders_custom_kinds_sharing_built_in_names_after_their_registration() {
+        let mut resources = vec![
+            manifest("projectcalico.org/v3", "NetworkPolicy", "served"),
+            manifest("crd.antrea.io/v1beta1", "NetworkPolicy", "custom"),
+            manifest("networking.k8s.io/v1", "NetworkPolicy", "built-in"),
+            manifest("apiregistration.k8s.io/v1", "APIService", "v3.projectcalico.org"),
+            manifest(
+                "apiextensions.k8s.io/v1",
+                "CustomResourceDefinition",
+                "networkpolicies.crd.antrea.io",
+            ),
+        ];
+
+        ResourceOrdering::sort_by_priority(&mut resources).unwrap();
+
+        let names: Vec<&str> = resources
+            .iter()
+            .map(|r| r["metadata"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "built-in",
+                "networkpolicies.crd.antrea.io",
+                "v3.projectcalico.org",
+                "custom",
+                "served"
             ]
         );
     }
@@ -218,7 +291,7 @@ mod tests {
         ];
         ResourceOrdering::sort_by_priority(&mut resources).unwrap();
 
-        let batches: Vec<Vec<&str>> = ResourceOrdering::apply_batches(&resources)
+        let batches: Vec<Vec<&str>> = batches_of(&resources)
             .into_iter()
             .map(|batch| {
                 resources[batch]
@@ -240,8 +313,8 @@ mod tests {
             manifest("v1", "Namespace", "b"),
             manifest("v1", "ConfigMap", "c"),
         ];
-        assert_eq!(ResourceOrdering::apply_batches(&resources), vec![0..1, 1..2, 2..3]);
-        assert!(ResourceOrdering::apply_batches(&[]).is_empty());
+        assert_eq!(batches_of(&resources), vec![0..1, 1..2, 2..3]);
+        assert!(batches_of(&[]).is_empty());
     }
 
     #[test]

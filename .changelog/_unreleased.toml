@@ -85,5 +85,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
 type = "breaking change"
-description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last, and recording a revision that another apply recorded concurrently now fails instead of overwriting it"
+description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC; admission webhook configurations are applied last) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last in apply and diff; a revision is recorded before applying, so a concurrent apply of the same release fails before changing the cluster; and a release that renders no resources is recorded and prunes its previous resources instead of being skipped"
 author = "@NiklasRosenstein"

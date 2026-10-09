@@ -3,10 +3,8 @@ use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    cli::{
-        commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
-        namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
-    },
+    cli::commands::apply::prepare_desired_manifests,
+    cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
     kubernetes::{
         extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseStatus,
         ReleaseStorage, ResourceKey,
@@ -97,10 +95,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     // 2. Determine release name and namespace
     let (release_name, release_namespace) = release_identity(release.as_ref(), args.name, args.namespace)?;
 
-    // Resolve missing namespaces with release namespace hint for diff/apply parity.
-    resolve_manifest_namespaces(&kube_client, &mut desired_manifests, Some(&release_namespace)).await?;
-    duplicates =
-        adjust_duplicate_keys_for_namespace_resolution(&kube_client, &duplicates, Some(&release_namespace)).await?;
+    // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
+    let ns = Some(release_namespace.as_str());
+    (desired_manifests, _) = prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, ns).await?;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {
