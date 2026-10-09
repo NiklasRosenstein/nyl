@@ -79,5 +79,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "36f53974-eda3-4035-a2d9-fc552bb8ef78"
 type = "feature"
-description = "Bound release history kept by `nyl apply` with `[release] history_limit` in `nyl.toml` or `--history-limit`, deleting the oldest revisions while keeping those that describe the live resources"
+description = "Bound release history with `[release] history_limit` in `nyl.toml` or `nyl apply --history-limit`; after a successful apply or rollback the oldest revisions beyond the limit are deleted"
 author = "@NiklasRosenstein"

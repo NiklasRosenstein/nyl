@@ -122,11 +122,38 @@ impl Default for ProjectSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReleaseSettings {
-    /// Maximum number of revisions `nyl apply` keeps per release. After
-    /// recording a revision, the oldest revisions beyond this limit are deleted.
-    /// The most recently deployed revision and every revision after it are always
-    /// kept. `0` keeps every revision.
+    /// Maximum number of revisions kept per release. After a revision deploys
+    /// successfully through `nyl apply` or `nyl release rollback`, the oldest
+    /// revisions beyond this limit are deleted. `0` keeps every revision; otherwise
+    /// the limit must be at least `2` so the previous revision stays available to
+    /// roll back to.
+    #[serde(deserialize_with = "deserialize_release_history_limit")]
     pub history_limit: u32,
+}
+
+/// Check a release history limit: `0` (unlimited) or at least `2`.
+pub fn check_release_history_limit(limit: u32) -> std::result::Result<u32, String> {
+    if limit == 1 {
+        return Err(
+            "a release history limit of 1 leaves no previous revision to roll back to; use 0 to keep every revision or a value of at least 2"
+                .to_string(),
+        );
+    }
+    Ok(limit)
+}
+
+/// Parse a `--history-limit` command-line value.
+pub fn parse_release_history_limit(value: &str) -> std::result::Result<u32, String> {
+    let limit = value.parse::<u32>().map_err(|e| e.to_string())?;
+    check_release_history_limit(limit)
+}
+
+fn deserialize_release_history_limit<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let limit = u32::deserialize(deserializer)?;
+    check_release_history_limit(limit).map_err(serde::de::Error::custom)
 }
 
 /// Root structure of `nyl.toml`.
@@ -135,7 +162,7 @@ pub struct ReleaseSettings {
 pub struct ProjectFile {
     pub project: ProjectSettings,
 
-    /// Release history retention for direct `nyl apply`.
+    /// Release history retention for `nyl apply` and `nyl release rollback`.
     pub release: ReleaseSettings,
 
     /// Final rendered-manifest validation policy.
@@ -791,5 +818,19 @@ strip_empty_metadata_labels = "sometimes"
 
         let config = ProjectConfig::load(Some(config_path)).unwrap();
         assert_eq!(config.release_history_limit(), 5);
+    }
+
+    #[test]
+    fn test_release_history_limit_of_one_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("nyl.toml");
+        fs::write(&config_path, "[release]\nhistory_limit = 1\n").unwrap();
+
+        let err = ProjectConfig::load(Some(config_path)).unwrap_err().to_string();
+        assert!(err.contains("history_limit"));
+        assert!(err.contains("roll back"));
+        assert!(parse_release_history_limit("1").is_err());
+        assert_eq!(parse_release_history_limit("0"), Ok(0));
+        assert_eq!(parse_release_history_limit("2"), Ok(2));
     }
 }

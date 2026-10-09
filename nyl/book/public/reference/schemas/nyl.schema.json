@@ -153,7 +153,7 @@
       "properties": {
         "history_limit": {
           "default": 0,
-          "description": "Maximum number of revisions `nyl apply` keeps per release. After\nrecording a revision, the oldest revisions beyond this limit are deleted.\nThe most recently deployed revision and every revision after it are always\nkept. `0` keeps every revision.",
+          "description": "Maximum number of revisions kept per release. After a revision deploys\nsuccessfully through `nyl apply` or `nyl release rollback`, the oldest\nrevisions beyond this limit are deleted. `0` keeps every revision; otherwise\nthe limit must be at least `2` so the previous revision stays available to\nroll back to.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -273,7 +273,7 @@
       "default": {
         "history_limit": 0
       },
-      "description": "Release history retention for direct `nyl apply`."
+      "description": "Release history retention for `nyl apply` and `nyl release rollback`."
     },
     "validation": {
       "$ref": "#/$defs/ValidationSettings",

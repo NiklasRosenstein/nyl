@@ -63,18 +63,21 @@ gitops_scaffold_path = "config"
 
 ## Release history
 
-`nyl apply` records every revision of a release as a Kubernetes Secret in the
-release namespace. Limit how many revisions each release keeps:
+`nyl apply` and `nyl release rollback` record every revision of a release as a
+Kubernetes Secret in the release namespace. Limit how many revisions each
+release keeps:
 
 ```toml
 [release]
 history_limit = 10
 ```
 
-- `history_limit` defaults to `0`, which keeps every revision. After recording
-  a revision, `nyl apply` deletes the oldest revisions beyond the limit. The
-  most recently deployed revision and any failed revisions after it are always
-  kept, because they describe the resources live on the cluster.
+- `history_limit` defaults to `0`, which keeps every revision. Otherwise it
+  must be at least `2`, so the previous revision remains available to roll
+  back to.
+- After a revision deploys successfully, the oldest revisions beyond the limit
+  are deleted. A failed apply deletes nothing, so the last known-good revision
+  and anything still live stay recorded.
 - `nyl apply --history-limit <N>` overrides the setting for one invocation.
 
 ## Remote artifact vendoring

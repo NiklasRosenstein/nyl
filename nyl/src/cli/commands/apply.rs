@@ -48,7 +48,12 @@ pub struct ApplyArgs {
     /// Maximum number of release revisions to keep; older revisions are deleted
     /// after this apply. 0 keeps every revision. Overrides `[release] history_limit`
     /// in nyl.toml.
-    #[arg(long, value_name = "N", conflicts_with = "no_release")]
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "no_release",
+        value_parser = crate::config::parse_release_history_limit
+    )]
     pub history_limit: Option<u32>,
 }
 
@@ -156,7 +161,11 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     // 7. Initialize release storage
     let storage = KubernetesReleaseStorage::new(client);
 
-    // 8-12. Record the new revision, mark the previous one superseded, and prune.
+    // 8-13. Record the new revision, mark the previous one superseded, prune, and
+    //       delete revisions beyond the history limit.
+    let history_limit = args
+        .history_limit
+        .unwrap_or_else(|| preflight.project_config.release_history_limit());
     let release = apply_and_record_release(
         &storage,
         &kube_client,
@@ -165,14 +174,9 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         &release_name,
         &release_namespace,
         args.append_release,
+        history_limit,
     )
     .await?;
-
-    // 13. Delete revisions beyond the configured history limit.
-    let history_limit = args
-        .history_limit
-        .unwrap_or_else(|| preflight.project_config.release_history_limit());
-    prune_release_history(&storage, &release_name, &release_namespace, history_limit).await;
 
     // 14. Print summary
     print_apply_summary(
@@ -294,10 +298,10 @@ fn merge_append_manifest(desired_manifests: &[serde_json::Value], previous_manif
 /// it computes the next revision number, builds and saves the [`ReleaseState`]
 /// (carrying the full rendered manifest), optionally merges with the previous
 /// revision when `append_release` is set, marks the previous revision
-/// [`ReleaseStatus::Superseded`], and prunes resources that existed in the previous
-/// revision but not the new one. Returns the recorded [`ReleaseState`] so callers
-/// can print a summary.
-#[allow(clippy::too_many_lines)]
+/// [`ReleaseStatus::Superseded`], prunes resources that existed in the previous
+/// revision but not the new one, and deletes revisions beyond `history_limit`.
+/// Returns the recorded [`ReleaseState`] so callers can print a summary.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn apply_and_record_release(
     storage: &KubernetesReleaseStorage,
     kube_client: &KubeRsClient,
@@ -306,6 +310,7 @@ pub(crate) async fn apply_and_record_release(
     release_name: &str,
     release_namespace: &str,
     append_release: bool,
+    history_limit: u32,
 ) -> Result<ReleaseState> {
     // Determine next revision number
     let revisions = storage.list_revisions(release_name, release_namespace).await?;
@@ -459,18 +464,38 @@ pub(crate) async fn apply_and_record_release(
         }
     }
 
+    prune_release_history(storage, &release, history_limit).await;
+
     Ok(release)
 }
 
-/// Delete release revisions beyond `history_limit`, warning instead of failing:
-/// the resources are already applied and recorded, and the next apply retries.
-async fn prune_release_history(
-    storage: &dyn ReleaseStorage,
-    release_name: &str,
-    release_namespace: &str,
-    history_limit: u32,
-) {
-    match enforce_release_history_limit(storage, release_name, release_namespace, history_limit).await {
+/// Delete release revisions beyond `history_limit` once `release` deployed.
+///
+/// A failed revision leaves older revisions in place: they may still describe live
+/// resources and hold the last known-good state to roll back to. Deletion errors
+/// only warn, because the resources are already applied and recorded and the next
+/// successful apply retries.
+async fn prune_release_history(storage: &dyn ReleaseStorage, release: &ReleaseState, history_limit: u32) {
+    if history_limit == 0 {
+        return;
+    }
+    if release.status != ReleaseStatus::Deployed {
+        tracing::warn!(
+            "Release history limit of {} not applied: revision {} did not deploy successfully",
+            history_limit,
+            release.revision
+        );
+        return;
+    }
+    match enforce_release_history_limit(
+        storage,
+        &release.release_name,
+        &release.release_namespace,
+        release.revision,
+        history_limit,
+    )
+    .await
+    {
         Ok(deleted) if !deleted.is_empty() => {
             tracing::info!(
                 "Deleted {} release revision(s) beyond the history limit of {}: {:?}",

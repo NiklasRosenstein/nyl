@@ -103,16 +103,11 @@ pub trait ReleaseStorage: Send + Sync {
 
 /// Select the revisions a release history limit removes, oldest first.
 ///
-/// `revisions` lists every stored revision and `last_deployed` is the most recent
-/// revision with status [`ReleaseStatus::Deployed`]. That revision and every
-/// revision after it describe the resources live on the cluster (Failed revisions
-/// never prune), so they are always kept even when they exceed `history_limit`.
-/// Without a Deployed revision nothing is removed. A `history_limit` of `0` keeps
-/// every revision.
-pub fn revisions_beyond_history_limit(revisions: &[u32], last_deployed: Option<u32>, history_limit: u32) -> Vec<u32> {
-    let Some(last_deployed) = last_deployed else {
-        return Vec::new();
-    };
+/// Retention runs only after `deployed_revision` was recorded as
+/// [`ReleaseStatus::Deployed`]. That revision alone describes the resources live on
+/// the cluster, so every older revision may go; `deployed_revision` and anything
+/// recorded after it are always kept. A `history_limit` of `0` keeps every revision.
+pub fn revisions_beyond_history_limit(revisions: &[u32], deployed_revision: u32, history_limit: u32) -> Vec<u32> {
     if history_limit == 0 {
         return Vec::new();
     }
@@ -123,39 +118,28 @@ pub fn revisions_beyond_history_limit(revisions: &[u32], last_deployed: Option<u
     sorted
         .into_iter()
         .take(excess)
-        .take_while(|revision| *revision < last_deployed)
+        .take_while(|revision| *revision < deployed_revision)
         .collect()
 }
 
-/// Delete the oldest revisions of a release beyond `history_limit`.
+/// Delete the oldest revisions of a release beyond `history_limit` after
+/// `deployed_revision` was deployed.
 ///
 /// Applies [`revisions_beyond_history_limit`] to the stored revisions and returns
-/// the revisions deleted, oldest first.
+/// the revisions deleted, oldest first. Only revision labels are read, so a
+/// revision whose stored state cannot be parsed is deleted like any other.
 pub async fn enforce_release_history_limit(
     storage: &dyn ReleaseStorage,
     release_name: &str,
     namespace: &str,
+    deployed_revision: u32,
     history_limit: u32,
 ) -> Result<Vec<u32>> {
     if history_limit == 0 {
         return Ok(Vec::new());
     }
     let revisions = storage.list_revisions(release_name, namespace).await?;
-    if revisions.len() <= history_limit as usize {
-        return Ok(Vec::new());
-    }
-
-    let mut last_deployed = None;
-    for &revision in revisions.iter().rev() {
-        if let Some(release) = storage.get_release(release_name, namespace, revision).await? {
-            if release.status == ReleaseStatus::Deployed {
-                last_deployed = Some(revision);
-                break;
-            }
-        }
-    }
-
-    let to_delete = revisions_beyond_history_limit(&revisions, last_deployed, history_limit);
+    let to_delete = revisions_beyond_history_limit(&revisions, deployed_revision, history_limit);
     for &revision in &to_delete {
         storage.delete_release(release_name, namespace, revision).await?;
     }
@@ -733,45 +717,36 @@ mod tests {
 
     #[test]
     fn test_revisions_beyond_history_limit_removes_oldest() {
-        assert_eq!(
-            revisions_beyond_history_limit(&[1, 2, 3, 4, 5], Some(5), 2),
-            vec![1, 2, 3]
-        );
-        assert!(revisions_beyond_history_limit(&[1, 2, 3], Some(3), 3).is_empty());
+        assert_eq!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], 5, 2), vec![1, 2, 3]);
+        assert!(revisions_beyond_history_limit(&[1, 2, 3], 3, 3).is_empty());
     }
 
     #[test]
     fn test_revisions_beyond_history_limit_zero_keeps_everything() {
-        assert!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], Some(5), 0).is_empty());
+        assert!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], 5, 0).is_empty());
     }
 
     #[test]
-    fn test_revisions_beyond_history_limit_keeps_live_state_revisions() {
-        // Revisions 4 and 5 failed after 3 was deployed; 3..=5 describe live resources.
-        assert_eq!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], Some(3), 1), vec![1, 2]);
-        // Without a deployed revision every failed revision may hold live resources.
-        assert!(revisions_beyond_history_limit(&[1, 2, 3], None, 1).is_empty());
+    fn test_revisions_beyond_history_limit_keeps_deployed_and_later_revisions() {
+        // A revision recorded concurrently after the deployed one is never removed.
+        assert_eq!(revisions_beyond_history_limit(&[1, 2, 3, 4], 3, 1), vec![1, 2]);
     }
 
     #[tokio::test]
     async fn test_enforce_release_history_limit_deletes_oldest_revisions() {
         let storage = MockReleaseStorage::new();
-        for revision in 1..=3 {
+        for revision in 1..=4 {
             storage
                 .save_release(&revision_with_status(revision, ReleaseStatus::Superseded))
                 .await
                 .unwrap();
         }
         storage
-            .save_release(&revision_with_status(4, ReleaseStatus::Deployed))
-            .await
-            .unwrap();
-        storage
-            .save_release(&revision_with_status(5, ReleaseStatus::Failed))
+            .save_release(&revision_with_status(5, ReleaseStatus::Deployed))
             .await
             .unwrap();
 
-        let deleted = enforce_release_history_limit(&storage, "myapp", "default", 3)
+        let deleted = enforce_release_history_limit(&storage, "myapp", "default", 5, 3)
             .await
             .unwrap();
 
