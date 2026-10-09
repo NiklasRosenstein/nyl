@@ -60,8 +60,9 @@ pub trait KubeClient: Send + Sync {
     /// Refresh API discovery until every `required` kind is resolvable, or give up.
     ///
     /// Called after CustomResourceDefinitions or APIServices are applied so the kinds
-    /// they register can be applied in the same run. Clients without a discovery cache need no
-    /// refresh, which is the default.
+    /// they register can be applied in the same run. Best-effort: refresh failures do
+    /// not fail the apply. Clients without a discovery cache need no refresh, which is
+    /// the default.
     async fn refresh_discovery_until_available(&self, _required: &[GroupVersionKind]) -> Result<()> {
         Ok(())
     }
@@ -209,13 +210,7 @@ impl KubeRsClient {
     }
 
     /// Re-run API discovery and rebuild the resource index.
-    ///
-    /// The index is captured once at construction. After applying a
-    /// CustomResourceDefinition, the kinds it introduces are not yet present in
-    /// the index, so applying their custom resources in the same batch would fail
-    /// with `ApiResourceNotFound`. Calling this after CRDs are applied refreshes
-    /// the index so those kinds become resolvable.
-    pub async fn refresh_discovery(&self) -> Result<()> {
+    async fn refresh_discovery(&self) -> Result<()> {
         let prefer_aggregated = self.aggregated_discovery.load(Ordering::Relaxed);
         let run = run_discovery(&self.client, prefer_aggregated).await?;
         if run.aggregated_unsupported {
@@ -226,57 +221,21 @@ impl KubeRsClient {
         Ok(())
     }
 
-    /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
-    /// index or the attempts are exhausted.
-    ///
-    /// Returns immediately when every kind is already known. A newly-applied
-    /// CustomResourceDefinition is not served by the API server the
-    /// instant the apply returns — it must first become `Established`. A single
-    /// [`Self::refresh_discovery`] can therefore rebuild the index before the new
-    /// kind is published, so a custom resource applied right after would still fail
-    /// with `ApiResourceNotFound`. This retries with a short delay until the kinds
-    /// are discoverable. Best-effort: if some kinds never appear it returns `Ok` and
-    /// the subsequent apply surfaces a clear `ApiResourceNotFound`.
-    async fn refresh_discovery_until_known(&self, required: &[GroupVersionKind]) -> Result<()> {
-        const MAX_ATTEMPTS: u32 = 10;
-        const DELAY: Duration = Duration::from_millis(500);
-
-        let all_known = || {
-            let index = self.api_resource_index();
-            required.iter().all(|gvk| index.contains_key(gvk))
-        };
-        // Re-applying unchanged CRDs registers nothing new, so skip the refresh.
-        if all_known() {
-            return Ok(());
-        }
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            self.refresh_discovery().await?;
-            if all_known() || attempt == MAX_ATTEMPTS {
-                break;
-            }
-
-            tracing::debug!(
-                attempt,
-                "Waiting for newly registered kinds to become discoverable before applying their resources"
-            );
-            tokio::time::sleep(DELAY).await;
-        }
-
-        Ok(())
-    }
-
     fn build_api_resource_index(discovery: &Discovery) -> ApiResourceIndex {
         let mut index = HashMap::new();
 
+        // Index every served version, not only the preferred one: manifests may use
+        // any version a CRD or built-in API serves.
         for group in discovery.groups() {
-            for (ar, caps) in group.recommended_resources() {
-                let gvk = GroupVersionKind {
-                    group: ar.group.clone(),
-                    version: ar.version.clone(),
-                    kind: ar.kind.clone(),
-                };
-                index.entry(gvk).or_insert_with(|| (ar.clone(), caps.clone()));
+            for version in group.versions() {
+                for (ar, caps) in group.versioned_resources(version) {
+                    let gvk = GroupVersionKind {
+                        group: ar.group.clone(),
+                        version: ar.version.clone(),
+                        kind: ar.kind.clone(),
+                    };
+                    index.entry(gvk).or_insert((ar, caps));
+                }
             }
         }
 
@@ -603,8 +562,49 @@ impl KubeClient for KubeRsClient {
         Ok(normalized)
     }
 
+    /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
+    /// index or the attempts are exhausted.
+    ///
+    /// Returns immediately when every kind is already known. A newly applied
+    /// CustomResourceDefinition or APIService is not served the instant its apply
+    /// returns, so a single refresh can miss its kinds; this retries with a short
+    /// delay. Best-effort: a failed refresh is logged and retried, and if some kinds
+    /// never appear it returns `Ok`, so only the resources of those kinds fail to
+    /// apply, each with a clear `ApiResourceNotFound`, and the release is still
+    /// recorded.
     async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
-        self.refresh_discovery_until_known(required).await
+        const MAX_ATTEMPTS: u32 = 10;
+        const DELAY: Duration = Duration::from_millis(500);
+
+        let all_known = || {
+            let index = self.api_resource_index();
+            required.iter().all(|gvk| index.contains_key(gvk))
+        };
+        // Re-applying unchanged CRDs registers nothing new, so skip the refresh.
+        if all_known() {
+            return Ok(());
+        }
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.refresh_discovery().await {
+                Ok(()) if all_known() => break,
+                Ok(()) => tracing::debug!(
+                    attempt,
+                    "Waiting for newly registered kinds to become discoverable before applying their resources"
+                ),
+                // An aggregated API whose backend is still starting fails per-group
+                // discovery with 503 until it is ready.
+                Err(err) => tracing::debug!(attempt, error = %err, "Discovery refresh failed; retrying"),
+            }
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(DELAY).await;
+            }
+        }
+
+        if !all_known() {
+            tracing::warn!("Some newly registered kinds are still not discoverable; their resources may fail to apply");
+        }
+        Ok(())
     }
 }
 
@@ -612,7 +612,7 @@ impl KubeClient for KubeRsClient {
 struct DiscoveryRun {
     discovery: Discovery,
     mode: DiscoveryMode,
-    /// The server answered in a way showing it does not serve aggregated discovery.
+    /// This run showed the server does not serve aggregated discovery.
     aggregated_unsupported: bool,
 }
 
@@ -635,7 +635,7 @@ impl DiscoveryState {
 /// response showing the server lacks aggregated discovery marks it unsupported; a
 /// transient failure falls back for this run alone.
 async fn run_discovery(client: &Client, prefer_aggregated: bool) -> Result<DiscoveryRun> {
-    let mut aggregated_unsupported = !prefer_aggregated;
+    let mut aggregated_unsupported = false;
     if prefer_aggregated {
         match Discovery::new(client.clone()).run_aggregated().await {
             Ok(discovery) if discovery.has_group("") => {
@@ -935,6 +935,30 @@ impl KubeClient for MockKubeClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn api_error(code: u16) -> kube::Error {
+        kube::Error::Api(Box::new(kube::core::Status {
+            code,
+            ..Default::default()
+        }))
+    }
+
+    /// Only answers showing the server lacks aggregated discovery disable it for later
+    /// refreshes; transient failures must not, or every refresh falls back to the
+    /// slower per-group discovery.
+    #[test]
+    fn test_aggregated_discovery_unsupported_only_for_definitive_answers() {
+        let legacy_document = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(aggregated_discovery_unsupported(&kube::Error::SerdeError(
+            legacy_document
+        )));
+        for code in [404, 406, 415] {
+            assert!(aggregated_discovery_unsupported(&api_error(code)), "{code}");
+        }
+        for code in [401, 403, 429, 500, 503] {
+            assert!(!aggregated_discovery_unsupported(&api_error(code)), "{code}");
+        }
+    }
 
     #[tokio::test]
     async fn test_mock_client_get_missing() {

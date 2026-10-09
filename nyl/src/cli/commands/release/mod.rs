@@ -2,7 +2,7 @@ mod delete;
 mod format;
 mod history;
 mod list;
-mod rollback;
+pub(crate) mod rollback;
 mod show;
 
 use clap::{Args, Subcommand, ValueEnum};

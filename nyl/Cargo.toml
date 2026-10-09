@@ -50,6 +50,7 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+# Paused virtual time for deterministic latency-injected apply tests.
 tokio = { workspace = true, features = ["test-util"] }
 criterion = { workspace = true }
 predicates = { workspace = true }
