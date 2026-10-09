@@ -10,9 +10,10 @@
 //! one kind into a batch. Resources in a batch are applied concurrently and each batch
 //! finishes before the next starts, so a kind never races a kind it may depend on.
 //!
-//! Pruning deletes concurrently, as Argo CD does, except that APIServices and admission
-//! webhook configurations are deleted after everything else (Argo CD's `PruneLast`),
-//! so they are never removed before the resources that relate to them.
+//! Pruning deletes concurrently, as Argo CD does, except that CustomResourceDefinitions,
+//! APIServices, and admission webhook configurations are deleted after everything else
+//! (Argo CD's `PruneLast`), so they are never removed before the resources that relate
+//! to them.
 
 use crate::kubernetes::{extract_gvk, GroupVersionKind};
 use crate::Result;
@@ -110,12 +111,15 @@ impl ResourceOrdering {
 
     /// Whether pruning defers this kind until every other pruned resource is gone.
     ///
-    /// APIServices serve, and admission webhooks admit, requests for other resources,
-    /// so they stay in place while those resources are deleted.
+    /// CustomResourceDefinitions define, APIServices serve, and admission webhooks admit
+    /// other resources, so they stay in place while those resources are deleted.
+    /// Deleting a CRD first would cascade to its custom resources, racing their own
+    /// prune and any controller finalizers.
     pub fn is_prune_last(gvk: &GroupVersionKind) -> bool {
         matches!(
             (gvk.group.as_str(), gvk.kind.as_str()),
-            ("apiregistration.k8s.io", "APIService")
+            ("apiextensions.k8s.io", "CustomResourceDefinition")
+                | ("apiregistration.k8s.io", "APIService")
                 | (
                     "admissionregistration.k8s.io",
                     "MutatingWebhookConfiguration" | "ValidatingWebhookConfiguration"
@@ -254,6 +258,10 @@ mod tests {
         assert!(ResourceOrdering::is_prune_last(&gvk(
             "admissionregistration.k8s.io",
             "ValidatingWebhookConfiguration"
+        )));
+        assert!(ResourceOrdering::is_prune_last(&gvk(
+            "apiextensions.k8s.io",
+            "CustomResourceDefinition"
         )));
         assert!(!ResourceOrdering::is_prune_last(&gvk("example.com", "APIService")));
         assert!(!ResourceOrdering::is_prune_last(&gvk("apps", "Deployment")));
