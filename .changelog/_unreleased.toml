@@ -79,5 +79,11 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
 type = "improvement"
-description = "Reduce `nyl apply` latency: use aggregated API discovery with a per-group fallback, apply resources of equal ordering priority concurrently (`--concurrency`, default 8) while keeping Namespace and CRD barriers, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+description = "Reduce `nyl apply` and `nyl release rollback` latency: use aggregated API discovery with a per-group fallback, apply resources in Argo CD's kind order with each kind's resources applied concurrently (`--concurrency`, default 8), prune concurrently with APIServices and admission webhooks last, print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
+type = "breaking change"
+description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last, and recording a revision that another apply recorded concurrently now fails instead of overwriting it"
 author = "@NiklasRosenstein"
