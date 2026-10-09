@@ -104,16 +104,25 @@ For shared rendering behavior and namespace resolution details, see
 <li><code dir="auto">--concurrency &#x3C;N></code> - Maximum number of resources applied or pruned at the same time (default: 8; <code dir="auto">1</code> applies serially)</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="apply-order-and-progress">Apply order and progress</h2><a class="sl-anchor-link" href="#apply-order-and-progress"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Apply order and progress”</span></a></div>
-<p>Resources are sorted by kind priority (Namespaces, CustomResourceDefinitions,
-ServiceAccounts, Roles and ClusterRoles, their bindings, ConfigMaps and Secrets,
-Services, workloads, everything else, then APIServices and admission webhook
-configurations) and applied in waves: resources of the same priority are applied
-concurrently, up to <code dir="auto">--concurrency</code> at a time, and each wave finishes before the
-next starts. Namespaces therefore exist before the resources in them, and after
-a wave that applies CustomResourceDefinitions Nyl refreshes API discovery until
-the new kinds are served. When several documents resolve to the same resource,
-only the last one is applied. A resource that fails to apply does not stop the
-others; the release is recorded as failed and the command exits non-zero.</p>
+<p>Nyl applies resources in the same order as Argo CD: Namespaces, cluster policy
+(NetworkPolicies, ResourceQuotas, LimitRanges, PodDisruptionBudgets),
+ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
+Services, workloads, Ingresses, and APIServices, followed by every other kind,
+including custom resources and admission webhook configurations. As in Argo CD,
+the resources of one kind form a batch that is applied concurrently, up to
+<code dir="auto">--concurrency</code> at a time, and each batch finishes before the next starts. Kinds
+therefore never race a kind they may depend on, while resources of one kind do
+not wait for each other.</p>
+<p>Before applying the first resource of an API group that a CustomResourceDefinition
+or APIService registered earlier in the same apply, Nyl refreshes API discovery
+until the new kinds are served. When several documents describe the same object
+(the same group, kind, namespace, and name, in any API version), only the last one
+is applied and recorded. A resource that fails to apply does not stop the others;
+the release is recorded as failed and the command exits non-zero.</p>
+<p>Pruning deletes the resources a release no longer contains concurrently, like Argo
+CD. APIServices and admission webhook configurations are deleted last, after every
+other pruned resource, so they keep serving and admitting requests while the
+resources related to them are removed.</p>
 <p>Each resource’s outcome (<code dir="auto">+</code> created, <code dir="auto">~</code> updated, <code dir="auto">=</code> unchanged, <code dir="auto">✗</code> failed) is
 printed as soon as it completes, in completion order. The summary is followed by
 the time spent in API discovery, validation, apply, and release bookkeeping.
