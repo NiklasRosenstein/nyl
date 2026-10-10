@@ -61,6 +61,25 @@ gitops_scaffold_path = "config"
 - `aliases` maps an API version and kind to a component shortcut or local
   component path.
 
+## Release history
+
+`nyl apply` and `nyl release rollback` record every revision of a release as a
+Kubernetes Secret in the release namespace. Limit how many revisions each
+release keeps:
+
+```toml
+[release]
+history_limit = 10
+```
+
+- `history_limit` defaults to `5`. Set it to `0` to keep every revision.
+  Any other value must be at least `2`, so the previous revision remains
+  available to roll back to.
+- After a revision deploys successfully, the oldest revisions beyond the limit
+  are deleted. A failed apply deletes nothing, so the last known-good revision
+  and anything still live stay recorded.
+- `nyl apply --history-limit <N>` overrides the setting for one invocation.
+
 ## Remote artifact vendoring
 
 Vendoring is a project-wide policy for remote inputs used by every Cluster and
