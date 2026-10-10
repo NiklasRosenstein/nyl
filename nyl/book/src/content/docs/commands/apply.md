@@ -90,7 +90,7 @@ nyl apply --target production --no-release manifest.yaml
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
-- Every revision is kept unless a history limit is configured. With a limit, the oldest revisions are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.
+- Each release keeps its five most recent revisions unless `[release] history_limit` says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.
 - The release namespace is created when it is missing, before the manifests are
   applied. Nyl does not own that namespace and never prunes it. Other namespaces
   a release writes to, including `spec.additionalNamespaces`, need their own

@@ -118,17 +118,28 @@ impl Default for ProjectSettings {
     }
 }
 
+/// Default number of revisions kept per release.
+pub const DEFAULT_RELEASE_HISTORY_LIMIT: u32 = 5;
+
 /// Release history settings in the `[release]` section of `nyl.toml`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReleaseSettings {
-    /// Maximum number of revisions kept per release. After a revision deploys
-    /// successfully through `nyl apply` or `nyl release rollback`, the oldest
-    /// revisions beyond this limit are deleted. `0` keeps every revision; otherwise
-    /// the limit must be at least `2` so the previous revision stays available to
-    /// roll back to.
+    /// Maximum number of revisions kept per release, `5` by default. After a
+    /// revision deploys successfully through `nyl apply` or `nyl release rollback`,
+    /// the oldest revisions beyond this limit are deleted. `0` keeps every revision;
+    /// otherwise the limit must be at least `2` so the previous revision stays
+    /// available to roll back to.
     #[serde(deserialize_with = "deserialize_release_history_limit")]
     pub history_limit: u32,
+}
+
+impl Default for ReleaseSettings {
+    fn default() -> Self {
+        Self {
+            history_limit: DEFAULT_RELEASE_HISTORY_LIMIT,
+        }
+    }
 }
 
 /// Check a release history limit: `0` (unlimited) or at least `2`.
@@ -809,15 +820,16 @@ strip_empty_metadata_labels = "sometimes"
     }
 
     #[test]
-    fn test_release_history_limit_defaults_to_unlimited_and_loads_from_toml() {
-        assert_eq!(ProjectFile::default().release.history_limit, 0);
-
+    fn test_release_history_limit_defaults_to_five_and_loads_from_toml() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("nyl.toml");
-        fs::write(&config_path, "[release]\nhistory_limit = 5\n").unwrap();
-
-        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        fs::write(&config_path, "[project]\n").unwrap();
+        let config = ProjectConfig::load(Some(config_path.clone())).unwrap();
         assert_eq!(config.release_history_limit(), 5);
+
+        fs::write(&config_path, "[release]\nhistory_limit = 0\n").unwrap();
+        let config = ProjectConfig::load(Some(config_path)).unwrap();
+        assert_eq!(config.release_history_limit(), 0);
     }
 
     #[test]

@@ -72,9 +72,9 @@ release keeps:
 history_limit = 10
 ```
 
-- `history_limit` defaults to `0`, which keeps every revision. Otherwise it
-  must be at least `2`, so the previous revision remains available to roll
-  back to.
+- `history_limit` defaults to `5`. Set it to `0` to keep every revision.
+  Any other value must be at least `2`, so the previous revision remains
+  available to roll back to.
 - After a revision deploys successfully, the oldest revisions beyond the limit
   are deleted. A failed apply deletes nothing, so the last known-good revision
   and anything still live stay recorded.

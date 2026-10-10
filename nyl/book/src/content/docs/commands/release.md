@@ -17,8 +17,8 @@ and the set of applied resources in a Kubernetes Secret in the release namespace
 The `release` subcommands let you inspect that history and roll back to a previous
 revision. Configure `[release] history_limit` in
 [`nyl.toml`](/nyl/configuration/#release-history) or pass
-`nyl apply --history-limit` to bound how many revisions are kept. A successful
-rollback applies the `nyl.toml` limit too.
+`nyl apply --history-limit` to change how many revisions are kept (five by
+default; `0` keeps all). A successful rollback applies the `nyl.toml` limit too.
 
 ## Subcommands
 
