@@ -123,9 +123,9 @@ Kubernetes Secret in the release namespace. Limit how many revisions each
 release keeps:</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="toml"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">[release]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">history_limit</span><span style="--0:#D6DEEB;--1:#403F53"> = </span><span style="--0:#F78C6C;--1:#AA0982">10</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[release]history_limit = 10"><div></div></button></div></figure></div>
 <ul>
-<li><code dir="auto">history_limit</code> defaults to <code dir="auto">0</code>, which keeps every revision. Otherwise it
-must be at least <code dir="auto">2</code>, so the previous revision remains available to roll
-back to.</li>
+<li><code dir="auto">history_limit</code> defaults to <code dir="auto">5</code>. Set it to <code dir="auto">0</code> to keep every revision.
+Any other value must be at least <code dir="auto">2</code>, so the previous revision remains
+available to roll back to.</li>
 <li>After a revision deploys successfully, the oldest revisions beyond the limit
 are deleted. A failed apply deletes nothing, so the last known-good revision
 and anything still live stay recorded.</li>

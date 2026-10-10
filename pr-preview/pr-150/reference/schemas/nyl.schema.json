@@ -152,8 +152,8 @@
       "description": "Release history settings in the `[release]` section of `nyl.toml`.",
       "properties": {
         "history_limit": {
-          "default": 0,
-          "description": "Maximum number of revisions kept per release. After a revision deploys\nsuccessfully through `nyl apply` or `nyl release rollback`, the oldest\nrevisions beyond this limit are deleted. `0` keeps every revision; otherwise\nthe limit must be at least `2` so the previous revision stays available to\nroll back to.",
+          "default": 5,
+          "description": "Maximum number of revisions kept per release, `5` by default. After a\nrevision deploys successfully through `nyl apply` or `nyl release rollback`,\nthe oldest revisions beyond this limit are deleted. `0` keeps every revision;\notherwise the limit must be at least `2` so the previous revision stays\navailable to roll back to.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -271,7 +271,7 @@
     "release": {
       "$ref": "#/$defs/ReleaseSettings",
       "default": {
-        "history_limit": 0
+        "history_limit": 5
       },
       "description": "Release history retention for `nyl apply` and `nyl release rollback`."
     },

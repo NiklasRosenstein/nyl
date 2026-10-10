@@ -122,7 +122,7 @@ For shared rendering behavior and namespace resolution details, see
 <li>Nyl accepts one entry file. <code dir="auto">Release.spec.include</code> can attach additional relative manifest files and glob matches; directory arguments are not supported.</li>
 <li>A <code dir="auto">Release</code> resource in the manifest provides release metadata automatically.</li>
 <li>Release state is tracked in Kubernetes Secrets in the release namespace. Use <a href="/nyl/pr-preview/pr-150/commands/release/"><code dir="auto">nyl release</code></a> to inspect history or <a href="/nyl/pr-preview/pr-150/commands/release/#rollback">roll back</a> to a previous revision.</li>
-<li>Every revision is kept unless a history limit is configured. With a limit, the oldest revisions are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.</li>
+<li>Each release keeps its five most recent revisions unless <code dir="auto">[release] history_limit</code> says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.</li>
 <li>The release namespace is created when it is missing, before the manifests are
 applied. Nyl does not own that namespace and never prunes it. Other namespaces
 a release writes to, including <code dir="auto">spec.additionalNamespaces</code>, need their own
