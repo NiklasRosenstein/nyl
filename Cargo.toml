@@ -19,7 +19,7 @@ nyl-render = { path = "crates/nyl-render" }
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 
 # Templates
-minijinja = { version = "2.5", features = ["builtins", "custom_syntax"] }
+minijinja = { version = "3.0", features = ["builtins", "custom_syntax"] }
 
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
