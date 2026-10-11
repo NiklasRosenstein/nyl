@@ -4,7 +4,8 @@ use futures::stream::{self, StreamExt};
 use kube::api::DynamicObject;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 
 use crate::{
     cli::{
@@ -147,9 +148,10 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
     };
 
     // 5. Create the release namespace before the resources that live in it, and
-    //    record the new revision before touching anything else, so a concurrent
-    //    apply of the same release fails here rather than after both changed the
-    //    cluster. Nyl creates this namespace either way to store release state.
+    //    record the new revision before touching anything else, so an apply that
+    //    computed the same revision concurrently fails here rather than after both
+    //    changed the cluster. Nyl creates this namespace either way to store release
+    //    state.
     let storage = KubernetesReleaseStorage::new(client);
     let renderer = ApplyRenderer::new(&duplicates);
     let recorder = match &release_identity {
@@ -172,45 +174,43 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         None => None,
     };
 
-    // 6. Apply manifests, printing each outcome as it completes.
-    let apply_started = Instant::now();
-    let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |event| {
-        renderer.event(event);
-    })
-    .await?;
-    timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
-
-    // 7. Complete the revision, prune resources no longer desired, and supersede the
-    //    previous revision.
-    let release = match recorder {
-        Some(recorder) => {
-            let release_started = Instant::now();
-            let release = recorder
-                .complete(&kube_client, &apply_result, &mut scopes, concurrency, &mut |event| {
-                    renderer.event(event);
-                })
-                .await?;
-            timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
-            Some(release)
+    // 6. Apply manifests, printing each outcome as it completes, then complete the
+    //    revision, prune resources no longer desired, and supersede the previous one.
+    let Some(recorder) = recorder else {
+        let apply_started = Instant::now();
+        let apply_result = apply_sorted_manifests(&kube_client, &desired_manifests, concurrency, &mut |event| {
+            renderer.event(event);
+        })
+        .await?;
+        timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
+        renderer.summary(&ApplyReport {
+            outcomes: &apply_result.outcomes,
+            failed_count: apply_result.failed_count,
+            prune_failed_count: 0,
+            release: None,
+            timings: &timings,
+        });
+        if apply_result.failed_count > 0 {
+            return Err(NylError::Other(format!(
+                "Apply completed with {} resource(s) failed to apply",
+                apply_result.failed_count
+            )));
         }
-        None => None,
+        return Ok(());
     };
 
-    renderer.summary(&ApplyReport {
-        outcomes: &apply_result.outcomes,
-        failed_count: apply_result.failed_count,
-        release: release.as_ref(),
-        timings: &timings,
-    });
-
-    if apply_result.failed_count > 0 {
-        return Err(NylError::Other(format!(
-            "Apply completed with {} error(s)",
-            apply_result.failed_count
-        )));
-    }
-
-    Ok(())
+    let run = recorder
+        .run(
+            &kube_client,
+            &desired_manifests,
+            &mut scopes,
+            concurrency,
+            &mut timings,
+            &mut |event| renderer.event(event),
+        )
+        .await?;
+    renderer.summary(&run.report(&timings));
+    run.error("Apply").map_or(Ok(()), Err)
 }
 
 /// Resolve the release name and namespace from the rendered Release or the CLI flags.
@@ -240,7 +240,8 @@ pub(crate) struct ApplyExecutionResult {
 /// Kinds the cluster does not know keep the namespace their manifest names.
 #[derive(Default)]
 pub(crate) struct ObjectScopes {
-    namespaced: HashMap<(String, String), bool>,
+    /// `None` when the lookup failed, so it is not repeated.
+    namespaced: HashMap<(String, String), Option<bool>>,
 }
 
 impl ObjectScopes {
@@ -251,12 +252,14 @@ impl ObjectScopes {
             if self.namespaced.contains_key(&group_kind) {
                 continue;
             }
-            match client.is_namespaced(&key.gvk).await {
-                Ok(namespaced) => {
-                    self.namespaced.insert(group_kind, namespaced);
+            let namespaced = match client.is_namespaced(&key.gvk).await {
+                Ok(namespaced) => Some(namespaced),
+                Err(err) => {
+                    tracing::debug!(resource = %key, error = %err, "Kind scope unknown; keeping its namespace");
+                    None
                 }
-                Err(err) => tracing::debug!(resource = %key, error = %err, "Kind scope unknown; keeping its namespace"),
-            }
+            };
+            self.namespaced.insert(group_kind, namespaced);
         }
     }
 
@@ -265,6 +268,7 @@ impl ObjectScopes {
             .namespaced
             .get(&(key.gvk.group.clone(), key.gvk.kind.clone()))
             .copied()
+            .flatten()
             .unwrap_or(true);
         key.object_identity(namespaced)
     }
@@ -372,12 +376,21 @@ async fn run_concurrently<T, R, Fut>(
     }
 }
 
+/// How long pruning waits for deleted resources to terminate before deleting the
+/// resources they may depend on.
+const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
+
 /// Delete resources no longer desired, at most `concurrency` at a time, and return
 /// the keys that failed to delete.
 ///
 /// Resources are deleted in reverse apply order ([`ResourceOrdering::prune_batches`]),
-/// dependents first; the resources of one kind are deleted concurrently and each
-/// batch finishes before the next starts.
+/// dependents first; the resources of one kind are deleted concurrently. Before the
+/// next batch, pruning waits until the deleted resources are gone, so a resource
+/// whose finalizer needs its controller, CRD, or webhook is finalized before those
+/// are deleted. Resources still terminating after [`PRUNE_TERMINATION_TIMEOUT`] are
+/// reported and pruning continues. A resource whose kind no longer exists, such as a
+/// custom resource whose CRD is gone, is already deleted.
 async fn prune_resources<'k>(
     client: &dyn KubeClient,
     mut keys: Vec<&'k ResourceKey>,
@@ -390,22 +403,81 @@ async fn prune_resources<'k>(
     }
     on_event(ApplyEvent::PruneStarted { count: keys.len() });
     let batches = ResourceOrdering::prune_batches(&mut keys);
-    for batch in batches {
+    let last = batches.len() - 1;
+    for (position, batch) in batches.into_iter().enumerate() {
+        let mut deleted = Vec::new();
         run_concurrently(
             keys[batch].iter().copied(),
             concurrency,
-            |key: &ResourceKey| client.delete_resource(&key.gvk, key.namespace.as_deref(), &key.name),
+            |key: &ResourceKey| async move {
+                match client
+                    .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+                    .await
+                {
+                    Err(err) if err.is_api_resource_not_found_error() => Ok(()),
+                    result => result,
+                }
+            },
             |key, result| {
                 on_event(ApplyEvent::Pruned { key, result: &result });
-                if result.is_err() {
+                if result.is_ok() {
+                    deleted.push(key);
+                } else {
                     failed.push(key);
                 }
             },
         )
         .await;
+        if position < last {
+            wait_until_terminated(client, deleted, concurrency, on_event).await;
+        }
     }
     on_event(ApplyEvent::PruneFinished);
     failed
+}
+
+/// Wait until every deleted resource is gone from the cluster, or the timeout passes.
+async fn wait_until_terminated(
+    client: &dyn KubeClient,
+    mut remaining: Vec<&ResourceKey>,
+    concurrency: usize,
+    on_event: &mut ApplyEventSink<'_>,
+) {
+    let deadline = tokio::time::Instant::now() + PRUNE_TERMINATION_TIMEOUT;
+    let mut announced = false;
+    loop {
+        let mut terminating = Vec::new();
+        run_concurrently(
+            remaining.iter().copied(),
+            concurrency,
+            |key: &ResourceKey| client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name),
+            |key, result| match result {
+                Ok(Some(_)) => terminating.push(key),
+                // Gone, or its kind is gone with it.
+                Ok(None) => {}
+                Err(err) if err.is_api_resource_not_found_error() => {}
+                // Keep waiting on transient errors; the deadline bounds the wait.
+                Err(err) => {
+                    tracing::debug!(resource = %key, error = %err, "Checking pruned resource failed");
+                    terminating.push(key);
+                }
+            },
+        )
+        .await;
+        remaining = terminating;
+        if remaining.is_empty() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            on_event(ApplyEvent::PruneWaitTimedOut { keys: &remaining });
+            return;
+        }
+        if !announced {
+            on_event(ApplyEvent::PruneWaiting { count: remaining.len() });
+            announced = true;
+        }
+        tokio::time::sleep(PRUNE_TERMINATION_POLL).await;
+    }
 }
 
 /// Resolve missing namespaces and collapse documents describing one object, the
@@ -605,18 +677,89 @@ impl<'s> ReleaseRecorder<'s> {
         })
     }
 
+    /// Apply `manifests` and record the outcome, recording the phase timings.
+    ///
+    /// If anything fails or the user interrupts (Ctrl-C) before the revision is
+    /// completed, the reserved revision is marked `Failed`, so it never stays
+    /// `Rendered` and later applies treat its keys as partially applied.
+    #[allow(clippy::too_many_arguments)] // Each is an independent input of one apply.
+    pub(crate) async fn run(
+        self,
+        client: &dyn KubeClient,
+        manifests: &[serde_json::Value],
+        scopes: &mut ObjectScopes,
+        concurrency: usize,
+        timings: &mut Vec<PhaseTiming>,
+        on_event: &mut ApplyEventSink<'_>,
+    ) -> Result<ReleaseRun> {
+        let storage = self.storage;
+        let reserved = (
+            self.release.release_name.clone(),
+            self.release.release_namespace.clone(),
+            self.release.revision,
+        );
+        let completed = AtomicBool::new(false);
+        let work = async {
+            let apply_started = Instant::now();
+            let apply = apply_sorted_manifests(client, manifests, concurrency, on_event).await?;
+            timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
+
+            let release_started = Instant::now();
+            let (release, prune_failed_count) = self
+                .complete(client, &apply, scopes, concurrency, on_event, &completed)
+                .await?;
+            timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
+            Ok(ReleaseRun {
+                apply,
+                release,
+                prune_failed_count,
+            })
+        };
+        let result = tokio::select! {
+            result = work => result,
+            _ = tokio::signal::ctrl_c() => Err(NylError::Other("Interrupted".to_string())),
+        };
+
+        if let Err(err) = &result {
+            if !completed.load(AtomicOrdering::SeqCst) {
+                let (release_name, release_namespace, revision) = reserved;
+                let error = format!("apply did not complete: {err}");
+                if let Err(mark_err) = storage
+                    .update_release_status(
+                        &release_name,
+                        &release_namespace,
+                        revision,
+                        ReleaseStatus::Failed,
+                        Some(error),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to mark release {} revision {} failed: {}",
+                        release_name,
+                        revision,
+                        mark_err
+                    );
+                }
+            }
+        }
+        result
+    }
+
     /// Record the apply's outcome, prune, and supersede the previous revision.
+    /// Returns the recorded revision and how many resources failed to prune.
     ///
     /// Keys that fail to prune stay in the new revision, so the next apply retries
-    /// deleting them.
-    pub(crate) async fn complete(
+    /// deleting them. `completed` is set once the revision is recorded.
+    async fn complete(
         self,
         client: &dyn KubeClient,
         apply_result: &ApplyExecutionResult,
         scopes: &mut ObjectScopes,
         concurrency: usize,
         on_event: &mut ApplyEventSink<'_>,
-    ) -> Result<ReleaseState> {
+        completed: &AtomicBool,
+    ) -> Result<(ReleaseState, usize)> {
         let Self {
             storage,
             mut release,
@@ -639,6 +782,7 @@ impl<'s> ReleaseRecorder<'s> {
         // Only a fully applied revision supersedes and prunes; a Failed one leaves
         // the previous live state in place.
         let mut superseded = None;
+        let mut prune_failed_count = 0;
         if release.status == ReleaseStatus::Deployed {
             if let Some(previous) = appended_to {
                 // Append mode does not prune; it only supersedes the revision it merged.
@@ -661,15 +805,48 @@ impl<'s> ReleaseRecorder<'s> {
                 scopes.load(client, &live_keys_list).await;
                 let to_prune = keys_to_prune(&live_keys, &release.resource_keys, scopes);
                 let failed = prune_resources(client, to_prune, concurrency, on_event).await;
+                prune_failed_count = failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
             }
         }
 
         storage.complete_release(&release).await?;
+        completed.store(true, AtomicOrdering::SeqCst);
         if let Some(previous) = &superseded {
             mark_superseded(storage, previous).await;
         }
-        Ok(release)
+        Ok((release, prune_failed_count))
+    }
+}
+
+/// What applying and recording a release produced.
+pub(crate) struct ReleaseRun {
+    pub(crate) apply: ApplyExecutionResult,
+    pub(crate) release: ReleaseState,
+    /// Resources that failed to prune; they stay recorded for the next apply.
+    pub(crate) prune_failed_count: usize,
+}
+
+impl ReleaseRun {
+    /// The summary of this run.
+    pub(crate) fn report<'a>(&'a self, timings: &'a [PhaseTiming]) -> ApplyReport<'a> {
+        ApplyReport {
+            outcomes: &self.apply.outcomes,
+            failed_count: self.apply.failed_count,
+            prune_failed_count: self.prune_failed_count,
+            release: Some(&self.release),
+            timings,
+        }
+    }
+
+    /// The command's error when anything failed to apply or prune.
+    pub(crate) fn error(&self, command: &str) -> Option<NylError> {
+        let (failed, pruned) = (self.apply.failed_count, self.prune_failed_count);
+        (failed > 0 || pruned > 0).then(|| {
+            NylError::Other(format!(
+                "{command} completed with {failed} resource(s) failed to apply and {pruned} failed to prune"
+            ))
+        })
     }
 }
 
@@ -949,6 +1126,12 @@ mod tests {
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
         events: std::sync::Mutex<Vec<String>>,
+        /// Discovery refreshes fail.
+        refresh_fails: bool,
+        /// Deleted resources that stay terminating for this many reads, by name.
+        terminating_reads: std::sync::Mutex<HashMap<String, usize>>,
+        /// A kind the cluster no longer serves.
+        removed_kind: &'static str,
     }
 
     impl LatencyClient {
@@ -960,6 +1143,9 @@ mod tests {
                 in_flight: AtomicUsize::new(0),
                 max_in_flight: AtomicUsize::new(0),
                 events: std::sync::Mutex::default(),
+                refresh_fails: false,
+                terminating_reads: std::sync::Mutex::default(),
+                removed_kind: "",
             }
         }
 
@@ -983,6 +1169,14 @@ mod tests {
             namespace: Option<&str>,
             name: &str,
         ) -> Result<Option<DynamicObject>> {
+            if let Some(reads) = self.terminating_reads.lock().unwrap().get_mut(name) {
+                if *reads > 0 {
+                    *reads -= 1;
+                    let terminating = json!({"apiVersion": "v1", "kind": gvk.kind, "metadata": {"name": name}});
+                    return Ok(Some(serde_json::from_value(terminating).unwrap()));
+                }
+                self.events.lock().unwrap().push(format!("gone {name}"));
+            }
             self.inner.get_resource(gvk, namespace, name).await
         }
 
@@ -1025,6 +1219,9 @@ mod tests {
             if name == self.failing {
                 return Err(NylError::Other("failed calling webhook".to_string()));
             }
+            if gvk.kind == self.removed_kind {
+                return Err(NylError::ApiResourceNotFound(gvk.kind.clone()));
+            }
             self.inner.delete_resource(gvk, namespace, name).await
         }
 
@@ -1036,6 +1233,9 @@ mod tests {
             tokio::time::sleep(self.latency).await;
             let kinds: Vec<&str> = required.iter().map(|gvk| gvk.kind.as_str()).collect();
             self.events.lock().unwrap().push(format!("refresh {}", kinds.join(",")));
+            if self.refresh_fails {
+                return Err(NylError::Kubernetes("connection reset".to_string()));
+            }
             Ok(())
         }
     }
@@ -1349,17 +1549,18 @@ mod tests {
         assert_eq!(reserved.status, ReleaseStatus::Rendered);
         assert_eq!(reserved.resource_keys, manifest_keys(&manifests).unwrap());
 
-        let applied = apply_sorted_manifests(&client, &manifests, 8, &mut |_| {})
+        let run = recorder
+            .run(&client, &manifests, &mut scopes, 8, &mut Vec::new(), &mut |_| {})
             .await
             .unwrap();
-        let release = recorder
-            .complete(&client, &applied, &mut scopes, 8, &mut |_| {})
-            .await
-            .unwrap();
+        let release = &run.release;
 
         assert_eq!(release.status, ReleaseStatus::Deployed);
         let names: Vec<&str> = release.resource_keys.iter().map(|key| key.name.as_str()).collect();
         assert_eq!(names, vec!["kept", "stuck"]);
+        // A failed prune fails the command although the revision is deployed.
+        assert_eq!(run.prune_failed_count, 1);
+        assert!(run.error("Apply").is_some());
         let stored = storage.get_release("app", "app", 2).await.unwrap().unwrap();
         assert_eq!(stored.status, ReleaseStatus::Deployed);
         assert_eq!(stored.resource_keys, release.resource_keys);
@@ -1386,11 +1587,11 @@ mod tests {
         let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &[], false, &client, &mut scopes)
             .await
             .unwrap();
-        let applied = apply_sorted_manifests(&client, &[], 8, &mut |_| {}).await.unwrap();
         let release = recorder
-            .complete(&client, &applied, &mut scopes, 8, &mut |_| {})
+            .run(&client, &[], &mut scopes, 8, &mut Vec::new(), &mut |_| {})
             .await
-            .unwrap();
+            .unwrap()
+            .release;
 
         assert_eq!(release.status, ReleaseStatus::Deployed);
         assert!(release.resource_keys.is_empty());
@@ -1420,5 +1621,72 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![1]);
+    }
+
+    /// An apply that fails before its revision is completed marks the reserved
+    /// revision Failed instead of leaving it Rendered.
+    #[tokio::test(start_paused = true)]
+    async fn test_release_recorder_marks_revision_failed_when_apply_errors() {
+        let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+        let client = LatencyClient {
+            refresh_fails: true,
+            ..LatencyClient::new("")
+        };
+        // The refresh after the CRD batch fails, aborting the apply.
+        let manifests = vec![
+            json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": {"name": "widgets.example.com"}, "spec": {"group": "example.com"}}),
+            json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "w", "namespace": "app"}}),
+        ];
+        let mut scopes = ObjectScopes::default();
+
+        let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &manifests, false, &client, &mut scopes)
+            .await
+            .unwrap();
+        let result = recorder
+            .run(&client, &manifests, &mut scopes, 8, &mut Vec::new(), &mut |_| {})
+            .await;
+
+        assert!(result.is_err());
+        let revision = storage.get_release("app", "app", 1).await.unwrap().unwrap();
+        assert_eq!(revision.status, ReleaseStatus::Failed);
+        assert!(revision.error.unwrap().contains("connection reset"));
+    }
+
+    /// Pruning deletes what a terminating resource may depend on only once it is gone.
+    #[tokio::test(start_paused = true)]
+    async fn test_prune_resources_waits_for_terminating_dependents() {
+        let client = LatencyClient::new("");
+        client.terminating_reads.lock().unwrap().insert("widget".to_string(), 3);
+        let keys = [
+            key("apps/v1", "Deployment", Some("app"), "controller"),
+            key("example.com/v1", "Widget", Some("app"), "widget"),
+        ];
+
+        let mut waiting = 0;
+        let failed = prune_resources(&client, keys.iter().collect(), 8, &mut |event| {
+            if let ApplyEvent::PruneWaiting { count } = event {
+                waiting = count;
+            }
+        })
+        .await;
+
+        assert!(failed.is_empty());
+        assert_eq!(waiting, 1);
+        assert!(client.position("gone widget") < client.position("delete-start controller"));
+    }
+
+    /// A resource whose kind the cluster no longer serves, such as a custom resource
+    /// whose CRD was pruned, is already deleted, so it is not retried forever.
+    #[tokio::test(start_paused = true)]
+    async fn test_prune_resources_treats_removed_kinds_as_deleted() {
+        let client = LatencyClient {
+            removed_kind: "Widget",
+            ..LatencyClient::new("")
+        };
+        let keys = [key("example.com/v1", "Widget", Some("app"), "widget")];
+
+        let failed = prune_resources(&client, keys.iter().collect(), 8, &mut |_| {}).await;
+
+        assert!(failed.is_empty());
     }
 }

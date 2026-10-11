@@ -104,7 +104,9 @@ pub struct KubeRsClient {
     /// API discovery and resource index, rebuildable via [`Self::refresh_discovery`]
     /// after CRDs are applied so newly registered custom resource kinds become resolvable.
     state: RwLock<DiscoveryState>,
-    crd_scope_cache: Mutex<HashMap<GroupVersionKind, Option<bool>>>,
+    /// Scope of every served version of every CRD, listed once on the first lookup a
+    /// discovery index cannot answer and dropped when discovery is refreshed.
+    crd_scopes: Mutex<Option<Arc<HashMap<GroupVersionKind, bool>>>>,
 }
 
 impl KubeRsClient {
@@ -192,7 +194,7 @@ impl KubeRsClient {
             aggregated_discovery: AtomicBool::new(!run.aggregated_unsupported),
             initial_discovery: (run.mode, elapsed),
             state: RwLock::new(DiscoveryState::new(run.discovery)),
-            crd_scope_cache: Mutex::new(HashMap::new()),
+            crd_scopes: Mutex::new(None),
         })
     }
 
@@ -218,6 +220,8 @@ impl KubeRsClient {
         }
         let state = DiscoveryState::new(run.discovery);
         *self.state.write().unwrap() = state;
+        // CRDs may have changed as well; list them again on the next miss.
+        *self.crd_scopes.lock().unwrap() = None;
         Ok(())
     }
 
@@ -281,37 +285,29 @@ impl KubeRsClient {
             return Ok(None);
         }
 
-        if let Some(cached) = self.crd_scope_cache.lock().unwrap().get(gvk).copied() {
-            return Ok(cached);
-        }
-
-        let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
-        let crds = match crd_api.list(&ListParams::default()).await {
-            Ok(crds) => crds,
-            Err(kube::Error::Api(err)) if err.code == 403 || err.code == 404 => {
-                tracing::debug!(
-                    code = err.code,
-                    message = %err.message,
-                    "Unable to list CRDs for scope fallback; proceeding without CRD fallback"
-                );
-                self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
-                return Ok(None);
-            }
-            Err(err) => return Err(err.into()),
+        let cached = self.crd_scopes.lock().unwrap().clone();
+        let scopes = if let Some(scopes) = cached {
+            scopes
+        } else {
+            // One list answers every kind, so many unknown kinds cost one request.
+            let crd_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &crd_api_resource());
+            let scopes = match crd_api.list(&ListParams::default()).await {
+                Ok(crds) => crds.items.iter().flat_map(crd_scope_entries).collect(),
+                Err(kube::Error::Api(err)) if err.code == 403 || err.code == 404 => {
+                    tracing::debug!(
+                        code = err.code,
+                        message = %err.message,
+                        "Unable to list CRDs for scope fallback; proceeding without CRD fallback"
+                    );
+                    HashMap::new()
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let scopes = Arc::new(scopes);
+            *self.crd_scopes.lock().unwrap() = Some(scopes.clone());
+            scopes
         };
-
-        for crd in crds.items {
-            if let Some(namespaced) = scope_from_crd_for_gvk(&crd, gvk) {
-                self.crd_scope_cache
-                    .lock()
-                    .unwrap()
-                    .insert(gvk.clone(), Some(namespaced));
-                return Ok(Some(namespaced));
-            }
-        }
-
-        self.crd_scope_cache.lock().unwrap().insert(gvk.clone(), None);
-        Ok(None)
+        Ok(scopes.get(gvk).copied())
     }
 }
 
@@ -769,33 +765,46 @@ fn crd_api_resource() -> ApiResource {
     }
 }
 
-fn scope_from_crd_for_gvk(crd: &DynamicObject, gvk: &GroupVersionKind) -> Option<bool> {
-    let value = serde_json::to_value(crd).ok()?;
-    let spec = value.get("spec")?;
-    let group = spec.get("group")?.as_str()?;
-    let kind = spec.get("names")?.get("kind")?.as_str()?;
-    let scope = spec.get("scope")?.as_str()?;
-    let versions = spec.get("versions")?.as_array()?;
-
-    if group != gvk.group || kind != gvk.kind {
-        return None;
-    }
-
+/// The scope of every served version of a CRD's kind (`true` when namespaced).
+fn crd_scope_entries(crd: &DynamicObject) -> Vec<(GroupVersionKind, bool)> {
+    let Some(spec) = crd.data.get("spec") else {
+        return Vec::new();
+    };
+    let (Some(group), Some(kind), Some(versions)) = (
+        spec.get("group").and_then(serde_json::Value::as_str),
+        spec.get("names")
+            .and_then(|names| names.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        spec.get("versions").and_then(serde_json::Value::as_array),
+    ) else {
+        return Vec::new();
+    };
+    let namespaced = match spec.get("scope").and_then(serde_json::Value::as_str) {
+        Some("Namespaced") => true,
+        Some("Cluster") => false,
+        _ => return Vec::new(),
+    };
     // Mirror Kubernetes behavior: only served versions are requestable.
-    let version_is_served = versions.iter().any(|v| {
-        let name = v.get("name").and_then(serde_json::Value::as_str);
-        let served = v.get("served").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        name == Some(gvk.version.as_str()) && served
-    });
-    if !version_is_served {
-        return None;
-    }
+    versions
+        .iter()
+        .filter(|version| version.get("served").and_then(serde_json::Value::as_bool) == Some(true))
+        .filter_map(|version| version.get("name").and_then(serde_json::Value::as_str))
+        .map(|version| {
+            let gvk = GroupVersionKind {
+                group: group.to_string(),
+                version: version.to_string(),
+                kind: kind.to_string(),
+            };
+            (gvk, namespaced)
+        })
+        .collect()
+}
 
-    match scope {
-        "Namespaced" => Some(true),
-        "Cluster" => Some(false),
-        _ => None,
-    }
+#[cfg(test)]
+fn scope_from_crd_for_gvk(crd: &DynamicObject, gvk: &GroupVersionKind) -> Option<bool> {
+    crd_scope_entries(crd)
+        .into_iter()
+        .find_map(|(served, namespaced)| (&served == gvk).then_some(namespaced))
 }
 
 impl Default for MockKubeClient {

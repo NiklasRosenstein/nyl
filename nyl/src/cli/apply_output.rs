@@ -29,6 +29,12 @@ pub(crate) enum ApplyEvent<'a> {
         key: &'a ResourceKey,
         result: &'a Result<()>,
     },
+    /// `count` deleted resources are still terminating (finalizers); the resources
+    /// they may depend on are deleted once they are gone.
+    PruneWaiting { count: usize },
+    /// Deleted resources still had not terminated when the wait timed out; pruning
+    /// continues without them.
+    PruneWaitTimedOut { keys: &'a [&'a ResourceKey] },
     /// Pruning finished.
     PruneFinished,
 }
@@ -73,6 +79,8 @@ pub(crate) struct ApplyReport<'a> {
     /// Successful outcomes in manifest order.
     pub(crate) outcomes: &'a [ApplyOutcome],
     pub(crate) failed_count: usize,
+    /// Resources that failed to prune; they stay recorded for the next apply to retry.
+    pub(crate) prune_failed_count: usize,
     /// The recorded revision, unless the apply ran without release tracking.
     pub(crate) release: Option<&'a ReleaseState>,
     /// Phase durations, in the order the phases ran.
@@ -103,6 +111,14 @@ impl<'a> ApplyRenderer<'a> {
             ApplyEvent::PruneStarted { count } => println!("\nPruning {} resources...", count),
             ApplyEvent::Pruned { key, result: Ok(()) } => println!("  ✓ Deleted {}", key),
             ApplyEvent::Pruned { key, result: Err(e) } => println!("  ✗ Failed to delete {}: {}", key, e),
+            ApplyEvent::PruneWaiting { count } => {
+                println!("  … waiting for {} deleted resource(s) to terminate", count);
+            }
+            ApplyEvent::PruneWaitTimedOut { keys } => {
+                for key in keys {
+                    println!("  {} {} is still terminating; continuing", "!".yellow().bold(), key);
+                }
+            }
             ApplyEvent::PruneFinished => println!(),
         }
     }
@@ -147,6 +163,12 @@ impl<'a> ApplyRenderer<'a> {
         if report.failed_count > 0 {
             parts.push(format!("{} failed", report.failed_count.to_string().red()));
         }
+        if report.prune_failed_count > 0 {
+            parts.push(format!(
+                "{} failed to prune",
+                report.prune_failed_count.to_string().red()
+            ));
+        }
         println!("Summary: {}", parts.join(", "));
 
         if !report.timings.is_empty() {
@@ -160,7 +182,12 @@ impl<'a> ApplyRenderer<'a> {
 
         if let Some(release) = report.release {
             println!();
-            if release.status == ReleaseStatus::Deployed {
+            if release.status == ReleaseStatus::Deployed && report.prune_failed_count > 0 {
+                println!(
+                    "Release: {} revision {} deployed to namespace {}; {} resource(s) failed to prune and will be retried by the next apply",
+                    release.release_name, release.revision, release.release_namespace, report.prune_failed_count
+                );
+            } else if release.status == ReleaseStatus::Deployed {
                 println!(
                     "Release: {} revision {} deployed successfully to namespace {}",
                     release.release_name, release.revision, release.release_namespace

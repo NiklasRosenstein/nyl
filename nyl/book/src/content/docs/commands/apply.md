@@ -67,19 +67,24 @@ objects ignore a namespace), only the last one is applied and recorded. A resour
 that fails to apply does not stop the others; the release is recorded as failed
 and the command exits non-zero.
 
-Nyl records the new release revision before applying anything, so a concurrent
-apply of the same release fails before it changes the cluster. A release that
-renders no resources is still recorded, and its previously deployed resources are
-pruned.
+Nyl records the new release revision before applying anything. Two applies that
+record the same revision at the same time therefore fail before the second
+changes the cluster, but Nyl does not otherwise lock a release: do not run applies
+of one release in parallel. If an apply fails or is interrupted (Ctrl-C) before it
+completes, its revision is recorded as failed. A release that renders no resources
+is still recorded, and its previously deployed resources are pruned.
 
 Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
 configurations before the backends they call, custom resources and objects of
 aggregated APIs before the CustomResourceDefinitions and APIServices behind them,
 APIServices before their backends, and Namespaces last. As with apply, the
-resources of one kind are deleted concurrently. A resource that fails to delete stays recorded
-in the new revision, so the next apply retries deleting it. Changing a resource's
-apiVersion does not prune it.
+resources of one kind are deleted concurrently. Before deleting the next kind,
+Nyl waits until the deleted resources are gone, so finalizers run while the
+controllers, CRDs, and webhooks they need still exist. Resources still terminating
+after two minutes are reported and pruning continues. A resource that fails to
+delete stays recorded in the new revision, so the next apply retries deleting it,
+and the command exits non-zero. Changing a resource's apiVersion does not prune it.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by

@@ -3,10 +3,9 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::{
-    cli::apply_output::{ApplyRenderer, ApplyReport, Phase, PhaseTiming},
+    cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
     cli::commands::apply::{
-        apply_sorted_manifests, collapse_rendered_duplicates, ensure_namespace_exists, ReleaseRecorder,
-        DEFAULT_APPLY_CONCURRENCY,
+        collapse_rendered_duplicates, ensure_namespace_exists, ReleaseRecorder, DEFAULT_APPLY_CONCURRENCY,
     },
     cli::commands::cluster::load_target_kube_config,
     config::ProjectConfig,
@@ -114,37 +113,20 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let renderer = ApplyRenderer::new(&duplicates);
     let (discovery_mode, discovery_elapsed) = kube_client.initial_discovery();
     let mut timings = vec![PhaseTiming::new(Phase::Discovery(discovery_mode), discovery_elapsed)];
-    let apply_started = std::time::Instant::now();
-    let apply_result = apply_sorted_manifests(&kube_client, &manifests, concurrency, &mut |event| {
-        renderer.event(event);
-    })
-    .await?;
-    timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
-
-    // Complete the revision, supersede the previous one, and prune, reusing the apply path.
-    let release_started = std::time::Instant::now();
-    let release = recorder
-        .complete(&kube_client, &apply_result, &mut scopes, concurrency, &mut |event| {
-            renderer.event(event);
-        })
+    // Apply, then complete the revision, supersede the previous one, and prune,
+    // reusing the apply path.
+    let run = recorder
+        .run(
+            &kube_client,
+            &manifests,
+            &mut scopes,
+            concurrency,
+            &mut timings,
+            &mut |event| renderer.event(event),
+        )
         .await?;
-    timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
-
-    renderer.summary(&ApplyReport {
-        outcomes: &apply_result.outcomes,
-        failed_count: apply_result.failed_count,
-        release: Some(&release),
-        timings: &timings,
-    });
-
-    if apply_result.failed_count > 0 {
-        return Err(NylError::Other(format!(
-            "Rollback completed with {} error(s)",
-            apply_result.failed_count
-        )));
-    }
-
-    Ok(())
+    renderer.summary(&run.report(&timings));
+    run.error("Rollback").map_or(Ok(()), Err)
 }
 
 /// Resolve which stored revision a rollback should target.
