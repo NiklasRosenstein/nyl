@@ -16,8 +16,8 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseState,
-        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+        enforce_release_history_limit, ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage,
+        ObjectIdentity, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -57,6 +57,17 @@ pub struct ApplyArgs {
     /// the next one starts. Use 1 to apply serially.
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
+
+    /// Maximum number of release revisions to keep; older revisions are deleted
+    /// after this apply. 0 keeps every revision. Overrides `[release] history_limit`
+    /// in nyl.toml.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "no_release",
+        value_parser = crate::config::parse_release_history_limit
+    )]
+    pub history_limit: Option<u32>,
 }
 
 /// Default bound on concurrent apply and prune requests.
@@ -199,12 +210,18 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         return Ok(());
     };
 
+    let history_limit = args
+        .history_limit
+        .unwrap_or_else(|| preflight.project_config.release_history_limit());
     let run = recorder
         .run(
             &kube_client,
             &desired_manifests,
             &mut scopes,
-            concurrency,
+            ApplySettings {
+                concurrency,
+                history_limit,
+            },
             &mut timings,
             &mut |event| renderer.event(event),
         )
@@ -682,13 +699,12 @@ impl<'s> ReleaseRecorder<'s> {
     /// If anything fails or the user interrupts (Ctrl-C) before the revision is
     /// completed, the reserved revision is marked `Failed`, so it never stays
     /// `Rendered` and later applies treat its keys as partially applied.
-    #[allow(clippy::too_many_arguments)] // Each is an independent input of one apply.
     pub(crate) async fn run(
         self,
         client: &dyn KubeClient,
         manifests: &[serde_json::Value],
         scopes: &mut ObjectScopes,
-        concurrency: usize,
+        settings: ApplySettings,
         timings: &mut Vec<PhaseTiming>,
         on_event: &mut ApplyEventSink<'_>,
     ) -> Result<ReleaseRun> {
@@ -701,12 +717,12 @@ impl<'s> ReleaseRecorder<'s> {
         let completed = AtomicBool::new(false);
         let work = async {
             let apply_started = Instant::now();
-            let apply = apply_sorted_manifests(client, manifests, concurrency, on_event).await?;
+            let apply = apply_sorted_manifests(client, manifests, settings.concurrency, on_event).await?;
             timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
 
             let release_started = Instant::now();
             let (release, prune_failed_count) = self
-                .complete(client, &apply, scopes, concurrency, on_event, &completed)
+                .complete(client, &apply, scopes, settings, on_event, &completed)
                 .await?;
             timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
             Ok(ReleaseRun {
@@ -750,13 +766,14 @@ impl<'s> ReleaseRecorder<'s> {
     /// Returns the recorded revision and how many resources failed to prune.
     ///
     /// Keys that fail to prune stay in the new revision, so the next apply retries
-    /// deleting them. `completed` is set once the revision is recorded.
+    /// deleting them. Once the revision deployed, revisions beyond the history limit
+    /// are deleted. `completed` is set once the revision is recorded.
     async fn complete(
         self,
         client: &dyn KubeClient,
         apply_result: &ApplyExecutionResult,
         scopes: &mut ObjectScopes,
-        concurrency: usize,
+        settings: ApplySettings,
         on_event: &mut ApplyEventSink<'_>,
         completed: &AtomicBool,
     ) -> Result<(ReleaseState, usize)> {
@@ -804,7 +821,7 @@ impl<'s> ReleaseRecorder<'s> {
                 let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
                 scopes.load(client, &live_keys_list).await;
                 let to_prune = keys_to_prune(&live_keys, &release.resource_keys, scopes);
-                let failed = prune_resources(client, to_prune, concurrency, on_event).await;
+                let failed = prune_resources(client, to_prune, settings.concurrency, on_event).await;
                 prune_failed_count = failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
             }
@@ -815,7 +832,63 @@ impl<'s> ReleaseRecorder<'s> {
         if let Some(previous) = &superseded {
             mark_superseded(storage, previous).await;
         }
+        prune_release_history(storage, &release, settings.history_limit).await;
         Ok((release, prune_failed_count))
+    }
+}
+
+/// How a release is applied and recorded.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ApplySettings {
+    /// Maximum number of resources applied or pruned at the same time.
+    pub(crate) concurrency: usize,
+    /// Revisions to keep after a successful apply; 0 keeps every revision.
+    pub(crate) history_limit: u32,
+}
+
+/// Delete release revisions beyond `history_limit` once `release` deployed.
+///
+/// A failed revision leaves older revisions in place: they may still describe live
+/// resources and hold the last known-good state to roll back to. Deletion errors
+/// only warn, because the resources are already applied and recorded and the next
+/// successful apply retries.
+async fn prune_release_history(storage: &dyn ReleaseStorage, release: &ReleaseState, history_limit: u32) {
+    if history_limit == 0 {
+        return;
+    }
+    if release.status != ReleaseStatus::Deployed {
+        tracing::warn!(
+            "Release history limit of {} not applied: revision {} did not deploy successfully",
+            history_limit,
+            release.revision
+        );
+        return;
+    }
+    match enforce_release_history_limit(
+        storage,
+        &release.release_name,
+        &release.release_namespace,
+        release.revision,
+        history_limit,
+    )
+    .await
+    {
+        Ok(deleted) if !deleted.is_empty() => {
+            tracing::info!(
+                "Deleted {} release revision(s) beyond the history limit of {}: {:?}",
+                deleted.len(),
+                history_limit,
+                deleted
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                "Failed to delete release revisions beyond the history limit of {}: {}",
+                history_limit,
+                e
+            );
+        }
     }
 }
 
@@ -1550,7 +1623,14 @@ mod tests {
         assert_eq!(reserved.resource_keys, manifest_keys(&manifests).unwrap());
 
         let run = recorder
-            .run(&client, &manifests, &mut scopes, 8, &mut Vec::new(), &mut |_| {})
+            .run(
+                &client,
+                &manifests,
+                &mut scopes,
+                settings(0),
+                &mut Vec::new(),
+                &mut |_| {},
+            )
             .await
             .unwrap();
         let release = &run.release;
@@ -1588,7 +1668,7 @@ mod tests {
             .await
             .unwrap();
         let release = recorder
-            .run(&client, &[], &mut scopes, 8, &mut Vec::new(), &mut |_| {})
+            .run(&client, &[], &mut scopes, settings(0), &mut Vec::new(), &mut |_| {})
             .await
             .unwrap()
             .release;
@@ -1643,7 +1723,14 @@ mod tests {
             .await
             .unwrap();
         let result = recorder
-            .run(&client, &manifests, &mut scopes, 8, &mut Vec::new(), &mut |_| {})
+            .run(
+                &client,
+                &manifests,
+                &mut scopes,
+                settings(0),
+                &mut Vec::new(),
+                &mut |_| {},
+            )
             .await;
 
         assert!(result.is_err());
@@ -1688,5 +1775,41 @@ mod tests {
         let failed = prune_resources(&client, keys.iter().collect(), 8, &mut |_| {}).await;
 
         assert!(failed.is_empty());
+    }
+
+    fn settings(history_limit: u32) -> ApplySettings {
+        ApplySettings {
+            concurrency: 8,
+            history_limit,
+        }
+    }
+
+    /// A deployed apply deletes the oldest revisions beyond the history limit.
+    #[tokio::test(start_paused = true)]
+    async fn test_release_recorder_enforces_history_limit_after_deploy() {
+        let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+        let client = LatencyClient::new("");
+        for revision in 1..=3 {
+            let status = if revision == 3 {
+                ReleaseStatus::Deployed
+            } else {
+                ReleaseStatus::Superseded
+            };
+            storage
+                .save_release(&release_with_keys(revision, status, vec![]))
+                .await
+                .unwrap();
+        }
+        let mut scopes = ObjectScopes::default();
+
+        let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &[], false, &client, &mut scopes)
+            .await
+            .unwrap();
+        recorder
+            .run(&client, &[], &mut scopes, settings(2), &mut Vec::new(), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![3, 4]);
     }
 }

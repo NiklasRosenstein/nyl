@@ -5,7 +5,8 @@ use dialoguer::Confirm;
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
     cli::commands::apply::{
-        collapse_rendered_duplicates, ensure_namespace_exists, ReleaseRecorder, DEFAULT_APPLY_CONCURRENCY,
+        collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, ReleaseRecorder,
+        DEFAULT_APPLY_CONCURRENCY,
     },
     cli::commands::cluster::load_target_kube_config,
     config::ProjectConfig,
@@ -115,12 +116,16 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let mut timings = vec![PhaseTiming::new(Phase::Discovery(discovery_mode), discovery_elapsed)];
     // Apply, then complete the revision, supersede the previous one, and prune,
     // reusing the apply path.
+    let history_limit = ProjectConfig::load(None)?.release_history_limit();
     let run = recorder
         .run(
             &kube_client,
             &manifests,
             &mut scopes,
-            concurrency,
+            ApplySettings {
+                concurrency,
+                history_limit,
+            },
             &mut timings,
             &mut |event| renderer.event(event),
         )
