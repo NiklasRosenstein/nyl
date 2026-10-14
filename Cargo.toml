@@ -37,7 +37,7 @@ minijinja = { version = "2.5", features = ["builtins", "custom_syntax"] }
 tokio = { version = "1.42", features = ["full"] }
 
 # YAML
-serde-saphyr = { version = "1.2", default-features = false, features = ["serialize", "deserialize"] }
+serde-saphyr = { version = "2.0", default-features = false, features = ["serialize", "deserialize"] }
 serde = { version = "1.0", features = ["derive"] }
 # float_roundtrip parses every float to the nearest double, which canonical
 # JSON digests depend on
