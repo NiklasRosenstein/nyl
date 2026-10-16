@@ -81,3 +81,15 @@ id = "36f53974-eda3-4035-a2d9-fc552bb8ef78"
 type = "feature"
 description = "Bound release history with `[release] history_limit` in `nyl.toml` or `nyl apply --history-limit`, keeping five revisions per release by default; after a successful apply or rollback the oldest revisions beyond the limit are deleted. Set `history_limit = 0` to keep every revision as before"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "2b8f5c1e-6a4d-4f0e-9d3b-7c1a5e8f2d64"
+type = "improvement"
+description = "Reduce `nyl apply` and `nyl release rollback` latency: use aggregated API discovery with a per-group fallback, apply resources in Argo CD's kind order with each kind's resources applied concurrently (`--concurrency`, default 8), print each resource outcome as it completes, report per-phase timings, and issue fewer release-state requests"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
+type = "breaking change"
+description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC; admission webhook configurations are applied last) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last in apply and diff; pruning deletes in reverse apply order and waits for each kind's resources to terminate before deleting the next kind, which can take longer than the previous unordered prune; a failed prune makes the command exit non-zero; a revision is recorded before applying, and an apply that fails or is interrupted records it as failed; and a release that renders no resources is recorded and prunes its previous resources instead of being skipped"
+author = "@NiklasRosenstein"

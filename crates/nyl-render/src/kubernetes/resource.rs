@@ -90,6 +90,35 @@ impl ResourceKey {
     }
 }
 
+/// A Kubernetes object independent of the API version it is addressed through.
+///
+/// Two versions of one object are one object: applying both would race, and changing
+/// a manifest's apiVersion must not prune the object it still describes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ObjectIdentity {
+    pub group: String,
+    pub kind: String,
+    /// `None` for cluster-scoped objects, whatever namespace their manifest names.
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+impl ResourceKey {
+    /// This key's object identity, given whether its kind is namespaced. A namespace
+    /// written on a cluster-scoped object is ignored, as the API server ignores it.
+    pub fn object_identity(&self, namespaced: bool) -> ObjectIdentity {
+        ObjectIdentity {
+            group: self.gvk.group.clone(),
+            kind: self.gvk.kind.clone(),
+            namespace: self
+                .namespace
+                .clone()
+                .filter(|namespace| namespaced && !namespace.is_empty()),
+            name: self.name.clone(),
+        }
+    }
+}
+
 impl std::fmt::Display for ResourceKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ns_name = if let Some(ns) = &self.namespace {
