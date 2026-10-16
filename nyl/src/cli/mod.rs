@@ -108,7 +108,7 @@ impl Cli {
             Commands::Diff(args) => commands::diff::execute(args).await,
             Commands::DiffTree(args) => Box::pin(commands::diff_tree::execute_with_color(args, self.color)).await,
             Commands::Apply(args) => commands::apply::execute(args).await,
-            Commands::Schema(args) => commands::schema::execute(args),
+            Commands::Schema(args) => commands::schema::execute(args).await,
             Commands::Init(args) => commands::init::execute(*args).await,
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
