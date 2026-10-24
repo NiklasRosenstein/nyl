@@ -521,6 +521,11 @@ adaptation. It also covers `nyl prepare` and a guide outline.
   Terraform variables file, remains the driver's.
 - Removing a member is a native input change. Removing members waits for
   approval by default, and Nyl keeps no native resource state.
+- A unit may declare a literal `forEach` over a domain type and is then
+  instantiated once per matching resource, as `<unit>-<resource>`. The set is
+  static at the source commit, the resource joins the unit's one structural
+  pass as `resource`, and an instance that loses its resource leaves the
+  ownership set under the usual teardown gate.
 
 ### Promotion paths (M6)
 
@@ -1055,6 +1060,9 @@ Delivered in the slices of the [design](design/domain-resources.md#rollout):
 - [ ] R4: the driver `prepare` capability and `nyl prepare --native`,
   OpenTofu/Terraform adaptation, removal approval, and `exec` with bundles.
 - [ ] R5: the worked AWS/GitHub/Bao guide, validated as a reference scenario.
+- [ ] R6: `forEach` unit instances, one per domain resource, rendered in the
+  unit's own structural pass with `resource` in its context and team-authored
+  values YAML-escaped.
 
 **Exit criterion:** colocated team declarations feed independently registered
 units; local and CI runs produce identical bundles and execution keys; moving a

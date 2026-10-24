@@ -506,6 +506,83 @@ record lists the bundle digest and the members that differ from the deployed
 bundle. Changes made with the native tool outside `nyl exec` are invisible to
 Nyl, and its records say nothing about them.
 
+## Unit instances per resource: `forEach`
+
+A unit can be instantiated once per domain resource, for example one OpenTofu
+configuration per team that declares a `TeamWorkspace`. Each team then has
+its own state, lock, and blast radius, and the platform writes the template
+only once:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: team-aws                      # literal base name
+  labels: {tier: org}
+forEach:                              # literal, read at discovery like the envelope
+  type: {apiVersion: domain.acme.example/v1, kind: TeamWorkspace}
+  selector: {matchLabels: {aws: enabled}}   # optional
+  paths: ['/teams/**']                      # optional
+spec:                                 # rendered once per (environment, resource)
+  source: {path: /platform/team-aws}
+  backend: {key: 'teams/{{ resource.metadata.name }}'}
+  collections:
+    accounts:
+      type: {apiVersion: domain.acme.example/v1, kind: AwsAccount}
+      selector: {matchLabels: {team: '{{ resource.metadata.name }}'}}
+  {% if resource.spec.sandbox %}
+  approval: auto
+  {% endif %}
+```
+
+- **One structural pass.** `resource` joins `values`, `environment`, and, in
+  template instances, `params` in the context of the unit's ordinary
+  structural pass. Full Jinja works, blocks included, and nothing is nested
+  or escaped. `${ … }` [template values](release-inputs.md#template-values)
+  keep their role for fields expanded later in a narrower context.
+- **`resource`** holds the instance's domain resource as admitted: its
+  `apiVersion`, `kind`, `metadata.name`, `metadata.labels`, and defaulted
+  `spec`. Fields that hold references stay reference objects, because the
+  structural pass runs before resolution. To use a resolved value, select
+  the resource in a collection instead.
+- **Static instances.** `forEach` is literal, like `apiVersion`, `kind`,
+  `metadata.name`, and `labels`, and is never templated. Its `type`,
+  `selector`, and `paths` follow the rules of
+  [collection](#stage-3-collection), so the instance set is computed from
+  the catalog of stages 0–2. That set depends only on S and is the same in
+  every environment and from every entry point.
+- **Names.** An instance is named `<unit>-<resource name>`, such as
+  `team-aws-payments`. The name is not templated. A clash with any other
+  unit or instance name, such as `team` + `aws-payments` against
+  `team-aws` + `payments`, is a validation error naming both
+  (`NYL-UNIT-INSTANCE-NAME`).
+  References, `--unit`, approvals, and state address the instance by its
+  full name.
+- **Selection.** Environments select the base unit by its literal labels, and
+  every instance comes with it. An instance follows the existing unit rules:
+  identity, ownership scopes, deletion policy, and kind changes. A template
+  whose backend key forgets `resource.metadata.name` is rejected because every
+  instance claims the same scope.
+- **Lifecycle.** Removing or renaming the resource, or deselecting it from
+  `forEach`, is the instance leaving the ownership set. `plan` lists it under
+  units leaving, with the resource as the reason, and its teardown waits for
+  `--allow-teardown`, so a team that disappears cannot destroy anything
+  without an explicit approval. Editing the resource re-renders only its
+  own instance.
+- **Authority stays with the platform.** The team authors only the resource.
+  The template, its credentials, and its backend belong to the unit's
+  author. The definition's admission policy decides which folders may declare
+  a resource that instantiates units.
+- **Escaping across the trust boundary.** Structural templating renders text
+  and then parses YAML. Until now that text was platform-authored; `resource`
+  is not. A string field of `resource` therefore always renders as one quoted
+  YAML scalar, so `"x\napproval: auto"` stays a string. A template that inserts
+  structure on purpose writes `{{ resource.spec.tags | tojson }}`. Schemas
+  should constrain the fields that templates use; names already follow the
+  DNS label rule.
+- `nyl get units` lists the instances under their base unit. `nyl get unit
+  team-aws` shows the `forEach` match for each instance.
+
 ## Code homes
 
 | Rule or type | Home |
@@ -533,6 +610,7 @@ consumer, and two owners rejected.
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, removal approval, exec with bundles | M4, M8's `exec` |
 | R5 | The worked guide, validated as a tier-2 reference scenario | R2–R4 |
+| R6 | `forEach` unit instances: the `resource` context, YAML-escaped values, instance names, leaving and teardown | R2 |
 
 ## Guide sketch: implementing a domain resource
 
@@ -598,3 +676,5 @@ teams/
 | Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
+| How YAML escaping of `resource` values is implemented: an escaping mode of the template engine, or values that are wrapped and render as quoted scalars | R6 |
+| Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R6 |
