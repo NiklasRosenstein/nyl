@@ -1,0 +1,9 @@
+# Nyl-Provenance: Source: applications/workloads/api.yaml (document 2)
+# Nyl-Provenance: Resource: v1 ConfigMap api/api
+apiVersion: v1
+data:
+  environment: production
+kind: ConfigMap
+metadata:
+  name: api
+  namespace: api

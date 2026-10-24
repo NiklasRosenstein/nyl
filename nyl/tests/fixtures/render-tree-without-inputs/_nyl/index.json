@@ -2,15 +2,16 @@
   "cluster": "kasoku",
   "dirty": true,
   "files": {
-    "_nyl/catalog/applications/argocd-production/api.yaml": "d3c8e5952a97d33d1afc320735976daf5a0501804b3c05721628244f75175879",
-    "_nyl/catalog/applications/argocd/production-catalog.yaml": "3b21c37f389ff88515de5b5235f91494af801d11fb185b047b2bfaf696e2e0a1",
-    "_nyl/catalog/projects/workloads.yaml": "a27cc790b3900f7d0b4f1c14f16870c2ced56393d43d5e1e5cea7cade4d5657c",
-    "workloads/api/resources.yaml": "573028891210c76b0a011f31a3a7a12e78c680451f6fde024ee4b7e435b04344"
+    "_nyl/catalog/application.argoproj.io/argocd-production/api.yaml": "d3c8e5952a97d33d1afc320735976daf5a0501804b3c05721628244f75175879",
+    "_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml": "3b21c37f389ff88515de5b5235f91494af801d11fb185b047b2bfaf696e2e0a1",
+    "_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml": "a27cc790b3900f7d0b4f1c14f16870c2ced56393d43d5e1e5cea7cade4d5657c",
+    "workloads/api/configmap/api/api.yaml": "9552e4dea7ac0110e5b82b09caaa2068ecae10b1cb5d089fa498e95e8827aa9a",
+    "workloads/api/namespace/api.yaml": "1e9374862eb7fc8d626f36f0815839433d538880e046d22c20a96c36e82e0bb8"
   },
   "inputs": {
     "applications/workloads/api.yaml": "a2f32e4e92a39a5d455be57efbf4c7a18194491075e4ad3ad5f709a92837b1d1",
     "config/application-groups/workloads.yaml": "77af5c5a4161c537c273615bd859ce2194bbe7122235fabe580a4264d75e8c3b",
-    "config/clusters/kasoku.yaml": "1058667f896bccc092b1cc7157abc9698b596cb2fed742cb60a51ac7e2a7cd11",
+    "config/clusters/kasoku.yaml": "1fb0cb2435b3a7a176a4a8c09334525276daf16e1d23290bc8d9eb19a4b6f7bc",
     "config/projects/workloads.yaml": "6ef0804c4a5648241ce26f31ea98012bc2284030a52d4e89bff624824bdb2717",
     "config/repositories/deploy.yaml": "7beb6bb8df1b5e565c5231ee85b341555890a30914fa9b8c62c0af71d9ef6d4d",
     "config/targets/production.yaml": "1bc5c449826dde969f4dfc1a296c6af0d0e8ad3058a9ee9572d5c9e51923778b"

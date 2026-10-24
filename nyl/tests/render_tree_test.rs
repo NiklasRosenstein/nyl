@@ -5603,12 +5603,13 @@ data:
     }
 }
 
-/// Output of a project without Release inputs, as the release before Release
-/// inputs rendered it; only `sourceCommit` in the index varies per run.
-/// Regenerate deliberately with `render-tree --target production` on this
-/// fixture when an intended change alters it.
+/// Output of a project without Release inputs. Release inputs must not change
+/// it: the fixture first held the output of the release before them, and now
+/// holds today's layout of the same bytes. Only `sourceCommit` in the index
+/// varies per run. Regenerate deliberately with `render-tree --target
+/// production` on this fixture when an intended change alters it.
 #[test]
-fn test_render_tree_without_inputs_matches_the_pre_inputs_output() {
+fn test_render_tree_without_inputs_keeps_its_output() {
     let fixture = fixture();
     render_production(&fixture).success();
     let mut rendered = read_tree(&fixture.path().join("deploy/production"));
