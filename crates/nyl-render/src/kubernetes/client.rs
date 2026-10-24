@@ -46,6 +46,14 @@ pub trait KubeClient: Send + Sync {
     /// Return the default namespace from kubeconfig/context.
     fn default_namespace(&self) -> &str;
 
+    /// Whether no version of this group and kind exists any more, so objects of it
+    /// are gone with it: no API version serves it, no CustomResourceDefinition
+    /// defines it, and no APIService serves its group. An aggregated API that is
+    /// only unavailable is not removed. Defaults to `false`, which is always safe.
+    async fn is_kind_removed(&self, _gvk: &GroupVersionKind) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Delete a resource from the cluster
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()>;
 
@@ -279,6 +287,31 @@ impl KubeRsClient {
         )))
     }
 
+    /// The API to read or delete an existing object through: its own version, or,
+    /// when that version is no longer served, the preferred served version of the
+    /// same group and kind. An object outlives the retirement of the version it was
+    /// written with, and every served version addresses the same object.
+    fn discover_object_api(&self, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
+        let not_found = match self.discover_api_resource(gvk) {
+            Ok(found) => return Ok(found),
+            Err(err) => err,
+        };
+        let index = self.api_resource_index();
+        let preferred = self
+            .discovery()
+            .get(&gvk.group)
+            .and_then(|group| group.preferred_version().map(str::to_string));
+        let mut served: Vec<&GroupVersionKind> = index
+            .keys()
+            .filter(|known| known.group == gvk.group && known.kind == gvk.kind)
+            .collect();
+        served.sort_by_key(|known| (Some(&known.version) != preferred.as_ref(), known.version.clone()));
+        match served.first() {
+            Some(known) => Ok(index[*known].clone()),
+            None => Err(not_found),
+        }
+    }
+
     async fn try_resolve_scope_from_crd(&self, gvk: &GroupVersionKind) -> Result<Option<bool>> {
         // Core API resources cannot be represented by CRDs.
         if gvk.group.is_empty() {
@@ -319,7 +352,7 @@ impl KubeClient for KubeRsClient {
         namespace: Option<&str>,
         name: &str,
     ) -> Result<Option<DynamicObject>> {
-        let (ar, caps) = self.discover_api_resource(gvk)?;
+        let (ar, caps) = self.discover_object_api(gvk)?;
 
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
             let ns = namespace
@@ -508,7 +541,7 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
-        let (ar, caps) = self.discover_api_resource(gvk)?;
+        let (ar, caps) = self.discover_object_api(gvk)?;
 
         // Create API client
         let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
@@ -568,6 +601,35 @@ impl KubeClient for KubeRsClient {
     /// never appear it returns `Ok`, so only the resources of those kinds fail to
     /// apply, each with a clear `ApiResourceNotFound`, and the release is still
     /// recorded.
+    async fn is_kind_removed(&self, gvk: &GroupVersionKind) -> Result<bool> {
+        if self.discover_object_api(gvk).is_ok() {
+            return Ok(false);
+        }
+        if gvk.group.is_empty() {
+            // Neither CRDs nor APIServices serve the core group.
+            return Ok(true);
+        }
+        let defined_by_crd = self.try_resolve_scope_from_crd(gvk).await?.is_some()
+            || self.crd_scopes.lock().unwrap().as_ref().is_some_and(|scopes| {
+                scopes
+                    .keys()
+                    .any(|known| known.group == gvk.group && known.kind == gvk.kind)
+            });
+        if defined_by_crd {
+            return Ok(false);
+        }
+        // An APIService for the group means an aggregated API that is unavailable,
+        // not removed; its objects may still exist behind it.
+        let api_services: Api<DynamicObject> = Api::all_with(self.client.clone(), &api_service_api_resource());
+        let served_by_api_service = api_services
+            .list(&ListParams::default())
+            .await?
+            .items
+            .iter()
+            .any(|service| service.data["spec"]["group"].as_str() == Some(gvk.group.as_str()));
+        Ok(!served_by_api_service)
+    }
+
     async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
         const MAX_ATTEMPTS: u32 = 10;
         const DELAY: Duration = Duration::from_millis(500);
@@ -752,6 +814,16 @@ pub fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
         "apiregistration.k8s.io" => matches!(gvk.kind.as_str(), "APIService"),
         "apiextensions.k8s.io" => matches!(gvk.kind.as_str(), "CustomResourceDefinition"),
         _ => false,
+    }
+}
+
+fn api_service_api_resource() -> ApiResource {
+    ApiResource {
+        group: "apiregistration.k8s.io".to_string(),
+        version: "v1".to_string(),
+        api_version: "apiregistration.k8s.io/v1".to_string(),
+        kind: "APIService".to_string(),
+        plural: "apiservices".to_string(),
     }
 }
 

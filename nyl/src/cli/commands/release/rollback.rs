@@ -43,9 +43,22 @@ pub struct RollbackArgs {
     /// Maximum number of resources applied or pruned at the same time (see `nyl apply --concurrency`).
     #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
     pub concurrency: u16,
+
+    /// Maximum number of release revisions to keep; older revisions are deleted
+    /// after this rollback. 0 keeps every revision. Overrides `[release]
+    /// history_limit` in nyl.toml.
+    #[arg(long, value_name = "N", value_parser = crate::config::parse_release_history_limit)]
+    pub history_limit: Option<u32>,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
+    // Read configuration before anything is recorded, so a broken nyl.toml fails
+    // the rollback before it leaves a revision behind.
+    let history_limit = match args.history_limit {
+        Some(limit) => limit,
+        None => ProjectConfig::load(None)?.release_history_limit(),
+    };
+
     // Create Kubernetes clients
     let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
     let client = kube::Client::try_from(config)?;
@@ -116,7 +129,6 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let mut timings = vec![PhaseTiming::new(Phase::Discovery(discovery_mode), discovery_elapsed)];
     // Apply, then complete the revision, supersede the previous one, and prune,
     // reusing the apply path.
-    let history_limit = ProjectConfig::load(None)?.release_history_limit();
     let run = recorder
         .run(
             &kube_client,

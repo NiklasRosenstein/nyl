@@ -71,7 +71,8 @@ Nyl records the new release revision before applying anything. Two applies that
 record the same revision at the same time therefore fail before the second
 changes the cluster, but Nyl does not otherwise lock a release: do not run applies
 of one release in parallel. If an apply fails or is interrupted (Ctrl-C) before it
-completes, its revision is recorded as failed. A release that renders no resources
+completes, its revision is recorded as failed with only the resources it applied;
+press Ctrl-C again to exit without waiting for that. A release that renders no resources
 is still recorded, and its previously deployed resources are pruned.
 
 Pruning deletes the resources a release no longer contains in the reverse of the
@@ -81,10 +82,14 @@ aggregated APIs before the CustomResourceDefinitions and APIServices behind them
 APIServices before their backends, and Namespaces last. As with apply, the
 resources of one kind are deleted concurrently. Before deleting the next kind,
 Nyl waits until the deleted resources are gone, so finalizers run while the
-controllers, CRDs, and webhooks they need still exist. Resources still terminating
-after two minutes are reported and pruning continues. A resource that fails to
-delete stays recorded in the new revision, so the next apply retries deleting it,
-and the command exits non-zero. Changing a resource's apiVersion does not prune it.
+controllers, CRDs, and webhooks they need still exist. After two minutes of waiting
+in total, resources still terminating are reported and pruning continues without
+waiting. A resource whose recorded apiVersion is no longer served is deleted
+through a version that is; one whose kind is gone entirely (for example, its CRD
+was deleted) is already gone. A resource that fails to delete, including one
+behind an aggregated API that is unavailable, stays recorded in the new revision,
+so the next apply retries deleting it, and the command exits non-zero. Changing a
+resource's apiVersion does not prune it.
 
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by

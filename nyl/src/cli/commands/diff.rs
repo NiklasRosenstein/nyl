@@ -3,11 +3,11 @@ use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    cli::commands::apply::prepare_desired_manifests,
+    cli::commands::apply::{prepare_desired_manifests, ObjectScopes},
     cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
     kubernetes::{
-        extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ReleaseStatus,
-        ReleaseStorage, ResourceKey,
+        extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity,
+        ReleaseStatus, ReleaseStorage, ResourceKey,
     },
     NylError, Result,
 };
@@ -77,7 +77,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     })
     .await?;
 
-    let mut desired_manifests = preflight.manifests;
+    let desired_manifests = preflight.manifests;
     let release = preflight.release;
     let mut duplicates = preflight.duplicates;
     let kube_client = preflight
@@ -97,7 +97,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
     let ns = Some(release_namespace.as_str());
-    (desired_manifests, _) = prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, ns).await?;
+    let (ready, mut scopes) = prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, ns).await?;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {
@@ -125,13 +125,13 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
                     prev_release.revision, prev_release.status
                 )));
             }
-            merge_with_previous_release(&kube_client, desired_manifests, prev_release).await?
+            merge_with_previous_release(&kube_client, ready, prev_release, &mut scopes).await?
         } else {
             tracing::info!("Append-release mode: no previous release found, showing diff as initial release");
-            desired_manifests
+            ready
         }
     } else {
-        desired_manifests
+        ready
     };
 
     crate::validation::validate_manifest_input(
@@ -152,8 +152,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     .await?;
 
     // 7. Compute diff against LIVE cluster state
-    let diff_result =
-        compute_diff_from_live(&kube_client, &desired_manifests, previous_release.as_ref(), args.mode).await?;
+    let prev = previous_release.as_ref();
+    let diff_result = compute_diff_from_live(&kube_client, &desired_manifests, prev, args.mode, &mut scopes).await?;
 
     // 8. Display errors if any
     if !diff_result.errors.is_empty() {
@@ -256,12 +256,29 @@ async fn compute_diff_from_live(
     desired_manifests: &[serde_json::Value],
     previous_state: Option<&crate::kubernetes::ReleaseState>,
     mode: DiffMode,
+    scopes: &mut ObjectScopes,
 ) -> Result<DiffResult> {
-    // Build set of desired resource keys
-    let desired_keys: HashSet<ResourceKey> = desired_manifests
+    // Build set of desired objects. Previous keys are compared by object identity,
+    // as `nyl apply` prunes, so a changed apiVersion is not shown as a deletion.
+    let desired_keys: Vec<ResourceKey> = desired_manifests
         .iter()
         .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
+    if let Some(previous) = previous_state {
+        scopes.load(client, &previous.resource_keys).await;
+    }
+    let desired_objects: HashSet<ObjectIdentity> = desired_keys.iter().map(|key| scopes.identity(key)).collect();
+    let mut seen_previous = HashSet::new();
+    let removed_keys: Vec<ResourceKey> = previous_state
+        .map(|state| state.resource_keys.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|key| {
+            let identity = scopes.identity(key);
+            !desired_objects.contains(&identity) && seen_previous.insert(identity)
+        })
+        .cloned()
+        .collect();
 
     // Fetch live resources for desired manifests
     let mut live_resources = HashMap::new();
@@ -281,23 +298,17 @@ async fn compute_diff_from_live(
         }
     }
 
-    // Get previous resource keys for deletion tracking
-    let previous_keys: HashSet<ResourceKey> =
-        previous_state.map_or_else(HashSet::new, |s| s.resource_keys.iter().cloned().collect());
-
-    // Also fetch resources from previous state that aren't in desired
-    for key in &previous_keys {
-        if !desired_keys.contains(key) {
-            // This resource is being deleted - check if it still exists in cluster
-            match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
-                Ok(Some(resource)) => {
-                    let live_json = serde_json::to_value(&resource)?;
-                    live_resources.insert(key.clone(), live_json);
-                }
-                Ok(None) => {}
-                Err(e) if e.is_api_resource_not_found_error() => {}
-                Err(e) => return Err(e),
+    // Also fetch resources from previous state that are being deleted, to check
+    // whether they still exist in the cluster.
+    for key in &removed_keys {
+        match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+            Ok(Some(resource)) => {
+                let live_json = serde_json::to_value(&resource)?;
+                live_resources.insert(key.clone(), live_json);
             }
+            Ok(None) => {}
+            Err(e) if e.is_api_resource_not_found_error() => {}
+            Err(e) => return Err(e),
         }
     }
 
@@ -382,11 +393,7 @@ async fn compute_diff_from_live(
     }
 
     // Check for deletions (in previous state but not in desired)
-    for key in previous_keys {
-        if !desired_keys.contains(&key) {
-            deleted.push(key);
-        }
-    }
+    deleted.extend(removed_keys);
 
     Ok(DiffResult {
         added,
@@ -621,18 +628,21 @@ async fn merge_with_previous_release(
     client: &dyn KubeClient,
     mut current_manifests: Vec<serde_json::Value>,
     previous_release: &crate::kubernetes::ReleaseState,
+    scopes: &mut ObjectScopes,
 ) -> Result<Vec<serde_json::Value>> {
-    // Build set of current resource keys
-    let current_keys: HashSet<ResourceKey> = current_manifests
+    // Build set of current objects, compared by identity as `nyl apply` merges.
+    let current_keys: Vec<ResourceKey> = current_manifests
         .iter()
         .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
+    scopes.load(client, &previous_release.resource_keys).await;
+    let current_objects: HashSet<ObjectIdentity> = current_keys.iter().map(|key| scopes.identity(key)).collect();
 
     // Fetch previous resources that are not in current manifests
     let mut added_count = 0;
     let mut missing_count = 0;
     for prev_key in &previous_release.resource_keys {
-        if !current_keys.contains(prev_key) {
+        if !current_objects.contains(&scopes.identity(prev_key)) {
             // This resource is in previous release but not in current - fetch it from cluster
             if let Some(resource) = client
                 .get_resource(&prev_key.gvk, prev_key.namespace.as_deref(), &prev_key.name)
@@ -852,7 +862,7 @@ mod tests {
         let manifests = vec![crd, cr];
         // Only the CR's GVK is unknown; the CRD manifest type is always available.
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
             .await
             .unwrap();
 
@@ -874,7 +884,7 @@ mod tests {
         });
         let manifests = vec![cr];
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
             .await
             .unwrap();
 
@@ -907,7 +917,7 @@ mod tests {
         });
         let manifests = vec![crd, cr];
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw)
+        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
             .await
             .unwrap();
 
@@ -916,5 +926,44 @@ mod tests {
         let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
         assert!(note.is_error, "should be an error: CRD in manifests but wrong version");
         assert_eq!(result.total_error_count(), 1);
+    }
+
+    /// Moving a manifest to another API version is not a deletion, as `nyl apply`
+    /// does not prune it.
+    #[tokio::test]
+    async fn test_diff_does_not_show_api_version_changes_as_deletions() {
+        let manifests = vec![json!({
+            "apiVersion": "autoscaling/v2",
+            "kind": "HorizontalPodAutoscaler",
+            "metadata": {"name": "web", "namespace": "app"}
+        })];
+        let previous = crate::kubernetes::ReleaseState {
+            release_name: "app".to_string(),
+            release_namespace: "app".to_string(),
+            revision: 1,
+            resource_keys: vec![ResourceKey {
+                gvk: GroupVersionKind::from_api_version_kind("autoscaling/v2beta2", "HorizontalPodAutoscaler").unwrap(),
+                namespace: Some("app".to_string()),
+                name: "web".to_string(),
+            }],
+            manifest: String::new(),
+            status: ReleaseStatus::Deployed,
+            rendered_at: chrono::Utc::now(),
+            applied_at: None,
+            error: None,
+        };
+        let client = crate::kubernetes::MockKubeClient::new();
+
+        let result = compute_diff_from_live(
+            &client,
+            &manifests,
+            Some(&previous),
+            DiffMode::Raw,
+            &mut ObjectScopes::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.deleted.is_empty());
     }
 }
