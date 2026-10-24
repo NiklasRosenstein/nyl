@@ -1052,7 +1052,8 @@ only on the observed ref; `state.yaml` exists on both.
 
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
-`ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`; artifacts use their own
+`ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`, plus
+`DeploymentAdmission` from M8; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form (RFC 8785), so formatting never
@@ -1064,6 +1065,7 @@ files cover every version, and a reader rejects a version it does not know.
 | --- | --- | --- |
 | `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, each with time, requester, and reason |
 | `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
+| `DeploymentAdmission` (M8) | `observed/deployment-admission.yaml` | Provider-neutral, versioned deployment generation and immutable execution binding, with normalized authorizing actor/request; supersession and invalidation follow the CI admission contract |
 | `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file |
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
@@ -1283,6 +1285,25 @@ is resolved in every invocation; changed-path selection must not imply deletion.
 This backend does not distribute one run or relax the lease. M3's graph interface
 must represent blocked references before their values exist, so export does not
 depend on a complete native plan.
+
+M8's [deployment admission](ci-execution.md#deployment-admission) is shared by
+all CI providers. Admission records are protected state, not CI artifacts. An
+admitted worker acquires the environment lease, validates its generation and
+manifest binding, and only then resolves/writes desired state, imports results,
+or invokes drivers. A stale generation fails without desired/observed writes or
+driver effects, including on retries after another deployment. Admission updates
+use that same lease, an expected-generation comparison, and the fenced state
+transition mechanism. Direct mutating operations outside the admitted worker
+path invalidate the generation under the lease; read-only operations do not.
+An explicit rollback is a newly authorized admission, never revival of an old
+worker's authority. This opt-in M8 gate does not change M3 local operation
+semantics for environments that have never used deployment admission.
+
+CI planning remains ordinary read-only planning, including the unfiltered
+leaving section and the caller's `--fail-on-leaving` policy. Reconciliation-only
+lifecycle restrictions on CI export must not block planning or require mutation
+to review removals. The adapter provides an environment lifecycle plan report
+even if no selected units remain.
 
 `nyl reconcile -e <env>`:
 
@@ -2374,6 +2395,21 @@ Reconcile, teardown, verify, and status reports have the same shape, with
 `apiVersion` versions the machine output.
 
 ## Walkthroughs
+
+**CI lifecycle review (M8).** An MR removing one unit, or deselecting all units,
+still exports a read-only planning workflow with an environment lifecycle report.
+It lists leaving units and consequences, writes no desired/observed state, and
+fails for leaving units only when `--fail-on-leaving` is requested. Reconciliation
+export instead refuses lifecycle work requiring an explicit environment operation.
+
+**CI admission and retries (M8).** Deployment A's jobs finish, B is newly admitted
+and deploys, and a worker from A is retried. Under the lease its old generation
+is rejected before any intent write, result import, or effect. An intentional
+rollback receives new admission C pointing to A's source and may reconcile.
+Retrying A's original dispatch request cannot mint C. These are shared core
+admission scenarios, executed by every CI adapter's conformance suite; the
+[CI acceptance scenarios](ci-execution.md#acceptance-scenarios) also cover racing
+admissions and intervening direct local operations.
 
 **Separate CI unit jobs (M3 foundation, M8 adapter).** Starting without receipts,
 the `database` job is blocked and executes nothing. Separate jobs for `network`

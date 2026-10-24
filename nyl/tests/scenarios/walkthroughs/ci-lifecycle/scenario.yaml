@@ -1,0 +1,30 @@
+contract: design/ci-execution.md#first-backend-separate-reconciliation-invocations
+milestone: M8
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  - commit: {branch: main, message: Remove all unit declarations, delete: [nyl/units.yaml]}
+  - ci-export: {operation: plan}
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      ci:
+        lifecycleLeaving: [network, database, web-image, kubernetes]
+  - ci-export: {operation: plan, fail-on-leaving: true}
+    exit: 1
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      ci:
+        lifecycleLeaving: [network, database, web-image, kubernetes]
+  - ci-export: {operation: reconcile}
+    exit: 1
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      codes: [NYL-CI-LIFECYCLE-REQUIRES-OPERATION]

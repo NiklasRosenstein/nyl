@@ -160,13 +160,26 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 
 ## CI graph boundary
 
-`nyl-core` owns versioned execution-graph and adapter-manifest types with typed
-unit addresses. `nyl-orchestration` owns the pure extraction and validation of
+`nyl-core` owns provider-neutral, versioned execution-graph, execution-manifest,
+and deployment-admission types with typed unit addresses and generation IDs.
+Scheduler syntax, provider environment variables, and job IDs are absent from
+these semantic types; opaque CI trace metadata may appear in diagnostics.
+`nyl-orchestration` owns the pure extraction and validation of
 dependency edges, shared with local scheduling, including unresolved data edges.
 Provider YAML serialization and runner mappings live in CLI-side adapter code;
 they introduce no GitLab types or IO into the orchestration core. Workers wire
-ordinary unit-scoped operations, with the same typed reports and state/driver
-implementations. Artifact aggregation is presentation, not receipt admission.
+unit-scoped operations through the core admission gate, with the same typed
+reports and state/driver implementations. The admission decision is pure over
+the current generation and normalized authorization evidence; the orchestration
+shell checks it under the environment lease and `nyl-state` persists it through
+the existing fenced transition mechanism. A worker cannot perform the check in
+a CLI preflight separated from the state mutation by another lease acquisition.
+Artifact aggregation is presentation, not receipt admission. Lifecycle planning
+uses the existing read-only planner and never requires deployment admission.
+
+Adapters map scheduler capabilities and presentation only. GitLab and an
+in-memory test adapter share graph, admission, and result conformance fixtures;
+future providers implement this boundary without changing unit/resource schemas.
 
 The [CI execution design](ci-execution.md) specifies the first, separate-run
 backend. A later shared-run backend must extend the orchestration shell and

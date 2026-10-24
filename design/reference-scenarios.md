@@ -162,6 +162,37 @@ the same file. `driver`, `fault`, and `pause` steps are tier 1 by kind, and a
 step that depends on one, or on a scripted observer response, carries
 `tier: 1`.
 
+### M8 CI conformance steps
+
+The [CI execution contract](ci-execution.md) adds these operations to the scenario
+harness in M8, exercised against GitLab graph rendering and an in-memory adapter.
+They are proposed harness operations; M3 does not execute M8 scenarios. Each
+invocation takes a fresh clone and uses the real core/state implementation with
+fake authorization and drivers in tier 1. References to admissions are harness
+aliases for captured generation IDs, never production caller-selected IDs.
+
+| Step | Effect |
+| --- | --- |
+| `ci-admit: {id, request, expected, rollback?}` | Trusted test dispatcher admits the current source/graph binding under the lease; `expected` is a prior admission alias or `none`; saves the generation as `id`. `rollback: true` supplies explicit test authorization for a new rollback request. Repeating a superseded request is rejected, not renewed. |
+| `ci-worker: {admission, unit}` | Executes an attempt through the ordinary core admission gate using the captured manifest/source/generation and only the named unit. It must not read source from the current branch tip instead. |
+| `ci-export: {operation, fail-on-leaving?}` | Read-only graph export for dev through each adapter; `expect.ci.lifecycleLeaving` is the exact leaving-unit set in its lifecycle plan node, which runs even with an empty unit selection. A `fail-on-leaving` policy applies when evaluating that read-only lifecycle plan, not as a required reconciliation. |
+
+Like `nyl`, these steps accept `at: <branch>` (default `main`). `ci-admit` and
+`ci-export` read that checkout; `ci-worker` always uses its captured binding.
+All use `exit` and the existing `expect.executed`, `expect.commits`, and
+`expect.codes`. `ci-export` additionally checks the lifecycle plan node's result
+without running reconciliation workers. Rejected worker assertions count no
+desired/observed transition commits and no driver execution; lease coordination
+refs are allowed to change. Test dispatcher policies permit the requested new
+deployments/rollback and reject stale request reuse. Exporter failures use
+`NYL-CI-LIFECYCLE-REQUIRES-OPERATION`; stale attempts/request reuse use
+`NYL-CI-ADMISSION-SUPERSEDED`. These codes are planned with M8's typed reports.
+
+After admitting A, the harness keeps its source manifest unchanged across later
+commits and new admissions. Both adapters must retain identical semantic bindings
+and report outcomes. Provider-specific scheduling behavior remains a separate
+integration check; conformance needs no hosted CI account.
+
 ## Reference project
 
 All three scenarios run against one project, which also lives at
@@ -573,3 +604,4 @@ is how M4 runs `FakePublication` through the real binary.
 
 A scenario's steps change together with the contract rules they prove, as the
 implementation architecture requires for walkthroughs.
+

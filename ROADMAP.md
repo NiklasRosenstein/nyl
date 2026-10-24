@@ -34,7 +34,7 @@ about Nyl's current CLI.
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
-| M8 | CI execution graph and GitLab unit jobs | Planned | M3, M4 |
+| M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
 
 **Next step:** move binding resolution into a generic resolver in
 `nyl_core::bindings` (see M2), then finish the Release inputs of M2 against the
@@ -109,8 +109,9 @@ stores no event triggers. Continuous observation is an M7 decision.
 
 ### CI execution and observability
 
-The [CI execution design](design/ci-execution.md) defines an optional GitLab
-adapter for per-unit logs, durations, reports, and retries. M3 exposes a pure,
+The [CI execution design](design/ci-execution.md) defines provider-neutral
+execution manifests, deployment admission, and adapter conformance for per-unit
+logs, durations, reports, and retries. GitLab is the first adapter. M3 exposes a pure,
 versioned dependency graph independently of complete native plans. M8 exports
 one job per unit, all pinned to one source commit, invoking ordinary unit-scoped
 operations. M8 depends on M3/M4 and need not wait for M5–M7; its identifier keeps
@@ -119,8 +120,11 @@ the existing milestone references stable.
 The first backend uses separate invocations and therefore serializes effects
 under the environment lease. It does not claim one run or an atomic observed
 snapshot across jobs. Full ownership stays selected; current receipts skip work,
-and lifecycle changes remain explicit environment-level operations. CI owns
-event mapping and runner configuration, while Nyl rechecks evidence and approvals.
+and reconciliation lifecycle changes remain explicit environment-level operations.
+Read-only planning always reports removals, including when no units remain.
+CI owns event mapping and runner configuration, while Nyl rechecks evidence,
+approvals, and the current deployment generation under the lease on every worker
+attempt, including retries. A rollback needs a new authorized admission.
 Parallel workers of one Nyl run require a later coordinator/worker contract,
 including fencing and recovery; they are not implied by graph export.
 
@@ -837,18 +841,29 @@ value-only path promotes each value from what its consuming Application runs.
 - [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 
-### M8 — CI execution graph and GitLab unit jobs
+### M8 — Provider-neutral CI execution and first GitLab adapter
 
 - [ ] Implement `nyl ci export gitlab` for one environment, with reconcile and
   read-only plan operations, consuming M3's graph and typed reports. Keep CI
   runner configuration separate from unit semantics.
+- [ ] Specify provider-neutral graph/manifest types, capability negotiation,
+  normalized diagnostics, and a conformance suite shared by GitLab and an
+  in-memory test adapter. Provider IDs and scheduler syntax never enter unit
+  identity, receipt formats, or the execution key. Unsupported capabilities
+  fail explicitly or use a documented safe fallback.
 - [ ] Generate stable, collision-checked job IDs and `needs` edges, a pinned
   public graph manifest, per-unit reports, and an always-run read-only summary.
-  Include current producers and unresolved consumers; reject lifecycle work
-  that ordinary unit jobs cannot perform.
+  Include current producers and unresolved consumers; reject reconciliation
+  lifecycle work that ordinary unit jobs cannot perform. Planning emits a
+  separate environment-level lifecycle report, including empty selections,
+  preserving the caller's `--fail-on-leaving` policy without state writes.
 - [ ] Bind jobs to immutable source, project, environment, operation, and adapter
-  configuration. Validate bindings before effects; serialize deployment
-  pipelines per environment and reject superseded source at admission.
+  configuration. Implement a versioned protected-state deployment admission
+  record with unique generations, expected-generation admission, and normalized
+  authorization evidence. Under the environment lease, reject stale admission
+  on every worker attempt before intent writes, imports, or effects. Direct
+  environment mutations invalidate admission; rollback requires a new request.
+  Provider pipeline serialization is an optional optimization, not the fence.
 - [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
   revalidate approvals and never pass authoritative outputs through CI artifacts.
 - [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)
@@ -859,7 +874,11 @@ value-only path promotes each value from what its consuming Application runs.
 consumer jobs, executes at a pinned source, explains no-ops and blockers, and
 preserves the local core's freshness, lease, approval, and recovery rules across
 retries and cancellation. Independent unit jobs are observably serialized within
-one environment; no distributed-run guarantee is made.
+one environment; no distributed-run guarantee is made. Retrying an old worker
+after a newer admission has no deployment effects, and a newly authorized
+rollback remains possible. Removing all units still produces a read-only MR
+lifecycle report. The in-memory adapter proves the same semantic graph and
+admission behavior without GitLab types or services.
 
 ## Open decisions
 
@@ -874,7 +893,8 @@ reasons to delay independent work.
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
-| GitLab adapter configuration schema, job limits, and source admission mechanism | M8 |
+| Provider capability/configuration schema and first GitLab adapter limits | M8 |
+| Trusted dispatcher policy and normalized admission authorization evidence | M8 |
 | Shared-run CI coordinator/worker protocol, fencing, liveness, and recovery | After M8, before distributed execution |
 
 ## Implementation reference points
