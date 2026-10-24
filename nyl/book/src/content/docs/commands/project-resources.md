@@ -37,13 +37,17 @@ file. `--check` reports drift without writing.
 
 ## Update source locks
 
-Resolve mutable remote ApplicationGroup revisions and update their pinned
-commits:
+Move every Git lock to the head of its revision: the pinned commits of remote
+ApplicationGroup sources and of `fromGit` Release input bindings:
 
 ```bash
 nyl update source-locks
 nyl update source-locks workloads
+nyl update source-locks --target production
 nyl update source-locks --check
 ```
 
-`--check` reports stale locks without modifying project source.
+An ApplicationGroup name or `--target <name>` selects which locks move, never
+where they move. `--check` reports stale locks without modifying project
+source. See the [Rendered GitOps command reference](/nyl/commands/gitops/) for
+details.

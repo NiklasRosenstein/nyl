@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=confirm
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+  name: production-catalog
+  namespace: argocd
+spec:
+  destination:
+    namespace: argocd
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    directory:
+      recurse: true
+    path: production/_nyl/catalog
+    repoURL: https://example.invalid/deploy.git
+    targetRevision: deploy/production
+  syncPolicy:
+    syncOptions:
+    - ApplyOutOfSyncOnly=true
+    - ServerSideApply=true

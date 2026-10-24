@@ -1,6 +1,6 @@
 # Release inputs and bindings
 
-**Status:** M1 contract for M2, all M2 questions settled. See [ROADMAP.md](../ROADMAP.md).
+**Status:** implemented in M2; the orchestration binding kinds follow in M5 and M6. See [ROADMAP.md](../ROADMAP.md).
 
 This contract lets a Release declare typed inputs and a DeploymentTarget bind
 them. Bindings in M2 resolve without orchestration: from inline values, from
