@@ -15,6 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::gitops::reconcile::in_rendered_tree;
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
 use crate::resources::schema::ResourceKind;
 use crate::resources::GitOpsResource;
@@ -49,12 +50,14 @@ pub struct EditorSettings {
 pub struct AnnotationReport {
     /// Files whose comments were, or with `check` would be, changed, relative to the project.
     pub changed_files: Vec<PathBuf>,
-    /// Generated schema files that were, or would be, written or removed.
+    /// Generated schema files that were, or would be, written or removed, relative to the project.
     pub changed_schemas: Vec<PathBuf>,
     /// Documents that carry a schema comment.
     pub annotated_documents: usize,
     /// Built-in schemas that could not be downloaded, with the reason; their comments are still written.
     pub unavailable_schemas: Vec<(String, String)>,
+    /// Kubernetes built-in documents left without a comment because no Cluster records a `kubeVersion`.
+    pub unversioned_builtins: usize,
 }
 
 impl AnnotationReport {
@@ -84,7 +87,10 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
     let skip = [schema_root.clone(), vendor.clone(), project_root.join(".nyl")];
     for relative in &inventory.yaml_files {
         let path = project_root.join(relative);
-        if skip.iter().any(|root| path.starts_with(root)) || in_helm_chart(project_root, &path) {
+        if skip.iter().any(|root| path.starts_with(root))
+            || in_helm_chart(project_root, &path)
+            || in_rendered_tree(&path)
+        {
             continue;
         }
         let Ok(original) = std::fs::read_to_string(&path) else {
@@ -93,7 +99,12 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
         let directory = path.parent().unwrap_or(project_root);
         let mut annotated_documents = 0;
         let updated = annotate_text(&original, |manifest| {
-            let target = catalog.resolve(manifest)?;
+            let Some(target) = catalog.resolve(manifest) else {
+                if catalog.needs_kube_version(manifest) {
+                    report.unversioned_builtins += 1;
+                }
+                return None;
+            };
             annotated_documents += 1;
             Some(match target {
                 SchemaTarget::Local(file, schema) => {
@@ -137,6 +148,11 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
     }
     if !check && mode == EditorSchemas::Local {
         store::atomic_write(&schema_root.join(".gitignore"), b"*\n")?;
+    }
+    // Report schema files where they are, like the documents.
+    let schema_dir = schema_root.strip_prefix(project_root).unwrap_or(&schema_root);
+    for file in &mut report.changed_schemas {
+        *file = schema_dir.join(&*file);
     }
     Ok(report)
 }
@@ -275,6 +291,16 @@ impl SchemaCatalog {
             settings: catalog_settings(inventory),
             vendor: vendor.to_path_buf(),
         })
+    }
+
+    /// Whether a manifest is a Kubernetes built-in that only lacks a Cluster `kubeVersion` to resolve.
+    fn needs_kube_version(&self, manifest: &Value) -> bool {
+        let api_version = manifest.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
+        let group = api_version.split_once('/').map_or("", |(group, _)| group);
+        self.kube_version.is_none()
+            && manifest.get("kind").and_then(Value::as_str).is_some()
+            && !api_version.is_empty()
+            && resolve::is_builtin_group(group)
     }
 
     fn resolve(&self, manifest: &Value) -> Option<SchemaTarget> {
@@ -449,7 +475,7 @@ fn version_key(version: &str) -> Vec<u64> {
 
 /// Accept a `{{ … }}` template expression wherever the schema expects a scalar.
 pub fn allow_templates(schema: Value) -> Value {
-    relax(schema)
+    relax(schema, true)
 }
 
 const SCHEMA_MAPS: [&str; 5] = [
@@ -471,40 +497,44 @@ const SCHEMA_VALUES: [&str; 8] = [
     "contains",
 ];
 
-fn relax(schema: Value) -> Value {
+/// Relax a schema's nested schemas, then, with `wrap`, the schema itself.
+///
+/// `oneOf` admits a value matching exactly one branch, and a template would
+/// match every relaxed branch. Its branches are therefore relaxed only beneath
+/// their top level, and the schema holding the `oneOf` accepts the template once.
+fn relax(schema: Value, wrap: bool) -> Value {
     let Value::Object(mut object) = schema else {
         return schema;
     };
     for key in SCHEMA_MAPS {
         if let Some(Value::Object(members)) = object.get_mut(key) {
             for member in members.values_mut() {
-                *member = relax(member.take());
+                *member = relax(member.take(), true);
             }
         }
     }
     for key in SCHEMA_LISTS {
         if let Some(Value::Array(members)) = object.get_mut(key) {
             for member in members.iter_mut() {
-                *member = relax(member.take());
+                *member = relax(member.take(), key != "oneOf");
             }
         }
     }
     for key in SCHEMA_VALUES {
         if let Some(member) = object.get_mut(key) {
             *member = match member.take() {
-                Value::Array(members) => Value::Array(members.into_iter().map(relax).collect()),
-                value => relax(value),
+                Value::Array(members) => Value::Array(members.into_iter().map(|member| relax(member, true)).collect()),
+                value => relax(value, true),
             };
         }
     }
-    let scalar_type = |value: &Value| matches!(value.as_str(), Some("boolean" | "integer" | "number"));
-    let constrained = object.get("type").is_some_and(|value| match value {
-        Value::Array(types) => types.iter().any(scalar_type),
-        value => scalar_type(value),
-    }) || ["enum", "const", "pattern", "format"]
-        .iter()
-        .any(|keyword| object.contains_key(*keyword));
-    if !constrained {
+    let constrained = constrains_scalar(&object)
+        || object.get("oneOf").and_then(Value::as_array).is_some_and(|branches| {
+            branches
+                .iter()
+                .any(|branch| branch.as_object().is_some_and(constrains_scalar))
+        });
+    if !wrap || !constrained {
         return Value::Object(object);
     }
     // Annotations stay on the outer schema so editors keep showing them.
@@ -519,6 +549,17 @@ fn relax(schema: Value) -> Value {
         json!([Value::Object(object), {"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"}]),
     );
     Value::Object(outer)
+}
+
+/// Whether a schema restricts a value in a way a template string would fail.
+fn constrains_scalar(object: &serde_json::Map<String, Value>) -> bool {
+    let scalar_type = |value: &Value| matches!(value.as_str(), Some("boolean" | "integer" | "number"));
+    object.get("type").is_some_and(|value| match value {
+        Value::Array(types) => types.iter().any(scalar_type),
+        value => scalar_type(value),
+    }) || ["enum", "const", "pattern", "format"]
+        .iter()
+        .any(|keyword| object.contains_key(*keyword))
 }
 
 #[cfg(test)]
@@ -576,5 +617,25 @@ mod tests {
         assert_eq!(schema["properties"]["items"]["items"]["anyOf"][1], template);
         // Plain strings already accept expressions.
         assert_eq!(schema["properties"]["name"], json!({"type": "string"}));
+    }
+
+    #[test]
+    fn test_allow_templates_accepts_expressions_once_for_one_of_enums() {
+        // Nyl's documented enums are a oneOf of const branches.
+        let policy = json!({"oneOf": [
+            {"const": "Foreground", "type": "string", "description": "Foreground."},
+            {"const": "Orphan", "type": "string"},
+            {"type": "object", "properties": {"count": {"type": "integer"}}}
+        ]});
+        let schema = allow_templates(json!({"properties": {"policy": policy.clone()}}));
+        let template = json!({"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"});
+        let relaxed = &schema["properties"]["policy"];
+        assert_eq!(relaxed["anyOf"][1], template);
+        // The branches stay exclusive: only the outer alternative admits a template.
+        let branches = &relaxed["anyOf"][0]["oneOf"];
+        assert_eq!(branches[0], policy["oneOf"][0]);
+        assert_eq!(branches[1], policy["oneOf"][1]);
+        // Fields nested in a branch still accept templates.
+        assert_eq!(branches[2]["properties"]["count"]["anyOf"][1], template);
     }
 }

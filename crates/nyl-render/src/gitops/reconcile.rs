@@ -13,6 +13,15 @@ use crate::{NylError, Result};
 pub const RENDER_INDEX_VERSION: u32 = 2;
 pub const DEFAULT_INDEX_PATH: &str = "_nyl/index.json";
 const TRANSACTION_PATH: &str = "_nyl/transaction.json";
+
+/// Whether `path` lies in a managed rendered output tree: beneath a directory
+/// holding the ownership index. Nyl owns those files, so other commands must
+/// not write there.
+pub fn in_rendered_tree(path: &Path) -> bool {
+    path.ancestors()
+        .skip(1)
+        .any(|directory| directory.join(DEFAULT_INDEX_PATH).is_file())
+}
 const TRANSACTION_TEMP_PATH: &str = "_nyl/transaction.json.tmp";
 
 /// Controls how rendered files recorded in the ownership index are reconciled.

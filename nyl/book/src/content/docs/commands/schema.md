@@ -72,7 +72,9 @@ comment when Nyl knows its schema:
   when `strict = false`. Otherwise the strict schema is downloaded.
 
 Documents of other kinds, files that are not valid YAML, Helm chart directories,
-and the vendor directory are left untouched.
+rendered output trees (directories holding `_nyl/index.json`), and the vendor
+directory are left untouched. When no Cluster records a `kubeVersion`, Kubernetes
+built-ins get no comment and the command warns.
 
 The schemas Nyl generates accept a `{{ … }}` template expression wherever a
 scalar is expected, so Helm values and structurally templated Nyl resources such
