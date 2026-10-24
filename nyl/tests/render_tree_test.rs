@@ -6014,7 +6014,7 @@ fn test_diff_tree_source_baseline_reads_its_own_publication_after_a_move() {
             "+  image: registry.example.com/api@sha256:after",
         ))
         .stderr(predicate::str::contains("WARNING (publication_moved)"))
-        .stderr(predicate::str::contains("#move-a-publication"));
+        .stderr(predicate::str::contains("workflow/move-publication/"));
 }
 
 #[test]

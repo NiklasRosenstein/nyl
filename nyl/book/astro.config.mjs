@@ -2,6 +2,7 @@ import { defineConfig } from "astro/config";
 import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import starlightSidebarTopics from "starlight-sidebar-topics";
+import { consoleOutput } from "./src/lib/console-output.mjs";
 import { movedPages } from "./src/lib/moved-pages.mjs";
 import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
 
@@ -46,6 +47,7 @@ export default defineConfig({
     starlight({
       title: "Nyl",
       description: "A fast Kubernetes manifest generator for rendered GitOps.",
+      expressiveCode: { plugins: [consoleOutput()] },
       social: [
         {
           icon: "github",
@@ -75,23 +77,31 @@ export default defineConfig({
             items: [
               "kubernetes/pipeline",
               {
-                label: "Components",
+                label: "Concepts",
                 items: [
-                  "kubernetes/components/overview",
-                  "kubernetes/components/authoring-local-components",
-                  "kubernetes/components/resolution-and-lookup",
-                  "kubernetes/components/remote-shortcuts-and-aliases",
-                  "kubernetes/components/troubleshooting",
+                  {
+                    label: "Components",
+                    items: [
+                      "kubernetes/components/overview",
+                      "kubernetes/components/authoring-local-components",
+                      "kubernetes/components/resolution-and-lookup",
+                      "kubernetes/components/remote-shortcuts-and-aliases",
+                      "kubernetes/components/troubleshooting",
+                    ],
+                  },
+                  "kubernetes/git-integration",
                 ],
               },
-              "kubernetes/git-integration",
-              "kubernetes/cli-workflows",
               {
-                label: "Validation",
-                items: ["kubernetes/validation/manifest-validation", "kubernetes/validation/kyverno-policies"],
+                label: "Workflow",
+                items: [
+                  "kubernetes/cli-workflows",
+                  "kubernetes/validation/manifest-validation",
+                  "kubernetes/validation/kyverno-policies",
+                  "kubernetes/renovate",
+                ],
               },
-              { label: "Integrations", items: ["kubernetes/renovate"] },
-              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "kubernetes/resource-guides" } }] },
+              { label: "Resources", items: [{ autogenerate: { directory: "kubernetes/resource-guides" } }] },
             ],
           },
           {
@@ -101,13 +111,32 @@ export default defineConfig({
             icon: "code-branch",
             items: [
               "rendered-gitops",
-              "rendered-gitops/project-structure",
-              "rendered-gitops/resources",
-              "rendered-gitops/targets-and-clusters",
-              "rendered-gitops/release-inputs",
-              "rendered-gitops/rendering-and-publishing",
+              {
+                label: "Concepts",
+                items: [
+                  "rendered-gitops/project-structure",
+                  "rendered-gitops/targets-and-clusters",
+                  "rendered-gitops/release-inputs",
+                  "rendered-gitops/rendered-layout",
+                ],
+              },
+              {
+                label: "Workflow",
+                items: [
+                  "rendered-gitops/workflow/render",
+                  "rendered-gitops/workflow/diff",
+                  "rendered-gitops/workflow/publish",
+                  "rendered-gitops/workflow/move-publication",
+                ],
+              },
+              {
+                label: "Resources",
+                items: [
+                  { slug: "rendered-gitops/resources", label: "Overview" },
+                  { autogenerate: { directory: "rendered-gitops/resource-guides" } },
+                ],
+              },
               "rendered-gitops/security",
-              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "rendered-gitops/resource-guides" } }] },
             ],
           },
           {
@@ -119,7 +148,7 @@ export default defineConfig({
             items: [
               "orchestration",
               "orchestration/environments-and-state",
-              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
+              { label: "Resources", items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
             ],
           },
           {

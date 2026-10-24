@@ -61,7 +61,7 @@ are absent from the resulting lock. It cannot be combined with `--target` or
 `--check`; `--refresh` may be used to retrieve every input again before pruning.
 
 See [Remote artifact vendoring](/nyl/reference/configuration/#remote-artifact-vendoring)
-for the modes and [Rendering, Diffing, and Publishing](/nyl/rendered-gitops/rendering-and-publishing/#vendored-remote-inputs)
+for the modes and [Vendored remote inputs](/nyl/rendered-gitops/workflow/render/#vendored-remote-inputs)
 for resolution and Git LFS behavior.
 
 ## Validation schemas

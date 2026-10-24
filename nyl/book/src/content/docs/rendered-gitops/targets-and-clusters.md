@@ -89,4 +89,4 @@ change because they can alter rendered output. See the
 
 - [Cluster reference](/nyl/reference/resources/k8s.nyl/v1/cluster/)
 - [DeploymentTarget reference](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
-- [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
+- [Render and validate](/nyl/rendered-gitops/workflow/render/)

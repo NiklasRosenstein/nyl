@@ -557,6 +557,9 @@ Mechanics that are easy to miss:
   deletes the entry and its row together.
 - Write links as `/nyl/...`; the build rewrites them for preview deployments
   and fails on links to missing pages.
+- Show example output in a `console` block: commands start with `$ `, and every
+  other line renders dimmed as output and is left out of the copy button. Take
+  the output from a real run, not from memory.
 
 ### Building Documentation
 ```bash
