@@ -16,7 +16,7 @@
 //! - A value needs no expression; whether a field requires one is the field's
 //!   own rule.
 
-use minijinja::{Environment, UndefinedBehavior};
+use minijinja::{value::Serde, Environment, UndefinedBehavior};
 use nyl_core::template_value::{parse, Segment};
 use serde_json::Value;
 
@@ -56,7 +56,7 @@ impl TemplateValueExpander {
         let value = self
             .expression
             .compile_expression(expression)
-            .and_then(|compiled| compiled.eval(context))
+            .and_then(|compiled| compiled.eval(Serde(context)))
             .map_err(|error| cannot_evaluate(&format!("{error:#}")))?;
         if value.is_undefined() {
             return Err(cannot_evaluate(&"the value is undefined"));
