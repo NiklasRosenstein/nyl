@@ -93,3 +93,9 @@ id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
 type = "breaking change"
 description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC; admission webhook configurations are applied last) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last in apply and diff; pruning deletes in reverse apply order and waits for each kind's resources to terminate before deleting the next kind, which can take longer than the previous unordered prune; a failed prune makes the command exit non-zero; a revision is recorded before applying, and an apply that fails or is interrupted records it as failed; and a release that renders no resources is recorded and prunes its previous resources instead of being skipped"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "915c739d-16c6-47be-9584-c80957f0f7b4"
+type = "breaking change"
+description = "Upgrade templating to MiniJinja 3, which aligns template behavior more closely with Jinja2: sequences and maps render with Python-style quoting, floor division and modulo follow Jinja2 semantics, division by zero is an error, `round` uses round-half-even, and `title` only starts words after whitespace and opening brackets"
+author = "@NiklasRosenstein"

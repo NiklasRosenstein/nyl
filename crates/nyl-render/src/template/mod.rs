@@ -4,7 +4,7 @@
 /// - Template rendering with MiniJinja
 /// - Custom filters and functions
 /// - Template context management
-use minijinja::Environment;
+use minijinja::{value::Serde, Environment};
 
 use crate::{secrets::SecretsConfig, Result};
 
@@ -39,13 +39,13 @@ impl TemplateEngine {
     /// Render a template with the given context
     pub fn render(&self, template: &str, context: &serde_json::Value) -> Result<String> {
         let tmpl = self.env.template_from_str(template)?;
-        let result = tmpl.render(context)?;
+        let result = tmpl.render(Serde(context))?;
         Ok(result)
     }
 
     /// Render a template with the given context, associating a name for error messages
     pub fn render_named(&self, name: &str, template: &str, context: &serde_json::Value) -> Result<String> {
-        let result = self.env.render_named_str(name, template, context)?;
+        let result = self.env.render_named_str(name, template, Serde(context))?;
         Ok(result)
     }
 
