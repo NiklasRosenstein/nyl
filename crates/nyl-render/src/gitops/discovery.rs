@@ -120,7 +120,12 @@ impl GitOpsInventory {
     /// Repeat discovery with a different output exclusion without re-reading
     /// the project configuration.
     pub fn rediscover(&self, output_subtree: Option<&Path>) -> Result<Self> {
-        discover_project_inventory(self.project_root.clone(), self.project_config.clone(), output_subtree)
+        discover_project_inventory(
+            self.project_root.clone(),
+            self.project_config.clone(),
+            output_subtree,
+            InvalidResources::Fail,
+        )
     }
 }
 
@@ -179,6 +184,32 @@ pub fn derived_group_source_root(project_root: &Path, group_source_path: &Path, 
 /// A relative `output_subtree` is resolved beneath the project root. The
 /// subtree is omitted from both the YAML file list and resource inventory.
 pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, output_subtree, InvalidResources::Fail)
+}
+
+/// Discover a project like [`discover_gitops_inventory`], leaving out
+/// resources that do not parse instead of failing.
+///
+/// Editor tooling uses this so it keeps working while a file is being written:
+/// a document without a valid envelope, a resource that does not deserialize,
+/// and a later duplicate of a name are skipped. The inventory is incomplete by
+/// design and must not feed rendering.
+pub fn discover_gitops_inventory_for_editing(start_dir: &Path) -> Result<GitOpsInventory> {
+    discover_inventory(start_dir, None, InvalidResources::Skip)
+}
+
+/// What discovery does with a resource document that cannot be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvalidResources {
+    Fail,
+    Skip,
+}
+
+fn discover_inventory(
+    start_dir: &Path,
+    output_subtree: Option<&Path>,
+    invalid: InvalidResources,
+) -> Result<GitOpsInventory> {
     let start_dir = if start_dir.is_file() {
         start_dir.parent().unwrap_or(start_dir)
     } else {
@@ -198,13 +229,14 @@ pub fn discover_gitops_inventory(start_dir: &Path, output_subtree: Option<&Path>
             ))
         })?;
 
-    discover_project_inventory(project_root, project_config, output_subtree)
+    discover_project_inventory(project_root, project_config, output_subtree, invalid)
 }
 
 fn discover_project_inventory(
     project_root: PathBuf,
     project_config: ProjectConfig,
     output_subtree: Option<&Path>,
+    invalid: InvalidResources,
 ) -> Result<GitOpsInventory> {
     let output_subtree = output_subtree.map(|path| {
         let path = if path.is_absolute() {
@@ -267,7 +299,10 @@ fn discover_project_inventory(
 
     for relative_path in &yaml_files {
         let absolute_path = project_root.join(relative_path);
-        discover_file_resources(&absolute_path, relative_path, &mut resources)?;
+        match discover_file_resources(&absolute_path, relative_path, &mut resources, invalid) {
+            Err(_) if invalid == InvalidResources::Skip => {}
+            result => result?,
+        }
     }
 
     Ok(GitOpsInventory {
@@ -349,49 +384,23 @@ fn discover_file_resources(
     absolute_path: &Path,
     relative_path: &Path,
     resources: &mut BTreeMap<GitOpsInventoryKey, DiscoveredGitOpsResource>,
+    invalid: InvalidResources,
 ) -> Result<()> {
     let bytes = std::fs::read(absolute_path)?;
     let contents = String::from_utf8_lossy(&bytes);
 
     for (document_index, document) in split_yaml_documents(&contents).into_iter().enumerate() {
-        if !advertises_gitops_api(document) {
-            continue;
-        }
-        let scanned_identity = scan_static_identity(document)?;
-        if advertises_release_kind(document) {
-            continue;
-        }
-
-        let contextual_path = PathBuf::from(format!("{}#document-{}", relative_path.display(), document_index + 1));
-        let identity = scanned_identity.ok_or_else(|| {
-            NylError::config(format!(
-                "Document {} in {} advertises {API_VERSION_K8S_GITOPS} but has no valid static envelope",
-                document_index + 1,
-                relative_path.display()
-            ))
-        })?;
-        let scanned_labels = scan_static_metadata_labels(document)?;
-        let templatable = matches!(
-            identity.kind,
-            GitOpsResourceKind::ApplicationGroup | GitOpsResourceKind::AppProjectDefinition
-        );
-        let has_template = nyl_core::template_syntax::has_template_syntax(document);
-        let resource = match parse_complete_resource(document, &contextual_path) {
-            Ok(resource) => Some(resource),
-            Err(_) if templatable && has_template => None,
+        let discovered = discover_document(document, document_index, relative_path);
+        let (key, discovered) = match discovered {
+            Ok(Some(found)) => found,
+            Ok(None) => continue,
+            Err(_) if invalid == InvalidResources::Skip => continue,
             Err(error) => return Err(error),
         };
-        let static_labels = resource.as_ref().map_or(scanned_labels, resource_metadata_labels);
-        let key = GitOpsInventoryKey::new(identity.kind, identity.name.clone());
-        let discovered = DiscoveredGitOpsResource {
-            source_path: relative_path.to_path_buf(),
-            document_index: document_index + 1,
-            raw_document: document.to_string(),
-            identity,
-            static_labels,
-            resource,
-        };
-        if let Some(previous) = resources.insert(key.clone(), discovered) {
+        if let Some(previous) = resources.get(&key) {
+            if invalid == InvalidResources::Skip {
+                continue;
+            }
             return Err(NylError::config(format!(
                 "Duplicate GitOps resource {}/{} in {} document {} and {} document {}",
                 key.kind,
@@ -402,8 +411,55 @@ fn discover_file_resources(
                 document_index + 1
             )));
         }
+        resources.insert(key, discovered);
     }
     Ok(())
+}
+
+/// The GitOps resource a document declares, if it advertises one.
+fn discover_document(
+    document: &str,
+    document_index: usize,
+    relative_path: &Path,
+) -> Result<Option<(GitOpsInventoryKey, DiscoveredGitOpsResource)>> {
+    if !advertises_gitops_api(document) {
+        return Ok(None);
+    }
+    let scanned_identity = scan_static_identity(document)?;
+    if advertises_release_kind(document) {
+        return Ok(None);
+    }
+
+    let contextual_path = PathBuf::from(format!("{}#document-{}", relative_path.display(), document_index + 1));
+    let identity = scanned_identity.ok_or_else(|| {
+        NylError::config(format!(
+            "Document {} in {} advertises {API_VERSION_K8S_GITOPS} but has no valid static envelope",
+            document_index + 1,
+            relative_path.display()
+        ))
+    })?;
+    let scanned_labels = scan_static_metadata_labels(document)?;
+    let templatable = matches!(
+        identity.kind,
+        GitOpsResourceKind::ApplicationGroup | GitOpsResourceKind::AppProjectDefinition
+    );
+    let has_template = nyl_core::template_syntax::has_template_syntax(document);
+    let resource = match parse_complete_resource(document, &contextual_path) {
+        Ok(resource) => Some(resource),
+        Err(_) if templatable && has_template => None,
+        Err(error) => return Err(error),
+    };
+    let static_labels = resource.as_ref().map_or(scanned_labels, resource_metadata_labels);
+    let key = GitOpsInventoryKey::new(identity.kind, identity.name.clone());
+    let discovered = DiscoveredGitOpsResource {
+        source_path: relative_path.to_path_buf(),
+        document_index: document_index + 1,
+        raw_document: document.to_string(),
+        identity,
+        static_labels,
+        resource,
+    };
+    Ok(Some((key, discovered)))
 }
 
 fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, String> {
@@ -935,6 +991,27 @@ spec:
         assert!(error.contains("Duplicate GitOps resource DeploymentTarget/production"));
         assert!(error.contains("one.yaml"));
         assert!(error.contains("two.yaml"));
+    }
+
+    #[test]
+    fn editing_discovery_skips_resources_that_do_not_parse() {
+        let (temporary, _repository) = project();
+        fs::write(temporary.path().join("one.yaml"), TARGET).unwrap();
+        fs::write(temporary.path().join("two.yaml"), TARGET).unwrap();
+        fs::write(
+            temporary.path().join("broken.yaml"),
+            "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: broken\nspec:\n  destination: 42\n",
+        )
+        .unwrap();
+
+        // Rendering needs a complete inventory; editor tooling keeps what parses.
+        assert!(discover_gitops_inventory(temporary.path(), None).is_err());
+        let inventory = discover_gitops_inventory_for_editing(temporary.path()).unwrap();
+        let target = inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap();
+        assert_eq!(target.source_path, PathBuf::from("one.yaml"));
+        assert!(inventory.get(GitOpsResourceKind::Cluster, "broken").is_none());
     }
 
     #[test]

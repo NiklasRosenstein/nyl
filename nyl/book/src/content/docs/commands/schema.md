@@ -76,6 +76,10 @@ rendered output trees (directories holding `_nyl/index.json`), and the vendor
 directory are left untouched. When no Cluster records a `kubeVersion`, Kubernetes
 built-ins get no comment and the command warns.
 
+Resources that are still invalid get their comment too, so the editor can point
+at the problem: the command reads each document's `apiVersion` and `kind` and
+does not need the project to render.
+
 The schemas describe rendered values, so a template expression where the schema
 expects another type, such as `enabled: '{{ values.enabled }}'`, is reported by
 the editor, as it is in Helm templates.

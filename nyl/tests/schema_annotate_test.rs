@@ -267,3 +267,23 @@ fn test_schema_annotate_warns_when_no_cluster_records_a_kube_version() {
         .success()
         .stderr(predicate::str::contains(warning));
 }
+
+#[test]
+fn test_schema_annotate_annotates_resources_that_do_not_parse_yet() {
+    let directory = project();
+    // A resource being written is invalid, and is exactly where editor help matters.
+    let group = directory.path().join("config/group.yaml");
+    fs::write(
+        &group,
+        "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: web\nspec:\n  applicationDeletionPolicy: Sideways\n",
+    )
+    .unwrap();
+
+    annotate(directory.path(), false).success();
+    assert!(fs::read_to_string(&group).unwrap().starts_with(
+        "# yaml-language-server: $schema=../vendor/schemas/editor/nyl/k8s.gitops.nyl/v1/application-group.schema.json\n"
+    ));
+    assert!(fs::read_to_string(directory.path().join("apps/web/widget.yaml"))
+        .unwrap()
+        .starts_with("# yaml-language-server: $schema="));
+}
