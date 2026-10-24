@@ -11,12 +11,18 @@
 //! retained by lifecycle; uncertain or failed by condition; blocked by
 //! readiness; current by receipt; else ready. `awaiting-approval` arrives
 //! with approvals (part 6).
+//!
+//! A broken lease declares its holder gone, its run ref included, as in
+//! [`crate::rules::lease::decide`]: its run neither holds the environment
+//! nor runs units. When that run had not finished, status reports that it
+//! lost its lease (`NYL-LEASE-LOST`, exit 4) and shows the units it may
+//! have left half-executed as uncertain.
 
 use std::collections::BTreeSet;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
-use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot};
+use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
 use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
 
 use crate::rules::freshness::receipt_is_current;
@@ -70,8 +76,30 @@ pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, runnin
     }
 }
 
+/// The run whose lease `nyl lease break` broke. Like
+/// [`crate::rules::lease::decide`], a broken lease declares its holder
+/// gone, its run ref included.
+fn broken_run(coordination: &Coordination) -> Option<&RunId> {
+    coordination
+        .lease
+        .as_ref()
+        .filter(|held| held.lease.broken.is_some())
+        .map(|held| &held.lease.run)
+}
+
+/// The units an unfinished run ref names that it has not checkpointed yet.
+fn unfinished_units(state: &RunState) -> impl Iterator<Item = &UnitName> {
+    let done: BTreeSet<&UnitName> = state
+        .checkpoints
+        .iter()
+        .map(|checkpoint| &checkpoint.desired.unit.name)
+        .collect();
+    state.run.units.iter().filter(move |unit| !done.contains(unit))
+}
+
 /// The units live runs are executing: those the unbroken lease names, and
-/// those an unfinished run ref names that it has not checkpointed yet.
+/// those an unfinished run ref of a live run names that it has not
+/// checkpointed yet.
 fn running_units(coordination: &Coordination) -> BTreeSet<UnitName> {
     let mut running = BTreeSet::new();
     if let Some(held) = &coordination.lease {
@@ -79,21 +107,40 @@ fn running_units(coordination: &Coordination) -> BTreeSet<UnitName> {
             running.extend(held.lease.units.iter().cloned());
         }
     }
-    for state in coordination.runs.iter().filter(|state| !state.run.finished) {
-        let done: BTreeSet<&UnitName> = state
-            .checkpoints
-            .iter()
-            .map(|checkpoint| &checkpoint.desired.unit.name)
-            .collect();
-        running.extend(state.run.units.iter().filter(|unit| !done.contains(unit)).cloned());
+    let broken = broken_run(coordination);
+    for state in coordination
+        .runs
+        .iter()
+        .filter(|state| !state.run.finished && Some(&state.run.run) != broken)
+    {
+        running.extend(unfinished_units(state).cloned());
     }
     running
 }
 
-/// Who holds the environment: the lease, and unfinished runs it does not name.
+/// A run that lost its lease to `nyl lease break` before finishing, and the
+/// units it may have left half-executed: those the broken lease names and
+/// those its unfinished run ref has not checkpointed. `None` when the lease
+/// is unbroken or the broken run's ref says it finished.
+fn lost_run(coordination: &Coordination) -> Option<(&RunId, BTreeSet<UnitName>)> {
+    let held = coordination.lease.as_ref().filter(|held| held.lease.broken.is_some())?;
+    let run = &held.lease.run;
+    let state = coordination.runs.iter().find(|state| &state.run.run == run);
+    if state.is_some_and(|state| state.run.finished) {
+        return None;
+    }
+    let mut units: BTreeSet<UnitName> = held.lease.units.iter().cloned().collect();
+    if let Some(state) = state {
+        units.extend(unfinished_units(state).cloned());
+    }
+    Some((run, units))
+}
+
+/// Who holds the environment: the unbroken lease, and unfinished runs it
+/// does not name, except the run of a broken lease.
 fn holders(coordination: &Coordination) -> Vec<Holder> {
     let mut holders = Vec::new();
-    let mut lease_run: Option<&RunId> = None;
+    let mut lease_run: Option<&RunId> = broken_run(coordination);
     if let Some(held) = &coordination.lease {
         if held.lease.broken.is_none() {
             lease_run = Some(&held.lease.run);
@@ -168,10 +215,25 @@ pub fn status(
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
     let running = running_units(coordination);
+    let lost = lost_run(coordination);
+    if let Some((run, _)) = &lost {
+        report.errors.push(Finding::new(
+            Code::LeaseLost,
+            format!("run {run} lost its lease to nyl lease break before it finished"),
+            "run nyl reconcile to take over the environment and import the run's checkpoints, \
+             then check and nyl recover any unit left uncertain",
+        ));
+    }
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
-        unit.state = Some(unit_state(desired, observed, running.contains(name)));
+        let half_executed = lost.as_ref().is_some_and(|(_, units)| units.contains(name));
+        unit.state = Some(if half_executed {
+            // The run may have executed it without recording the outcome.
+            UnitState::Uncertain
+        } else {
+            unit_state(desired, observed, running.contains(name))
+        });
         unit.receipt = Some(receipt_state(Some(desired), observed));
         let condition = observed.and_then(|observed| observed.condition.as_ref());
         unit.last_run = match condition {
@@ -373,5 +435,70 @@ mod tests {
         assert!(report.warnings[0].message.contains("by ci"), "{:?}", report.warnings);
         assert_eq!(report.exit, ExitCategory::Failed);
         assert!(!report.complete);
+    }
+
+    /// Catches status still treating a run whose lease `nyl lease break`
+    /// broke as running and holding the environment (exit 2), where the
+    /// contract says a run that lost its lease exits 4 and its half-executed
+    /// units need recovery.
+    #[test]
+    fn test_status_reports_a_broken_lease_as_lost_not_running() {
+        let snapshot = EnvironmentSnapshot {
+            desired: BTreeMap::from([
+                (UnitName::new("network").unwrap(), desired(1, Some(key('a')))),
+                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
+            ]),
+            observed: BTreeMap::from([
+                (UnitName::new("network").unwrap(), observed(1, Some(key('a')))),
+                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
+            ]),
+            ..EnvironmentSnapshot::default()
+        };
+        let lease = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN, "runner": "ci",
+            "operation": "reconcile", "units": [],
+            "deadline": "2026-01-01T01:00:00Z", "takenAt": "2026-01-01T00:00:00Z",
+            "broken": {"by": "alice", "at": "2026-01-01T00:10:00Z"}
+        }))
+        .unwrap();
+        let run = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": RUN, "runner": "ci",
+            "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["web"]
+        }))
+        .unwrap();
+        let coordination = Coordination {
+            lease: Some(HeldLease {
+                lease,
+                version: "1".to_owned(),
+            }),
+            runs: vec![RunState {
+                run,
+                checkpoints: Vec::new(),
+                version: "r1".to_owned(),
+            }],
+        };
+        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination);
+
+        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        assert_eq!(unit("web").state, Some(UnitState::Uncertain));
+        assert_eq!(unit("network").state, Some(UnitState::Current));
+        assert!(
+            report.warnings.iter().all(|warning| warning.code != Code::LeaseHeld),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(report.errors[0].code, Code::LeaseLost);
+        assert_eq!(report.exit, ExitCategory::Uncertain);
+
+        // Once the broken run's ref says it finished, nothing was lost.
+        let mut finished = coordination.clone();
+        finished.runs[0].run.finished = true;
+        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &finished);
+        assert_eq!(
+            report.units[&UnitName::new("web").unwrap()].state,
+            Some(UnitState::Current)
+        );
+        assert!(report.errors.is_empty());
+        assert_eq!(report.exit, ExitCategory::Ok);
     }
 }
