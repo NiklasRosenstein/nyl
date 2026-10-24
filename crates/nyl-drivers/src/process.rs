@@ -8,15 +8,29 @@
 //! never stored; stdout is also returned for steps Nyl reads, such as a
 //! fingerprint.
 
-use std::time::Duration as StdDuration;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 
-use nyl_core::orchestration::driver::{DriverResult, ToolExit, ToolInvocation, ToolRunner};
+use nyl_core::orchestration::driver::{DriverError, DriverResult, ToolExit, ToolInvocation, ToolRunner};
 
 /// Time between SIGTERM and SIGKILL.
 pub const KILL_GRACE: StdDuration = StdDuration::from_secs(30);
 
+/// How often the runner checks whether a tool has exited.
+const POLL_INTERVAL: StdDuration = StdDuration::from_millis(10);
+
+/// What replaces a masked value in the transcript.
+const MASK: &str = "***";
+
+/// Where transcripts go: this process's stderr, or a buffer in tests.
+type Sink = Option<Arc<Mutex<Vec<u8>>>>;
+
 /// Runs tools as child processes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProcessRunner {
     /// Secret values masked in every transcript, in addition to each
     /// invocation's own [`ToolInvocation::masked`].
@@ -26,6 +40,21 @@ pub struct ProcessRunner {
     /// timeout from their context's `deadline - now`, so this runner never
     /// reads a clock to decide one (it measures elapsed time with `Instant`).
     timeout: Option<StdDuration>,
+    /// Time between SIGTERM and SIGKILL; [`KILL_GRACE`] except in tests.
+    pub(crate) kill_grace: StdDuration,
+    /// A buffer that receives the transcript instead of stderr, for tests.
+    pub(crate) transcript: Sink,
+}
+
+impl Default for ProcessRunner {
+    fn default() -> Self {
+        Self {
+            masked: Vec::new(),
+            timeout: None,
+            kill_grace: KILL_GRACE,
+            transcript: None,
+        }
+    }
 }
 
 impl ProcessRunner {
@@ -50,7 +79,403 @@ impl ProcessRunner {
 
 impl ToolRunner for ProcessRunner {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
-        let _ = (invocation, &self.masked, self.timeout);
-        todo!("drivers-sources")
+        let mut masked = self
+            .masked
+            .iter()
+            .chain(&invocation.masked)
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        // Longest first, so a secret containing another is masked whole.
+        masked.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        masked.dedup();
+        let masked = Arc::new(masked);
+        let timeout = invocation.timeout.or(self.timeout);
+
+        let mut command = Command::new(&invocation.program);
+        command
+            .args(&invocation.args)
+            .current_dir(&invocation.working_dir)
+            .env_clear()
+            .envs(&invocation.env)
+            .stdin(if invocation.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Ok(ToolExit::NotStarted {
+                    reason: format!("{}: {error}", invocation.program.display()),
+                })
+            }
+        };
+        let start = Instant::now();
+        let deadline = timeout.map(|timeout| start + timeout);
+
+        if let (Some(bytes), Some(mut stdin)) = (invocation.stdin, child.stdin.take()) {
+            // A tool that never reads its input must not block the runner.
+            thread::spawn(move || {
+                let _ = stdin.write_all(&bytes);
+            });
+        }
+        let (done, finished) = mpsc::channel::<()>();
+        let stdout = child.stdout.take().map(|pipe| {
+            let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
+            thread::spawn(move || {
+                let captured = transcribe(pipe, &masked, &sink, true);
+                let _ = done.send(());
+                captured
+            })
+        });
+        let stderr = child.stderr.take().map(|pipe| {
+            let (masked, sink, done) = (masked.clone(), self.transcript.clone(), done.clone());
+            thread::spawn(move || {
+                transcribe(pipe, &masked, &sink, false);
+                let _ = done.send(());
+            })
+        });
+        drop(done);
+        let readers = usize::from(stdout.is_some()) + usize::from(stderr.is_some());
+
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(wait_error)? {
+                break status;
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.terminate(&mut child)?;
+                join_readers(stdout, stderr);
+                return Ok(ToolExit::DeadlineExceeded);
+            }
+            thread::sleep(POLL_INTERVAL);
+        };
+
+        // The tool exited; its output ends when every process holding its
+        // pipes, such as a background child, has exited too.
+        let expired = await_output(&finished, readers, deadline, &child);
+        if expired {
+            if cfg!(unix) {
+                join_readers(stdout, stderr);
+            }
+            return Ok(ToolExit::DeadlineExceeded);
+        }
+        let captured = stdout
+            .map(|reader| reader.join().unwrap_or_default())
+            .unwrap_or_default();
+        if let Some(reader) = stderr {
+            let _ = reader.join();
+        }
+        Ok(exit_of(status, captured))
+    }
+}
+
+impl ProcessRunner {
+    /// SIGTERM to the group; SIGKILL once [`Self::kill_grace`] passes while
+    /// any member is alive. Returns once the tool itself is reaped.
+    #[cfg(not(unix))]
+    fn terminate(&self, child: &mut Child) -> DriverResult<()> {
+        let _ = child.kill();
+        child.wait().map_err(wait_error)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn terminate(&self, child: &mut Child) -> DriverResult<()> {
+        kill_group(child, Signal::Term);
+        let grace_end = Instant::now() + self.kill_grace;
+        let mut leader_exited = false;
+        while Instant::now() < grace_end {
+            if !leader_exited {
+                leader_exited = child.try_wait().map_err(wait_error)?.is_some();
+            }
+            if leader_exited && !group_alive(child) {
+                return Ok(());
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        kill_group(child, Signal::Kill);
+        if !leader_exited {
+            child.wait().map_err(wait_error)?;
+        }
+        Ok(())
+    }
+}
+
+/// Wait until `readers` transcript threads finish. Returns whether the
+/// deadline passed first, in which case the group was killed.
+fn await_output(finished: &mpsc::Receiver<()>, readers: usize, deadline: Option<Instant>, child: &Child) -> bool {
+    let mut open = readers;
+    let mut expired = false;
+    while open > 0 {
+        let received = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match finished.recv_timeout(remaining) {
+                    Ok(()) => true,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        expired = true;
+                        if cfg!(unix) {
+                            kill_group(child, Signal::Kill);
+                            // The group is gone; the pipes close.
+                            finished.recv().is_ok()
+                        } else {
+                            false
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => false,
+                }
+            }
+            None => finished.recv().is_ok(),
+        };
+        if !received {
+            break;
+        }
+        open -= 1;
+    }
+    expired
+}
+
+#[allow(clippy::needless_pass_by_value)] // Used as `map_err(wait_error)`.
+fn wait_error(error: std::io::Error) -> DriverError {
+    DriverError::after_effects(format!("failed to wait for a tool: {error}"))
+}
+
+fn join_readers(stdout: Option<thread::JoinHandle<Vec<u8>>>, stderr: Option<thread::JoinHandle<()>>) {
+    if let Some(reader) = stdout {
+        let _ = reader.join();
+    }
+    if let Some(reader) = stderr {
+        let _ = reader.join();
+    }
+}
+
+#[cfg(unix)]
+fn exit_of(status: ExitStatus, stdout: Vec<u8>) -> ToolExit {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => ToolExit::Exited { code, stdout },
+        (None, Some(signal)) => ToolExit::Signaled { signal },
+        (None, None) => ToolExit::Exited { code: -1, stdout },
+    }
+}
+
+#[cfg(not(unix))]
+fn exit_of(status: ExitStatus, stdout: Vec<u8>) -> ToolExit {
+    ToolExit::Exited {
+        code: status.code().unwrap_or(-1),
+        stdout,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))] // Only unix has process groups to signal.
+enum Signal {
+    Term,
+    Kill,
+}
+
+/// Send a signal to the tool's process group, which `process_group(0)` made
+/// its own: the group id is the tool's pid.
+#[cfg(unix)]
+fn kill_group(child: &Child, signal: Signal) {
+    let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
+        return;
+    };
+    let signal = match signal {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: kill(2) has no memory-safety preconditions; a group that no
+    // longer exists yields ESRCH, which is ignored.
+    unsafe {
+        libc::kill(-pgid, signal);
+    }
+}
+
+/// Without process groups, [`ProcessRunner::terminate`] stops the tool
+/// itself, and stray children of an exited tool are left alone.
+#[cfg(not(unix))]
+fn kill_group(_child: &Child, _signal: Signal) {}
+
+/// Whether any process of the tool's group is still alive.
+#[cfg(unix)]
+fn group_alive(child: &Child) -> bool {
+    let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks for existence.
+    unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+/// Copy a tool's output, line by line and masked, to the transcript; return
+/// the raw bytes when `capture` is set.
+fn transcribe(pipe: impl Read, masked: &[String], sink: &Sink, capture: bool) -> Vec<u8> {
+    let mut reader = BufReader::new(pipe);
+    let mut captured = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if capture {
+                    captured.extend_from_slice(&line);
+                }
+                let text = mask(&String::from_utf8_lossy(&line), masked);
+                match sink {
+                    Some(buffer) => buffer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend_from_slice(text.as_bytes()),
+                    None => {
+                        let _ = std::io::stderr().lock().write_all(text.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+    captured
+}
+
+/// Replace every masked value in `text` with `***`.
+pub(crate) fn mask(text: &str, masked: &[String]) -> String {
+    let mut text = text.to_owned();
+    for value in masked {
+        if !value.is_empty() && text.contains(value.as_str()) {
+            text = text.replace(value.as_str(), MASK);
+        }
+    }
+    text
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn sh(script: &str) -> ToolInvocation {
+        ToolInvocation {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), script.into()],
+            working_dir: std::env::temp_dir(),
+            env: BTreeMap::new(),
+            stdin: None,
+            timeout: None,
+            masked: Vec::new(),
+        }
+    }
+
+    fn quiet() -> (ProcessRunner, Arc<Mutex<Vec<u8>>>) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let runner = ProcessRunner {
+            transcript: Some(buffer.clone()),
+            ..ProcessRunner::new()
+        };
+        (runner, buffer)
+    }
+
+    #[test]
+    fn test_run_captures_stdout_and_exit_code() {
+        let (runner, transcript) = quiet();
+        let exit = runner.run(sh("echo out; echo err >&2; exit 3")).unwrap();
+        assert_eq!(
+            exit,
+            ToolExit::Exited {
+                code: 3,
+                stdout: b"out\n".to_vec()
+            }
+        );
+        let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(transcript.contains("out") && transcript.contains("err"), "{transcript}");
+    }
+
+    #[test]
+    fn test_run_passes_stdin_bytes() {
+        let (runner, _) = quiet();
+        let mut invocation = sh("cat");
+        invocation.stdin = Some(b"piped".to_vec());
+        let exit = runner.run(invocation).unwrap();
+        assert_eq!(
+            exit,
+            ToolExit::Exited {
+                code: 0,
+                stdout: b"piped".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn test_run_environment_is_exactly_the_invocation_env() {
+        let (runner, _) = quiet();
+        let mut invocation = sh("/usr/bin/env");
+        invocation.env = BTreeMap::from([("ONLY".to_owned(), "this".to_owned())]);
+        let ToolExit::Exited { code: 0, stdout } = runner.run(invocation).unwrap() else {
+            panic!("env runs");
+        };
+        let mut lines = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        // `sh` itself may export PWD, SHLVL and `_`; nothing else of ours leaks.
+        lines.retain(|line| !line.starts_with("PWD=") && !line.starts_with("SHLVL=") && !line.starts_with("_="));
+        assert_eq!(lines, vec!["ONLY=this".to_owned()]);
+    }
+
+    #[test]
+    fn test_run_masks_invocation_and_default_secrets_in_the_transcript() {
+        let (runner, transcript) = quiet();
+        let runner = runner.masking(vec!["default-secret".to_owned()]);
+        let mut invocation = sh("echo token=hunter2; echo other=default-secret >&2");
+        invocation.masked = vec!["hunter2".to_owned()];
+        let ToolExit::Exited { stdout, .. } = runner.run(invocation).unwrap() else {
+            panic!("the tool runs");
+        };
+        // Captured stdout is the tool's own bytes; only the transcript is masked.
+        assert_eq!(stdout, b"token=hunter2\n");
+        let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(transcript.contains("token=***"), "{transcript}");
+        assert!(transcript.contains("other=***"), "{transcript}");
+        assert!(!transcript.contains("hunter2") && !transcript.contains("default-secret"));
+    }
+
+    #[test]
+    fn test_run_timeout_kills_the_whole_process_group() {
+        let (mut runner, _) = quiet();
+        runner.kill_grace = StdDuration::from_millis(200);
+        let mut invocation = sh("sleep 30 & wait");
+        invocation.timeout = Some(StdDuration::from_millis(200));
+        let started = Instant::now();
+        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
+        // The background `sleep` holds the stdout pipe, and the runner returns
+        // only once that pipe closes: the whole group was terminated.
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+    }
+
+    #[test]
+    fn test_run_reports_a_signal_death() {
+        let (runner, _) = quiet();
+        assert_eq!(
+            runner.run(sh("kill -9 $$")).unwrap(),
+            ToolExit::Signaled { signal: libc::SIGKILL }
+        );
+    }
+
+    #[test]
+    fn test_run_missing_program_is_not_started() {
+        let (runner, _) = quiet();
+        let mut invocation = sh("");
+        invocation.program = PathBuf::from("/nonexistent/tool");
+        assert!(matches!(runner.run(invocation).unwrap(), ToolExit::NotStarted { .. }));
     }
 }
