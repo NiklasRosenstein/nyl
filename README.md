@@ -54,7 +54,7 @@ spec:
 Render:
 
 ```bash
-nyl render examples/components/manifests/nginx.yaml --offline --kube-version 1.30.0 --kube-api-versions v1
+nyl render examples/components/manifests/nginx.yaml --kube-version 1.30.0 --kube-api-versions v1
 ```
 
 ### RemoteManifest

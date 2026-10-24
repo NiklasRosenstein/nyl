@@ -42,7 +42,7 @@ mode respects fields that explicitly preserve unknown properties.
 nyl render-tree --target production --output-dir rendered --validate
 nyl diff-tree --target production --validate
 nyl publish-tree --target production --validate
-nyl render app.yaml --offline --kube-version 1.31.4 --validate
+nyl render app.yaml --kube-version 1.31.4 --validate
 ```
 
 Target-aware validation uses the Cluster's effective Kubernetes version.

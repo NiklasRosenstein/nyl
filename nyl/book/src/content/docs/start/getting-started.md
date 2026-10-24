@@ -107,7 +107,7 @@ nyl render apps.yaml
 For a targetless deterministic render, provide Kubernetes capabilities explicitly:
 
 ```bash
-nyl render --offline --kube-version 1.31.0 --kube-api-versions v1,apps/v1 apps.yaml
+nyl render --kube-version 1.31.0 --kube-api-versions v1,apps/v1 apps.yaml
 ```
 
 For target-aware rendering, scaffold a Cluster and target, update the Cluster's

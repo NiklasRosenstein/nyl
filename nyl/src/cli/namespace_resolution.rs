@@ -9,17 +9,16 @@ use crate::{
 
 /// Resolve missing metadata.namespace values for namespaced resources.
 ///
-/// Fallback order:
-/// 1. Existing manifest metadata.namespace
-/// 2. release_namespace argument
-/// 3. kube client default namespace
+/// A resource keeps its own namespace; otherwise it takes the destination
+/// namespace, as Argo CD's Application destination gives it. The kube
+/// context's default namespace is never used, so the result depends only on
+/// the declaration.
 pub async fn resolve_manifest_namespaces(
     client: &dyn KubeClient,
     manifests: &mut [Value],
-    release_namespace: Option<&str>,
+    destination_namespace: Option<&str>,
 ) -> Result<usize> {
     let mut resolved_count = 0;
-    let default_namespace = client.default_namespace();
     let mut scope_cache: HashMap<GroupVersionKind, bool> = HashMap::new();
 
     for manifest in manifests {
@@ -51,15 +50,9 @@ pub async fn resolve_manifest_namespaces(
             continue;
         }
 
-        let namespace = release_namespace
-            .filter(|ns| !ns.is_empty())
-            .or_else(|| (!default_namespace.is_empty()).then_some(default_namespace))
-            .ok_or_else(|| {
-                NylError::Config(format!(
-                    "Namespace required for namespaced resource {} {}",
-                    key.gvk.kind, key.name
-                ))
-            })?;
+        let namespace = destination_namespace
+            .filter(|ns| !ns.trim().is_empty())
+            .ok_or_else(|| missing_namespace(&key))?;
 
         set_manifest_namespace(manifest, namespace)?;
         resolved_count += 1;
@@ -86,11 +79,10 @@ pub async fn resolve_manifest_namespaces(
 pub async fn adjust_duplicate_keys_for_namespace_resolution(
     client: &dyn KubeClient,
     duplicates: &HashMap<ResourceKey, usize>,
-    release_namespace: Option<&str>,
+    destination_namespace: Option<&str>,
 ) -> Result<HashMap<ResourceKey, usize>> {
     let mut adjusted = HashMap::with_capacity(duplicates.len());
     let mut scope_cache: HashMap<GroupVersionKind, bool> = HashMap::new();
-    let default_namespace = client.default_namespace();
 
     for (key, count) in duplicates {
         if key.namespace.as_deref().is_some_and(|ns| !ns.trim().is_empty()) {
@@ -124,18 +116,9 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
             continue;
         }
 
-        let namespace = release_namespace
+        let namespace = destination_namespace
             .filter(|ns| !ns.trim().is_empty())
-            .or_else(|| {
-                let trimmed = default_namespace.trim();
-                (!trimmed.is_empty()).then_some(trimmed)
-            })
-            .ok_or_else(|| {
-                NylError::Config(format!(
-                    "Namespace required for namespaced resource {} {}",
-                    key.gvk.kind, key.name
-                ))
-            })?;
+            .ok_or_else(|| missing_namespace(key))?;
 
         let mut resolved_key = key.clone();
         resolved_key.namespace = Some(namespace.to_string());
@@ -143,6 +126,13 @@ pub async fn adjust_duplicate_keys_for_namespace_resolution(
     }
 
     Ok(adjusted)
+}
+
+fn missing_namespace(key: &ResourceKey) -> NylError {
+    NylError::config(format!(
+        "{} {} sets no namespace and the file declares no Release to give it one; set metadata.namespace, declare a Release, or pass --namespace",
+        key.gvk.kind, key.name
+    ))
 }
 
 fn format_api_version(gvk: &GroupVersionKind) -> String {
@@ -362,23 +352,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_manifest_namespaces_uses_client_default_namespace() {
-        let client = MockKubeClient::with_default_namespace("ctx-default");
-        let mut manifests = vec![json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa"}
-        })];
-
-        let resolved = resolve_manifest_namespaces(&client, &mut manifests, None)
-            .await
-            .unwrap();
-
-        assert_eq!(resolved, 1);
-        assert_eq!(manifests[0]["metadata"]["namespace"].as_str(), Some("ctx-default"));
-    }
-
-    #[tokio::test]
     async fn test_resolve_manifest_namespaces_skips_cluster_scoped_resources() {
         let client = MockKubeClient::new();
         let mut manifests = vec![json!({
@@ -396,8 +369,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_manifest_namespaces_errors_when_no_fallback_exists() {
-        let client = MockKubeClient::with_default_namespace("");
+    async fn test_resolve_manifest_namespaces_never_uses_the_kube_context_namespace() {
+        let client = MockKubeClient::with_default_namespace("ctx-default");
         let mut manifests = vec![json!({
             "apiVersion": "v1",
             "kind": "ServiceAccount",
@@ -410,7 +383,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("Namespace required for namespaced resource ServiceAccount sa"));
+            .contains("ServiceAccount sa sets no namespace and the file declares no Release"));
     }
 
     #[tokio::test]

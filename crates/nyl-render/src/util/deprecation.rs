@@ -1,4 +1,5 @@
-//! Warnings for deprecated API versions found while loading project files.
+//! Warnings for deprecated API versions found while loading project files,
+//! and for deprecated command-line flags.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,16 @@ pub fn warn_deprecated_api_version(path: &Path, document: &serde_json::Value) {
     if first {
         tracing::warn!("{warning}");
     }
+}
+
+/// The warning for a deprecated command-line flag.
+pub fn deprecated_flag_warning(flag: &str, fix: &str) -> String {
+    format!("{flag} is deprecated: {fix}. Support ends in a future release, see {DEPRECATIONS_URL}")
+}
+
+/// Warn about a deprecated command-line flag the invocation passed.
+pub fn warn_deprecated_flag(flag: &str, fix: &str) {
+    tracing::warn!("{}", deprecated_flag_warning(flag, fix));
 }
 
 #[cfg(test)]

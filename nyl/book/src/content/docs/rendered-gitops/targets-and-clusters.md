@@ -65,10 +65,20 @@ CI cluster access.
 
 ## Maintaining cluster capabilities
 
-Inspect and refresh committed capabilities from a live cluster with:
+`nyl get clusters` shows each Cluster's committed Kubernetes version and the
+kube context `capture` uses:
+
+```console
+$ nyl get clusters
+NAME     DESTINATION                       CONTEXT        VERSION  FILE
+primary  https://primary.example.com:6443  admin@primary  1.32.2   config/clusters/primary.yaml#document-1
+staging  https://staging.example.com:6443  -              1.31.4   config/clusters/staging.yaml#document-1
+```
+
+Refresh the committed capabilities from the live cluster, or check them for
+drift:
 
 ```bash
-nyl get clusters
 nyl capture cluster primary
 nyl capture cluster primary --check
 ```

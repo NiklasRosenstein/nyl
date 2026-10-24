@@ -18,18 +18,12 @@ Filter the rendered output when you only need part of the result:
 nyl render --target dev --only-kind Deployment,Service apps/web.yaml
 ```
 
-Use the target Cluster's committed capabilities for repeatable rendering
-without Kubernetes discovery:
-
-```bash
-nyl render --target dev --offline apps/web.yaml
-```
-
+`nyl render` never connects to Kubernetes: with `--target` it uses the Cluster's
+committed capabilities and renders the Release as `render-tree` publishes it.
 For a targetless base render, pass the capabilities explicitly:
 
 ```bash
 nyl render \
-  --offline \
   --kube-version 1.30.0 \
   --kube-api-versions v1,apps/v1 \
   apps/web.yaml

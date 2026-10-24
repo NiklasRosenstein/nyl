@@ -290,9 +290,9 @@ spec:
 - Rendering validates bound values against declared types and fails on an
   unbound input without a default. Inputs are opt-in by the Release author, so
   this never affects an existing Release.
-- Direct `nyl render`, `diff`, and `apply` apply the selected target's bindings,
-  so they match `render-tree`, and accept `--input`/`--inputs` overrides that
-  tree commands never accept.
+- Direct `nyl render`, `diff`, and `apply` apply the selected target's bindings
+  and take the Release from the compiled target, so they match `render-tree`,
+  and accept `--input`/`--inputs` overrides that tree commands never accept.
 - Remote ApplicationGroups receive inputs exactly like local groups, as they
   already receive target `values`; the platform's binding key is the admission.
 - Resolved inputs participate in the dependency recorder and render-cache key.

@@ -223,7 +223,10 @@ nyl render --input image='"registry.example.com/api@sha256:4f0c"' --inputs local
 reads a YAML or JSON object, and individual `--input` flags win over it.
 Overrides must name declared inputs and are type-checked like bindings. Tree
 commands accept no overrides: published output reproduces from committed
-source and the publication state.
+source and the publication state. A Release rendered with overrides or
+`--defaults-only` is therefore not the published one, and the direct command
+settles it alone instead of taking it from the compiled target; see
+[The Release's Application](/nyl/kubernetes/pipeline/#the-releases-application).
 
 ## Provenance
 
