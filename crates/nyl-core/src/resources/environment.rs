@@ -37,11 +37,16 @@ pub const KIND_ENVIRONMENT_GROUP: &str = "EnvironmentGroup";
 /// No orchestration happens; rendering and publication work as before.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::Environment))]
 pub struct Environment {
+    /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
     pub api_version: String,
+    /// Resource kind within the API group.
     pub kind: String,
+    /// Resource identity and metadata.
     pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
     #[serde(default)]
     pub spec: EnvironmentSpec,
 }
@@ -167,11 +172,16 @@ fn environment_source_schema(schema: &mut schemars::Schema) {
 /// Each Environment carries all of its own configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[schemars(example = super::schema::resource_example(super::schema::ResourceKind::EnvironmentGroup))]
 pub struct EnvironmentGroup {
+    /// API group and version defining this resource.
     #[serde(rename = "apiVersion")]
     pub api_version: String,
+    /// Resource kind within the API group.
     pub kind: String,
+    /// Resource identity and metadata.
     pub metadata: GitOpsResourceMetadata,
+    /// Configuration for this resource.
     pub spec: EnvironmentGroupSpec,
 }
 

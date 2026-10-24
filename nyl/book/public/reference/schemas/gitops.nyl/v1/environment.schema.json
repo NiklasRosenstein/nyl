@@ -292,24 +292,55 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "A named place that units are reconciled into, with its own state.\n\nAn Environment selects units by their literal labels and gives their\ntemplates its `values`. The selected, enabled units are its ownership set:\na unit that leaves the set is deleted under its deletion policy.\n\n## When needed\n\nTo reconcile units with `nyl reconcile -e <environment>`.\n\n## If omitted\n\nNo orchestration happens; rendering and publication work as before.",
+  "examples": [
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "kind": "Environment",
+      "metadata": {
+        "name": "production"
+      },
+      "spec": {
+        "protectedRefs": [
+          "main"
+        ],
+        "state": {
+          "repositoryRef": {
+            "name": "deploy"
+          }
+        },
+        "unitSelector": {
+          "matchLabels": {
+            "stage": "production"
+          }
+        },
+        "values": {
+          "target": "production"
+        }
+      }
+    }
+  ],
   "properties": {
     "apiVersion": {
       "const": "gitops.nyl/v1",
+      "description": "API group and version defining this resource.",
       "type": "string"
     },
     "kind": {
       "const": "Environment",
+      "description": "Resource kind within the API group.",
       "type": "string"
     },
     "metadata": {
-      "$ref": "#/$defs/GitOpsResourceMetadata"
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Resource identity and metadata."
     },
     "spec": {
       "$ref": "#/$defs/EnvironmentSpec",
       "default": {
         "state": {},
         "unitSelector": {}
-      }
+      },
+      "description": "Configuration for this resource."
     }
   },
   "required": [
