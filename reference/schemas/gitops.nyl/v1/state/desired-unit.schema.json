@@ -1,0 +1,730 @@
+{
+  "$defs": {
+    "ApprovalIdentity": {
+      "description": "How Nyl learned an approver's identity. An audit record, not authorization.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Read from the CI system, by a built-in lookup or the project's hook.",
+          "type": "string"
+        },
+        {
+          "const": "asserted",
+          "description": "Passed with `--approved-by`.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The Git user of a workstation run.",
+          "type": "string"
+        }
+      ]
+    },
+    "ApprovalRecord": {
+      "additionalProperties": false,
+      "description": "Who approved an execution, how Nyl knows, and what they saw.",
+      "properties": {
+        "by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeDigest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The approved change digest; `null` for an approval without one."
+        },
+        "identity": {
+          "$ref": "#/$defs/ApprovalIdentity"
+        },
+        "reviewed": {
+          "description": "Whether someone saw the exact changes: false without a digest.",
+          "type": "boolean"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "reviewed"
+      ],
+      "type": "object"
+    },
+    "ArtifactDigest": {
+      "additionalProperties": false,
+      "description": "An artifact a receipt lists, with the digest of its canonical form.",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "BlockedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "pointer": {
+          "description": "Location of the unresolved reference, or empty for a `dependsOn` entry.",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ChangeDigest": {
+      "description": "A digest of the changes a plan would apply, which `bind: plan`\napprovals authorize: `sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "Deletion": {
+      "additionalProperties": false,
+      "description": "Why and how a unit is being deleted.",
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/DeletionIntent"
+        },
+        "reason": {
+          "$ref": "#/$defs/DeletionReason"
+        },
+        "requested": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Request"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "teardown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TeardownProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent for `intent: retain`."
+        }
+      },
+      "required": [
+        "reason",
+        "intent"
+      ],
+      "type": "object"
+    },
+    "DeletionIntent": {
+      "enum": [
+        "retain",
+        "teardown"
+      ],
+      "type": "string"
+    },
+    "DeletionReason": {
+      "oneOf": [
+        {
+          "const": "omission",
+          "description": "The unit left the ownership set.",
+          "type": "string"
+        },
+        {
+          "const": "teardown",
+          "description": "`nyl teardown --unit` of a unit outside the ownership set.",
+          "type": "string"
+        },
+        {
+          "const": "replace",
+          "description": "`nyl teardown --unit` of a unit inside it.",
+          "type": "string"
+        },
+        {
+          "const": "kind-change",
+          "description": "The unit's `apiVersion` or `kind` changed.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "An expired template instance.",
+          "type": "string"
+        },
+        {
+          "const": "decommission",
+          "description": "`teardown --all` or `state delete --teardown`.",
+          "type": "string"
+        }
+      ]
+    },
+    "DesiredUnitKind": {
+      "const": "DesiredUnit"
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "Hold": {
+      "additionalProperties": false,
+      "description": "An operator's hold.",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldPending"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Newer source not applied while held."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "by"
+      ],
+      "type": "object"
+    },
+    "HoldPending": {
+      "additionalProperties": false,
+      "properties": {
+        "deletion": {
+          "default": false,
+          "description": "Whether the unit left the ownership set.",
+          "type": "boolean"
+        },
+        "executionKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceCommit": {
+          "$ref": "#/$defs/CommitId"
+        }
+      },
+      "required": [
+        "sourceCommit"
+      ],
+      "type": "object"
+    },
+    "Lifecycle": {
+      "description": "Where a unit is in its life: running, being deleted, frozen, or retained.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deletion": {
+              "$ref": "#/$defs/Deletion"
+            },
+            "state": {
+              "const": "deleting",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "deletion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Frozen by an operator; a held deleting unit keeps its deletion block.",
+          "properties": {
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deletion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hold": {
+              "$ref": "#/$defs/Hold"
+            },
+            "state": {
+              "const": "held",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "hold"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `Retain` unit outside the ownership set, keeping its last receipt.",
+          "properties": {
+            "state": {
+              "const": "retained",
+              "type": "string"
+            },
+            "tombstone": {
+              "$ref": "#/$defs/Tombstone"
+            }
+          },
+          "required": [
+            "state",
+            "tombstone"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PromotionProvenance": {
+      "additionalProperties": false,
+      "description": "A value read from a PromotionRecord.",
+      "properties": {
+        "promotion": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "promotion",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReceiptProvenance"
+        },
+        {
+          "$ref": "#/$defs/PromotionProvenance"
+        }
+      ],
+      "description": "Where one referenced value came from."
+    },
+    "Readiness": {
+      "description": "Whether a desired document can execute.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasons": {
+              "items": {
+                "$ref": "#/$defs/BlockedReason"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "blocked",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Receipt": {
+      "additionalProperties": false,
+      "description": "What one successful execution recorded.",
+      "properties": {
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactDigest"
+          },
+          "type": "array"
+        },
+        "behaviorVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "executionKey": {
+          "$ref": "#/$defs/ExecutionKey"
+        },
+        "finishedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "outputs": {
+          "description": "Declared, non-sensitive outputs."
+        },
+        "provenance": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "type": "object"
+        },
+        "readDesired": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The desired commit the run started from."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId"
+        },
+        "startedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Nyl's and the tools' versions, for audit.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "executionKey",
+        "behaviorVersion",
+        "run",
+        "startedAt",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
+    "ReceiptProvenance": {
+      "additionalProperties": false,
+      "description": "A value read from a producer's receipt: from an observed commit, or from\na receipt the same run produced earlier.",
+      "properties": {
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The producer's environment, for cross-environment references."
+        },
+        "executionKey": {
+          "$ref": "#/$defs/ExecutionKey"
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "$ref": "#/$defs/Uid"
+        },
+        "unit": {
+          "$ref": "#/$defs/UnitName"
+        }
+      },
+      "required": [
+        "unit",
+        "uid",
+        "executionKey"
+      ],
+      "type": "object"
+    },
+    "Request": {
+      "additionalProperties": false,
+      "description": "Who requested an operator action, when, and why.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "at"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "TeardownProgress": {
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Awaiting `--allow-teardown`, an approval, a dependent, or a readiness override.",
+          "type": "string"
+        },
+        {
+          "const": "in-progress",
+          "description": "The driver's teardown has started.",
+          "type": "string"
+        }
+      ]
+    },
+    "Tombstone": {
+      "additionalProperties": false,
+      "description": "What a `retained` unit keeps.",
+      "properties": {
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last receipt; a returning unit is current at once while it still matches."
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since"
+      ],
+      "type": "object"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitIdentity": {
+      "additionalProperties": false,
+      "description": "A unit's identity in state documents.",
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/UnitName"
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent for a held unit without one."
+        }
+      },
+      "required": [
+        "environment",
+        "name",
+        "apiVersion",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`desired/units/<unit>.yaml`.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "attestations": {
+      "description": "The attestations the unit's receipts can carry.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "executionKey": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionKey"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Absent while blocked."
+    },
+    "fingerprint": {
+      "description": "A command unit's fingerprint output, truncated to 4 KiB, for audit.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "$ref": "#/$defs/DesiredUnitKind"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/Lifecycle"
+    },
+    "provenance": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Provenance"
+      },
+      "description": "Per reference, by JSON Pointer, where its value came from.",
+      "type": "object"
+    },
+    "readiness": {
+      "$ref": "#/$defs/Readiness"
+    },
+    "resolvedSpec": {
+      "description": "The spec with references replaced by values; absent while blocked."
+    },
+    "sourceCommit": {
+      "$ref": "#/$defs/CommitId"
+    },
+    "sourceRevision": {
+      "$ref": "#/$defs/CommitId",
+      "description": "The effective revision for repository content, S."
+    },
+    "spec": {
+      "description": "The rendered spec, references still as expressions."
+    },
+    "unit": {
+      "$ref": "#/$defs/UnitIdentity"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "unit",
+    "lifecycle",
+    "sourceCommit",
+    "sourceRevision",
+    "spec",
+    "readiness"
+  ],
+  "title": "DesiredUnit",
+  "type": "object"
+}

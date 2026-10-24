@@ -1,0 +1,435 @@
+{
+  "$defs": {
+    "ApprovalIdentity": {
+      "description": "How Nyl learned an approver's identity. An audit record, not authorization.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Read from the CI system, by a built-in lookup or the project's hook.",
+          "type": "string"
+        },
+        {
+          "const": "asserted",
+          "description": "Passed with `--approved-by`.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The Git user of a workstation run.",
+          "type": "string"
+        }
+      ]
+    },
+    "ApprovalRecord": {
+      "additionalProperties": false,
+      "description": "Who approved an execution, how Nyl knows, and what they saw.",
+      "properties": {
+        "by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeDigest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The approved change digest; `null` for an approval without one."
+        },
+        "identity": {
+          "$ref": "#/$defs/ApprovalIdentity"
+        },
+        "reviewed": {
+          "description": "Whether someone saw the exact changes: false without a digest.",
+          "type": "boolean"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "reviewed"
+      ],
+      "type": "object"
+    },
+    "ArtifactDigest": {
+      "additionalProperties": false,
+      "description": "An artifact a receipt lists, with the digest of its canonical form.",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "ChangeDigest": {
+      "description": "A digest of the changes a plan would apply, which `bind: plan`\napprovals authorize: `sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "Condition": {
+      "description": "The latest failure or uncertainty, kept until the unit next succeeds or\nan operator recovers it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Effects may or may not have happened.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "run": {
+              "$ref": "#/$defs/RunId"
+            },
+            "since": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "state": {
+              "const": "uncertain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "since",
+            "run",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The execution made no effect it did not report.",
+          "properties": {
+            "category": {
+              "$ref": "#/$defs/FailureCategory"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "run": {
+              "$ref": "#/$defs/RunId"
+            },
+            "since": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "state": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "since",
+            "run",
+            "category",
+            "retryable",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "FailureCategory": {
+      "description": "The closed set of failure categories.",
+      "enum": [
+        "tool-error",
+        "output-rejected",
+        "missing-tool",
+        "credentials",
+        "ownership",
+        "timeout"
+      ],
+      "type": "string"
+    },
+    "ObservedUnitKind": {
+      "const": "ObservedUnit"
+    },
+    "PromotionProvenance": {
+      "additionalProperties": false,
+      "description": "A value read from a PromotionRecord.",
+      "properties": {
+        "promotion": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "promotion",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReceiptProvenance"
+        },
+        {
+          "$ref": "#/$defs/PromotionProvenance"
+        }
+      ],
+      "description": "Where one referenced value came from."
+    },
+    "Receipt": {
+      "additionalProperties": false,
+      "description": "What one successful execution recorded.",
+      "properties": {
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactDigest"
+          },
+          "type": "array"
+        },
+        "behaviorVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "executionKey": {
+          "$ref": "#/$defs/ExecutionKey"
+        },
+        "finishedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "outputs": {
+          "description": "Declared, non-sensitive outputs."
+        },
+        "provenance": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "type": "object"
+        },
+        "readDesired": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The desired commit the run started from."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId"
+        },
+        "startedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Nyl's and the tools' versions, for audit.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "executionKey",
+        "behaviorVersion",
+        "run",
+        "startedAt",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
+    "ReceiptProvenance": {
+      "additionalProperties": false,
+      "description": "A value read from a producer's receipt: from an observed commit, or from\na receipt the same run produced earlier.",
+      "properties": {
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The producer's environment, for cross-environment references."
+        },
+        "executionKey": {
+          "$ref": "#/$defs/ExecutionKey"
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "$ref": "#/$defs/Uid"
+        },
+        "unit": {
+          "$ref": "#/$defs/UnitName"
+        }
+      },
+      "required": [
+        "unit",
+        "uid",
+        "executionKey"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitIdentity": {
+      "additionalProperties": false,
+      "description": "A unit's identity in state documents.",
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/UnitName"
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent for a held unit without one."
+        }
+      },
+      "required": [
+        "environment",
+        "name",
+        "apiVersion",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`observed/units/<unit>.yaml`: the latest receipt and condition.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "condition": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Condition"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "kind": {
+      "$ref": "#/$defs/ObservedUnitKind"
+    },
+    "receipt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "unit": {
+      "$ref": "#/$defs/UnitIdentity"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "unit"
+  ],
+  "title": "ObservedUnit",
+  "type": "object"
+}
