@@ -8,6 +8,20 @@
       "slug": "git-repository"
     },
     {
+      "apiVersion": "gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "Environment",
+      "schema": "gitops.nyl/v1/environment.schema.json",
+      "slug": "environment"
+    },
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "EnvironmentGroup",
+      "schema": "gitops.nyl/v1/environment-group.schema.json",
+      "slug": "environment-group"
+    },
+    {
       "apiVersion": "k8s.gitops.nyl/v1",
       "dynamicKind": false,
       "name": "Cluster",
