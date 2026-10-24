@@ -1633,25 +1633,49 @@ apply otherwise.
 
 #### Operator exec
 
-Some repairs need the unit's native tool: moving or importing native state,
-releasing a native lock, or relocating a state backend.
-`nyl exec -e <env> --unit <u> [--reason <text>] -- <tool arguments>` runs that
-tool for drivers that declare the `exec` capability, with the configuration,
-worktree, and admitted credentials a reconcile of the unit's current desired
-document would use, and with the driver's preparation steps (for OpenTofu,
-`init`). Driver-specific options may substitute a configuration for this
-invocation only, such as OpenTofu's `--backend <file>`.
+Some repairs need a unit's native tool: moving or importing native state,
+releasing a native lock, or relocating a state backend. `exec` is a driver
+capability like `plan` or `teardown`; which tool it runs, and how the driver
+prepares it from the spec, is the driver's implementation:
 
-- The unit must be held, so no run reconciles it during the repair, and
-  `exec` takes the environment lease like every state-writing operation.
-- The transition commit records the operator, reason, tool arguments, and any
-  substituted configuration, never secrets or tool output.
-- The unit's receipt is marked `operator-modified`. While held, consumers keep
-  resolving from it, as for any hold. After `resume`, the next `reconcile`
-  executes the unit again under its recovery policy: `converge` re-executes,
-  `inspect` inspects, and `manual` waits for `recover --retry`.
-- `exec` ignores deployment admission; it reads the unit's desired document,
-  not a new source.
+```text
+nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text>] -- <tool arguments>
+```
+
+- **Spec.** Without `--worktree`, the unit's current desired document, which is
+  what is deployed. With `--worktree`, the unit rendered from the entry
+  worktree, uncommitted edits included, as `nyl build` renders it, and resolved
+  against current receipts. Changing a setting for a repair, such as an
+  OpenTofu backend, a tool version, or a variable, is an edit to the unit
+  definition, the same edit that is then reviewed and merged; `exec` has no
+  kind-specific options. The rendering must keep the unit's name and kind.
+- **Guards.** The unit must be held, so no run reconciles it during the repair,
+  and `exec` takes the environment lease like every state-writing operation,
+  with a deadline from `--timeout`, defaulting to the unit's `timeout`. The
+  ownership scopes of the spec must not overlap another unit's, so a changed
+  setting cannot point the tool at state another unit owns. Credentials are
+  the spec's admitted `env`, so a credential change is also a recorded edit.
+- **Tool.** The driver prepares the tool from the spec in the execution's own
+  worktree and temporary directory, then runs it with the arguments after
+  `--` unchanged, through the context's process handling and masking. Stdin and
+  the terminal are passed through only when the driver declares the tool
+  interactive and Nyl runs on a terminal.
+- **Record.** The transition commit records the operator, reason, tool
+  arguments, the tool's exit status, and the spec used: the desired document,
+  or the worktree's commit, whether it was dirty, the spec digest, and the
+  fields that differ from the desired document, with values only where they
+  are not sensitive. It never records secrets or tool output.
+- **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
+  consumers keep resolving from it, as for any hold. After `resume`, the next
+  `reconcile` executes the unit again under its recovery policy: `converge`
+  re-executes, `inspect` inspects, and `manual` waits for `recover --retry`.
+- **Exit status.** Once the tool has started, `exec` exits with the tool's
+  status, or 128 plus the signal that ended it. Before that, Nyl refuses with
+  exit 125 and a stable code, such as `NYL-EXEC-NOT-HELD`,
+  `NYL-EXEC-UNSUPPORTED`, `NYL-EXEC-SCOPE-CONFLICT`, or `NYL-LEASE-HELD`, so
+  scripts can tell a refusal from the tool's own failure.
+- `exec` ignores deployment admission: it repairs a unit, it does not deploy a
+  source.
 
 ## Deletion
 
@@ -2008,6 +2032,7 @@ trait Driver {
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
     fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
+    fn exec(&self, ctx: &ExecutionContext, unit: &DesiredUnit, args: &[OsString]) -> Result<Supported<ExecStatus>>; // operator repair, see Operator exec
 }
 
 struct Capabilities {
@@ -2015,6 +2040,7 @@ struct Capabilities {
     observe: bool,              // verify records observations, such as Argo CD health
     build: Option<BuildPush>,   // None: no `nyl build`; Some(Safe | LoadOnly)
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
+    exec: Option<ExecTerminal>, // None: no `nyl exec`; Some(Interactive | NonInteractive)
 }
 
 enum Supported<T> {
@@ -2039,6 +2065,7 @@ enum Outcome {
 | `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
 | `Verification` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; `observations`; `attestations` |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
+| `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
 | `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
 
 - `Waiting` is how a two-phase teardown reports that phase 1 is published and
@@ -2227,7 +2254,7 @@ spec:
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution, or with `--accept <run>` adopt a checkpointed result | One observed commit |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
-| `exec` | Run a held unit's native tool with its resolved configuration for repairs (see [Operator exec](#operator-exec)) | One observed commit |
+| `exec` | Run a held unit's tool, through its driver's `exec` capability, with the deployed spec or one rendered from the worktree (see [Operator exec](#operator-exec)) | One observed commit |
 | `ci admit` (M8) | Record a new deployment generation, or confirm the current one (see [Deployment admission](ci-execution.md#deployment-admission)) | One commit on the admission ref |
 | `ci export` (M8) | Export the dependency graph as a provider workflow (see [CI execution](ci-execution.md)) | Nothing |
 | `resume` | Lift a hold | One desired commit |
@@ -2421,6 +2448,7 @@ The table applies to each command as follows:
 | `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
+| `exec` | The tool's own exit status once it has started; 125 when Nyl refuses before starting it (see [Operator exec](#operator-exec)) | | | | |
 | `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done | Error or refusal | The lease is held, `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
 
 `--output json` prints the operation's typed report, the same one that renders

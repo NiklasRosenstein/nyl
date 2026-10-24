@@ -187,10 +187,11 @@ unit/resource schemas. Artifact aggregation is presentation, not receipt
 admission. Lifecycle planning uses the existing read-only planner and never
 requires deployment admission.
 
-Operator `exec` is a driver capability like `plan` or `teardown`: the driver
-prepares the tool invocation from the desired document and an optional
-substituted configuration, and the shell requires the hold and the lease and
-records the transition.
+Operator `exec` is a driver capability like `plan` or `teardown`. The shell
+chooses the spec (desired document, or a worktree rendering), requires the hold
+and the lease, checks ownership scopes, admits credentials, and records the
+transition; the driver only prepares and runs its tool from that spec and
+returns how it ended. No CLI option is specific to a kind.
 
 The [CI execution design](ci-execution.md) specifies the first, separate-run
 backend. A later shared-run backend must extend the orchestration shell and

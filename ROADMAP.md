@@ -132,8 +132,9 @@ generation was overtaken skip without effects; unit-level operator actions never
 touch the admission. Security is a deployment choice, not a separate mode: on
 one ref admission is a consistency fence, and on a dispatcher-only ref it also
 keeps worker credentials from choosing what is deployed. Every CI action has a
-CLI form, and `nyl exec` gives held units a recorded repair path through their
-native tool, such as relocating an OpenTofu backend. Parallel workers of one
+CLI form, and `nyl exec`, a driver capability, gives held units a recorded
+repair path through their own tool; changed settings, such as a relocated
+OpenTofu backend, are edits to the unit definition used from the worktree. Parallel workers of one
 Nyl run require a later coordinator/worker contract, including fencing and
 recovery; they are not implied by graph export.
 
@@ -874,9 +875,10 @@ value-only path promotes each value from what its consuming Application runs.
   worker attempts skip before intent writes, imports, or effects; `state
   restore` carries the record forward. Provider pipeline serialization is an
   optional optimization, not the fence.
-- [ ] Add `nyl exec` for held units of drivers with the `exec` capability,
-  starting with OpenTofu and Terraform, including backend substitution and the
-  missing-state guard.
+- [ ] Add the `exec` driver capability and `nyl exec` for held units, with the
+  deployed or `--worktree` spec, ownership-scope checks, recorded spec
+  differences, and refusal exit 125; implement it for OpenTofu and Terraform,
+  with their missing-state guard.
 - [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
   revalidate approvals and never pass authoritative outputs through CI artifacts.
 - [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)

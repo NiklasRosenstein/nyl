@@ -292,18 +292,20 @@ the pipeline:
 | Dispatcher unavailable | Set `admission: off` through a reviewed change to the Environment; plain runs then behave as in M3 |
 | Lease left by a lost runner | `nyl lease break` and the core [recovery](orchestration-core.md#recovery) rules |
 | Leaving units awaiting teardown | `nyl reconcile -e <env> --leaving --allow-teardown`, or `nyl state forget` to release without destroying |
-| A unit's native tool needs repair | `nyl hold`, `nyl exec`, a reviewed source change, then `nyl resume` (below) |
+| A unit's native tool needs repair | `nyl hold`, `nyl exec`, a reviewed source change if configuration changed, then `nyl resume` (below) |
 
-`nyl exec -e <env> --unit <u> -- <tool arguments>` runs a unit's native tool
-with exactly the resolved configuration, worktree, and admitted credentials a
-reconcile would use, under the environment lease, for drivers that offer the
-[exec capability](orchestration-core.md#operator-exec). It requires the unit to
-be held, so CI cannot race the repair, and records the command, operator, and
-reason in a transition commit. Driver-specific options select an alternative
-configuration for the repair only, such as OpenTofu's `--backend <file>` for a
-separate state location (see the
-[OpenTofu repair flow](infrastructure-units.md#repair)). After `nyl resume`, the
-next reconcile treats the unit's receipt as stale and re-executes it under its
+`nyl exec -e <env> --unit <u> [--worktree] -- <tool arguments>` runs a unit's
+tool through its driver's [exec capability](orchestration-core.md#operator-exec),
+prepared from the deployed spec or, with `--worktree`, from the unit as edited
+in the current checkout. A repair that needs different settings, such as a
+separate OpenTofu state location, is therefore an ordinary edit to the unit
+definition, used before it is merged and then reviewed like any change (see the
+[OpenTofu repair flow](infrastructure-units.md#repair)); the command has no
+kind-specific options. It requires the unit to be held, so CI cannot race the
+repair, refuses settings that overlap another unit's ownership scope, and
+records the spec used, its differences from the deployed spec, the command,
+operator, and reason in a transition commit. After `nyl resume`, the next
+reconcile treats the unit's receipt as stale and re-executes it under its
 recovery policy, so the native state and Nyl's receipt converge again.
 
 ## Later backend: workers of one run
