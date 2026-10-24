@@ -5,16 +5,15 @@
 //! built-in schemas, which use a vendored copy when one exists and are
 //! downloaded otherwise. Every comment is a relative path to a schema Nyl
 //! writes, never a URL, so committed comments do not depend on the network.
-//! The schemas accept `{{ … }}` template expressions wherever a scalar is
-//! expected, so Helm and structurally templated Nyl files validate in editors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
+use crate::gitops::reconcile::in_rendered_tree;
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
 use crate::resources::schema::ResourceKind;
 use crate::resources::GitOpsResource;
@@ -49,12 +48,14 @@ pub struct EditorSettings {
 pub struct AnnotationReport {
     /// Files whose comments were, or with `check` would be, changed, relative to the project.
     pub changed_files: Vec<PathBuf>,
-    /// Generated schema files that were, or would be, written or removed.
+    /// Generated schema files that were, or would be, written or removed, relative to the project.
     pub changed_schemas: Vec<PathBuf>,
     /// Documents that carry a schema comment.
     pub annotated_documents: usize,
     /// Built-in schemas that could not be downloaded, with the reason; their comments are still written.
     pub unavailable_schemas: Vec<(String, String)>,
+    /// Kubernetes built-in documents left without a comment because no Cluster records a `kubeVersion`.
+    pub unversioned_builtins: usize,
 }
 
 impl AnnotationReport {
@@ -84,7 +85,10 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
     let skip = [schema_root.clone(), vendor.clone(), project_root.join(".nyl")];
     for relative in &inventory.yaml_files {
         let path = project_root.join(relative);
-        if skip.iter().any(|root| path.starts_with(root)) || in_helm_chart(project_root, &path) {
+        if skip.iter().any(|root| path.starts_with(root))
+            || in_helm_chart(project_root, &path)
+            || in_rendered_tree(&path)
+        {
             continue;
         }
         let Ok(original) = std::fs::read_to_string(&path) else {
@@ -93,7 +97,12 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
         let directory = path.parent().unwrap_or(project_root);
         let mut annotated_documents = 0;
         let updated = annotate_text(&original, |manifest| {
-            let target = catalog.resolve(manifest)?;
+            let Some(target) = catalog.resolve(manifest) else {
+                if catalog.needs_kube_version(manifest) {
+                    report.unversioned_builtins += 1;
+                }
+                return None;
+            };
             annotated_documents += 1;
             Some(match target {
                 SchemaTarget::Local(file, schema) => {
@@ -138,6 +147,11 @@ pub async fn annotate_project(inventory: &GitOpsInventory, check: bool) -> Resul
     if !check && mode == EditorSchemas::Local {
         store::atomic_write(&schema_root.join(".gitignore"), b"*\n")?;
     }
+    // Report schema files where they are, like the documents.
+    let schema_dir = schema_root.strip_prefix(project_root).unwrap_or(&schema_root);
+    for file in &mut report.changed_schemas {
+        *file = schema_dir.join(&*file);
+    }
     Ok(report)
 }
 
@@ -161,7 +175,7 @@ async fn download_builtins(
     for (file, url) in downloads {
         let reason = match resolver.builtin(&url).await {
             Ok(Some(document)) => {
-                generated.insert(file, allow_templates(document.value));
+                generated.insert(file, document.value);
                 continue;
             }
             Ok(None) => format!("Built-in schema {url} is not published"),
@@ -226,7 +240,7 @@ impl SchemaCatalog {
         let mut components = None;
         for kind in ResourceKind::ALL {
             let file = PathBuf::from("nyl").join(kind.schema_path());
-            let schema = allow_templates(kind.schema());
+            let schema = kind.schema();
             if kind == ResourceKind::Component {
                 components = Some((kind.api_version().to_owned(), file, schema));
             } else {
@@ -258,7 +272,7 @@ impl SchemaCatalog {
                 };
                 for (version, variants) in definition.versions {
                     let key = (format!("{}/{version}", crd.group), crd.kind.clone());
-                    crds.entry(key).or_insert_with(|| allow_templates(variants.strict));
+                    crds.entry(key).or_insert(variants.strict);
                 }
             }
         }
@@ -275,6 +289,16 @@ impl SchemaCatalog {
             settings: catalog_settings(inventory),
             vendor: vendor.to_path_buf(),
         })
+    }
+
+    /// Whether a manifest is a Kubernetes built-in that only lacks a Cluster `kubeVersion` to resolve.
+    fn needs_kube_version(&self, manifest: &Value) -> bool {
+        let api_version = manifest.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
+        let group = api_version.split_once('/').map_or("", |(group, _)| group);
+        self.kube_version.is_none()
+            && manifest.get("kind").and_then(Value::as_str).is_some()
+            && !api_version.is_empty()
+            && resolve::is_builtin_group(group)
     }
 
     fn resolve(&self, manifest: &Value) -> Option<SchemaTarget> {
@@ -316,9 +340,8 @@ impl SchemaCatalog {
                 let digest = self.builtins.get(&url)?;
                 serde_json::from_slice::<Value>(&store::read_blob(&self.vendor, digest).ok()?).ok()
             });
-        // Vendored copies are local, so they can accept template expressions too.
         if let Some(schema) = vendored {
-            return Some(SchemaTarget::Local(file, allow_templates(schema)));
+            return Some(SchemaTarget::Local(file, schema));
         }
         Some(SchemaTarget::Download(file, url))
     }
@@ -447,80 +470,6 @@ fn version_key(version: &str) -> Vec<u64> {
     version.split('.').map(|part| part.parse().unwrap_or(0)).collect()
 }
 
-/// Accept a `{{ … }}` template expression wherever the schema expects a scalar.
-pub fn allow_templates(schema: Value) -> Value {
-    relax(schema)
-}
-
-const SCHEMA_MAPS: [&str; 5] = [
-    "properties",
-    "patternProperties",
-    "definitions",
-    "$defs",
-    "dependentSchemas",
-];
-const SCHEMA_LISTS: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
-const SCHEMA_VALUES: [&str; 8] = [
-    "items",
-    "additionalProperties",
-    "additionalItems",
-    "not",
-    "if",
-    "then",
-    "else",
-    "contains",
-];
-
-fn relax(schema: Value) -> Value {
-    let Value::Object(mut object) = schema else {
-        return schema;
-    };
-    for key in SCHEMA_MAPS {
-        if let Some(Value::Object(members)) = object.get_mut(key) {
-            for member in members.values_mut() {
-                *member = relax(member.take());
-            }
-        }
-    }
-    for key in SCHEMA_LISTS {
-        if let Some(Value::Array(members)) = object.get_mut(key) {
-            for member in members.iter_mut() {
-                *member = relax(member.take());
-            }
-        }
-    }
-    for key in SCHEMA_VALUES {
-        if let Some(member) = object.get_mut(key) {
-            *member = match member.take() {
-                Value::Array(members) => Value::Array(members.into_iter().map(relax).collect()),
-                value => relax(value),
-            };
-        }
-    }
-    let scalar_type = |value: &Value| matches!(value.as_str(), Some("boolean" | "integer" | "number"));
-    let constrained = object.get("type").is_some_and(|value| match value {
-        Value::Array(types) => types.iter().any(scalar_type),
-        value => scalar_type(value),
-    }) || ["enum", "const", "pattern", "format"]
-        .iter()
-        .any(|keyword| object.contains_key(*keyword));
-    if !constrained {
-        return Value::Object(object);
-    }
-    // Annotations stay on the outer schema so editors keep showing them.
-    let mut outer = serde_json::Map::new();
-    for keyword in ["description", "title", "default", "examples", "$schema", "$id"] {
-        if let Some(value) = object.remove(keyword) {
-            outer.insert(keyword.to_owned(), value);
-        }
-    }
-    outer.insert(
-        "anyOf".to_owned(),
-        json!([Value::Object(object), {"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"}]),
-    );
-    Value::Object(outer)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,29 +501,5 @@ mod tests {
             relative_reference(Path::new("/p"), Path::new("/p/.nyl/schemas/a.json")),
             "./.nyl/schemas/a.json"
         );
-    }
-
-    #[test]
-    fn test_allow_templates_accepts_expressions_for_scalars_only() {
-        let schema = allow_templates(json!({
-            "type": "object",
-            "properties": {
-                "enabled": {"type": "boolean", "description": "Toggle."},
-                "replicas": {"type": ["integer", "null"]},
-                "name": {"type": "string"},
-                "mode": {"enum": ["a", "b"]},
-                "items": {"type": "array", "items": {"type": "integer"}}
-            }
-        }));
-        let template = json!({"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"});
-        assert_eq!(
-            schema["properties"]["enabled"],
-            json!({"description": "Toggle.", "anyOf": [{"type": "boolean"}, template]})
-        );
-        assert_eq!(schema["properties"]["replicas"]["anyOf"][1], template);
-        assert_eq!(schema["properties"]["mode"]["anyOf"][1], template);
-        assert_eq!(schema["properties"]["items"]["items"]["anyOf"][1], template);
-        // Plain strings already accept expressions.
-        assert_eq!(schema["properties"]["name"], json!({"type": "string"}));
     }
 }

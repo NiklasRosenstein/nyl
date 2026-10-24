@@ -72,19 +72,33 @@ async fn annotate(check: bool) -> Result<()> {
     for (_, reason) in &report.unavailable_schemas {
         eprintln!("warning: {reason}; its comment is written, rerun nyl schema annotate once it is reachable");
     }
+    if report.unversioned_builtins > 0 {
+        let documents = match report.unversioned_builtins {
+            1 => "1 Kubernetes built-in document has".to_owned(),
+            count => format!("{count} Kubernetes built-in documents have"),
+        };
+        eprintln!(
+            "warning: {documents} no schema comment: no Cluster records spec.kubernetes.kubeVersion; run nyl capture cluster <name>"
+        );
+    }
     if check {
         if !report.is_current() {
-            let paths = report
-                .changed_files
-                .iter()
-                .chain(&report.changed_schemas)
-                // Report project paths with `/` on every platform, like other Nyl output.
-                .map(|path| format!("  {}", path.to_string_lossy().replace('\\', "/")))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(NylError::validation(format!(
-                "Schema comments are out of date; run nyl schema annotate:\n{paths}"
-            )));
+            let mut sections = vec!["Schema comments are out of date; run nyl schema annotate:".to_owned()];
+            for (title, paths) in [
+                ("Documents", &report.changed_files),
+                ("Schemas", &report.changed_schemas),
+            ] {
+                if !paths.is_empty() {
+                    sections.push(format!("{title}:"));
+                    // Report project paths with `/` on every platform, like other Nyl output.
+                    sections.extend(
+                        paths
+                            .iter()
+                            .map(|path| format!("  {}", path.to_string_lossy().replace('\\', "/"))),
+                    );
+                }
+            }
+            return Err(NylError::validation(sections.join("\n")));
         }
         println!("Schema comments are current ({} documents)", report.annotated_documents);
     } else {

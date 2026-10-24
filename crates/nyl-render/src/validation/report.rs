@@ -438,11 +438,7 @@ pub(crate) fn validate_outputs(
             continue;
         }
         let identity = output_identity(&output.path)?;
-        if identity
-            .ancestors()
-            .skip(1)
-            .any(|parent| parent.join("_nyl/index.json").is_file())
-        {
+        if crate::gitops::reconcile::in_rendered_tree(&identity) {
             return Err(NylError::config(
                 "Validation reports must be outside managed rendered output trees",
             ));

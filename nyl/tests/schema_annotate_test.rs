@@ -93,7 +93,7 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
     assert!(cluster.starts_with(
         "# yaml-language-server: $schema=../vendor/schemas/editor/nyl/k8s.gitops.nyl/v1/cluster.schema.json\n"
     ));
-    // The vendored CRD schema accepts template expressions for its scalars.
+    // The vendored CRD's strict schema is written next to the Nyl schemas.
     let schema: serde_json::Value = serde_json::from_slice(
         &fs::read(
             directory
@@ -103,10 +103,7 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        schema["properties"]["spec"]["properties"]["count"]["anyOf"][0]["type"],
-        "integer"
-    );
+    assert_eq!(schema["properties"]["spec"]["properties"]["count"]["type"], "integer");
     assert_eq!(
         fs::read_to_string(directory.path().join("charts/web/templates/configmap.yaml")).unwrap(),
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n"
@@ -123,7 +120,9 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
     .unwrap();
     annotate(directory.path(), true)
         .failure()
-        .stderr(predicate::str::contains("Widget_v1.json"));
+        .stderr(predicate::str::contains(
+            "Schemas:\n  vendor/schemas/editor/crds/example.com/Widget_v1.json",
+        ));
 }
 
 /// The pinned kubeconform URL of a core/v1 kind for the fixture's Kubernetes version.
@@ -186,7 +185,7 @@ fn assert_builtin_comments(directory: &Path, schema_root: &str) {
         let schema: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.join(schema_root).join("builtins/v1.31.4").join(file)).unwrap())
                 .unwrap();
-        assert_eq!(schema["properties"][property]["anyOf"][0]["type"], "boolean");
+        assert_eq!(schema["properties"][property]["type"], "boolean");
     }
 }
 
@@ -223,4 +222,48 @@ fn test_schema_annotate_local_mode_keeps_builtin_comments_local_and_offline() {
     // Checking compares comments only, so a fresh checkout without schemas passes.
     fs::remove_dir_all(directory.path().join(".nyl/schemas")).unwrap();
     annotate(directory.path(), true).success();
+}
+
+#[test]
+fn test_schema_annotate_leaves_rendered_output_trees_untouched() {
+    let directory = project();
+    // A render-tree output committed inside the project belongs to Nyl's ownership index.
+    let tree = directory.path().join("deploy/production");
+    fs::create_dir_all(tree.join("_nyl")).unwrap();
+    fs::write(tree.join("_nyl/index.json"), "{}").unwrap();
+    let rendered = "apiVersion: example.com/v1\nkind: Widget\nmetadata:\n  name: web\n";
+    fs::write(tree.join("widget.yaml"), rendered).unwrap();
+    let repository = git2::Repository::open(directory.path()).unwrap();
+    let mut git_index = repository.index().unwrap();
+    git_index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
+    git_index.write().unwrap();
+
+    annotate(directory.path(), false).success();
+    assert_eq!(fs::read_to_string(tree.join("widget.yaml")).unwrap(), rendered);
+    annotate(directory.path(), true).success();
+}
+
+#[test]
+fn test_schema_annotate_warns_when_no_cluster_records_a_kube_version() {
+    let directory = project();
+    fs::write(
+        directory.path().join("config/cluster.yaml"),
+        CLUSTER.replace("    kubeVersion: 1.31.4\n", ""),
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("apps/web/configmap.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n",
+    )
+    .unwrap();
+    let warning =
+        "warning: 1 Kubernetes built-in document has no schema comment: no Cluster records spec.kubernetes.kubeVersion";
+
+    annotate(directory.path(), false)
+        .success()
+        .stderr(predicate::str::contains(warning));
+    // The warning does not fail checks: the project is otherwise current.
+    annotate(directory.path(), true)
+        .success()
+        .stderr(predicate::str::contains(warning));
 }
