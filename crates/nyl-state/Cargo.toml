@@ -10,9 +10,14 @@ publish.workspace = true
 
 [dependencies]
 nyl-core = { workspace = true }
+nyl-git = { workspace = true }
 
+git2 = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 proptest = { workspace = true }
 chrono = { workspace = true }

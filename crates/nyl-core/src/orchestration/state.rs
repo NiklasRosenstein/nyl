@@ -131,6 +131,16 @@ pub struct StateLocation {
     pub coordination_ref_prefix: String,
 }
 
+impl StateLocation {
+    /// The `repository` of a location that is the clone's own branches, used
+    /// when no state repository is configured and the checkout has no `origin`.
+    pub const LOCAL_REPOSITORY: &'static str = "local";
+
+    pub fn is_local(&self) -> bool {
+        self.repository == Self::LOCAL_REPOSITORY
+    }
+}
+
 /// `state.yaml`: the state location and its history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -723,6 +733,10 @@ pub struct Lease {
     pub deadline: Timestamp,
     #[serde(rename = "takenAt")]
     pub taken_at: Timestamp,
+    /// Set by `nyl lease break`: the holder is declared gone, so the next run
+    /// takes over at once and records the break in its transition commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<Request>,
 }
 
 /// A run ref's record, updated per phase together with the lease.
@@ -768,4 +782,29 @@ pub struct Signal {
     pub at: Timestamp,
     /// Where the confirmation came from, such as a CI run URL.
     pub from: String,
+}
+
+/// JSON Schemas of the state documents, published with the resource
+/// references under `gitops.nyl/v1/state/`.
+pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
+    fn schema<T: JsonSchema>(title: &str) -> serde_json::Value {
+        let mut schema = serde_json::to_value(schemars::schema_for!(T)).expect("schemas serialize");
+        schema["title"] = serde_json::Value::String(title.to_owned());
+        schema
+    }
+    [
+        ("state-record", schema::<StateRecord>("StateRecord")),
+        ("environment-record", schema::<EnvironmentRecord>("EnvironmentRecord")),
+        ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
+        ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
+        ("artifact", schema::<ArtifactDocument>("Artifact")),
+        ("observation", schema::<Observation>("Observation")),
+        ("attestation", schema::<Attestation>("Attestation")),
+        ("lease", schema::<Lease>("Lease")),
+        ("run", schema::<Run>("Run")),
+        ("signal", schema::<Signal>("Signal")),
+    ]
+    .into_iter()
+    .map(|(slug, schema)| (format!("{API_VERSION_GITOPS}/state/{slug}.schema.json"), schema))
+    .collect()
 }

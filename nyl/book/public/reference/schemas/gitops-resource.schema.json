@@ -21,6 +21,12 @@
       "$ref": "application-group.schema.json"
     },
     {
+      "$ref": "environment.schema.json"
+    },
+    {
+      "$ref": "environment-group.schema.json"
+    },
+    {
       "$ref": "release.schema.json"
     }
   ],

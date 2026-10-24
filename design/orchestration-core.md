@@ -107,7 +107,8 @@ spec:
   namespace keeps them out of the branch list and out of push-triggered CI;
   a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
   refs. Changing it goes through `nyl state move` (see
-  [Initialization and moves](#initialization-and-moves)).
+  [Initialization and moves](#initialization-and-moves)). Hosts verified with
+  both prefixes are listed in [Git host compatibility](../nyl/book/src/content/docs/commands/state.md#git-host-compatibility).
 - Validation checks every configured state ref, and the coordination refs each
   environment implies, for names that Git cannot hold together, such as a
   shared state branch `nyl/previews` and an environment named `previews` whose
@@ -1550,6 +1551,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 5. **Fenced commit.** The final transition commit is pushed with
    `git push --atomic`, together with a compare-and-swap of the lease ref that
    expects the run's own lease commit, so either both land or neither does.
+   The push moves the lease ref to a new commit holding the same lease,
+   because Git checks a lease only on a ref the push changes.
    Releasing the lease is a compare-and-swap too. A run whose lease was taken
    over pushes nothing to the state refs and exits 4 with `NYL-LEASE-LOST`;
    its results stay on its run ref for the next run to import. Atomic pushes work on GitHub, GitLab,
@@ -1571,7 +1574,10 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    them.
 8. **Breaking a lease.** When a holder died without releasing its lease, for
    example after a forced kill, `nyl lease break -e <env> --reason <text>`
-   declares it gone. The next run takes over at once, as after expiry, and
+   declares it gone by replacing the lease with one marked broken, naming who
+   broke it and why. When only a live run ref holds the environment, because
+   its lease ref is already gone, the broken lease names that run. The next
+   run takes over at once, as after expiry, and
    units the holder was executing become `uncertain`. The command warns that
    a holder that is in fact alive may still be causing effects; the fenced
    final push keeps it from overwriting state either way. The break is
@@ -1882,7 +1888,10 @@ initialization, move, or fresh start, each as its own event.
 - When an Environment's `state` points to a location without `state.yaml`,
   `reconcile` refuses and names both ways forward:
   - `nyl state move -e <env> --from <repository> [--desired-ref …]
-    [--observed-ref …]` relocates the state. It holds the lease at both
+    [--observed-ref …] [--state-path …] [--coordination-refs …]` relocates
+    the state to the location the Environment configures. The options name
+    the old location and each defaults to the configured value; `--from`
+    takes a URL, a GitRepository name, or `local`. It holds the lease at both
     locations throughout, pushes the existing refs' history to the new
     location, and then writes a final transition commit to the old location
     whose `state.yaml` records a `state-moved` event naming the new one. Units
@@ -1901,14 +1910,18 @@ initialization, move, or fresh start, each as its own event.
     non-idempotent commands run again. The command prints what that means and
     records a `state-initialized` event marked fresh.
   - A move within one repository changes only the refs, for example to
-    rename them: `nyl state move -e <env> --desired-ref state/<env>/desired
-    --observed-ref state/<env>/observed`. Moving state to full `refs/…` names
-    works the same way and gives up branch protection, with the
-    `NYL-STATE-UNPROTECTED` warning.
+    rename them: after the Environment's `desiredRef` and `observedRef` change,
+    `nyl state move -e <env> --desired-ref nyl/<env>/desired --observed-ref
+    nyl/<env>/observed` names the old refs. Moving state to full `refs/…`
+    names works the same way and gives up branch protection, with the
+    `NYL-STATE-UNPROTECTED` warning. Where neither location shares its refs
+    through `path`, the refs' history moves; otherwise the documents move with
+    one commit, and the old location keeps the history.
   - `state.yaml` also records the coordination prefix. A run takes the lease at
     the configured prefix and, holding it, refuses when `state.yaml` records
-    another. `nyl state move -e <env> --coordination-refs <prefix>` changes it:
-    it holds the lease at both prefixes, fails while a run ref exists at the
+    another. After the configured prefix changes, `nyl state move -e <env>
+    --coordination-refs <old prefix>` moves it: it holds the lease at both
+    prefixes, fails while a run ref exists at the
     old one, and records the new prefix in a transition commit. A run from an
     older source commit then takes the old lease, reads the new prefix, and
     refuses, so no two runners can hold leases at different prefixes.
@@ -2008,7 +2021,10 @@ revisions, and locked `fromGit` bindings.
   GitRepository's `publishURL`. Remote Git operations run the `git` command
   line, so `publish-tree` authenticates as the user's `git` does (SSH config
   and keys, SSH agent, credential helpers); state pushes use the same
-  transport.
+  transport. Runners without those can name dedicated credentials, optional
+  and per repository URL prefix, in `[[git.credentials]]` of `nyl.toml`: an
+  SSH key file, an SSH key or an HTTPS token from an environment variable.
+  `nyl.toml` holds only where a secret is.
 - Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
   as corruption and stops every command until an operator repairs it.
 - Recommended protection: force pushes and deletion are disabled on both state

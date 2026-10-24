@@ -152,6 +152,14 @@ fn samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "lease-broken.v1.yaml",
+            json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN, "runner": "https://ci.example.com/runs/1234",
+                "operation": "reconcile", "deadline": "2026-09-24T11:10:00Z", "takenAt": "2026-09-24T10:00:00Z",
+                "broken": {"by": "alice", "at": "2026-09-24T10:30:00Z", "reason": "runner lost"}
+            }),
+        ),
+        (
             "run.v1.yaml",
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": RUN, "runner": "https://ci.example.com/runs/1234",

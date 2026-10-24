@@ -33,6 +33,7 @@ tier2 = []
 [dependencies]
 nyl-core = { workspace = true }
 nyl-render = { workspace = true }
+nyl-git = { workspace = true }
 nyl-state = { workspace = true }
 nyl-orchestration = { workspace = true }
 nyl-drivers = { workspace = true }
@@ -62,6 +63,7 @@ tracing-subscriber = { workspace = true }
 unicode-width = { workspace = true }
 
 [dev-dependencies]
+nyl-orchestration = { workspace = true, features = ["testing"] }
 assert_cmd = { workspace = true }
 # Paused virtual time for deterministic latency-injected apply tests.
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,6 +1,7 @@
 pub(crate) mod apply_output;
 pub mod commands;
 pub mod filter;
+pub mod git_auth;
 pub(crate) mod namespace_resolution;
 pub(crate) mod resource_file;
 pub(crate) mod table;
@@ -91,6 +92,12 @@ enum Commands {
 
     /// Manage project-global vendored renderer inputs
     Vendor(commands::vendor::VendorArgs),
+
+    /// Create, move, and forget an environment's orchestration state
+    State(commands::state::StateArgs),
+
+    /// Manage an environment's run lease
+    Lease(commands::state::LeaseArgs),
 }
 
 impl Cli {
@@ -114,6 +121,8 @@ impl Cli {
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
             Commands::Vendor(args) => commands::vendor::execute(args).await,
+            Commands::State(args) => commands::state::execute_state(args),
+            Commands::Lease(args) => commands::state::execute_lease(args),
         }
     }
 }

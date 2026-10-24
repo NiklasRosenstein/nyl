@@ -114,6 +114,32 @@ Deployment values, Kubernetes capabilities, and kube contexts live in
 Kubernetes-shaped [Cluster and DeploymentTarget resources](/nyl/reference/resources/gitops/),
 not in `nyl.toml`.
 
+## Git credentials
+
+Remote Git operations run the `git` command line, so Nyl authenticates as
+your `git` does: SSH config and agent, and credential helpers. Runners without
+those, such as CI jobs holding a deploy key or an access token in a secret,
+can name dedicated credentials for state pushes and `publish-tree`:
+
+```toml
+[[git.credentials]]
+url = "https://gitlab.example.com/platform/"   # prefix of the repository URLs it applies to
+token_env = "NYL_STATE_TOKEN"                 # HTTPS token from this environment variable
+username = "oauth2"                           # default x-access-token; GitLab expects oauth2
+
+[[git.credentials]]
+url = "git@github.com:acme/"
+ssh_key_file = "/run/secrets/deploy-key"      # or ssh_key_env with the key itself
+```
+
+Each entry sets exactly one of `ssh_key_file`, `ssh_key_env`, and
+`token_env`; the longest matching `url` prefix wins. `nyl.toml` names only
+where a secret is. A token reaches `git` through a credential helper that reads
+it from the child process's environment, never through the command line, and a
+key from `ssh_key_env` is written to a temporary file readable only by you. A
+variable an entry names but the environment lacks fails the command before
+it contacts the repository.
+
 ## Render inputs
 
 A target-aware render resolves one `DeploymentTarget` and its referenced `Cluster`.

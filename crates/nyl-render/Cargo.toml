@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 nyl-core = { workspace = true }
+nyl-git = { workspace = true }
 
 async-trait = { workspace = true }
 base64 = { workspace = true }

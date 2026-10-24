@@ -187,6 +187,9 @@ pub struct ProjectFile {
 
     /// Editor integration, such as where `nyl schema annotate` writes schemas.
     pub editor: crate::editor::EditorSettings,
+
+    /// Optional dedicated credentials for state pushes and publication.
+    pub git: nyl_git::GitSettings,
 }
 
 /// Wrapper for project configuration file.

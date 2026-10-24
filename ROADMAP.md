@@ -47,12 +47,18 @@ executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
    `FakeImage` and `FakeInfra` kinds, and the `test-clock` feature. The
    harness validates every scenario and lists the reached ones as pending
    until the commands they use exist.
-2. The Git state store and `nyl state init`/`move`/`forget`, leases, run
-   checkpoints, `lease break`, and optional dedicated push credentials.
+2. Done: the Git state store in `nyl-state` over the shared `nyl-git`
+   transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and
+   run refs with compare-and-swap, the fenced transition commit, optional
+   dedicated credentials, and the Environment and EnvironmentGroup resources.
+   Custom refs and atomic leased pushes are verified on GitHub, GitLab,
+   Forgejo, and plain Git with both coordination prefixes
+   ([Git host compatibility](nyl/book/src/content/docs/commands/state.md#git-host-compatibility)).
 3. Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`,
    `recover`, and `get -e`, with `FakePublication`, pinned source worktrees,
-   and execution keys. Unit `values` and `variables` resolve through
-   `nyl_core::bindings`.
+   execution keys, `--local` runs, and `nyl validate` of targets whose
+   bindings orchestration resolves. Unit `values` and `variables` resolve
+   through `nyl_core::bindings`.
 4. `teardown`, `hold`, `resume`, `state delete`, multi-environment runs,
    approvals, the tier-2 harness, and the M3 part of reference scenario 1.
 
@@ -731,16 +737,14 @@ implicit per-target Argo CD instances.
   GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one
   transition commit per operation with a machine-readable summary, pushed
   atomically with the lease check.
-- [ ] Support SSH keys and HTTPS tokens, besides the SSH agent, for state
-  pushes and `publish-tree`. Remote Git operations run the `git` command line,
-  so fetches and `publish-tree` already authenticate as the user's `git` does
-  (SSH config and keys, agent, credential helpers) and push with a
-  `--force-with-lease` compare-and-swap; libgit2 handles only local
-  repository access, because its SSH transport ignores SSH config. Dedicated
-  SSH keys and HTTPS tokens are supplied to the same `git` invocations, for
-  example through `GIT_SSH_COMMAND` or a credential helper. State pushes must
-  use the same transport, including atomic multi-ref pushes with per-ref
-  leases.
+- [x] Support optional dedicated SSH keys and HTTPS tokens, configured only
+  when needed, for state pushes and `publish-tree`. Remote Git operations run
+  the `git` command line through `nyl-git`, so by default they authenticate
+  as the user's `git` does (SSH config and keys, agent, credential helpers);
+  `[[git.credentials]]` in `nyl.toml` names a key file, or a key or token in
+  an environment variable, per repository URL prefix, for runners without
+  those. State pushes use the same transport, including atomic multi-ref
+  pushes with per-ref leases; libgit2 handles only local repository access.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
   units with `fromUnit` references, including `--local` runs next to remote

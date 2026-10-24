@@ -17,17 +17,20 @@ crates join them from M3:
 
 ```text
 nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
-         ├─► nyl-state ─────────► nyl-core
+         ├─► nyl-state ─────────┬► nyl-core
+         │                      └► nyl-git
          ├─► nyl-drivers ─┬──────► nyl-core
-         │                └──────► nyl-render ─► nyl-core
+         │                └──────► nyl-render ─┬► nyl-core
+         │                                     └► nyl-git
          └─► nyl-render
 ```
 
 | Crate | Owns | Must not depend on |
 | --- | --- | --- |
 | `nyl-core` | Resource and state-file types, typed identifiers, schemas, canonical JSON and digests, JSON Pointer and reference resolution, and the traits orchestration uses (`StateStore`, `Driver`, `SourceResolver`, `SourceRenderer`, `ArgoObserver`, `Clock`, `IdGenerator`) | Git, processes, network, clock, environment |
+| `nyl-git` | The remote Git transport: the hardened `git` command line, atomic pushes with per-ref leases, and the optional dedicated credentials of `[[git.credentials]]` | Every other Nyl crate |
 | `nyl-render` | Today's Kubernetes rendering and rendered GitOps, unchanged in behavior | Orchestration crates |
-| `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap | Drivers, rendering, orchestration |
+| `nyl-state` | The Git implementation of `StateStore`: snapshots, layout, transition commits, leases, run checkpoints, compare-and-swap, through `nyl-git` | Drivers, rendering, orchestration |
 | `nyl-drivers` | Implementations of `Driver`: execution context, process runner with masking, built-in unit kinds; the Kubernetes adapter uses `nyl-render` | State layout, orchestration |
 | `nyl-orchestration` | Resolution, selection, lifecycle, recovery, promotion, teardown readiness, expiry | Everything except `nyl-core` |
 | `nyl-cli` | Argument parsing, output formats, exit categories, and wiring the concrete implementations into orchestration | Business rules |
@@ -51,6 +54,9 @@ nyl-cli ─┬─► nyl-orchestration ─► nyl-core (types + traits)
   the implementations from `nyl-state` and `nyl-drivers`.
 - Plugin drivers, when added, implement the same driver trait through a
   process adapter in `nyl-drivers`.
+- `nyl-git` exists so that state pushes and `publish-tree` share one
+  transport and one credential configuration without `nyl-state` depending
+  on rendering.
 
 ## Pure decisions, thin shell
 

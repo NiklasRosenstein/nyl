@@ -7,6 +7,7 @@
 //! `nyl-orchestration`, the Git state store in `nyl-state`, and the drivers
 //! in `nyl-drivers`.
 
+pub mod codes;
 pub mod driver;
 pub mod ids;
 pub mod ports;
