@@ -48,7 +48,14 @@ pub fn load_all() -> (Vec<Loaded>, Vec<String>) {
     files.sort();
     for file in files {
         let directory = file.parent().unwrap().to_path_buf();
-        let name = directory.strip_prefix(scenarios_root()).unwrap().display().to_string();
+        // Names use `/` on every platform, as scenarios refer to each other.
+        let name = directory
+            .strip_prefix(scenarios_root())
+            .unwrap()
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
         let text = std::fs::read_to_string(&file).unwrap();
         let result = serde_saphyr::from_str::<Scenario>(&text)
             .map_err(|error| error.to_string())
