@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "Drift": {
+      "description": "The result of a drift verification.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "drift": {
+              "const": "clean",
+              "type": "string"
+            }
+          },
+          "required": [
+            "drift"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "drift": {
+              "const": "drifted",
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "drift",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "drift": {
+              "const": "unknown",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "drift",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "ObservationKind": {
+      "const": "Observation"
+    },
+    "ObservationType": {
+      "enum": [
+        "drift",
+        "health"
+      ],
+      "type": "string"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitIdentity": {
+      "additionalProperties": false,
+      "description": "A unit's identity in state documents.",
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/UnitName"
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent for a held unit without one."
+        }
+      },
+      "required": [
+        "environment",
+        "name",
+        "apiVersion",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`observed/units/<unit>/observations/<type>.yaml`.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "details": true,
+    "executionKey": {
+      "$ref": "#/$defs/ExecutionKey"
+    },
+    "kind": {
+      "$ref": "#/$defs/ObservationKind"
+    },
+    "result": {
+      "$ref": "#/$defs/Drift"
+    },
+    "type": {
+      "$ref": "#/$defs/ObservationType"
+    },
+    "unit": {
+      "$ref": "#/$defs/UnitIdentity"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "unit",
+    "type",
+    "executionKey",
+    "at",
+    "result"
+  ],
+  "title": "Observation",
+  "type": "object"
+}

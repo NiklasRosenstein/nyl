@@ -46,6 +46,48 @@
       },
       "type": "object"
     },
+    "CredentialEntry": {
+      "additionalProperties": false,
+      "description": "One dedicated credential. Set exactly one of `ssh_key_file`, `ssh_key_env`, and `token_env`.",
+      "properties": {
+        "ssh_key_env": {
+          "description": "Environment variable holding a private SSH key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssh_key_file": {
+          "description": "Private SSH key file used instead of the SSH agent and config identities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_env": {
+          "description": "Environment variable holding an HTTPS access token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Prefix of the repository URLs this credential applies to, such as `https://gitlab.example.com/platform/`.",
+          "type": "string"
+        },
+        "username": {
+          "description": "HTTPS username sent with the token. Default `x-access-token`; GitLab expects `oauth2`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "EditorSchemas": {
       "description": "Where generated editor schemas live.",
       "oneOf": [
@@ -69,6 +111,21 @@
           "$ref": "#/$defs/EditorSchemas",
           "default": "local",
           "description": "Where `nyl schema annotate` writes the schemas its comments reference."
+        }
+      },
+      "type": "object"
+    },
+    "GitSettings": {
+      "additionalProperties": false,
+      "description": "The `[git]` table of `nyl.toml`.",
+      "properties": {
+        "credentials": {
+          "default": [],
+          "description": "Dedicated credentials for state pushes and publication, by repository URL prefix.",
+          "items": {
+            "$ref": "#/$defs/CredentialEntry"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -286,6 +343,13 @@
         "schemas": "local"
       },
       "description": "Editor integration, such as where `nyl schema annotate` writes schemas."
+    },
+    "git": {
+      "$ref": "#/$defs/GitSettings",
+      "default": {
+        "credentials": []
+      },
+      "description": "Optional dedicated credentials for state pushes and publication."
     },
     "project": {
       "$ref": "#/$defs/ProjectSettings",
