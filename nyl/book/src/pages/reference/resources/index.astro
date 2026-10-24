@@ -1,5 +1,6 @@
 ---
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import ResourceDiagrams from '../../../components/ResourceDiagrams.astro';
 import { createResourceMarkdownProcessor } from '../../../lib/resource-markdown.mjs';
 import { resourceGroups, summary } from '../../../lib/resources.mjs';
 import { schemaFor } from '../../../lib/schema-documents';
@@ -17,6 +18,7 @@ const groups = await Promise.all(resourceGroups().map(async (group) => ({
 ---
 <StarlightPage frontmatter={{ title: 'Resources', description: 'Nyl resource APIs and their purposes.', editUrl: false, tableOfContents: false }}>
   <p>Choose a resource by its purpose. Each reference explains when to declare the resource, what happens if it is omitted, and every field.</p>
+  <ResourceDiagrams />
   <ul class="catalog">
     {groups.map((group) => <li id={group.apiVersion.replace('/', '-')}>
       <strong>{group.label}</strong> <code>{group.apiVersion}</code>
