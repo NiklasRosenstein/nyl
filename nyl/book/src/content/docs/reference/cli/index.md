@@ -2,25 +2,30 @@
 title: 'Commands'
 ---
 
-nyl provides several commands for managing Kubernetes manifests:
+Commands grouped by what they are for. Each page documents one command or a
+closely related pair.
 
 ## Available Commands
 
-- [`init`](/nyl/reference/cli/init/) - Initialize a Nyl project
-- [`create and delete`](/nyl/reference/cli/create/) - Manage GitOps resource source files
-- [`get and update`](/nyl/reference/cli/project-resources/) - Inspect and refresh project resources
-- [`validate`](/nyl/reference/cli/validate/) - Validate project configuration
-- [`rendering-pipeline`](/nyl/kubernetes/pipeline/) - Shared rendering pipeline used by render/diff/apply
-- [`render`](/nyl/reference/cli/render/) - Render Kubernetes manifests
-- [`diff`](/nyl/reference/cli/diff/) - Show diff between rendered manifests and cluster state
-- [`apply`](/nyl/reference/cli/apply/) - Apply rendered manifests to the cluster
-- [`release`](/nyl/reference/cli/release/) - Inspect release history and roll back to a previous revision
-- [`schema`](/nyl/reference/cli/schema/) - Generate project and resource schemas
-- [`vendor`](/nyl/reference/cli/vendor/) - Snapshot and verify remote renderer inputs
-- [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
-- [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
-- [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
-- [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
+- **Project setup**: create and check a project.
+  - [`init`](/nyl/reference/cli/init/) - Initialize a Nyl project
+  - [`create and delete`](/nyl/reference/cli/create/) - Add or remove GitOps resource source files
+  - [`validate`](/nyl/reference/cli/validate/) - Validate project configuration
+  - [`schema`](/nyl/reference/cli/schema/) - Generate project and resource schemas for editors and CI
+- **Project inputs**: inspect resources and pin what rendering reads.
+  - [`get and update`](/nyl/reference/cli/project-resources/) - Inspect resources, capture cluster capabilities, and move source locks
+  - [`vendor`](/nyl/reference/cli/vendor/) - Snapshot and verify remote renderer inputs
+- **Kubernetes**: act on a cluster directly, through the shared [rendering pipeline](/nyl/kubernetes/pipeline/).
+  - [`render`](/nyl/reference/cli/render/) - Render Kubernetes manifests
+  - [`diff`](/nyl/reference/cli/diff/) - Show diff between rendered manifests and cluster state
+  - [`apply`](/nyl/reference/cli/apply/) - Apply rendered manifests to the cluster
+  - [`release`](/nyl/reference/cli/release/) - Inspect release history and roll back to a previous revision
+- **Rendered GitOps**: render, compare, and publish a deployment target's tree.
+  - [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
+  - [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
+  - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
+- **CI integration**: report results where reviewers look.
+  - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 
 ## Global Options
 
