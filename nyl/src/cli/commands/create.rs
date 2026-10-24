@@ -482,15 +482,20 @@ fn resolved_project_scope(
         return Some((reference.clone(), project_destination_namespaces(inventory, reference)?));
     }
     let template = group.spec.project_template.as_ref()?;
-    let mut namespaces = template.destination_namespaces.clone();
+    // An omitted template list leaves the generated project's namespaces unrestricted.
+    // The group may render on several target Clusters, so this early warning
+    // counts every entry's namespace; render-tree enforces the per-Cluster check.
+    let mut namespaces = template
+        .destinations
+        .as_ref()?
+        .iter()
+        .map(|destination| destination.namespace.clone())
+        .collect::<Vec<_>>();
     if let Some(namespace) = &group.spec.destination_namespace {
         namespaces.push(namespace.clone());
     }
-    // An empty template list leaves the generated project's namespaces unrestricted.
-    (!namespaces.is_empty()).then(|| {
-        let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
-        (name, namespaces)
-    })
+    let name = template.name.clone().unwrap_or_else(|| group.metadata.name.clone());
+    Some((name, namespaces))
 }
 
 /// Literal destination namespaces of a statically declared AppProjectDefinition.

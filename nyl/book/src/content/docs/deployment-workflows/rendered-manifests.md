@@ -23,7 +23,7 @@ Kubernetes-shaped configuration resources describe the deployment:
    parent-catalog defaults.
 5. An [`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/)
    declares source releases and generated Application and Namespace policy. It
-   owns an implied permissive AppProject unless it narrows one with
+   owns an implied least-privilege AppProject unless it shapes one with
    `projectTemplate` or shares one through an AppProjectDefinition.
 
 These resources are compiler inputs. They are not installed in Kubernetes.

@@ -76,9 +76,13 @@ another tool has committed `fromPublication` state before the first
 publication. It may then hold only files the target declares as
 `fromPublication` state paths; any other file fails the comparison, which
 usually means `pathPrefix` names a directory that belongs to something else.
-Unindexed repository content is never treated as target-owned baseline data. `--offline` reads `fromPublication` state at the cached branch
-head, as for `render-tree`, and compares against the published tree at that
-same commit.
+Unindexed repository content is never treated as target-owned baseline data. `--offline` reads `fromPublication` state at the
+cached branch head, as for `render-tree`, and compares against the published
+tree at that same commit, or at the cached publication branch head, without
+contacting the publication repository. With `--against source`, `--source-ref`
+resolves against the cached refs too. Helm charts from Git come from the
+vendor lock or the local source cache when they are there; only a chart in
+neither, or `--refresh`, fetches.
 
 Compare with a render from a source revision:
 

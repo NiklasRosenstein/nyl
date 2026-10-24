@@ -29,8 +29,8 @@ resource identities are never overwritten.
 `nyl capture cluster NAME` to refresh stored Kubernetes capabilities.
 
 A generated ApplicationGroup declares no project and no `destinationNamespace`,
-so it owns its implied permissive AppProject and each Release keeps the
-namespace in its own metadata. Add `spec.projectTemplate` to narrow the project,
+so it owns its implied least-privilege AppProject and each Release keeps the
+namespace in its own metadata. Add `spec.projectTemplate` to set project fields explicitly,
 or `spec.projectRef` to share an AppProjectDefinition.
 
 ## Create releases

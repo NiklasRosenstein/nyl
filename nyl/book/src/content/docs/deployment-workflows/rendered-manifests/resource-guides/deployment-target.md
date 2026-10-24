@@ -16,7 +16,7 @@ target values merge recursively, with target values winning at conflicting
 leaves.
 
 By default, Nyl emits `<target>-catalog` beneath
-`_nyl/catalog/applications/<argocd-namespace>/`. It recursively syncs the
+`_nyl/catalog/application.argoproj.io/<argocd-namespace>/`. It recursively syncs the
 target's `_nyl/catalog` directory. Set `catalogApplication.enabled: false` only
 when another trusted mechanism applies generated catalog resources.
 

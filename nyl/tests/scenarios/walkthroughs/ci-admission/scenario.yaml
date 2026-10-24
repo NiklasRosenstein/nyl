@@ -1,0 +1,66 @@
+contract: design/ci-execution.md#deployment-admission
+milestone: M8
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - ci-admit: {id: A}
+    exit: 0
+  - ci-worker: {admission: A, unit: network}
+    exit: 0
+    expect:
+      executed: [network]
+  - branch: {name: a-source, from: main}
+  - commit: {branch: main, message: Change network inputs, apply: patches/network}
+  - ci-admit: {id: B}
+    exit: 0
+  - ci-worker: {admission: B, unit: network}
+    exit: 0
+    expect:
+      executed: [network]
+  # A retried job of the overtaken deployment skips without writes or effects.
+  - ci-worker: {admission: A, unit: network}
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      codes: [NYL-CI-ADMISSION-SUPERSEDED]
+      ci:
+        superseded: [network]
+  # Re-dispatching A's source is a rollback; re-dispatching B returns B.
+  - ci-admit: {id: stale}
+    at: a-source
+    exit: 1
+    expect:
+      commits: {desired: 0, observed: 0}
+      codes: [NYL-CI-ADMISSION-ROLLBACK]
+  - ci-admit: {id: again}
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 0}
+      ci:
+        admission: B
+  # Operator actions on units leave the admission current.
+  - nyl: [hold, -e, dev, --unit, network]
+    exit: 0
+  - nyl: [resume, -e, dev, --unit, network]
+    exit: 0
+  - ci-worker: {admission: B, unit: network}
+    exit: 0
+    expect:
+      executed: []
+      current: [network]
+  - ci-admit: {id: C, rollback: true}
+    at: a-source
+    exit: 0
+  - ci-worker: {admission: C, unit: network}
+    exit: 0
+    expect:
+      executed: [network]
+  - ci-worker: {admission: B, unit: network}
+    exit: 0
+    expect:
+      executed: []
+      ci:
+        superseded: [network]

@@ -1,5 +1,33 @@
 {
   "$defs": {
+    "AppProjectDestination": {
+      "additionalProperties": false,
+      "description": "One Argo CD AppProject destination. At least one of `server` and `name` is required.",
+      "properties": {
+        "name": {
+          "description": "Argo CD cluster name pattern.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "namespace": {
+          "description": "Namespace pattern, such as `apps`, `preview-*`, or `*`.",
+          "type": "string"
+        },
+        "server": {
+          "description": "Cluster API server URL pattern, such as `https://kubernetes.default.svc` or `*`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "namespace"
+      ],
+      "type": "object"
+    },
     "AppProjectResourcePattern": {
       "additionalProperties": false,
       "properties": {
@@ -27,26 +55,152 @@
     },
     "AppProjectTemplate": {
       "additionalProperties": false,
-      "description": "A constrained AppProject generated for one ApplicationGroup and target.",
+      "description": "An Argo CD AppProject generated for one ApplicationGroup and target.\n\n`name`, `labels`, `annotations`, and `finalizers` set the AppProject metadata; every other field mirrors the Argo CD `AppProject.spec` field of the same name. An omitted field is derived from what the group's Applications need on the target, so a bare template only renames the implied project: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds the group renders. Declare a field to set it explicitly.",
       "properties": {
-        "clusterResourceWhitelist": {
-          "description": "Explicit cluster-scoped resource permissions. Namespace permissions are added for approved namespaces when creation is enabled.",
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations on the generated AppProject.",
+          "type": "object"
+        },
+        "clusterResourceBlacklist": {
+          "description": "Cluster-scoped resources the project denies.",
           "items": {
             "$ref": "#/$defs/AppProjectResourcePattern"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
-        "destinationNamespaces": {
-          "description": "Permitted destination namespace patterns. Must cover all effective Release namespaces and additional namespaces; required when no fixed destination namespace is configured.",
+        "clusterResourceWhitelist": {
+          "description": "Cluster-scoped resources the project admits. Omitted, the cluster-scoped kinds the group renders, including Namespaces Nyl creates for it; a declared list, including `[]`, admits only its patterns plus Namespace permissions for the admitted namespaces when namespace creation is enabled. Deriving a whitelist requires each rendered kind's scope, from a CRD rendered in the target or the Cluster's recorded capabilities.",
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "Project description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destinationServiceAccounts": {
+          "description": "Service accounts used for sync per destination, as Argo CD `spec.destinationServiceAccounts`.",
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "destinations": {
+          "description": "Permitted destinations. Omitted, the project admits the target workload Cluster with every effective Release namespace and additional namespace of the group. A declared list must admit every effective Release namespace and additional namespace on the target workload Cluster; a fixed `destinationNamespace` is added for that Cluster when no entry covers it.",
+          "items": {
+            "$ref": "#/$defs/AppProjectDestination"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "finalizers": {
+          "description": "Finalizers on the generated AppProject, such as `resources-finalizer.argocd.argoproj.io`.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels on the generated AppProject.",
+          "type": "object"
+        },
         "name": {
           "description": "Generated AppProject name; defaults to the ApplicationGroup name. Must be unambiguous across targets sharing an Argo CD namespace.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "namespaceResourceBlacklist": {
+          "description": "Namespaced resources the project denies.",
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "namespaceResourceWhitelist": {
+          "description": "Namespaced resources the project admits. Omitted, the namespaced kinds the group renders.",
+          "items": {
+            "$ref": "#/$defs/AppProjectResourcePattern"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "orphanedResources": {
+          "description": "Orphaned resource monitoring, as Argo CD `spec.orphanedResources`."
+        },
+        "permitOnlyProjectScopedClusters": {
+          "description": "Whether only clusters scoped to this project are admitted, as Argo CD `spec.permitOnlyProjectScopedClusters`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "roles": {
+          "description": "Project roles, as Argo CD `spec.roles`.",
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "signatureKeys": {
+          "description": "GnuPG keys required to verify source commits, as Argo CD `spec.signatureKeys`.",
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sourceNamespaces": {
+          "description": "Namespaces whose Applications may use the project. `applicationNamespace` is always added.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sourceRepos": {
+          "description": "Permitted source repository URL patterns. Omitted, the project admits the target publication repository.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "syncWindows": {
+          "description": "Sync windows, as Argo CD `spec.syncWindows`.",
+          "items": true,
+          "type": [
+            "array",
             "null"
           ]
         }
@@ -260,7 +414,7 @@
           "title": "projectRef"
         },
         {
-          "description": "Generates a least-privilege AppProject for this group from the declared namespaces and cluster resources.",
+          "description": "Generates an AppProject for this group from the declared AppProject fields; omitted fields admit only what the group deploys.",
           "not": {
             "anyOf": [
               {
@@ -290,7 +444,7 @@
           "title": "projectTemplate"
         },
         {
-          "description": "Generates a permissive AppProject named after the group: the target workload Cluster, every namespace, every cluster-scoped resource.",
+          "description": "Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders.",
           "properties": {
             "projectRef": {
               "type": "null"
@@ -362,7 +516,7 @@
           ]
         },
         "projectRef": {
-          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies a permissive AppProject named after this group.",
+          "description": "Project-local AppProjectDefinition identity. Mutually exclusive with `projectTemplate`; omitting both implies an AppProject named after this group that admits only what the group deploys.",
           "type": [
             "string",
             "null"
@@ -377,7 +531,7 @@
               "type": "null"
             }
           ],
-          "description": "Constrained generated AppProject. Mutually exclusive with `projectRef`; declaring it requires explicit destination namespaces."
+          "description": "Generated AppProject fields. Mutually exclusive with `projectRef`; declared fields are kept as written and omitted fields are derived from what the group deploys."
         },
         "releaseCustomization": {
           "$ref": "#/$defs/GitOpsReleaseCustomization",
@@ -709,8 +863,11 @@
         "applicationNamespace": "argocd",
         "destinationNamespace": "workloads",
         "projectTemplate": {
-          "destinationNamespaces": [
-            "workloads"
+          "destinations": [
+            {
+              "namespace": "workloads",
+              "server": "https://kubernetes.default.svc"
+            }
           ]
         },
         "source": {

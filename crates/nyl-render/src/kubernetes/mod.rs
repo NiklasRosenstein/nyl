@@ -16,7 +16,10 @@ pub use diff::DiffEngine;
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use resource::{ApplyOutcome, GroupVersionKind, ResourceKey};
-pub use state::{KubernetesReleaseStorage, ReleaseInfo, ReleaseState, ReleaseStatus, ReleaseStorage};
+pub use state::{
+    enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseState,
+    ReleaseStatus, ReleaseStorage,
+};
 
 use serde::{Deserialize, Serialize};
 

@@ -1,22 +1,20 @@
-use git2::{ErrorCode, FetchOptions, FetchPrune, Oid, Repository};
+use git2::{ErrorCode, Oid, Repository};
 use std::path::Path;
-use std::sync::Arc;
 
-use super::auth::CredentialProvider;
 use super::error::{GitError, Result};
+use super::transport;
 
 /// Manages a bare Git repository
 pub struct BareRepository {
     repo: Repository,
     url: String,
-    credential_provider: Option<Arc<CredentialProvider>>,
 }
 
 impl BareRepository {
-    fn resolve_object_to_commit_oid(&self, oid: Oid) -> Result<Oid> {
+    fn resolve_object_to_commit_oid(&self, oid: Oid, fetch: bool) -> Result<Oid> {
         let object = match self.repo.find_object(oid, None) {
             Ok(object) => object,
-            Err(error) if error.code() == ErrorCode::NotFound => {
+            Err(error) if fetch && error.code() == ErrorCode::NotFound => {
                 self.fetch_objects(oid)?;
                 self.repo.find_object(oid, None)?
             }
@@ -31,26 +29,26 @@ impl BareRepository {
         Ok(commit_oid)
     }
 
-    fn resolve_reference_to_commit_oid(&self, reference_name: &str) -> Result<Option<Oid>> {
+    fn resolve_reference_to_commit_oid(&self, reference_name: &str, fetch: bool) -> Result<Option<Oid>> {
         let Ok(reference) = self.repo.find_reference(reference_name) else {
             return Ok(None);
         };
 
         if let Some(oid) = reference.target() {
-            return self.resolve_object_to_commit_oid(oid).map(Some);
+            return self.resolve_object_to_commit_oid(oid, fetch).map(Some);
         }
 
         Ok(None)
     }
 
     /// Get or create a bare repository at the specified path
-    pub fn get_or_create(url: &str, path: &Path, credential_provider: Option<Arc<CredentialProvider>>) -> Result<Self> {
+    pub fn get_or_create(url: &str, path: &Path) -> Result<Self> {
         let repo = if path.exists() {
             tracing::debug!("Reusing cached bare repository for {} at {}", url, path.display());
             Repository::open(path)?
         } else {
             tracing::debug!("Creating bare repository cache for {} at {}", url, path.display());
-            Self::clone_bare(url, path, credential_provider.as_deref())?
+            Self::clone_bare(url, path)?
         };
 
         // Cached checkouts preserve repository bytes so ownership hashes and
@@ -63,12 +61,11 @@ impl BareRepository {
         Ok(Self {
             repo,
             url: url.to_string(),
-            credential_provider,
         })
     }
 
     /// Clone a bare repository with lazy fetching (refs only initially)
-    fn clone_bare(url: &str, path: &Path, credential_provider: Option<&CredentialProvider>) -> Result<Repository> {
+    fn clone_bare(url: &str, path: &Path) -> Result<Repository> {
         // Create parent directory
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -90,110 +87,84 @@ impl BareRepository {
 
         tracing::debug!("Fetching initial refs for {}", url);
         // Fetch refs only (no objects yet - lazy loading)
-        Self::fetch_refs_with_auth(&repo, url, credential_provider)?;
+        Self::fetch_refs_from(&repo, url)?;
         tracing::debug!("Initial ref fetch complete for {}", url);
         tracing::trace!("Bare clone completed successfully for {}", url);
 
         Ok(repo)
     }
 
-    /// Fetch refs from the remote using git2 API with authentication
-    fn fetch_refs_with_auth(
-        repo: &Repository,
-        url: &str,
-        credential_provider: Option<&CredentialProvider>,
-    ) -> Result<()> {
-        tracing::trace!(
-            "Fetching refs for {} (credential_provider={})",
+    /// Fetch the branches, tags, and remote `HEAD` of `url`, pruning deleted ones.
+    fn fetch_refs_from(repo: &Repository, url: &str) -> Result<()> {
+        tracing::trace!("Fetching refs for {}", url);
+        // `HEAD*` matches the remote HEAD as a glob, so a repository without
+        // one (an empty repository) fetches nothing instead of failing.
+        transport::fetch(
+            repo,
             url,
-            if credential_provider.is_some() {
-                "present"
-            } else {
-                "absent"
-            }
-        );
-        let callbacks = if let Some(provider) = credential_provider {
-            provider.build_callbacks(url)
-        } else {
-            Self::build_default_callbacks()
-        };
-
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-        fetch_options.prune(FetchPrune::On);
-
-        let mut remote = repo.find_remote("origin").map_err(GitError::Repository)?;
-        remote
-            .fetch(
-                &[
-                    "+refs/heads/*:refs/heads/*",
-                    "+refs/tags/*:refs/tags/*",
-                    "+HEAD:refs/remotes/origin/HEAD",
-                ],
-                Some(&mut fetch_options),
-                None,
-            )
-            .map_err(|e| GitError::Command(format!("git fetch failed: {}", e)))?;
-
+            &[
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+                "+HEAD*:refs/remotes/origin/HEAD*",
+            ],
+            true,
+        )?;
         tracing::trace!("Fetch refs completed for {}", url);
         Ok(())
-    }
-
-    /// Build default callbacks with SSH agent fallback
-    fn build_default_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, allowed_types| {
-            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-                let username = username_from_url.unwrap_or("git");
-                git2::Cred::ssh_key_from_agent(username)
-            } else {
-                Err(git2::Error::from_str("No credentials available"))
-            }
-        });
-        callbacks
     }
 
     /// Update refs from the remote
     pub fn fetch_refs(&self) -> Result<()> {
         tracing::debug!("Refreshing remote refs for {}", self.url);
-        Self::fetch_refs_with_auth(&self.repo, &self.url, self.credential_provider.as_deref())
+        Self::fetch_refs_from(&self.repo, &self.url)
     }
 
-    /// Resolve a ref (branch, tag, or commit) to an OID
+    /// Resolve a ref (branch, tag, or commit) to an OID, fetching a commit
+    /// that is missing from the cache by ID.
     pub fn resolve_ref(&self, ref_name: &str) -> Result<Oid> {
+        self.resolve_ref_with_fetch(ref_name, true)
+    }
+
+    /// Resolve a ref (branch, tag, or commit) to an OID from the cache alone.
+    /// A commit missing from the cache does not resolve.
+    pub fn resolve_cached_ref(&self, ref_name: &str) -> Result<Oid> {
+        self.resolve_ref_with_fetch(ref_name, false)
+    }
+
+    fn resolve_ref_with_fetch(&self, ref_name: &str, fetch: bool) -> Result<Oid> {
         // Try direct ref lookup first (branches, tags)
-        if let Some(oid) = self.resolve_reference_to_commit_oid(ref_name)? {
+        if let Some(oid) = self.resolve_reference_to_commit_oid(ref_name, fetch)? {
             return Ok(oid);
         }
 
         // Try with refs/heads/ prefix (branches)
         let branch_ref = format!("refs/heads/{}", ref_name);
-        if let Some(oid) = self.resolve_reference_to_commit_oid(&branch_ref)? {
+        if let Some(oid) = self.resolve_reference_to_commit_oid(&branch_ref, fetch)? {
             return Ok(oid);
         }
 
         // Try with refs/tags/ prefix (tags)
         let tag_ref = format!("refs/tags/{}", ref_name);
-        if let Some(oid) = self.resolve_reference_to_commit_oid(&tag_ref)? {
+        if let Some(oid) = self.resolve_reference_to_commit_oid(&tag_ref, fetch)? {
             return Ok(oid);
         }
 
         // Try parsing as OID (commit hash)
         if let Ok(oid) = Oid::from_str(ref_name) {
-            if let Ok(commit_oid) = self.resolve_object_to_commit_oid(oid) {
+            if let Ok(commit_oid) = self.resolve_object_to_commit_oid(oid, fetch) {
                 return Ok(commit_oid);
             }
         }
 
         // Try HEAD if ref_name is "HEAD"
         if ref_name == "HEAD" {
-            if let Some(oid) = self.resolve_reference_to_commit_oid("HEAD")? {
+            if let Some(oid) = self.resolve_reference_to_commit_oid("HEAD", fetch)? {
                 return Ok(oid);
             }
 
             // Bare repos created via init+fetch have no local HEAD.
             // Use the remote HEAD fetched into refs/remotes/origin/HEAD.
-            if let Some(oid) = self.resolve_reference_to_commit_oid("refs/remotes/origin/HEAD")? {
+            if let Some(oid) = self.resolve_reference_to_commit_oid("refs/remotes/origin/HEAD", fetch)? {
                 return Ok(oid);
             }
         }
@@ -213,19 +184,7 @@ impl BareRepository {
         let oid_str = oid.to_string();
         tracing::debug!("Fetching commit objects for {} at {}", self.url, oid_str);
 
-        let callbacks = if let Some(provider) = &self.credential_provider {
-            provider.build_callbacks(&self.url)
-        } else {
-            Self::build_default_callbacks()
-        };
-
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-
-        let mut remote = self.repo.find_remote("origin").map_err(GitError::Repository)?;
-        remote
-            .fetch(&[&oid_str], Some(&mut fetch_options), None)
-            .map_err(|e| GitError::Command(format!("git fetch {} failed: {}", oid_str, e)))?;
+        transport::fetch(&self.repo, &self.url, &[&oid_str], false)?;
 
         tracing::debug!("Fetched commit objects for {} at {}", self.url, oid_str);
         Ok(())
@@ -243,14 +202,14 @@ impl BareRepository {
         tracing::debug!("Fetching refs of {} to find {commit}", self.url);
         match (self.fetch_refs(), by_id) {
             (Ok(()), _) if self.has_object(commit) => Ok(()),
-            (Ok(()), by_id) => Err(GitError::Command(format!(
+            (Ok(()), by_id) => Err(GitError::Other(format!(
                 "commit {commit} is not reachable from any branch or tag of {}{}",
                 crate::util::sanitize_url(&self.url),
                 by_id
                     .map(|error| format!(", and fetching it by ID failed: {error}"))
                     .unwrap_or_default()
             ))),
-            (Err(refs), Some(by_id)) => Err(GitError::Command(format!(
+            (Err(refs), Some(by_id)) => Err(GitError::Other(format!(
                 "fetching {commit} by ID failed ({by_id}), and fetching refs failed ({refs})"
             ))),
             (Err(refs), None) => Err(refs),
@@ -279,7 +238,7 @@ impl BareRepository {
                 Err(error) => return Err(GitError::Repository(error)),
             };
             if found.filemode() == 0o120_000 {
-                return Err(GitError::Command(format!(
+                return Err(GitError::Other(format!(
                     "{} at {commit} is a symbolic link; Nyl reads only regular files",
                     prefix.display()
                 )));
@@ -292,14 +251,14 @@ impl BareRepository {
         let object = entry.to_object(&self.repo)?;
         let blob = object
             .as_blob()
-            .ok_or_else(|| GitError::Command(format!("{path} at {commit} is not a file")))?;
+            .ok_or_else(|| GitError::Other(format!("{path} at {commit} is not a file")))?;
         Ok(Some(blob.content().to_vec()))
     }
 
     /// The commit a branch names, or `None` when the branch does not exist.
     pub fn branch_commit(&self, branch: &str) -> Result<Option<Oid>> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        self.resolve_reference_to_commit_oid(&format!("refs/heads/{branch}"))
+        self.resolve_reference_to_commit_oid(&format!("refs/heads/{branch}"), false)
     }
 
     /// Get the repository path
@@ -334,7 +293,7 @@ mod tests {
             .unwrap();
 
         let url = source_dir.path().to_string_lossy();
-        BareRepository::get_or_create(&url, &repo_path, None).unwrap();
+        BareRepository::get_or_create(&url, &repo_path).unwrap();
 
         let config = Repository::open_bare(&repo_path)
             .unwrap()
@@ -363,7 +322,7 @@ mod tests {
 
         let cache_dir = TempDir::new().unwrap();
         let url = source_dir.path().to_string_lossy();
-        let bare = BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git"), None).unwrap();
+        let bare = BareRepository::get_or_create(&url, &cache_dir.path().join("cache.git")).unwrap();
         assert_eq!(bare.resolve_ref("temporary").unwrap(), commit_id);
 
         source_repo

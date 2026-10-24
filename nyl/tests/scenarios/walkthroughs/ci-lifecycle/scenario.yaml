@@ -1,0 +1,62 @@
+contract: design/ci-execution.md#leaving-units
+milestone: M8
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  # The merge request removes database together with the binding consuming it.
+  - branch: {name: remove-database, from: main}
+  - commit: {branch: remove-database, message: Remove the database unit, apply: patches/remove-database}
+  - ci-export: {operation: plan}
+    at: remove-database
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      ci:
+        units: [network, web-image, kubernetes]
+        lifecycleLeaving: [database]
+  - ci-export: {operation: plan, fail-on-leaving: true}
+    at: remove-database
+    exit: 1
+    expect:
+      commits: {desired: 0, observed: 0}
+      ci:
+        lifecycleLeaving: [database]
+  - squash-merge: {branch: remove-database, into: main}
+  - ci-export: {operation: reconcile}
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 0}
+      ci:
+        units: [network, web-image, kubernetes]
+        lifecycleLeaving: [database]
+  - ci-admit: {id: A}
+    exit: 0
+  - ci-worker: {admission: A, unit: kubernetes}
+    exit: 0
+    expect:
+      executed: [kubernetes]
+  # Omission alone never destroys: the lifecycle job waits for --allow-teardown.
+  - ci-worker: {admission: A, leaving: true}
+    exit: 2
+    expect:
+      executed: []
+      pending-teardown: [database]
+  - ci-worker: {admission: A, leaving: true, allow-teardown: true}
+    exit: 0
+    expect:
+      removed: [database]
+  # An empty selection still exports the lifecycle node.
+  - commit: {branch: main, message: Deselect every unit, apply: patches/deselect-all}
+  - ci-export: {operation: plan}
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+      ci:
+        units: []
+        lifecycleLeaving: [network, web-image, kubernetes]

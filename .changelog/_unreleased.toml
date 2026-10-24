@@ -75,3 +75,9 @@ id = "4d5cb2e1-7ba9-4935-8afe-69403f409a20"
 type = "improvement"
 description = "Label the generated schema branches for mutually exclusive fields with what choosing each one does, so the resource reference lists them as named variants linking to their fields (for example `projectRef`, `projectTemplate`, `Neither`) instead of dumping raw constraints whose `required` entry reads as if the field were required outright"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "36f53974-eda3-4035-a2d9-fc552bb8ef78"
+type = "feature"
+description = "Bound release history with `[release] history_limit` in `nyl.toml` or `nyl apply --history-limit`, keeping five revisions per release by default; after a successful apply or rollback the oldest revisions beyond the limit are deleted. Set `history_limit = 0` to keep every revision as before"
+author = "@NiklasRosenstein"

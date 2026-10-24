@@ -37,6 +37,7 @@ For shared rendering behavior and namespace resolution details, see
 - `--namespace <NAMESPACE>` - Release namespace (required if no Release in file)
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
+- `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest after a successful apply; `0` keeps every revision, otherwise `N` must be at least `2`. Overrides `[release] history_limit` in [`nyl.toml`](/nyl/configuration/#release-history)
 
 ### Cluster Options
 
@@ -68,6 +69,9 @@ nyl apply --target production --name my-release --namespace default manifest.yam
 
 # Use different Kubernetes context
 nyl apply --target production --context admin@production manifest.yaml
+
+# Keep only the ten most recent release revisions
+nyl apply --target production --history-limit 10 manifest.yaml
 ```
 
 ### Dry Run
@@ -86,6 +90,7 @@ nyl apply --target production --no-release manifest.yaml
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/commands/release/) to inspect history or [roll back](/nyl/commands/release/#rollback) to a previous revision.
+- Each release keeps its five most recent revisions unless `[release] history_limit` says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.
 - The release namespace is created when it is missing, before the manifests are
   applied. Nyl does not own that namespace and never prunes it. Other namespaces
   a release writes to, including `spec.additionalNamespaces`, need their own

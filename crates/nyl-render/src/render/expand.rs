@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::RenderCache;
@@ -199,7 +198,6 @@ pub(crate) async fn generate_render_resource(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
-    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
@@ -211,7 +209,6 @@ pub(crate) async fn generate_render_resource(
         config,
         kube_version,
         api_versions,
-        credential_provider,
         track_parent,
         gitops_cache,
         artifact_resolver,
@@ -291,7 +288,6 @@ pub(crate) async fn generate_resource(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
-    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     track_parent: bool,
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
@@ -305,15 +301,7 @@ pub(crate) async fn generate_resource(
         // Parse as HelmChart and render
         let chart: HelmChart = serde_json::from_value(resource.clone())
             .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
-        let manifests = render_helm_chart(
-            &chart,
-            context,
-            config,
-            kube_version,
-            api_versions,
-            credential_provider.clone(),
-            artifact_resolver,
-        )?;
+        let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
 
         Ok(apply_parent_tracking_annotations(
             manifests,
@@ -380,15 +368,7 @@ pub(crate) async fn generate_resource(
                 },
             };
 
-            let manifests = render_helm_chart(
-                &chart,
-                context,
-                config,
-                kube_version,
-                api_versions,
-                credential_provider.clone(),
-                artifact_resolver,
-            )?;
+            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
 
             Ok(apply_parent_tracking_annotations(
                 manifests,
@@ -421,15 +401,7 @@ pub(crate) async fn generate_resource(
                 },
             };
 
-            let manifests = render_helm_chart(
-                &chart,
-                context,
-                config,
-                kube_version,
-                api_versions,
-                credential_provider.clone(),
-                artifact_resolver,
-            )?;
+            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
 
             Ok(apply_parent_tracking_annotations(
                 manifests,
@@ -690,7 +662,6 @@ fn render_helm_chart(
     config: &ProjectConfig,
     kube_version: &str,
     api_versions: &[String],
-    credential_provider: Option<Arc<crate::git::CredentialProvider>>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
     let gitops_cache = artifact_resolver.render_cache();
@@ -700,11 +671,10 @@ fn render_helm_chart(
         std::env::current_dir().map_err(|e| NylError::Config(format!("Failed to get current directory: {}", e)))?
     };
 
-    let resolver = HelmChartResolver::with_cache_dir_and_provider(
+    let resolver = HelmChartResolver::with_cache_dir(
         config.get_helm_chart_search_paths().to_vec(),
         working_dir,
         Some(artifact_resolver.cache_base().to_path_buf()),
-        credential_provider,
     )
     .with_render_cache(gitops_cache.cloned())
     .with_artifact_resolver(Some(artifact_resolver.clone()));

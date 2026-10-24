@@ -580,7 +580,7 @@ fn build_documents(config: &GitOpsInitConfig) -> Result<Vec<Value>> {
         });
         // Without narrowing options the group keeps its implied permissive AppProject.
         if let Some(project) = &config.project {
-            group_spec["projectTemplate"] = project_template(project);
+            group_spec["projectTemplate"] = project_template(project, config);
         }
         documents.push(resource("ApplicationGroup", name, group_spec));
     }
@@ -592,26 +592,36 @@ fn build_documents(config: &GitOpsInitConfig) -> Result<Vec<Value>> {
 }
 
 /// The `projectTemplate` for the narrowing the command line asked for. Every
-/// dimension the caller left open stays permissive.
-fn project_template(project: &ProjectScope) -> Value {
+/// field the caller left open is omitted, so it keeps its permissive default.
+fn project_template(project: &ProjectScope, config: &GitOpsInitConfig) -> Value {
     let mut template = json!({});
     if let Some(name) = &project.name {
         template["name"] = json!(name);
     }
-    template["destinationNamespaces"] = if project.namespaces.is_empty() {
-        json!(["*"])
-    } else {
-        json!(project.namespaces)
-    };
-    template["clusterResourceWhitelist"] = if project.cluster_resources.is_empty() {
-        json!([{"group": "*", "kind": "*"}])
-    } else {
-        json!(project
+    if !project.namespaces.is_empty() {
+        // Allowed namespaces narrow the project to the scaffolded Cluster.
+        template["destinations"] = project
+            .namespaces
+            .iter()
+            .map(|namespace| {
+                let mut destination = json!({"namespace": namespace});
+                if let Some(server) = &config.destination_server {
+                    destination["server"] = json!(server);
+                }
+                if let Some(name) = &config.destination_name {
+                    destination["name"] = json!(name);
+                }
+                destination
+            })
+            .collect();
+    }
+    if !project.cluster_resources.is_empty() {
+        template["clusterResourceWhitelist"] = project
             .cluster_resources
             .iter()
             .map(|(group, kind)| json!({"group": group, "kind": kind}))
-            .collect::<Vec<_>>())
-    };
+            .collect();
+    }
     template
 }
 
@@ -779,12 +789,17 @@ mod tests {
             .find(|value| value["kind"] == "ApplicationGroup")
             .unwrap();
         let template = &group["spec"]["projectTemplate"];
-        assert_eq!(template["name"], "workloads");
-        assert_eq!(template["destinationNamespaces"], json!(["apps", "apps-preview"]));
-        // An unrequested dimension stays permissive rather than becoming empty.
+        // Allowed namespaces bind to the scaffolded Cluster; the unrequested
+        // cluster-resource dimension is left to its permissive default.
         assert_eq!(
-            template["clusterResourceWhitelist"],
-            json!([{"group": "*", "kind": "*"}])
+            template,
+            &json!({
+                "name": "workloads",
+                "destinations": [
+                    {"namespace": "apps", "server": "https://kubernetes.default.svc"},
+                    {"namespace": "apps-preview", "server": "https://kubernetes.default.svc"},
+                ],
+            })
         );
     }
 
