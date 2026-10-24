@@ -123,14 +123,19 @@ pub fn resolve_environment(
 
 /// The Git state store for a resolved environment, with the project's
 /// optional dedicated credentials.
-/// Its commits are signed by `signer`.
+/// Its commits are signed by `signer`; without one the store is read-only,
+/// for commands that never write (`plan`, `status`, `get`), which therefore
+/// need no commit identity.
 pub fn open_store(
     inventory: &GitOpsInventory,
     resolved: &ResolvedEnvironment,
-    signer: CommitSigner,
+    signer: Option<CommitSigner>,
 ) -> Result<GitStateStore> {
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let store = GitStateStore::new(&resolved.git_dir, auth, signer);
+    let store = match signer {
+        Some(signer) => GitStateStore::new(&resolved.git_dir, auth, signer),
+        None => GitStateStore::read_only(&resolved.git_dir, auth),
+    };
     Ok(match &resolved.endpoint {
         Some(endpoint) => store.with_endpoint(resolved.location.repository.clone(), endpoint.clone()),
         None => store,

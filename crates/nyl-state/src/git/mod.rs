@@ -45,7 +45,8 @@ const REBASE_ATTEMPTS: usize = 5;
 pub struct GitStateStore {
     git_dir: PathBuf,
     auth: GitAuth,
-    signer: CommitSigner,
+    /// `None` for a read-only store: every write is refused.
+    signer: Option<CommitSigner>,
     endpoints: BTreeMap<String, Endpoint>,
 }
 
@@ -87,7 +88,19 @@ impl GitStateStore {
         Self {
             git_dir: git_dir.into(),
             auth,
-            signer,
+            signer: Some(signer),
+            endpoints: BTreeMap::new(),
+        }
+    }
+
+    /// A store for commands that only read state (`plan`, `status`, `get`):
+    /// they need no commit identity, and every write fails with
+    /// [`StateError::Unavailable`](nyl_core::orchestration::ports::StateError::Unavailable).
+    pub fn read_only(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
+        Self {
+            git_dir: git_dir.into(),
+            auth,
+            signer: None,
             endpoints: BTreeMap::new(),
         }
     }
@@ -330,7 +343,7 @@ impl StateStore for GitStateStore {
         let expected = expected.map(Oid::from_str).transpose().map_err(unavailable)?;
         write_lease(
             &repository,
-            &self.signer,
+            self.signer.as_ref(),
             &refs,
             &name,
             lease,
@@ -352,7 +365,7 @@ impl StateStore for GitStateStore {
         let expected = Oid::from_str(expected).map_err(unavailable)?;
         write_lease(
             &repository,
-            &self.signer,
+            self.signer.as_ref(),
             &refs,
             &name,
             lease,
@@ -427,7 +440,7 @@ impl StateStore for GitStateStore {
         }
         let parents = tip.into_iter().collect::<Vec<_>>();
         let message = format!("nyl: run {} of {environment}", run.run);
-        let Some(commit) = tree::commit(&repository, &self.signer, &files, &message, &parents, true)? else {
+        let Some(commit) = tree::commit(&repository, self.signer.as_ref(), &files, &message, &parents, true)? else {
             return Ok(());
         };
         match refs.update(&[Update {
@@ -503,7 +516,7 @@ impl StateStore for GitStateStore {
         let index = files.len();
         files.insert(format!("signals/{index:04}.yaml"), to_yaml(signal)?);
         let parents = tip.into_iter().collect::<Vec<_>>();
-        let commit = tree::commit(&repository, &self.signer, &files, "nyl: signal", &parents, true)?
+        let commit = tree::commit(&repository, self.signer.as_ref(), &files, "nyl: signal", &parents, true)?
             .expect("allow_empty commits");
         match refs.update(&[Update {
             name: name.clone(),
@@ -528,6 +541,7 @@ impl StateStore for GitStateStore {
         lease_version: &str,
     ) -> StateResult<Committed> {
         let repository = self.open()?;
+        let signer = self.signer.as_ref();
         let refs = self.refs(&repository, location);
         let desired_name = full_name(&location.desired_ref);
         let observed_name = full_name(&location.observed_ref);
@@ -542,20 +556,13 @@ impl StateStore for GitStateStore {
             apply_changes(&mut inner, &transition.changes, desired, observed)?;
             let files = replace_beneath(&all, &location.path, &inner);
             let parents = tip.into_iter().collect::<Vec<_>>();
-            tree::commit(&repository, &self.signer, &files, &transition.message, &parents, false)
+            tree::commit(&repository, signer, &files, &transition.message, &parents, false)
         };
         // The lease moves to a new commit with the same document, so that
         // the push checks it: git never compares an unchanged ref.
         let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
-        let renewed = tree::commit(
-            &repository,
-            &self.signer,
-            &lease_files,
-            "nyl: lease",
-            &[lease_oid],
-            true,
-        )?
-        .expect("allow_empty commits");
+        let renewed = tree::commit(&repository, signer, &lease_files, "nyl: lease", &[lease_oid], true)?
+            .expect("allow_empty commits");
 
         // Each attempt builds on the tips the last one lost to.
         let (mut tip_desired, mut tip_observed) = (base_desired, base_observed);
@@ -739,7 +746,7 @@ fn directory_unchanged(
 
 fn write_lease(
     repository: &Repository,
-    signer: &CommitSigner,
+    signer: Option<&CommitSigner>,
     refs: &Refs<'_>,
     name: &str,
     lease: &Lease,

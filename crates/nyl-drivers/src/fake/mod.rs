@@ -227,8 +227,11 @@ mod tests {
             env: BTreeMap::new(),
             approved_digest: approved,
             deadline: chrono::Utc::now(),
+            now: chrono::Utc::now(),
             observed: None,
             tools,
+            commit_identity: None,
+            cache_dir: directory.path().join("cache"),
         }
     }
 

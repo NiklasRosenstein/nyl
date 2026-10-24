@@ -247,3 +247,16 @@ fn regenerate_state_golden_files() {
         std::fs::write(golden_dir().join(name), render(name, &sample)).unwrap();
     }
 }
+
+#[test]
+fn test_artifact_digest_survives_a_yaml_round_trip() {
+    // The shell digests the document it writes; resolution digests the one
+    // it reads back. A digest that changed across YAML would block every
+    // artifact reference with a digest mismatch.
+    let text = std::fs::read_to_string(golden_dir().join("artifact-container-image.v1.yaml")).unwrap();
+    let document: nyl_core::orchestration::state::ArtifactDocument = serde_saphyr::from_str(&text).unwrap();
+    let written = serde_saphyr::to_string(&document).unwrap();
+    let read: nyl_core::orchestration::state::ArtifactDocument = serde_saphyr::from_str(&written).unwrap();
+    assert!(document.digest().starts_with("sha256:"));
+    assert_eq!(read.digest(), document.digest());
+}

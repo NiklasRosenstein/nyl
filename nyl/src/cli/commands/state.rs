@@ -226,10 +226,10 @@ fn run(
     let mut store = open_store(
         &inventory,
         &resolved,
-        CommitSigner {
+        Some(CommitSigner {
             identity,
             clock: clock.clone(),
-        },
+        }),
     )?;
     if let Some((identity, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.

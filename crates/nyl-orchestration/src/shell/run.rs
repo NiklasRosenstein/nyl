@@ -28,7 +28,7 @@ use std::path::Path;
 
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{SourceRenderer, SourceResolver};
+use nyl_core::orchestration::ports::{CommitIdentity, SourceRenderer, SourceResolver};
 use nyl_core::orchestration::state::StateLocation;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::Environment;
@@ -51,9 +51,17 @@ pub struct RunContext<'a> {
     /// A directory this invocation owns: pinned worktrees and per-execution
     /// temp dirs are created beneath it.
     pub workspace: &'a Path,
-    /// Variables the invocation admits from its process, such as `PATH` and
-    /// a unit's `env.passthrough`; the command line reads them, never the shell.
+    /// A snapshot of the whole process environment, read once by the command
+    /// line, never by the shell. The shell admits from it only `PATH` and
+    /// each unit's declared `env.passthrough` into that unit's
+    /// `ExecutionContext.env`/`ResolutionContext.env`; nothing else reaches a
+    /// driver. Units declaring `env.secrets` are rejected in M3
+    /// (`NYL-UNIT-SECRETS-UNSUPPORTED`) because no secrets provider is wired.
     pub process_env: &'a BTreeMap<String, String>,
+    /// Who signs commits drivers write, such as publication commits, with the
+    /// clock's time: the identity the command line resolved for state
+    /// commits. `None` for `plan`, which writes nothing.
+    pub commit_identity: Option<&'a CommitIdentity>,
 }
 
 /// One `plan` or `reconcile` of one environment.

@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use nyl_core::orchestration::codes::Finding;
+use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::Change;
 use nyl_core::orchestration::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, RunId, UnitName};
 use nyl_core::orchestration::state::{FailureCategory, Operation};
@@ -109,6 +109,18 @@ impl ExitCategory {
     }
 }
 
+impl ExitCategory {
+    /// The category an error finding contributes: a held lease is
+    /// incomplete (2), a lost lease uncertain (4), anything else an error (1).
+    pub fn of_finding(finding: &Finding) -> Self {
+        match finding.code {
+            Code::LeaseHeld => Self::Incomplete,
+            Code::LeaseLost => Self::Uncertain,
+            _ => Self::Error,
+        }
+    }
+}
+
 impl Serialize for ExitCategory {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u8(self.code())
@@ -156,10 +168,19 @@ impl EnvironmentRunReport {
         }
     }
 
-    /// Set `exit` and `complete` from the units, errors, and the report kind:
-    /// plan exits 2 when a unit is blocked or waits and 3 when a driver plan
-    /// failed; reconcile and status by the most severe unit result or state.
-    /// An error finding is exit 1.
+    /// Set `exit` and `complete` from the units, errors, and the report kind,
+    /// combining with [`ExitCategory::most_severe`]:
+    /// - each error finding contributes [`ExitCategory::of_finding`];
+    /// - plan: 2 when a unit's state is blocked or awaiting approval, 3 only
+    ///   when a driver plan failed in this invocation
+    ///   ([`UnitReport::plan_error`]); a stored failed condition that will be
+    ///   retried does not raise the exit;
+    /// - reconcile: by each unit's `result` (failed 3, uncertain 4, blocked
+    ///   or awaiting approval 2);
+    /// - status: by each unit's `state` (uncertain 4, failed 3, and 2 for
+    ///   every other state but current: blocked, ready, running, held,
+    ///   awaiting approval, pending teardown, tearing down);
+    /// - `complete` is true exactly when the exit is 0.
     pub fn finish(&mut self, kind: ReportKind) {
         let _ = kind;
         todo!("run-model")
@@ -208,6 +229,10 @@ pub struct UnitReport {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<BlockedBy>,
+    /// The driver's plan failed in this invocation (plan reports only); this,
+    /// not a stored condition, makes a plan exit 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_error: Option<String>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -229,10 +254,22 @@ impl UnitReport {
             change_digest: None,
             summary: None,
             blocked_by: Vec::new(),
+            plan_error: None,
             message: None,
             last_run: None,
             warnings: Vec::new(),
         }
+    }
+}
+
+impl UnitReport {
+    /// The name `expect` keys, tables, and headlines use: the `result` of a
+    /// reconcile report, else the `state` of a plan or status report.
+    pub fn outcome_name(&self) -> Option<&'static str> {
+        self.result
+            .as_ref()
+            .map(UnitResult::name)
+            .or_else(|| self.state.map(UnitState::name))
     }
 }
 
@@ -291,6 +328,25 @@ pub enum UnitState {
     Retained,
 }
 
+impl UnitState {
+    /// The kebab-case name, as reports serialize it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Ready => "ready",
+            Self::AwaitingApproval => "awaiting-approval",
+            Self::Running => "running",
+            Self::Uncertain => "uncertain",
+            Self::Failed => "failed",
+            Self::Current => "current",
+            Self::Held => "held",
+            Self::PendingTeardown => "pending-teardown",
+            Self::TearingDown => "tearing-down",
+            Self::Retained => "retained",
+        }
+    }
+}
+
 /// Whether a unit's latest receipt matches its desired document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -324,5 +380,41 @@ mod tests {
         assert_eq!(Failed.most_severe(Uncertain), Uncertain);
         assert_eq!(Ok.most_severe(Incomplete), Incomplete);
         assert_eq!(Uncertain.code(), 4);
+    }
+
+    #[test]
+    fn test_lease_findings_keep_their_exit_categories() {
+        let finding = |code| Finding::new(code, "m", "f");
+        assert_eq!(
+            ExitCategory::of_finding(&finding(Code::LeaseHeld)),
+            ExitCategory::Incomplete
+        );
+        assert_eq!(
+            ExitCategory::of_finding(&finding(Code::LeaseLost)),
+            ExitCategory::Uncertain
+        );
+        assert_eq!(
+            ExitCategory::of_finding(&finding(Code::UnitUnknown)),
+            ExitCategory::Error
+        );
+    }
+
+    #[test]
+    fn test_unit_state_names_match_their_serialized_form() {
+        for state in [
+            UnitState::Blocked,
+            UnitState::Ready,
+            UnitState::AwaitingApproval,
+            UnitState::Running,
+            UnitState::Uncertain,
+            UnitState::Failed,
+            UnitState::Current,
+            UnitState::Held,
+            UnitState::PendingTeardown,
+            UnitState::TearingDown,
+            UnitState::Retained,
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), state.name());
+        }
     }
 }

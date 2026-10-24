@@ -41,19 +41,19 @@ impl Driver for CommandDriver {
     }
 
     fn capabilities(&self, _spec: &Value) -> Capabilities {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn recovery(&self, _spec: &Value) -> RecoveryPolicies {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn spec_schema(&self) -> schemars::Schema {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn validate_spec(&self, _spec: &Value) -> Result<(), String> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn attestations(&self, _spec: &Value) -> Vec<String> {
@@ -61,19 +61,19 @@ impl Driver for CommandDriver {
     }
 
     fn ownership_scopes(&self, _environment: &EnvironmentName, _spec: &Value) -> Vec<OwnershipScope> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn execution_key_inputs(&self, _ctx: &ResolutionContext<'_>, _spec: &Value) -> DriverResult<KeyInputs> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn plan(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn reconcile(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn verify(
@@ -82,7 +82,7 @@ impl Driver for CommandDriver {
         _unit: &DesiredUnit,
         _receipt: &Receipt,
     ) -> DriverResult<Supported<Verification>> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
@@ -91,7 +91,7 @@ impl Driver for CommandDriver {
 
     /// Teardown is part 5; a Command supports it only with a `teardown` step.
     fn teardown(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 
     fn build(

@@ -51,7 +51,11 @@ mod tests {
     #[test]
     fn test_fakes_serve_the_real_kinds_they_stand_in_for() {
         let drivers = with_test_kinds(&crate::fake::Script::new());
-        let kind = |real: &str| drivers.get("units.gitops.nyl/v1", real).map(nyl_core::orchestration::driver::Driver::kind);
+        let kind = |real: &str| {
+            drivers
+                .get("units.gitops.nyl/v1", real)
+                .map(nyl_core::orchestration::driver::Driver::kind)
+        };
         assert_eq!(kind("Command"), Some("Command"));
         assert_eq!(kind("OciImage"), Some("FakeImage"));
         assert_eq!(kind("OpenTofu"), Some("FakeInfra"));

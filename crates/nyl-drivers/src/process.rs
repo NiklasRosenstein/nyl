@@ -18,11 +18,13 @@ pub const KILL_GRACE: StdDuration = StdDuration::from_secs(30);
 /// Runs tools as child processes.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessRunner {
-    /// Secret values masked in transcripts.
+    /// Secret values masked in every transcript, in addition to each
+    /// invocation's own [`ToolInvocation::masked`].
     masked: Vec<String>,
-    /// Wall-clock budget per invocation; `None` runs without a deadline.
-    /// The shell derives it from the execution's deadline and the injected
-    /// clock, so this runner never reads the clock to decide one.
+    /// Default budget for invocations without [`ToolInvocation::timeout`];
+    /// `None` runs those without a deadline. Drivers set the per-invocation
+    /// timeout from their context's `deadline - now`, so this runner never
+    /// reads a clock to decide one (it measures elapsed time with `Instant`).
     timeout: Option<StdDuration>,
 }
 
@@ -49,6 +51,6 @@ impl ProcessRunner {
 impl ToolRunner for ProcessRunner {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
         let _ = (invocation, &self.masked, self.timeout);
-        todo!("command-driver")
+        todo!("drivers-sources")
     }
 }

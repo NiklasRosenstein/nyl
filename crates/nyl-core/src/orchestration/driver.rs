@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ids::{ChangeDigest, EnvironmentName, UnitAddress};
+use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
 use super::time::Timestamp;
 
@@ -190,7 +191,9 @@ pub struct AttestationOutcome {
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
     Succeeded {
-        /// Declared, non-sensitive outputs; Nyl validates and filters them.
+        /// Every non-sensitive output the tool reported, declared or not. Nyl
+        /// validates them against the declarations, warns about undeclared ones
+        /// (`NYL-OUTPUT-UNDECLARED`), and records only declared ones.
         outputs: Value,
         /// Artifact documents without `metadata.unit` and `executionKey`, which Nyl fills in.
         artifacts: Vec<ArtifactDocument>,
@@ -284,6 +287,15 @@ pub struct ToolInvocation {
     pub env: BTreeMap<String, String>,
     /// Bytes on stdin; none closes it.
     pub stdin: Option<Vec<u8>>,
+    /// How long the tool may run: the driver computes it as the context's
+    /// `deadline - now`, so no runner reads a clock to decide it. At expiry
+    /// the runner sends SIGTERM to the process group and SIGKILL 30 seconds
+    /// later, and reports [`ToolExit::DeadlineExceeded`]. `None` falls back
+    /// to the runner's default, if it has one.
+    pub timeout: Option<std::time::Duration>,
+    /// Values the transcript replaces with `***`: the admitted secrets of
+    /// this execution, in addition to any the runner masks by default.
+    pub masked: Vec<String>,
 }
 
 /// How a tool invocation ended. Its stdout and stderr went to the masked
@@ -332,22 +344,40 @@ pub struct ExecutionContext<'a> {
     /// The approved change digest of a `bind: plan` unit.
     pub approved_digest: Option<ChangeDigest>,
     pub deadline: Timestamp,
+    /// The injected clock's time when the execution starts; a driver's tool
+    /// timeout is `deadline - now`. Drivers never read a clock.
+    pub now: Timestamp,
     /// The unit's observed file, holding its last receipt.
     pub observed: Option<&'a ObservedUnit>,
     pub tools: &'a dyn ToolRunner,
+    /// Who signs commits a driver writes, such as a publication's commit:
+    /// the identity the command line resolved for state commits, with
+    /// `now` as the commit time. `None` for operations that write nothing
+    /// (plan, verify); a driver that must commit without one fails before
+    /// effects.
+    pub commit_identity: Option<&'a CommitIdentity>,
+    /// A cache directory of this invocation's workspace, for render caches;
+    /// never the user's default cache, so parallel runs stay isolated.
+    pub cache_dir: PathBuf,
 }
 
 /// What resolution provides to compute execution-key inputs.
 pub struct ResolutionContext<'a> {
     pub environment: EnvironmentName,
-    /// A checkout of the source commit S.
+    /// A Git worktree of the unit's effective commit: the commit resolution
+    /// writes into its Git source fields (S for a unit without `revision`).
+    /// Execution-key inputs are read from these bytes.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
     /// Passthrough variables, without secrets, for fingerprint steps.
     pub env: BTreeMap<String, String>,
     pub deadline: Timestamp,
+    /// The injected clock's time; a fingerprint's timeout is `deadline - now`.
+    pub now: Timestamp,
     pub tools: &'a dyn ToolRunner,
+    /// A cache directory of this invocation's workspace, as for executions.
+    pub cache_dir: PathBuf,
 }
 
 /// One unit kind. Built-in drivers implement it in Rust; methods for

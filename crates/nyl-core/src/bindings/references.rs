@@ -26,5 +26,5 @@ pub struct UnitReference {
 /// is an issue naming its pointer; `fromPromotion` references are skipped.
 pub fn unit_references(pointer: &str, document: &Value) -> Result<Vec<UnitReference>, Vec<String>> {
     let _ = (pointer, document);
-    todo!("run-rules")
+    todo!("references-graph")
 }

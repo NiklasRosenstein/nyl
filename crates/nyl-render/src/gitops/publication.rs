@@ -14,6 +14,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use nyl_core::orchestration::ports::CommitIdentity;
+use nyl_core::orchestration::time::Timestamp;
+
 use super::inputs::InputSnapshot;
 use crate::Result;
 
@@ -28,6 +31,22 @@ pub struct TargetRender<'a> {
     pub target: &'a str,
     /// Resolved values of the target's `fromUnit` (and later `fromPromotion`) bindings.
     pub inputs: &'a InputSnapshot,
+    /// The render cache directory, from the invocation's workspace; `None`
+    /// renders without a cache. Never the user's default cache, so parallel
+    /// invocations and tests stay isolated and the result never depends on
+    /// host state.
+    pub cache_dir: Option<&'a Path>,
+}
+
+/// Who signs a publication commit, and when. Orchestrated publications pass
+/// the identity the command line resolved for state commits and the injected
+/// clock's time; `publish-tree` passes the signature it resolves itself, so
+/// its commits stay as they are. This module reads neither the process
+/// environment, Git configuration, nor the clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationSignature {
+    pub identity: CommitIdentity,
+    pub time: Timestamp,
 }
 
 /// Where a target publishes.
@@ -49,7 +68,10 @@ pub struct RenderedTarget {
     /// relative to the prefix.
     pub files: BTreeMap<PathBuf, Vec<u8>>,
     /// The render's input record in portable form: repository-relative paths
-    /// (and other recorded inputs) with content digests, never machine paths.
+    /// (and other recorded inputs) with plain content digests; never machine
+    /// paths, cache locations, or cache-local keyed fingerprints. Rendering
+    /// the same commit from two worktrees with two cache directories yields
+    /// the same record.
     pub input_record: BTreeMap<String, String>,
 }
 
@@ -75,8 +97,18 @@ pub struct PublishedTree {
 /// Publish a rendered tree to its destination branch by compare-and-swap,
 /// reconciling only files the previous ownership index recorded, as
 /// `publish-tree` does. Publishing an unchanged tree creates no commit.
-/// `project_dir` supplies the project's `[git]` credentials.
-pub fn publish_target(rendered: &RenderedTarget, project_dir: &Path, message: &str) -> Result<PublishedTree> {
-    let _ = (rendered, project_dir, message);
+/// `project_dir` supplies the project's `[git]` credentials; `signature`
+/// signs the commit.
+///
+/// Index v3 (owning environment and unit uid) is deferred to the
+/// KubernetesPublication driver (M5): the index is written as `publish-tree`
+/// writes it, so non-orchestrated output stays byte-identical.
+pub fn publish_target(
+    rendered: &RenderedTarget,
+    project_dir: &Path,
+    message: &str,
+    signature: &PublicationSignature,
+) -> Result<PublishedTree> {
+    let _ = (rendered, project_dir, message, signature);
     todo!("publication")
 }

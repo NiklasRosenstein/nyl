@@ -24,6 +24,14 @@
 //! - Provenance cites the receipt: `{unit, uid, executionKey, observedCommit}`
 //!   for a receipt read from the snapshot, or `{…, run}` for one produced
 //!   earlier in the same run; never a checkpoint or the commit being written.
+//! - A citation is stable: when a reference resolves to the receipt (unit,
+//!   uid, executionKey) that the stored desired document already cites at
+//!   that pointer, the stored citation (its `run` or `observedCommit`) is
+//!   kept unchanged. Re-resolving against unchanged receipts therefore
+//!   yields byte-identical provenance, and a run that changes nothing writes
+//!   nothing, although the observed tip and the run ID differ.
+//! - The artifact digest is [`ArtifactDocument::digest`], the one function
+//!   receipts are written and checked with.
 //! - Cross-environment references (`environment:`) are rejected until M6.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +58,9 @@ pub struct ReferenceView<'a> {
     /// This run, when receipts of `produced_in_run` came from it.
     pub run: Option<&'a RunId>,
     pub produced_in_run: &'a BTreeSet<UnitName>,
+    /// The snapshot's stored desired documents, whose provenance
+    /// [`resolve_unit`] keeps where it still cites the same receipt.
+    pub previous: &'a BTreeMap<UnitName, DesiredUnit>,
 }
 
 /// What one reference found.
@@ -84,7 +95,10 @@ pub struct Resolution {
 
 /// Resolve every reference of `unit.spec` through
 /// [`nyl_core::bindings::resolve_document`] with providers backed by
-/// [`resolve_reference`].
+/// [`resolve_reference`]. Where `view.previous[unit]` cites the same
+/// receipt (unit, uid, executionKey) at a pointer, that stored citation is
+/// returned instead of a new one. An explicit `dependsOn` entry whose
+/// producer has no current receipt blocks at `/dependsOn/<index>`.
 pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution {
     let _ = (view, unit);
     todo!("references-graph")

@@ -17,10 +17,19 @@ test-kinds = []
 nyl-core = { workspace = true }
 nyl-render = { workspace = true }
 
+chrono = { workspace = true }
+# Command `files` globs and the files a key digests.
+glob = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+walkdir = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM/SIGKILL to a tool's process group.
+libc = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 tempfile = { workspace = true }

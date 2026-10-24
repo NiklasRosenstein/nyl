@@ -27,9 +27,12 @@ pub struct Wiring<'a> {
     /// Who runs Nyl, such as a CI run URL or `user@host`.
     pub runner: String,
     /// The commit identity when no `--author` is given; `None` reads the
-    /// clone's Git `user.name` and `user.email`.
+    /// clone's Git `user.name` and `user.email`. Resolved only by commands
+    /// that write (reconcile, state and lease writes); `plan`, `status`, and
+    /// `get` open a read-only store and need none.
     pub author: Option<CommitIdentity>,
-    /// Variables admitted from the process, such as `PATH`.
+    /// A snapshot of the whole process environment, read once here; the
+    /// shell admits only `PATH` and each unit's declared passthrough from it.
     pub process_env: BTreeMap<String, String>,
 }
 

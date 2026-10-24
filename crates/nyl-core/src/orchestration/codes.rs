@@ -74,10 +74,13 @@ pub enum Code {
     PlanUnitsLeaving,
     /// Publication units of two environments place the same DeploymentTarget.
     TargetEnvironmentConflict,
+    /// A unit declares `env.secrets`, but no secrets provider is wired into
+    /// orchestration yet (M3).
+    UnitSecretsUnsupported,
 }
 
 impl Code {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -109,6 +112,7 @@ impl Code {
         Self::OutputUndeclared,
         Self::PlanUnitsLeaving,
         Self::TargetEnvironmentConflict,
+        Self::UnitSecretsUnsupported,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -144,6 +148,7 @@ impl Code {
             Self::OutputUndeclared => "NYL-OUTPUT-UNDECLARED",
             Self::PlanUnitsLeaving => "NYL-PLAN-UNITS-LEAVING",
             Self::TargetEnvironmentConflict => "NYL-TARGET-ENVIRONMENT-CONFLICT",
+            Self::UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
         }
     }
 }

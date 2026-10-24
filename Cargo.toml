@@ -64,6 +64,9 @@ tracing-indicatif = "0.3.14"
 walkdir = "2.5"
 same-file = "1.0.6"
 glob = "0.3"
+# Signals to a tool's process group (nyl-drivers process runner); already a
+# transitive dependency, so it adds no new crates.
+libc = "0.2"
 sha2 = "0.11"
 percent-encoding = "2.3"
 hex = "0.4"
