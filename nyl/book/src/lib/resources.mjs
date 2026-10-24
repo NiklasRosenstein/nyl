@@ -30,11 +30,11 @@ export function resourceGroups() {
     resources: resources.filter((resource) => resource.apiVersion === apiVersion),
   }));
 }
+/** Every resource by name; each reference page states its API version. */
 export function resourceSidebar() {
-  return resourceGroups().map((group) => ({
-    label: group.apiVersion, collapsed: true,
-    items: group.resources.map((resource) => ({ label: resource.name, link: resource.route })),
-  }));
+  return [...resources]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((resource) => ({ label: resource.name, link: resource.route }));
 }
 export const resourceRedirects = Object.fromEntries(resources.map((resource) => {
   const oldSlug = resource.name === 'HelmChart' ? 'helmchart' : resource.slug;

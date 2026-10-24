@@ -73,9 +73,9 @@ test('mutually exclusive fields read as labelled variants rather than a blanket 
 test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.equal(resourceGroups().flatMap((group) => group.resources).length, resources.length);
   assert.equal(new Set(resources.map((resource) => resource.route)).size, resources.length);
-  assert.deepEqual(resourceSidebar().map(({ label }) => label), resourceGroups().map(({ apiVersion }) => apiVersion));
-  const links = resourceSidebar().flatMap((group) => group.items.map((item) => item.link));
-  assert.deepEqual(links, resources.map((resource) => resource.route));
+  const sidebar = resourceSidebar();
+  assert.deepEqual(sidebar.map(({ link }) => link).sort(), resources.map((resource) => resource.route).sort());
+  assert.deepEqual(sidebar.map(({ label }) => label), resources.map((resource) => resource.name).sort((a, b) => a.localeCompare(b)));
 });
 
 test('field references retain nested descriptions, sibling annotations, alternatives, and map values', async () => {
