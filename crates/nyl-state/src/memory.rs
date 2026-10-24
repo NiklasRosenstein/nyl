@@ -204,7 +204,7 @@ impl StateStore for MemoryStateStore {
         }
     }
 
-    fn break_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
+    fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()> {
         self.lock().leases.remove(&coordination_key(location, environment));
         Ok(())
     }
@@ -277,11 +277,11 @@ impl StateStore for MemoryStateStore {
         lease_version: &str,
     ) -> StateResult<Committed> {
         let mut inner = self.lock();
-        match inner.leases.get(&coordination_key(location, environment)) {
+        let key = coordination_key(location, environment);
+        match inner.leases.get(&key) {
             Some(held) if held.version == lease_version => {}
             _ => return Err(StateError::LeaseLost),
         }
-        let same_ref = location.desired_ref == location.observed_ref;
         for (reference, expected) in [
             (&location.desired_ref, &base.desired),
             (&location.observed_ref, &base.observed),
@@ -298,15 +298,16 @@ impl StateStore for MemoryStateStore {
             }
         }
         let changes = &transition.changes;
-        let desired_changed = changes.record.is_some() || changes.environment.is_some() || !changes.desired.is_empty();
-        let observed_changed =
-            changes.record.is_some() || !changes.observed.is_empty() || !changes.artifacts.is_empty();
-
-        let mut committed = Committed::default();
-        let apply = |inner: &mut Inner, reference: &str, desired_side: bool, observed_side: bool| -> CommitId {
-            let commit = inner.next_commit();
-            let state_ref = inner.refs.entry(ref_key(location, reference)).or_default();
-            let directory = state_ref.directories.entry(location.path.clone()).or_default();
+        // Apply one side's changes; commit only when the directory changed,
+        // so an operation that changes nothing writes nothing.
+        let apply = |inner: &mut Inner, reference: &str, desired_side: bool, observed_side: bool| -> Option<CommitId> {
+            let before = inner
+                .refs
+                .get(&ref_key(location, reference))
+                .and_then(|state_ref| state_ref.directories.get(&location.path))
+                .cloned()
+                .unwrap_or_default();
+            let mut directory = before.clone();
             if let Some(record) = &changes.record {
                 directory.record = Some(record.clone());
             }
@@ -320,25 +321,65 @@ impl StateStore for MemoryStateStore {
                 apply_map(&mut directory.observed, &changes.observed);
                 apply_map(&mut directory.artifacts, &changes.artifacts);
             }
+            if directory == before {
+                return None;
+            }
+            let commit = inner.next_commit();
+            let state_ref = inner.refs.entry(ref_key(location, reference)).or_default();
+            state_ref.directories.insert(location.path.clone(), directory);
             state_ref.tip = Some(commit.clone());
             state_ref.commits += 1;
-            commit
+            Some(commit)
         };
-        if same_ref {
-            if desired_changed || observed_changed {
-                let commit = apply(&mut inner, &location.desired_ref, true, true);
+        let mut committed = Committed::default();
+        if location.desired_ref == location.observed_ref {
+            if let Some(commit) = apply(&mut inner, &location.desired_ref, true, true) {
                 committed.desired = Some(commit.clone());
                 committed.observed = Some(commit);
             }
         } else {
-            if desired_changed {
-                committed.desired = Some(apply(&mut inner, &location.desired_ref, true, false));
+            committed.desired = apply(&mut inner, &location.desired_ref, true, false);
+            committed.observed = apply(&mut inner, &location.observed_ref, false, true);
+        }
+        // The fenced push moves the lease, as the Git store's does.
+        committed.lease_version = if committed.desired.is_some() || committed.observed.is_some() {
+            let version = inner.next_version();
+            if let Some(held) = inner.leases.get_mut(&key) {
+                held.version.clone_from(&version);
             }
-            if observed_changed {
-                committed.observed = Some(apply(&mut inner, &location.observed_ref, false, true));
+            version
+        } else {
+            lease_version.to_owned()
+        };
+        Ok(committed)
+    }
+
+    fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
+        let mut inner = self.lock();
+        for (source, target) in [
+            (&from.desired_ref, &to.desired_ref),
+            (&from.observed_ref, &to.observed_ref),
+        ] {
+            let Some(copied) = inner.refs.get(&ref_key(from, source)).cloned() else {
+                continue;
+            };
+            match inner.refs.get(&ref_key(to, target)) {
+                None => {
+                    inner.refs.insert(ref_key(to, target), copied);
+                }
+                Some(existing) if existing.tip == copied.tip => {}
+                Some(existing) => {
+                    return Err(StateError::Conflict {
+                        reference: target.clone(),
+                        actual: existing
+                            .tip
+                            .as_ref()
+                            .map_or_else(|| "nothing".to_owned(), ToString::to_string),
+                    })
+                }
             }
         }
-        Ok(committed)
+        Ok(())
     }
 }
 
@@ -388,6 +429,7 @@ mod tests {
             units: Vec::new(),
             deadline: at,
             taken_at: at,
+            broken: None,
         }
     }
 
@@ -441,7 +483,7 @@ mod tests {
         let store = MemoryStateStore::new();
         let location = location(false);
         let version = store.take_lease(&location, &dev(), &lease(RUN_A), None).unwrap();
-        store.break_lease(&location, &dev()).unwrap();
+        store.delete_lease(&location, &dev()).unwrap();
         // A holder whose lease was deleted pushes nothing.
         assert!(matches!(
             store.commit(&location, &dev(), &StateTips::default(), &init(&location), &version),
@@ -452,9 +494,20 @@ mod tests {
             .commit(&location, &dev(), &StateTips::default(), &init(&location), &version)
             .unwrap();
         assert!(committed.desired.is_some() && committed.observed.is_some());
+        // The fenced push moved the lease: the old version no longer holds it.
+        assert!(matches!(
+            store.update_lease(&location, &dev(), &lease(RUN_B), &version),
+            Err(StateError::LeaseLost)
+        ));
         // A commit built on tips that have moved since is a conflict.
         assert!(matches!(
-            store.commit(&location, &dev(), &StateTips::default(), &init(&location), &version),
+            store.commit(
+                &location,
+                &dev(),
+                &StateTips::default(),
+                &init(&location),
+                &committed.lease_version
+            ),
             Err(StateError::Conflict { .. })
         ));
         let snapshot = store.snapshot(&location).unwrap();
@@ -527,13 +580,16 @@ mod tests {
                         let base = store.snapshot(&location).unwrap().tips;
                         let result = store.commit(&location, &dev(), &base, &init(&location), &version);
                         proptest::prop_assert_eq!(result.is_ok(), current.as_deref() == Some(version.as_str()));
+                        if let Ok(committed) = result {
+                            believed[run] = Some(committed.lease_version);
+                        }
                     }
                     Step::Release(run) => {
                         let Some(version) = believed[run].take() else { continue };
                         let result = store.release_lease(&location, &dev(), &version);
                         proptest::prop_assert_eq!(result.is_ok(), current.as_deref() == Some(version.as_str()));
                     }
-                    Step::Break => store.break_lease(&location, &dev()).unwrap(),
+                    Step::Break => store.delete_lease(&location, &dev()).unwrap(),
                 }
             }
         }

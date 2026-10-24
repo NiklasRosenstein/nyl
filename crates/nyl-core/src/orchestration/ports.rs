@@ -115,6 +115,9 @@ pub struct Transition {
 pub struct Committed {
     pub desired: Option<CommitId>,
     pub observed: Option<CommitId>,
+    /// The lease's version after the fenced push, which moved it, so that
+    /// releasing the lease afterwards compares against it.
+    pub lease_version: String,
 }
 
 /// A lease as read, with the version a compare-and-swap expects.
@@ -184,8 +187,10 @@ pub trait StateStore: Send + Sync {
     fn release_lease(&self, location: &StateLocation, environment: &EnvironmentName, expected: &str)
         -> StateResult<()>;
 
-    /// Delete a lease regardless of its holder: `nyl lease break`.
-    fn break_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()>;
+    /// Delete a lease regardless of its holder, as someone with push access
+    /// could. `nyl lease break` instead replaces the lease with a broken one,
+    /// so the next transition commit records the break.
+    fn delete_lease(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<()>;
 
     /// Write a run's record, adding a checkpoint when given.
     fn write_run(
@@ -208,6 +213,8 @@ pub trait StateStore: Send + Sync {
 
     /// Write one transition commit per changed state ref on top of `base`,
     /// atomically with a compare-and-swap of the lease at `lease_version`.
+    /// The lease moves to a new version in the same push, because a lease
+    /// that does not change is never checked.
     fn commit(
         &self,
         location: &StateLocation,
@@ -216,6 +223,14 @@ pub trait StateStore: Send + Sync {
         transition: &Transition,
         lease_version: &str,
     ) -> StateResult<Committed>;
+
+    /// Give `to` the history of `from`'s state refs, for `nyl state move`:
+    /// each target ref is created at its source's tip, or left alone when it
+    /// already is there, so an interrupted move completes when run again. A
+    /// target ref at another commit is a conflict. Both locations keep their
+    /// own `path`; a location that shares its refs through `path` has its
+    /// directory moved with a commit instead, by the caller.
+    fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()>;
 }
 
 /// The repository a source names.

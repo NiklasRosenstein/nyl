@@ -2530,6 +2530,8 @@ pub(super) fn render_effective_control(
             (GitOpsResourceKind::AppProjectDefinition, &resource.metadata.name)
         }
         GitOpsResource::ApplicationGroup(resource) => (GitOpsResourceKind::ApplicationGroup, &resource.metadata.name),
+        GitOpsResource::Environment(resource) => (GitOpsResourceKind::Environment, &resource.metadata.name),
+        GitOpsResource::EnvironmentGroup(resource) => (GitOpsResourceKind::EnvironmentGroup, &resource.metadata.name),
     };
     if effective_identity.0 != discovered.identity.kind || effective_identity.1 != &discovered.identity.name {
         return Err(NylError::config(format!(

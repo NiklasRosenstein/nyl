@@ -5,6 +5,7 @@ use clap::Args;
 use git2::build::CheckoutBuilder;
 use git2::{IndexAddOption, Repository, ResetType, Signature, StatusOptions};
 
+use crate::git::transport::GitAuth;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::inputs::verify_publication_base;
 use crate::gitops::{
@@ -269,7 +270,8 @@ fn publish_compiled(
         return Ok(());
     }
     let temp = tempfile::TempDir::new()?;
-    let repository = clone_branch(publication_url, branch, temp.path())?;
+    let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
+    let repository = clone_branch(publication_url, branch, temp.path(), &auth)?;
     let expected = remote_branch_oid(&repository, branch);
     verify_publication_base(
         compiled.publication_base.as_ref(),
@@ -295,7 +297,7 @@ fn publish_compiled(
         subject: args.message.as_deref(),
     })?;
     if !args.dry_run {
-        fetch_branch(&repository, publication_url, branch)?;
+        fetch_branch(&repository, publication_url, branch, &auth)?;
         let actual = remote_branch_oid(&repository, branch);
         if actual != expected {
             return Err(NylError::config(format!(
@@ -328,7 +330,7 @@ fn publish_compiled(
         return Ok(());
     }
 
-    push_branch(&repository, publication_url, branch, expected)?;
+    push_branch(&repository, publication_url, branch, expected, &auth)?;
     print_publication_result(
         &format!("Published deployment target {target_name}"),
         publication_url,
@@ -632,7 +634,7 @@ fn writable_branch_name(revision: &str) -> Result<&str> {
     }
 }
 
-fn clone_branch(url: &str, branch: &str, path: &Path) -> Result<Repository> {
+fn clone_branch(url: &str, branch: &str, path: &Path, auth: &GitAuth) -> Result<Repository> {
     // Nothing is checked out by the fetch: the user's Git config may convert
     // line endings, and owned files must keep the exact bytes their index records.
     let repository = Repository::init(path)
@@ -648,7 +650,7 @@ fn clone_branch(url: &str, branch: &str, path: &Path) -> Result<Repository> {
             .and_then(|()| config.set_str("core.eol", "lf"))
             .map_err(crate::git::GitError::from)?;
     }
-    fetch_branch(&repository, url, branch)?;
+    fetch_branch(&repository, url, branch, auth)?;
     if let Some(oid) = remote_branch_oid(&repository, branch) {
         let commit = repository.find_commit(oid).map_err(crate::git::GitError::from)?;
         repository
@@ -793,14 +795,20 @@ fn configured_publication_signature(
     Ok(Signature::now(&name, &email).map_err(crate::git::GitError::from)?)
 }
 
-fn fetch_branch(repository: &Repository, url: &str, branch: &str) -> Result<()> {
-    crate::git::transport::fetch_branch(repository, url, branch, &format!("refs/remotes/origin/{branch}"))
+fn fetch_branch(repository: &Repository, url: &str, branch: &str, auth: &GitAuth) -> Result<()> {
+    crate::git::transport::fetch_branch(repository, url, branch, &format!("refs/remotes/origin/{branch}"), auth)
         .map(drop)
         .map_err(|error| NylError::config(format!("Failed to refresh publication branch: {error}")))
 }
 
-fn push_branch(repository: &Repository, url: &str, branch: &str, expected: Option<git2::Oid>) -> Result<()> {
-    crate::git::transport::push_branch_if_unchanged(repository, url, branch, expected)
+fn push_branch(
+    repository: &Repository,
+    url: &str,
+    branch: &str,
+    expected: Option<git2::Oid>,
+    auth: &GitAuth,
+) -> Result<()> {
+    crate::git::transport::push_branch_if_unchanged(repository, url, branch, expected, auth)
         .map_err(|error| NylError::config(format!("Failed to publish publication branch: {error}")))
 }
 
@@ -876,7 +884,13 @@ mod tests {
             .unwrap();
 
         let checkout = tempfile::TempDir::new().unwrap();
-        let repository = clone_branch(source.path().to_str().unwrap(), "deploy/main", checkout.path()).unwrap();
+        let repository = clone_branch(
+            source.path().to_str().unwrap(),
+            "deploy/main",
+            checkout.path(),
+            &GitAuth::none(),
+        )
+        .unwrap();
         assert!(!checkout.path().join("source.txt").exists());
         assert!(checkout.path().join("deploy/old.yaml").is_file());
         assert!(repository.statuses(None).unwrap().is_empty());
@@ -907,7 +921,13 @@ mod tests {
         commit_initial(&source_repository);
 
         let checkout = tempfile::TempDir::new().unwrap();
-        let repository = clone_branch(source.path().to_str().unwrap(), "deploy/new", checkout.path()).unwrap();
+        let repository = clone_branch(
+            source.path().to_str().unwrap(),
+            "deploy/new",
+            checkout.path(),
+            &GitAuth::none(),
+        )
+        .unwrap();
         assert!(!checkout.path().join("source.txt").exists());
         assert!(repository.statuses(None).unwrap().is_empty());
         assert!(repository.head().is_err());

@@ -18,6 +18,7 @@ nyl provides several commands for managing Kubernetes manifests:
 - [`schema`](/nyl/commands/schema/) - Generate project and resource schemas
 - [`vendor`](/nyl/commands/vendor/) - Snapshot and verify remote renderer inputs
 - [`Rendered GitOps commands`](/nyl/commands/gitops/) - Render, diff, lock, and publish target trees
+- [`state and lease`](/nyl/commands/state/) - Create, move, and forget an environment's orchestration state
 - [`comment`](/nyl/commands/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 
 ## Global Options

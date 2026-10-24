@@ -17,5 +17,9 @@
 //! cluster call from here. See `design/implementation-architecture.md`.
 
 pub mod fault;
+pub mod report;
+pub mod rules;
+pub mod shell;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod transition;

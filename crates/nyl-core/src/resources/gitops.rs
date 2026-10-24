@@ -812,13 +812,17 @@ pub enum GitOpsResourceKind {
     AppProjectDefinition,
     #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
     ApplicationGroup,
+    #[value(name = "Environment", alias = "environment")]
+    Environment,
+    #[value(name = "EnvironmentGroup", alias = "environment-group")]
+    EnvironmentGroup,
 }
 
 impl GitOpsResourceKind {
     /// API version of this control resource.
     pub const fn api_version(self) -> &'static str {
         match self {
-            Self::GitRepository => API_VERSION_GITOPS,
+            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -831,6 +835,8 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget => KIND_DEPLOYMENT_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
+            Self::Environment => super::environment::KIND_ENVIRONMENT,
+            Self::EnvironmentGroup => super::environment::KIND_ENVIRONMENT_GROUP,
         }
     }
 
@@ -842,6 +848,8 @@ impl GitOpsResourceKind {
             KIND_DEPLOYMENT_TARGET => Some(Self::DeploymentTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
+            super::environment::KIND_ENVIRONMENT => Some(Self::Environment),
+            super::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
             _ => None,
         }
     }
@@ -854,10 +862,12 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget => "deployment-target.schema.json",
             Self::AppProjectDefinition => "app-project-definition.schema.json",
             Self::ApplicationGroup => "application-group.schema.json",
+            Self::Environment => "environment.schema.json",
+            Self::EnvironmentGroup => "environment-group.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 8] {
         [
             Self::GitRepository,
             Self::Cluster,
@@ -865,6 +875,8 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget,
             Self::AppProjectDefinition,
             Self::ApplicationGroup,
+            Self::Environment,
+            Self::EnvironmentGroup,
         ]
     }
 }
@@ -882,6 +894,8 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
+        GitOpsResourceKind::Environment => serde_json::to_value(schema_for!(super::environment::Environment)),
+        GitOpsResourceKind::EnvironmentGroup => serde_json::to_value(schema_for!(super::environment::EnvironmentGroup)),
     }
     .expect("schema serialization should never fail");
     tighten_resource_envelope(schema, kind)
@@ -922,6 +936,8 @@ pub enum GitOpsResource {
     DeploymentTarget(DeploymentTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
+    Environment(Box<super::environment::Environment>),
+    EnvironmentGroup(super::environment::EnvironmentGroup),
 }
 
 /// True when the manifest advertises the GitOps API and one of its known kinds.
@@ -987,6 +1003,12 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
         GitOpsResourceKind::ApplicationGroup => {
             GitOpsResource::ApplicationGroup(Box::new(parse_as(value, KIND_APPLICATION_GROUP)?))
         }
+        GitOpsResourceKind::Environment => {
+            GitOpsResource::Environment(Box::new(parse_as(value, super::environment::KIND_ENVIRONMENT)?))
+        }
+        GitOpsResourceKind::EnvironmentGroup => {
+            GitOpsResource::EnvironmentGroup(parse_as(value, super::environment::KIND_ENVIRONMENT_GROUP)?)
+        }
     };
     resource.validate()?;
     Ok(Some(resource))
@@ -1005,6 +1027,8 @@ impl GitOpsResource {
             Self::DeploymentTarget(resource) => resource.validate(),
             Self::AppProjectDefinition(resource) => resource.validate(),
             Self::ApplicationGroup(resource) => resource.validate(),
+            Self::Environment(resource) => resource.validate(),
+            Self::EnvironmentGroup(resource) => resource.validate(),
         }
     }
 }
@@ -2255,6 +2279,8 @@ mod tests {
                 "deployment-target.schema.json",
                 "app-project-definition.schema.json",
                 "application-group.schema.json",
+                "environment.schema.json",
+                "environment-group.schema.json",
                 "release.schema.json"
             ]
         );

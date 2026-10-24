@@ -15,7 +15,9 @@
 //! drivers, rendering, or orchestration decisions. See
 //! `design/implementation-architecture.md`.
 //!
-//! [`memory::MemoryStateStore`] is the in-memory store the contract
-//! walkthroughs run against.
+//! [`git::GitStateStore`] keeps state in Git repositories, remote or the
+//! clone itself; [`memory::MemoryStateStore`] is the in-memory store the
+//! contract walkthroughs run against.
 
+pub mod git;
 pub mod memory;

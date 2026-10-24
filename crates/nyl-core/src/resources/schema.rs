@@ -26,6 +26,10 @@ pub enum ResourceKind {
     AppProjectDefinition,
     #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
     ApplicationGroup,
+    #[value(name = "Environment", alias = "environment")]
+    Environment,
+    #[value(name = "EnvironmentGroup", alias = "environment-group")]
+    EnvironmentGroup,
     #[value(name = "Release", alias = "release")]
     Release,
     #[value(name = "HelmChart", alias = "helm-chart", alias = "helmchart")]
@@ -38,8 +42,10 @@ pub enum ResourceKind {
 
 impl ResourceKind {
     /// All supported schemas in catalog order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::GitRepository,
+        Self::Environment,
+        Self::EnvironmentGroup,
         Self::Cluster,
         Self::DeploymentTarget,
         Self::ArgoCDInstance,
@@ -55,6 +61,8 @@ impl ResourceKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::GitRepository => "GitRepository",
+            Self::Environment => "Environment",
+            Self::EnvironmentGroup => "EnvironmentGroup",
             Self::Cluster => "Cluster",
             Self::DeploymentTarget => "DeploymentTarget",
             Self::ArgoCDInstance => "ArgoCDInstance",
@@ -70,7 +78,7 @@ impl ResourceKind {
     /// Canonical API version.
     pub fn api_version(self) -> &'static str {
         match self {
-            Self::GitRepository => API_VERSION_GITOPS,
+            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             Self::HelmChart | Self::RemoteManifest => API_VERSION,
             Self::Component => API_VERSION_COMPONENTS,
             _ => API_VERSION_K8S_GITOPS,
@@ -81,6 +89,8 @@ impl ResourceKind {
     pub fn slug(self) -> &'static str {
         match self {
             Self::GitRepository => "git-repository",
+            Self::Environment => "environment",
+            Self::EnvironmentGroup => "environment-group",
             Self::Cluster => "cluster",
             Self::DeploymentTarget => "deployment-target",
             Self::ArgoCDInstance => "argocd-instance",
@@ -182,6 +192,7 @@ pub fn schema_artifacts() -> BTreeMap<String, Value> {
         "gitops-resource.schema.json".into(),
         super::generate_gitops_aggregate_schema(),
     );
+    files.extend(crate::orchestration::state::state_document_schemas());
     files
 }
 
@@ -189,6 +200,12 @@ pub fn schema_artifacts() -> BTreeMap<String, Value> {
 pub fn resource_example(kind: ResourceKind) -> Value {
     let spec = match kind {
         ResourceKind::GitRepository => json!({"repoURL": "https://github.com/example/deploy.git"}),
+        ResourceKind::Environment => {
+            json!({"unitSelector": {"matchLabels": {"stage": "production"}}, "values": {"target": "production"}, "state": {"repositoryRef": {"name": "deploy"}}, "protectedRefs": ["main"]})
+        }
+        ResourceKind::EnvironmentGroup => {
+            json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"cluster": "prod-1"}})
+        }
         ResourceKind::Cluster => {
             json!({"destination": {"server": "https://kubernetes.default.svc"}, "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1", "apps/v1"]}})
         }
@@ -210,7 +227,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
     let name = match kind {
         ResourceKind::GitRepository => "deploy",
         ResourceKind::Cluster | ResourceKind::ArgoCDInstance => "primary",
-        ResourceKind::DeploymentTarget => "production",
+        ResourceKind::DeploymentTarget | ResourceKind::Environment | ResourceKind::EnvironmentGroup => "production",
         _ => "workloads",
     };
     let mut example = json!({"apiVersion": kind.api_version(), "kind": if kind == ResourceKind::Component { "app/v1/WebService" } else { kind.name() }, "metadata": {"name": name}, "spec": spec});
@@ -464,10 +481,12 @@ mod tests {
 
     #[test]
     fn test_moved_envelopes_require_the_canonical_api() {
-        for kind in ResourceKind::ALL
-            .into_iter()
-            .filter(|kind| *kind != ResourceKind::GitRepository)
-        {
+        for kind in ResourceKind::ALL.into_iter().filter(|kind| {
+            !matches!(
+                kind,
+                ResourceKind::GitRepository | ResourceKind::Environment | ResourceKind::EnvironmentGroup
+            )
+        }) {
             let old_api = match kind {
                 ResourceKind::HelmChart | ResourceKind::RemoteManifest => "nyl.niklasrosenstein.github.com/v1",
                 ResourceKind::Component => "components.nyl.niklasrosenstein.github.com/v1",
