@@ -115,7 +115,14 @@
       "description": "Kubernetes discovery information used for deterministic offline rendering.",
       "properties": {
         "apiVersions": {
-          "description": "API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry.",
+          "description": "API versions exposed to Helm. An empty list is valid for scaffolding; target rendering requires at least one entry. With `vendoredCrds`, entries served by vendored CustomResourceDefinitions are omitted here and added from the snapshot.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "clusterScopedKinds": {
+          "description": "Cluster-scoped kinds as `group/Kind`, with `core` for the core API group, such as `core/Namespace`. Recorded by `nyl capture cluster`; every other kind listed in `apiVersions` is namespaced. Empty means the scope is unknown.",
           "items": {
             "type": "string"
           },
@@ -127,6 +134,10 @@
             "string",
             "null"
           ]
+        },
+        "vendoredCrds": {
+          "description": "Whether CustomResourceDefinitions were vendored by `nyl capture cluster --crds`. Their API versions and scopes then come from the vendored snapshot, and rendering fails while it is missing or stale.",
+          "type": "boolean"
         }
       },
       "type": "object"

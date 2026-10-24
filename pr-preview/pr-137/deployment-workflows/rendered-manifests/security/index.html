@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-g5ptsecz"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Trust and Admission Boundaries | Nyl</title><link rel="canonical" href="https://niklasrosenstein.github.io/nyl/pr-preview/pr-137/deployment-workflows/rendered-manifests/security/"/><link rel="sitemap" href="/nyl/pr-preview/pr-137/sitemap-index.xml"/><link rel="shortcut icon" href="/nyl/pr-preview/pr-137/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.3.5"/><meta name="generator" content="Starlight v0.42.4"/><meta property="og:title" content="Trust and Admission Boundaries"/><meta property="og:type" content="article"/><meta property="og:url" content="https://niklasrosenstein.github.io/nyl/pr-preview/pr-137/deployment-workflows/rendered-manifests/security/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A fast Kubernetes manifest generator for rendered GitOps."/><meta property="og:site_name" content="Nyl"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A fast Kubernetes manifest generator for rendered GitOps."/><script>
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-g5ptsecz"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Trust and Admission Boundaries | Nyl</title><link rel="canonical" href="https://niklasrosenstein.github.io/nyl/pr-preview/pr-137/deployment-workflows/rendered-manifests/security/"/><link rel="sitemap" href="/nyl/pr-preview/pr-137/sitemap-index.xml"/><link rel="shortcut icon" href="/nyl/pr-preview/pr-137/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.3.5"/><meta name="generator" content="Starlight v0.42.5"/><meta property="og:title" content="Trust and Admission Boundaries"/><meta property="og:type" content="article"/><meta property="og:url" content="https://niklasrosenstein.github.io/nyl/pr-preview/pr-137/deployment-workflows/rendered-manifests/security/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A fast Kubernetes manifest generator for rendered GitOps."/><meta property="og:site_name" content="Nyl"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A fast Kubernetes manifest generator for rendered GitOps."/><script>
 	window.StarlightThemeProvider = (() => {
 		const storedTheme =
 			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
@@ -98,18 +98,24 @@ with the same option key replace the generated or group-level value.</p>
 even when an application source repository is compromised. An
 <code dir="auto">AppProjectDefinition</code> with <code dir="auto">management: External</code> references an administrator-
 managed project without publishing its manifest.</p>
-<p><code dir="auto">ApplicationGroup.spec.projectTemplate</code> is a constrained alternative. Nyl fixes
-its source repository and destination cluster from the selected target, checks
-every Release namespace against its declared destination patterns, and only
-adds Namespace permissions when namespace creation is enabled. Other
-cluster-scoped permissions remain explicit. The generated policy complements,
-but does not replace, Argo CD admission.</p>
-<p>A group that declares no project at all keeps the implied AppProject, which is
-permissive: it still confines the group to one destination cluster and to the
-target publication repository, but it admits every namespace and every
-cluster-scoped resource, and no Release namespace check applies. Declare
-<code dir="auto">projectTemplate</code> for any group whose namespace or cluster-resource scope
-should be an enforced boundary.</p>
+<p>A group that declares no project gets an implied least-privilege AppProject: the
+target publication repository, the target workload Cluster with the group’s
+Release namespaces, and exactly the resource kinds the group renders, split into
+cluster-scoped and namespaced whitelists. The project changes with the rendered
+output, so a Release that adds a ClusterRole also adds it to the project in the
+same render.</p>
+<p><code dir="auto">ApplicationGroup.spec.projectTemplate</code> mirrors the AppProject spec fields;
+declared fields are kept as written and omitted fields take the derived values.
+Declare a field to make it a fixed boundary that rendered output cannot widen.
+With declared <code dir="auto">destinations</code>, Nyl checks every Release namespace against the
+entries admitting the target workload Cluster, and adds Namespace permissions
+only when namespace creation is enabled and the cluster-resource whitelist is
+declared.</p>
+<p>Deriving a whitelist needs each rendered kind’s scope. It comes from a CRD
+rendered in the same target or from the Cluster’s recorded capabilities
+(<code dir="auto">clusterScopedKinds</code> and vendored CRDs); when neither knows a kind, rendering
+fails with a capture hint rather than guessing. The generated policy complements, but
+does not replace, Argo CD admission.</p>
 <p>The generated parent catalog Application is platform configuration. Its default
 automated sync self-heals without automated prune, foreground deletion cascades
 to catalog resources, applies only out-of-sync resources, and pruning the parent
