@@ -314,7 +314,7 @@ has <code dir="auto">repository</code> and resolved <code dir="auto">revision</c
 <li><code dir="auto">schemaOrigin</code>: null when unresolved, or a tagged origin. <code dir="auto">captured</code> contains
 <code dir="auto">cluster</code> and <code dir="auto">digest</code>; <code dir="auto">desired</code> contains <code dir="auto">crd</code> and <code dir="auto">digest</code>; <code dir="auto">local</code> contains
 <code dir="auto">path</code> and <code dir="auto">digest</code>; <code dir="auto">builtin</code> contains <code dir="auto">url</code> and nullable <code dir="auto">digest</code>. Digests
-identify canonical schema JSON; built-in URLs retain the registry commit and
+are SHA-256 over the schema’s RFC 8785 canonical JSON; built-in URLs retain the registry commit and
 selected Kubernetes version.</li>
 </ul>
 <p><code dir="auto">summary</code> counts resources as <code dir="auto">valid</code>, <code dir="auto">invalid</code>, <code dir="auto">errors</code>, <code dir="auto">skipped</code>, and
