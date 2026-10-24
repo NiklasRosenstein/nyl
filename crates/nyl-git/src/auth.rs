@@ -118,6 +118,17 @@ pub(crate) struct Applied {
 
 const TOKEN_VARIABLE: &str = "NYL_GIT_HELPER_TOKEN";
 const USERNAME_VARIABLE: &str = "NYL_GIT_HELPER_USERNAME";
+const PROTOCOL_VARIABLE: &str = "NYL_GIT_HELPER_PROTOCOL";
+const HOST_VARIABLE: &str = "NYL_GIT_HELPER_HOST";
+
+/// The protocol and host, with any port, that git's credential protocol
+/// names for `url`.
+fn protocol_and_host(url: &str) -> (&str, &str) {
+    let (protocol, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    (protocol, host)
+}
 
 impl GitAuth {
     /// No dedicated credentials: `git` authenticates as configured for the user.
@@ -190,15 +201,23 @@ impl GitAuth {
             Some(Secret::Token { username, token }) => {
                 // The empty helper drops the user's helpers for this
                 // invocation; the next one answers from the child's
-                // environment, so the token is never on a command line.
+                // environment, so the token is never on a command line. It
+                // answers only for the URL's own protocol and host, never
+                // for a redirect or another repository git asks about.
+                let (protocol, host) = protocol_and_host(url);
                 command
                     .args(["-c", "credential.helper="])
                     .args([
                         "-c",
                         &format!(
-                            "credential.helper=!f() {{ test \"$1\" = get || exit 0; echo username=\"${USERNAME_VARIABLE}\"; echo password=\"${TOKEN_VARIABLE}\"; }}; f"
+                            "credential.helper=!f() {{ test \"$1\" = get || exit 0; p=; h=; \
+                             while IFS='=' read -r k v; do test -n \"$k\" || break; case \"$k\" in protocol) p=$v;; host) h=$v;; esac; done; \
+                             test \"$p\" = \"${PROTOCOL_VARIABLE}\" && test \"$h\" = \"${HOST_VARIABLE}\" || exit 0; \
+                             echo username=\"${USERNAME_VARIABLE}\"; echo password=\"${TOKEN_VARIABLE}\"; }}; f"
                         ),
                     ])
+                    .env(PROTOCOL_VARIABLE, protocol)
+                    .env(HOST_VARIABLE, host)
                     .env(USERNAME_VARIABLE, username)
                     .env(TOKEN_VARIABLE, token);
                 Ok(Applied { _key: None })
@@ -288,5 +307,40 @@ mod tests {
             .join(" ");
         assert!(!arguments.contains("s3cr3t"), "{arguments}");
         assert!(format!("{auth:?}").contains("Token") && !format!("{auth:?}").contains("s3cr3t"));
+    }
+
+    /// What `git credential fill` gets from the helper for `protocol`/`host`.
+    fn filled(auth: &GitAuth, protocol: &str, host: &str) -> String {
+        let mut command = Command::new("git");
+        let _applied = auth
+            .apply("https://user@git.example.com:8443/state.git", &mut command)
+            .unwrap();
+        let mut child = command
+            .args(["credential", "fill"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env_remove("SSH_ASKPASS")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("protocol={protocol}\nhost={host}\n\n").as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    }
+
+    #[test]
+    fn test_the_token_answers_only_for_its_own_protocol_and_host() {
+        let settings =
+            settings(r#"{"credentials": [{"url": "https://user@git.example.com:8443/", "token_env": "TOKEN"}]}"#);
+        let auth = GitAuth::from_settings(&settings, |_| Some("s3cr3t".into())).unwrap();
+        assert!(filled(&auth, "https", "git.example.com:8443").contains("password=s3cr3t"));
+        assert!(!filled(&auth, "https", "elsewhere.example.com").contains("s3cr3t"));
+        assert!(!filled(&auth, "http", "git.example.com:8443").contains("s3cr3t"));
     }
 }

@@ -34,6 +34,22 @@ struct StateRef {
     tip: Option<CommitId>,
     commits: usize,
     directories: BTreeMap<String, Directory>,
+    /// Every commit, oldest first, with the directory it changed.
+    log: Vec<(CommitId, String)>,
+}
+
+impl StateRef {
+    /// Whether the commits after `base` left the directory at `path` alone.
+    fn unchanged_since(&self, base: Option<&CommitId>, path: &str) -> bool {
+        let after = match base {
+            None => 0,
+            Some(base) => match self.log.iter().position(|(commit, _)| commit == base) {
+                Some(index) => index + 1,
+                None => return false,
+            },
+        };
+        self.log[after..].iter().all(|(_, changed)| changed != path)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -290,7 +306,13 @@ impl StateStore for MemoryStateStore {
                 .refs
                 .get(&ref_key(location, reference))
                 .and_then(|state_ref| state_ref.tip.clone());
-            if &actual != expected {
+            // Commits of environments sharing the ref through `path` are
+            // rebased past; any other commit is a conflict.
+            let rebased = inner
+                .refs
+                .get(&ref_key(location, reference))
+                .is_some_and(|state_ref| state_ref.unchanged_since(expected.as_ref(), &location.path));
+            if &actual != expected && !rebased {
                 return Err(StateError::Conflict {
                     reference: reference.clone(),
                     actual: actual.map_or_else(|| "nothing".to_owned(), |commit| commit.to_string()),
@@ -329,6 +351,7 @@ impl StateStore for MemoryStateStore {
             state_ref.directories.insert(location.path.clone(), directory);
             state_ref.tip = Some(commit.clone());
             state_ref.commits += 1;
+            state_ref.log.push((commit.clone(), location.path.clone()));
             Some(commit)
         };
         let mut committed = Committed::default();

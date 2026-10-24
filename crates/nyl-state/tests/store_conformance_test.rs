@@ -253,6 +253,26 @@ fn test_transitions_are_fenced_by_the_lease_and_the_tips_they_read() {
             subject.name
         );
         store.release_lease(&location, &dev, &committed.lease_version).unwrap();
+
+        // A transition that changes nothing still tells a taken-over run it lost.
+        let stale = store.take_lease(&location, &dev, &lease(RUN_A), None).unwrap();
+        let tips = store.snapshot(&location).unwrap().tips;
+        let held = store.coordination(&location, &dev).unwrap().lease.unwrap().version;
+        store.take_lease(&location, &dev, &lease(RUN_B), Some(&held)).unwrap();
+        assert!(
+            matches!(
+                store.commit(
+                    &location,
+                    &dev,
+                    &tips,
+                    &transition(TransitionChanges::default()),
+                    &stale
+                ),
+                Err(StateError::LeaseLost)
+            ),
+            "{}: an unchanged transition is fenced too",
+            subject.name
+        );
     }
 }
 
@@ -338,6 +358,40 @@ fn test_environments_sharing_a_ref_through_path_keep_their_own_directories() {
         }
         assert_eq!(store.snapshot(&a).unwrap().record.unwrap().environment.as_str(), "pr-1");
         assert_eq!(store.snapshot(&b).unwrap().record.unwrap().environment.as_str(), "pr-2");
+    }
+}
+
+#[test]
+fn test_concurrent_writers_sharing_a_ref_rebase_unless_their_directory_changed() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let a = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-1");
+        let b = location(&subject.repository, "nyl/previews", "nyl/previews", "pr-2");
+        let (pr1, pr2) = (environment("pr-1"), environment("pr-2"));
+        let lease_a = store.take_lease(&a, &pr1, &lease(RUN_A), None).unwrap();
+        let lease_b = store.take_lease(&b, &pr2, &lease(RUN_B), None).unwrap();
+        // Both read the ref before either commits.
+        let base_a = store.snapshot(&a).unwrap().tips;
+        let base_b = store.snapshot(&b).unwrap().tips;
+        let first = store.commit(&a, &pr1, &base_a, &init(&a, "pr-1"), &lease_a).unwrap();
+        let second = store.commit(&b, &pr2, &base_b, &init(&b, "pr-2"), &lease_b);
+        let second = second.unwrap_or_else(|error| panic!("{}: disjoint paths rebase: {error}", subject.name));
+        assert_eq!(store.snapshot(&a).unwrap().record.unwrap().environment.as_str(), "pr-1");
+        assert_eq!(store.snapshot(&b).unwrap().record.unwrap().environment.as_str(), "pr-2");
+
+        // A transition built before pr-1's directory changed is a conflict.
+        let mut stale = init(&a, "pr-1");
+        stale.message = "nyl: stale\n".to_owned();
+        assert!(
+            matches!(
+                store.commit(&a, &pr1, &base_a, &stale, &first.lease_version),
+                Err(StateError::Conflict { .. })
+            ),
+            "{}",
+            subject.name
+        );
+        store.release_lease(&a, &pr1, &first.lease_version).unwrap();
+        store.release_lease(&b, &pr2, &second.lease_version).unwrap();
     }
 }
 
@@ -488,10 +542,13 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
     remote
         .reference("refs/heads/nyl/dev/desired", rewritten, true, "rewrite")
         .unwrap();
-    assert!(matches!(
-        store.snapshot(&location),
-        Err(StateError::NotFastForward { .. })
-    ));
+    // Every later snapshot refuses it too, not only the first.
+    for _ in 0..2 {
+        assert!(matches!(
+            store.snapshot(&location),
+            Err(StateError::NotFastForward { .. })
+        ));
+    }
     // The diverged local branch is never moved.
     assert_eq!(
         local.refname_to_id("refs/heads/nyl/dev/desired").unwrap().to_string(),

@@ -37,6 +37,8 @@ const STATE_FILE: &str = "state.yaml";
 const ENVIRONMENT_FILE: &str = "desired/environment.yaml";
 const LEASE_FILE: &str = "lease.yaml";
 const RUN_FILE: &str = "run.yaml";
+/// How often a transition is rebuilt on tips that other environments moved.
+const REBASE_ATTEMPTS: usize = 5;
 
 /// State in Git repositories, worked on through the clone at `git_dir`.
 pub struct GitStateStore {
@@ -495,9 +497,6 @@ impl StateStore for GitStateStore {
         let base_desired = base.desired.as_ref().map(oid).transpose()?;
         let base_observed = base.observed.as_ref().map(oid).transpose()?;
         let same_ref = desired_name == observed_name;
-
-        let mut updates = Vec::new();
-        let mut committed = Committed::default();
         let side = |tip: Option<Oid>, desired: bool, observed: bool| -> StateResult<Option<Oid>> {
             let all = tree::read(&repository, tip)?;
             let mut inner = tree::beneath(&all, &location.path);
@@ -506,77 +505,86 @@ impl StateStore for GitStateStore {
             let parents = tip.into_iter().collect::<Vec<_>>();
             tree::commit(&repository, &files, &transition.message, &parents, false)
         };
-        if same_ref {
-            if let Some(commit) = side(base_desired, true, true)? {
-                updates.push(Update {
-                    name: desired_name.clone(),
-                    new: Some(commit),
-                    expected: base_desired,
-                });
-                committed.desired = Some(commit_id(commit));
-                committed.observed = Some(commit_id(commit));
-            }
-        } else {
-            if let Some(commit) = side(base_desired, true, false)? {
-                updates.push(Update {
-                    name: desired_name.clone(),
-                    new: Some(commit),
-                    expected: base_desired,
-                });
-                committed.desired = Some(commit_id(commit));
-            }
-            if let Some(commit) = side(base_observed, false, true)? {
-                updates.push(Update {
-                    name: observed_name.clone(),
-                    new: Some(commit),
-                    expected: base_observed,
-                });
-                committed.observed = Some(commit_id(commit));
-            }
-        }
-        if updates.is_empty() {
-            lease_version.clone_into(&mut committed.lease_version);
-            return Ok(committed);
-        }
         // The lease moves to a new commit with the same document, so that
         // the push checks it: git never compares an unchanged ref.
         let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
         let renewed =
             tree::commit(&repository, &lease_files, "nyl: lease", &[lease_oid], true)?.expect("allow_empty commits");
-        updates.push(Update {
-            name: lease_name.clone(),
-            new: Some(renewed),
-            expected: Some(lease_oid),
-        });
-        match refs.update(&updates) {
-            Ok(()) => {
-                for update in &updates {
-                    if let Some(new) = update.new {
-                        if update.name != lease_name {
-                            refs.fast_forward_local_branch(&update.name, new)?;
-                        }
-                    }
+
+        // Each attempt builds on the tips the last one lost to.
+        let (mut tip_desired, mut tip_observed) = (base_desired, base_observed);
+        for _ in 0..REBASE_ATTEMPTS {
+            let mut updates = Vec::new();
+            let mut committed = Committed::default();
+            if same_ref {
+                if let Some(commit) = side(tip_desired, true, true)? {
+                    updates.push(Update {
+                        name: desired_name.clone(),
+                        new: Some(commit),
+                        expected: tip_desired,
+                    });
+                    committed.desired = Some(commit_id(commit));
+                    committed.observed = Some(commit_id(commit));
                 }
-                committed.lease_version = renewed.to_string();
-                Ok(committed)
+            } else {
+                if let Some(commit) = side(tip_desired, true, false)? {
+                    updates.push(Update {
+                        name: desired_name.clone(),
+                        new: Some(commit),
+                        expected: tip_desired,
+                    });
+                    committed.desired = Some(commit_id(commit));
+                }
+                if let Some(commit) = side(tip_observed, false, true)? {
+                    updates.push(Update {
+                        name: observed_name.clone(),
+                        new: Some(commit),
+                        expected: tip_observed,
+                    });
+                    committed.observed = Some(commit_id(commit));
+                }
             }
-            Err(UpdateError::Stale) => {
-                let heads = refs.heads(&[lease_name.clone(), desired_name.clone(), observed_name.clone()])?;
-                if heads.get(&lease_name) != Some(&lease_oid) {
+            if updates.is_empty() {
+                // Nothing to push, but a run that lost its lease still learns so.
+                if refs.heads(std::slice::from_ref(&lease_name))?.get(&lease_name) != Some(&lease_oid) {
                     return Err(StateError::LeaseLost);
                 }
-                let (reference, actual) = if heads.get(&desired_name).copied() == base_desired {
-                    (observed_name.clone(), heads.get(&observed_name))
-                } else {
-                    (desired_name.clone(), heads.get(&desired_name))
-                };
-                Err(StateError::Conflict {
-                    reference,
-                    actual: actual.map_or_else(|| "nothing".to_owned(), ToString::to_string),
-                })
+                lease_version.clone_into(&mut committed.lease_version);
+                return Ok(committed);
             }
-            Err(UpdateError::Other(error)) => Err(error),
+            updates.push(Update {
+                name: lease_name.clone(),
+                new: Some(renewed),
+                expected: Some(lease_oid),
+            });
+            match refs.update(&updates) {
+                Ok(()) => {
+                    for update in &updates {
+                        if let Some(new) = update.new {
+                            if update.name != lease_name {
+                                refs.fast_forward_local_branch(&update.name, new)?;
+                            }
+                        }
+                    }
+                    committed.lease_version = renewed.to_string();
+                    return Ok(committed);
+                }
+                Err(UpdateError::Stale) => {
+                    (tip_desired, tip_observed) = rebase_tips(
+                        &repository,
+                        &refs,
+                        location,
+                        (&lease_name, lease_oid),
+                        [(&desired_name, base_desired), (&observed_name, base_observed)],
+                    )?;
+                }
+                Err(UpdateError::Other(error)) => return Err(error),
+            }
         }
+        Err(StateError::Conflict {
+            reference: desired_name,
+            actual: "commits that kept moving".to_owned(),
+        })
     }
 
     fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
@@ -629,6 +637,57 @@ impl StateStore for GitStateStore {
             }),
             Err(UpdateError::Other(error)) => Err(error),
         }
+    }
+}
+
+/// After a lost push: the new tips to rebuild a transition on, when the
+/// lease still holds and the commits since `bases` left the location's
+/// directory as it was read. Those are commits of another environment
+/// sharing the ref through `path`; any other commit is a conflict.
+fn rebase_tips(
+    repository: &Repository,
+    refs: &Refs<'_>,
+    location: &StateLocation,
+    (lease_name, lease_oid): (&String, Oid),
+    bases: [(&String, Option<Oid>); 2],
+) -> StateResult<(Option<Oid>, Option<Oid>)> {
+    let heads = refs.heads(&[lease_name.clone(), bases[0].0.clone(), bases[1].0.clone()])?;
+    if heads.get(lease_name) != Some(&lease_oid) {
+        return Err(StateError::LeaseLost);
+    }
+    let wanted = bases
+        .iter()
+        .filter_map(|(name, _)| heads.get(*name).map(|head| ((*name).clone(), *head)))
+        .collect::<BTreeMap<_, _>>();
+    refs.fetch(&wanted, true)?;
+    for (name, base) in bases {
+        let head = heads.get(name).copied();
+        if !directory_unchanged(repository, location, base, head)? {
+            return Err(StateError::Conflict {
+                reference: name.clone(),
+                actual: head.map_or_else(|| "nothing".to_owned(), |head| head.to_string()),
+            });
+        }
+    }
+    Ok((heads.get(bases[0].0).copied(), heads.get(bases[1].0).copied()))
+}
+
+/// Whether `head` descends from `base` without changing the location's directory.
+fn directory_unchanged(
+    repository: &Repository,
+    location: &StateLocation,
+    base: Option<Oid>,
+    head: Option<Oid>,
+) -> StateResult<bool> {
+    match (base, head) {
+        _ if base == head => Ok(true),
+        // A deleted ref took the directory with it.
+        (_, None) => Ok(false),
+        // Another environment created the shared ref; ours had nothing yet.
+        (None, Some(head)) => Ok(tree::beneath(&tree::read(repository, Some(head))?, &location.path).is_empty()),
+        (Some(base), Some(head)) => Ok(repository.graph_descendant_of(head, base).map_err(unavailable)?
+            && tree::beneath(&tree::read(repository, Some(base))?, &location.path)
+                == tree::beneath(&tree::read(repository, Some(head))?, &location.path)),
     }
 }
 

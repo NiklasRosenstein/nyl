@@ -30,6 +30,8 @@ pub enum Code {
     StateUnprotected,
     /// A state ref was rewritten outside Nyl.
     StateNotFastForward,
+    /// Another writer changed the environment's state while an operation ran.
+    StateConflict,
     /// State refs or coordination refs of environments cannot coexist in Git.
     StateRefConflict,
     /// `state forget` names a unit that is neither retained nor pending teardown.
@@ -43,7 +45,7 @@ pub enum Code {
 }
 
 impl Code {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -53,6 +55,7 @@ impl Code {
         Self::StateLocationMismatch,
         Self::StateUnprotected,
         Self::StateNotFastForward,
+        Self::StateConflict,
         Self::StateRefConflict,
         Self::StateForgetRefused,
         Self::UnitUnknown,
@@ -71,6 +74,7 @@ impl Code {
             Self::StateLocationMismatch => "NYL-STATE-LOCATION-MISMATCH",
             Self::StateUnprotected => "NYL-STATE-UNPROTECTED",
             Self::StateNotFastForward => "NYL-STATE-NOT-FAST-FORWARD",
+            Self::StateConflict => "NYL-STATE-CONFLICT",
             Self::StateRefConflict => "NYL-STATE-REF-CONFLICT",
             Self::StateForgetRefused => "NYL-STATE-FORGET-REFUSED",
             Self::UnitUnknown => "NYL-UNIT-UNKNOWN",

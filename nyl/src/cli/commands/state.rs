@@ -138,30 +138,33 @@ pub fn execute_state(args: StateArgs) -> Result<()> {
         } => {
             let inventory = discover_gitops_inventory(&common.path, None)?;
             // The old repository and, unless it is this clone's branches, how to reach it.
-            let from = from.map(|from| match from.as_str() {
-                StateLocation::LOCAL_REPOSITORY => (from, None),
-                name if !name.contains(':') && !name.contains('/') => {
-                    match inventory
-                        .resolve_git_repository(Some(&crate::resources::LocalReference { name: name.to_owned() }), None)
-                    {
-                        Ok((repository, _)) => (
-                            repository.repo_url.clone(),
+            let from = from
+                .map(|from| -> Result<_> {
+                    Ok(match from.as_str() {
+                        StateLocation::LOCAL_REPOSITORY => (from, None),
+                        name if !name.contains(':') && !name.contains('/') => {
+                            let (repository, _) = inventory.resolve_git_repository(
+                                Some(&crate::resources::LocalReference { name: name.to_owned() }),
+                                None,
+                            )?;
+                            (
+                                repository.repo_url.clone(),
+                                Some(Endpoint {
+                                    read: repository.repo_url,
+                                    write: repository.publish_url,
+                                }),
+                            )
+                        }
+                        url => (
+                            crate::util::credential_free_url(url),
                             Some(Endpoint {
-                                read: repository.repo_url,
-                                write: repository.publish_url,
+                                read: url.to_owned(),
+                                write: None,
                             }),
                         ),
-                        Err(_) => (from, None),
-                    }
-                }
-                url => (
-                    crate::util::credential_free_url(url),
-                    Some(Endpoint {
-                        read: url.to_owned(),
-                        write: None,
-                    }),
-                ),
-            });
+                    })
+                })
+                .transpose()?;
             let extra = from
                 .as_ref()
                 .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));

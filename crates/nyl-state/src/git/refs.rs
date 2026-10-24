@@ -139,6 +139,11 @@ impl Refs<'_> {
                             .graph_descendant_of(**oid, *before)
                             .map_err(unavailable)?;
                     if !forward {
+                        // Keep tracking what Nyl last saw, so every later
+                        // snapshot refuses the rewrite too.
+                        for (name, before) in &previous {
+                            self.set_tracking(name, *before)?;
+                        }
                         return Err(StateError::NotFastForward {
                             reference: (*name).clone(),
                         });

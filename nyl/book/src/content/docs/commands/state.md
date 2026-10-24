@@ -41,7 +41,10 @@ Creates `state.yaml` on the environment's state refs. Running it again
 changes nothing. No other command creates state implicitly; a command against
 a location without `state.yaml` exits 1 with `NYL-STATE-MISSING` and names
 both ways forward. A state repository Nyl cannot reach or read exits 1 with
-`NYL-STATE-UNAVAILABLE`.
+`NYL-STATE-UNAVAILABLE`. When a commit outside Nyl changes the environment's
+state while a command runs, the command exits 1 with `NYL-STATE-CONFLICT`; run
+it again. Commits of environments sharing the ref through `path` never cause
+this: Nyl rebases past them.
 
 `--fresh` starts over deliberately: every unit becomes a new incarnation and
 executes again at the next reconcile.
@@ -86,7 +89,8 @@ touching its resources. A unit that returns later starts a new incarnation.
 nyl lease break -e dev --reason "runner was killed"
 ```
 
-Declares the lease holder gone, for example after a forced kill. The next run
+Declares the lease holder gone, for example after a forced kill. The holder is
+the lease, or a live run whose lease ref is already gone. The next run
 takes over at once instead of waiting for the lease's deadline, and records
 who broke the lease and why in its transition commit. A holder that is in fact
 still running can still cause effects, but it can no longer write state.

@@ -157,12 +157,12 @@ pub fn push_atomic(git_dir: &Path, url: &str, updates: &[RefUpdate], auth: &GitA
             update.remote
         )));
     }
-    let mut args = vec![
-        "push".to_owned(),
-        "--porcelain".to_owned(),
-        "--atomic".to_owned(),
-        "--no-verify".to_owned(),
-    ];
+    let mut args = vec!["push".to_owned(), "--porcelain".to_owned(), "--no-verify".to_owned()];
+    // One ref is atomic by itself; asking for more would require servers
+    // that advertise the capability even for single-branch publication.
+    if updates.len() > 1 {
+        args.push("--atomic".to_owned());
+    }
     for update in updates {
         let expected = match &update.expected {
             Expect::FastForward => continue,

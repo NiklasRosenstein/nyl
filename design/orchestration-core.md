@@ -1574,7 +1574,9 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
 8. **Breaking a lease.** When a holder died without releasing its lease, for
    example after a forced kill, `nyl lease break -e <env> --reason <text>`
    declares it gone by replacing the lease with one marked broken, naming who
-   broke it and why. The next run takes over at once, as after expiry, and
+   broke it and why. When only a live run ref holds the environment, because
+   its lease ref is already gone, the broken lease names that run. The next
+   run takes over at once, as after expiry, and
    units the holder was executing become `uncertain`. The command warns that
    a holder that is in fact alive may still be causing effects; the fenced
    final push keeps it from overwriting state either way. The break is

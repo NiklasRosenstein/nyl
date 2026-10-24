@@ -74,6 +74,11 @@ fn test_state_commands_refuse_with_stable_codes_and_exit_categories() {
         .stderr(predicate::str::contains("NYL-ENVIRONMENT-UNKNOWN"));
 
     nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
+    // A --from name no GitRepository declares fails instead of passing as a URL.
+    nyl(&checkout, &["state", "move", "-e", "dev", "--from", "statee"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("GitRepository \"statee\" was not found"));
     nyl(&checkout, &["state", "forget", "-e", "dev", "--unit", "database"])
         .assert()
         .code(1)

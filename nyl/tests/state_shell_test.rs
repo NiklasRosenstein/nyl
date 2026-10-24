@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{StateStore, Transition, TransitionChanges};
-use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, StateEvent, StateLocation, StateV1};
+use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Run, RunKind, StateEvent, StateLocation, StateV1};
 use nyl_core::orchestration::time::Duration;
 use nyl_git::GitAuth;
 use nyl_orchestration::report::Outcome;
@@ -110,6 +110,16 @@ fn requested() -> Requested {
     Requested::default()
 }
 
+/// An observed unit with a receipt, as a run records it.
+fn observed_unit(unit: &str) -> nyl_core::orchestration::state::ObservedUnit {
+    let mut document: serde_json::Value = serde_saphyr::from_str(include_str!(
+        "../../crates/nyl-core/tests/golden/state/observed-unit.v1.yaml"
+    ))
+    .unwrap();
+    document["unit"]["name"] = json!(unit);
+    serde_json::from_value(document).unwrap()
+}
+
 /// Put a unit with the given lifecycle into state directly, as a run would.
 fn seed_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: serde_json::Value) {
     let identity =
@@ -155,6 +165,7 @@ fn seed_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: ser
                 message: "nyl: reconcile dev\n".to_owned(),
                 changes: TransitionChanges {
                     desired: BTreeMap::from([(UnitName::new(unit).unwrap(), Some(desired))]),
+                    observed: BTreeMap::from([(UnitName::new(unit).unwrap(), Some(observed_unit(unit)))]),
                     ..TransitionChanges::default()
                 },
             },
@@ -325,6 +336,37 @@ fn test_lease_break_lets_the_next_operation_take_over_and_record_the_break() {
 }
 
 #[test]
+fn test_lease_break_also_breaks_a_live_run_without_a_lease() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        // The runner died after its lease ref was deleted; its run ref lives on.
+        let run = Run {
+            api_version: StateV1,
+            kind: RunKind,
+            run: world.ids_run(),
+            runner: "lost runner".to_owned(),
+            operation: Operation::Reconcile,
+            source_commit: None,
+            read_desired: None,
+            read_observed: None,
+            deadline: world.clock_now() + chrono::Duration::hours(3),
+            units: Vec::new(),
+            finished: false,
+        };
+        world.store.write_run(&location, &dev(), &run, None).unwrap();
+        let held = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(held.exit, 2, "{}: the live run holds the environment", world.name);
+
+        let broken = state::break_lease(&context, &dev(), &location, Some("runner lost".to_owned()));
+        assert_eq!(broken.outcome, Outcome::Done, "{}: {broken:?}", world.name);
+        let fresh = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(fresh.outcome, Outcome::Done, "{}: {fresh:?}", world.name);
+    }
+}
+
+#[test]
 fn test_state_forget_drops_only_retained_or_pending_teardown_units() {
     for world in worlds() {
         let context = world.context();
@@ -420,6 +462,52 @@ fn test_state_move_keeps_history_marks_the_old_location_and_completes_when_repea
 
         let again = state::relocate(&context, &dev(), &new, &old, &requested());
         assert_eq!(again.outcome, Outcome::Unchanged, "{}: {again:?}", world.name);
+    }
+}
+
+#[test]
+fn test_state_move_onto_one_ref_keeps_desired_and_observed_state() {
+    for world in worlds() {
+        let context = world.context();
+        let old = world.dev();
+        state::init(&context, &dev(), &old, false, &requested());
+        seed_unit(&world, &old, "seed", json!({"state": "active"}));
+        let new = world.location("state/dev", "state/dev");
+
+        let moved = state::relocate(&context, &dev(), &new, &old, &requested());
+        assert_eq!(moved.outcome, Outcome::Done, "{}: {moved:?}", world.name);
+        let snapshot = world.store.snapshot(&new).unwrap();
+        let seed = UnitName::new("seed").unwrap();
+        assert!(snapshot.desired.contains_key(&seed), "{}", world.name);
+        assert!(
+            snapshot.observed.contains_key(&seed),
+            "{}: receipts move too",
+            world.name
+        );
+    }
+}
+
+#[test]
+fn test_state_move_refuses_a_location_holding_other_state() {
+    for world in worlds() {
+        let context = world.context();
+        let old = world.dev();
+        state::init(&context, &dev(), &old, false, &requested());
+        let mut new = world.location("shared/desired", "shared/observed");
+        new.path = "envs/dev".to_owned();
+        let prod = EnvironmentName::new("prod").unwrap();
+        state::init(&context, &prod, &new, false, &requested());
+
+        let moved = state::relocate(&context, &dev(), &new, &old, &requested());
+        assert_eq!(
+            moved.errors[0].code,
+            Code::StateLocationMismatch,
+            "{}: {moved:?}",
+            world.name
+        );
+        // The old location stays usable: nothing marked it as moved.
+        let record = world.store.snapshot(&old).unwrap().record.unwrap();
+        nyl_orchestration::rules::state_location::check_record(Some(&record), &dev(), &old).unwrap();
     }
 }
 

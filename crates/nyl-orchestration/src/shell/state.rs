@@ -12,13 +12,15 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{
-    Lifecycle, Operation, Request, StateEvent, StateLocation, StateRecord, StateRecordKind, StateV1, TeardownProgress,
+    Lease, LeaseKind, Lifecycle, Operation, Request, StateEvent, StateLocation, StateRecord, StateRecordKind, StateV1,
+    TeardownProgress,
 };
 use serde_json::{json, Value};
 
 use super::lease::{self, HeldLease, LeaseError};
 use super::Context;
 use crate::report::{Outcome, StateOperationReport};
+use crate::rules::lease::{self as lease_rule, Holder, LeaseDecision};
 use crate::rules::state_location::{check_record, describe};
 use crate::transition::{self, Trailers, TransitionSummary};
 
@@ -37,6 +39,11 @@ fn store_error(environment: &EnvironmentName, error: &StateError) -> Finding {
             Code::StateNotFastForward,
             format!("state ref {reference} of {environment} was rewritten outside Nyl"),
             "restore the ref to a descendant of what Nyl last wrote; Nyl never force-pushes state",
+        ),
+        StateError::Conflict { reference, actual } => Finding::new(
+            Code::StateConflict,
+            format!("{reference} of {environment} moved to {actual} while this operation ran, changing its state"),
+            "run the command again; it reads the new state. Changes outside Nyl, such as a merged pull request, also cause this",
         ),
         other => Finding::new(
             Code::StateUnavailable,
@@ -456,9 +463,21 @@ fn move_holding(
     report.details.insert("from".to_owned(), json!(describe(from)));
     report.details.insert("to".to_owned(), json!(describe(to)));
 
+    // A copy from an interrupted move is the source record itself; any other
+    // record at the new location is someone else's state.
+    if !already_marked && target.record.as_ref().is_some_and(|record| *record != source_record) {
+        return report.refused(Finding::new(
+            Code::StateLocationMismatch,
+            format!("{} already holds other state", describe(to)),
+            "point the Environment at a location without state, or remove that state first",
+        ));
+    }
     if !only_prefix && !already_marked {
-        // 1. The history, or the documents, at the new location.
-        if from.path.is_empty() && to.path.is_empty() {
+        // 1. The history, or the documents, at the new location. History
+        // carries over only when both locations split desired and observed
+        // state across refs alike.
+        let same_layout = (from.desired_ref == from.observed_ref) == (to.desired_ref == to.observed_ref);
+        if from.path.is_empty() && to.path.is_empty() && same_layout {
             if let Err(error) = context.store.import_history(from, to) {
                 return report.refused(Finding::new(
                     Code::StateLocationMismatch,
@@ -570,31 +589,46 @@ pub fn break_lease(
         Ok(coordination) => coordination,
         Err(error) => return report.refused(store_error(environment, &error)),
     };
-    let Some(held) = coordination.lease else {
-        report
-            .details
-            .insert("note".to_owned(), json!(format!("{environment} has no lease to break")));
-        return report;
+    let now = context.clock.now();
+    // Break whatever holds the environment: its lease, or a live run whose
+    // lease ref is already gone.
+    let mut lease = match lease_rule::decide(&coordination, now) {
+        LeaseDecision::Take { .. } => {
+            report.details.insert(
+                "note".to_owned(),
+                json!(format!("nothing holds the lease of {environment}")),
+            );
+            return report;
+        }
+        LeaseDecision::Held(Holder::Lease(lease)) => lease,
+        LeaseDecision::Held(Holder::Run(run)) => Lease {
+            api_version: StateV1,
+            kind: LeaseKind,
+            run: run.run,
+            runner: run.runner,
+            operation: run.operation,
+            units: run.units,
+            deadline: run.deadline,
+            taken_at: now,
+            broken: None,
+        },
     };
-    let mut lease = held.lease.clone();
     lease.broken = Some(Request {
         by: context.requested_by.clone(),
-        at: context.clock.now(),
+        at: now,
         reason,
     });
-    match context
-        .store
-        .take_lease(location, environment, &lease, Some(&held.version))
-    {
+    let expected = coordination.lease.as_ref().map(|held| held.version.as_str());
+    match context.store.take_lease(location, environment, &lease, expected) {
         Ok(_) => {
             report
                 .details
-                .insert("broken".to_owned(), Value::String(format!("run {}", held.lease.run)));
+                .insert("broken".to_owned(), Value::String(format!("run {}", lease.run)));
             report.warnings.push(Finding::new(
                 Code::LeaseHeld,
                 format!(
                     "the lease of run {} by {} was broken; if that run is still alive it may still cause effects, but it can no longer write state",
-                    held.lease.run, held.lease.runner
+                    lease.run, lease.runner
                 ),
                 "make sure the runner is gone; units it was executing become uncertain at the next run",
             ));
