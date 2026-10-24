@@ -3,7 +3,11 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::{
-    cli::commands::apply::{apply_and_record_release, apply_sorted_manifests, print_apply_summary},
+    cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
+    cli::commands::apply::{
+        collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, ReleaseRecorder,
+        DEFAULT_APPLY_CONCURRENCY,
+    },
     cli::commands::cluster::load_target_kube_config,
     config::ProjectConfig,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
@@ -35,6 +39,10 @@ pub struct RollbackArgs {
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
+
+    /// Maximum number of resources applied or pruned at the same time (see `nyl apply --concurrency`).
+    #[arg(long, default_value_t = DEFAULT_APPLY_CONCURRENCY, value_parser = clap::value_parser!(u16).range(1..))]
+    pub concurrency: u16,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
@@ -48,7 +56,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     let target = resolve_rollback_target(&storage, &args.name, &args.namespace, args.revision).await?;
 
     // Parse the stored manifest back into individual documents.
-    let mut manifests = crate::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
+    let manifests = crate::yaml::parse_yaml_documents_k8s_compatible(&target.manifest)
         .map_err(|e| NylError::Config(format!("Failed to parse stored manifest for rollback: {}", e)))?;
     if manifests.is_empty() {
         return Err(NylError::Config(format!(
@@ -82,40 +90,48 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         args.name, target.revision
     );
 
-    // Sort resources by priority (Namespace → CRD → RBAC → Config → Workload) and apply.
-    ResourceOrdering::sort_by_priority(&mut manifests)?;
-    let apply_result = apply_sorted_manifests(&kube_client, &manifests).await?;
+    // Revisions recorded before duplicates were collapsed at apply time may still
+    // hold several documents for one object; apply only the last, as apply did.
+    let mut duplicates = std::collections::HashMap::new();
+    let (mut manifests, mut scopes) = collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates).await?;
 
-    // Record the rollback as a new revision (supersede previous + prune + history
-    // limit), reusing the apply path.
-    let history_limit = ProjectConfig::load(None)?.release_history_limit();
-    let release = apply_and_record_release(
+    // Sort resources into apply order (Argo CD's kind order), record the rollback as
+    // a new revision before touching the cluster, and apply.
+    ResourceOrdering::sort_by_priority(&mut manifests)?;
+    ensure_namespace_exists(&kube_client, &args.namespace).await?;
+    let recorder = ReleaseRecorder::reserve(
         &storage,
-        &kube_client,
-        &manifests,
-        &apply_result,
         &args.name,
         &args.namespace,
+        &manifests,
         false,
-        history_limit,
+        &kube_client,
+        &mut scopes,
     )
     .await?;
 
-    print_apply_summary(
-        &apply_result.outcomes,
-        Some(&release),
-        &std::collections::HashMap::new(),
-        apply_result.failed_count,
-    );
-
-    if apply_result.failed_count > 0 {
-        return Err(NylError::Other(format!(
-            "Rollback completed with {} error(s)",
-            apply_result.failed_count
-        )));
-    }
-
-    Ok(())
+    let concurrency = usize::from(args.concurrency);
+    let renderer = ApplyRenderer::new(&duplicates);
+    let (discovery_mode, discovery_elapsed) = kube_client.initial_discovery();
+    let mut timings = vec![PhaseTiming::new(Phase::Discovery(discovery_mode), discovery_elapsed)];
+    // Apply, then complete the revision, supersede the previous one, and prune,
+    // reusing the apply path.
+    let history_limit = ProjectConfig::load(None)?.release_history_limit();
+    let run = recorder
+        .run(
+            &kube_client,
+            &manifests,
+            &mut scopes,
+            ApplySettings {
+                concurrency,
+                history_limit,
+            },
+            &mut timings,
+            &mut |event| renderer.event(event),
+        )
+        .await?;
+    renderer.summary(&run.report(&timings));
+    run.error("Rollback").map_or(Ok(()), Err)
 }
 
 /// Resolve which stored revision a rollback should target.
@@ -169,7 +185,7 @@ async fn resolve_rollback_target(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kubernetes::{ReleaseInfo, ReleaseStatus};
     use chrono::Utc;
@@ -177,12 +193,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// In-memory release storage for testing (mirrors the mock in `state.rs`).
-    struct MockReleaseStorage {
+    pub(crate) struct MockReleaseStorage {
         releases: Arc<Mutex<HashMap<(String, u32), ReleaseState>>>,
     }
 
     impl MockReleaseStorage {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 releases: Arc::new(Mutex::new(HashMap::new())),
             }
@@ -197,6 +213,25 @@ mod tests {
                 format!("{}/{}", release.release_namespace, release.release_name),
                 release.revision,
             );
+            if store.contains_key(&key) {
+                return Err(NylError::Kubernetes(format!(
+                    "revision {} already exists",
+                    release.revision
+                )));
+            }
+            store.insert(key, release.clone());
+            Ok(())
+        }
+
+        async fn complete_release(&self, release: &ReleaseState) -> Result<()> {
+            let mut store = self.releases.lock().unwrap();
+            let key = (
+                format!("{}/{}", release.release_namespace, release.release_name),
+                release.revision,
+            );
+            if !store.contains_key(&key) {
+                return Err(NylError::Config(format!("revision {} not found", release.revision)));
+            }
             store.insert(key, release.clone());
             Ok(())
         }
@@ -270,7 +305,7 @@ mod tests {
         }
     }
 
-    fn make_release(name: &str, namespace: &str, revision: u32, status: ReleaseStatus) -> ReleaseState {
+    pub(crate) fn make_release(name: &str, namespace: &str, revision: u32, status: ReleaseStatus) -> ReleaseState {
         ReleaseState {
             release_name: name.to_string(),
             release_namespace: namespace.to_string(),
@@ -396,8 +431,9 @@ mod tests {
 
         // Recording rev5 (e.g. a rollback): live state is rev3 + rev4's partials,
         // and the superseded revision is the last Deployed one (rev3).
-        let (superseded, live) = collect_live_state(&storage, "app", "ns", 5).await.unwrap();
-        assert_eq!(superseded, Some(3));
+        let revisions = storage.list_revisions("app", "ns").await.unwrap();
+        let (superseded, live) = collect_live_state(&storage, "app", "ns", &revisions, 5).await.unwrap();
+        assert_eq!(superseded.map(|release| release.revision), Some(3));
         let names: std::collections::HashSet<&str> = live.iter().map(|k| k.name.as_str()).collect();
         assert_eq!(names, ["a", "x", "y"].into_iter().collect());
     }

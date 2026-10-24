@@ -11,11 +11,11 @@ mod resource;
 mod state;
 
 pub use client::is_known_cluster_scoped_gvk;
-pub use client::{KubeClient, KubeRsClient, MockKubeClient};
+pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
 pub use diff::DiffEngine;
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
-pub use resource::{ApplyOutcome, GroupVersionKind, ResourceKey};
+pub use resource::{ApplyOutcome, GroupVersionKind, ObjectIdentity, ResourceKey};
 pub use state::{
     enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseState,
     ReleaseStatus, ReleaseStorage,

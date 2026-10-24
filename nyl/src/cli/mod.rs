@@ -1,3 +1,4 @@
+pub(crate) mod apply_output;
 pub mod commands;
 pub mod filter;
 pub(crate) mod namespace_resolution;

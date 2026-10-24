@@ -124,6 +124,16 @@ pub struct RenderPreflightOptions<'a> {
     pub resolve_namespaces: bool,
     pub release_namespace_hint: Option<&'a str>,
     pub adjust_duplicate_keys: bool,
+    pub discovery_progress: DiscoveryProgress,
+}
+
+/// Whether the preflight announces Kubernetes API discovery as a progress line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoveryProgress {
+    /// Log at info level, for commands that report their phases.
+    Announce,
+    /// Log at debug level.
+    Quiet,
 }
 
 /// Shared render preflight output for render/diff/apply commands.
@@ -303,6 +313,11 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             .ok_or_else(|| NylError::config("This operation requires --target so Nyl can select a trusted cluster"))?;
         let config = load_cluster_kube_config(&resolved.cluster, options.context_override).await?;
         let client = Client::try_from(config)?;
+        if options.discovery_progress == DiscoveryProgress::Announce {
+            tracing::info!("Discovering Kubernetes API resources");
+        } else {
+            tracing::debug!("Discovering Kubernetes API resources");
+        }
         (Some(KubeRsClient::from_client(client.clone()).await?), Some(client))
     } else {
         (None, None)
@@ -371,6 +386,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         resolve_namespaces: true,
         release_namespace_hint: None,
         adjust_duplicate_keys: false,
+        discovery_progress: DiscoveryProgress::Quiet,
     })
     .await?;
 
