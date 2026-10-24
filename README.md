@@ -88,7 +88,7 @@ render:
 
 - Full docs: https://niklasrosenstein.github.io/nyl/
 - CLI and development details: [nyl/README.md](nyl/README.md)
-- Components guide: [nyl/book/src/content/docs/components/overview.md](nyl/book/src/content/docs/components/overview.md)
+- Components guide: [nyl/book/src/content/docs/rendering/components/overview.md](nyl/book/src/content/docs/rendering/components/overview.md)
 
 ## License
 

@@ -1,6 +1,8 @@
 import { defineConfig } from "astro/config";
 import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
+import starlightSidebarTopics from "starlight-sidebar-topics";
+import { movedPages } from "./src/lib/moved-pages.mjs";
 import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
 
 const basePath = process.env.BASE_PATH ?? "/nyl";
@@ -34,7 +36,9 @@ function rewriteNylLinks() {
 export default defineConfig({
   site: "https://niklasrosenstein.github.io",
   base: basePath,
-  redirects: Object.fromEntries(Object.entries(resourceRedirects).map(([from, to]) => [from, `${basePath}${to}`])),
+  redirects: Object.fromEntries(
+    Object.entries({ ...resourceRedirects, ...movedPages }).map(([from, to]) => [from, `${basePath}${to}`]),
+  ),
   markdown: {
     processor: unified({ remarkPlugins: [rewriteNylLinks] }),
   },
@@ -50,78 +54,94 @@ export default defineConfig({
         },
       ],
       customCss: ["./src/styles/custom.css"],
-      sidebar: [
-        {
-          label: "Start Here",
-          items: [
-            "index",
-            "getting-started",
-            "deployment-workflows/rendered-manifests",
-          ],
-        },
-        {
-          label: "User Guide",
-          items: [
-            "configuration",
-            {
-              label: "Component System",
-              items: [
-                "components/overview",
-                "components/authoring-local-components",
-                "components/resolution-and-lookup",
-                "components/remote-shortcuts-and-aliases",
-                "components/troubleshooting",
-              ],
-            },
-            "git-integration",
-            { label: "Direct CLI operations", link: "/deployment-workflows/cli-workflows/" },
-            { label: "Rendering usage guides", collapsed: true, items: [{ autogenerate: { directory: "components/resource-guides" } }] },
-          ],
-        },
-        {
-          label: "Rendered Manifest Pattern",
-          items: [
-            "deployment-workflows/rendered-manifests/project-structure",
-            "deployment-workflows/rendered-manifests/targets-and-clusters",
-            "deployment-workflows/rendered-manifests/release-inputs",
-            "deployment-workflows/rendered-manifests/rendering-and-publishing",
-            "deployment-workflows/rendered-manifests/security",
-            "reference/resources/gitops",
-            { label: "Resource usage guides", collapsed: true, items: [{ autogenerate: { directory: "deployment-workflows/rendered-manifests/resource-guides" } }] },
-          ],
-        },
-        {
-          label: "Command Reference",
-          items: [
-            "commands",
-            "commands/rendering-pipeline",
-            "commands/gitops",
-            "commands/comment",
-            "commands/init",
-            "commands/create",
-            "commands/project-resources",
-            "commands/validate",
-            "commands/manifest-validation",
-            "commands/render",
-            "commands/diff",
-            "commands/apply",
-            "commands/release",
-            "commands/schema",
-            "commands/vendor",
-          ],
-        },
-        {
-          label: "Reference",
-          items: [
-            { label: "Resources", link: "/reference/resources/" },
-            ...resourceSidebar(),
-            "reference/kyverno-policies",
-          ],
-        },
-        {
-          label: "Extras",
-          items: ["extras/renovate", "extras/nyl-resource-schemas"],
-        },
+      components: {
+        Header: "./src/components/Header.astro",
+        Sidebar: "./src/components/Sidebar.astro",
+      },
+      plugins: [
+        starlightSidebarTopics([
+          {
+            id: "start",
+            label: "Get started",
+            link: "/",
+            icon: "rocket",
+            items: ["index", "start/introduction", "start/getting-started"],
+          },
+          {
+            id: "rendering",
+            label: "Rendering",
+            link: "/rendering/pipeline/",
+            icon: "puzzle",
+            items: [
+              "rendering/pipeline",
+              {
+                label: "Components",
+                items: [
+                  "rendering/components/overview",
+                  "rendering/components/authoring-local-components",
+                  "rendering/components/resolution-and-lookup",
+                  "rendering/components/remote-shortcuts-and-aliases",
+                  "rendering/components/troubleshooting",
+                ],
+              },
+              "rendering/git-integration",
+              "rendering/cli-workflows",
+              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "rendering/resource-guides" } }] },
+            ],
+          },
+          {
+            id: "gitops",
+            label: "GitOps",
+            link: "/gitops/",
+            icon: "code-branch",
+            items: [
+              "gitops",
+              "gitops/project-structure",
+              "gitops/targets-and-clusters",
+              "gitops/release-inputs",
+              "gitops/rendering-and-publishing",
+              "gitops/manifest-validation",
+              "gitops/security",
+              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "gitops/resource-guides" } }] },
+            ],
+          },
+          {
+            id: "reference",
+            label: "Reference",
+            link: "/reference/cli/",
+            icon: "open-book",
+            items: [
+              {
+                label: "CLI",
+                items: [
+                  "reference/cli",
+                  "reference/cli/init",
+                  "reference/cli/create",
+                  "reference/cli/project-resources",
+                  "reference/cli/validate",
+                  "reference/cli/render",
+                  "reference/cli/diff",
+                  "reference/cli/apply",
+                  "reference/cli/release",
+                  "reference/cli/gitops",
+                  "reference/cli/vendor",
+                  "reference/cli/schema",
+                  "reference/cli/comment",
+                ],
+              },
+              {
+                label: "Resources",
+                items: [{ label: "All resources", link: "/reference/resources/" }, "reference/resources/gitops", ...resourceSidebar()],
+              },
+              "reference/configuration",
+              "reference/kyverno-policies",
+              {
+                label: "Integrations",
+                items: ["reference/integrations/renovate", "reference/integrations/resource-schemas"],
+              },
+            ],
+          },
+        ]),
       ],
     }),
   ],

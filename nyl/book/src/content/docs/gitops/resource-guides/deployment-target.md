@@ -1,0 +1,42 @@
+---
+title: 'Using DeploymentTarget'
+---
+
+See the [DeploymentTarget resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/) for the API, example, and field definitions.
+
+## Selection behavior
+
+The target selects ApplicationGroups whose static `metadata.labels` satisfy
+`spec.applicationGroupSelector.matchLabels`. Selection happens before target
+templating; `ApplicationGroup.spec.enabled` can then omit a selected group for
+the effective target.
+
+The target's Cluster supplies the generated Argo CD destination. Cluster and
+target values merge recursively, with target values winning at conflicting
+leaves.
+
+By default, Nyl emits `<target>-catalog` beneath
+`_nyl/catalog/application.argoproj.io/<argocd-namespace>/`. It recursively syncs the
+target's `_nyl/catalog` directory. Set `catalogApplication.enabled: false` only
+when another trusted mechanism applies generated catalog resources.
+
+## Release inputs
+
+`spec.releaseInputs` binds the typed inputs of the Releases the target renders,
+keyed by `<applicationGroup>/<release>`. Every binding sets exactly one source:
+`value`, `fromFile`, `fromGit`, or `fromPublication`; `fromUnit` and
+`fromPromotion` are reserved for orchestration and rejected here. Nyl resolves
+and checks every binding of the target before rendering, and reports all
+problems together; bindings of a selected but disabled ApplicationGroup are
+ignored. `target.spec.releaseInputs` is not part of the template context. See
+[Release inputs](/nyl/gitops/release-inputs/).
+
+## Publication models
+
+Targets may share a revision when their path prefixes are disjoint. They may
+also use separate revisions or repositories. Nyl rejects overlapping prefixes
+on the same repository and normalized branch revision, including overlap
+through read or write URL aliases.
+
+See [Targets and cluster variation](/nyl/gitops/targets-and-clusters/)
+for common deployment topologies.

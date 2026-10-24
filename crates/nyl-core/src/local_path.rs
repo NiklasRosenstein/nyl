@@ -1,7 +1,7 @@
 //! Static form of local paths in the project's own repository.
 //!
 //! Owns the authored-string half of the
-//! [local path rule](https://niklasrosenstein.github.io/nyl/configuration/#local-paths):
+//! [local path rule](https://niklasrosenstein.github.io/nyl/reference/configuration/#local-paths):
 //! slash-separated, normalized, static, and with `..` only as leading segments
 //! of a relative path. Resolution against the filesystem, which rejects paths
 //! leaving the worktree or traversing a symbolic link, lives in nyl-render's

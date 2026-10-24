@@ -406,13 +406,14 @@ src/
 3. Implement command logic in the module
 4. Register command in `nyl/src/cli/mod.rs`
 5. Add integration test in `tests/`
-6. Update documentation in `book/src/commands/`
+6. Document it in `nyl/book/src/content/docs/reference/cli/` and list the page in the
+   Reference topic of `nyl/book/astro.config.mjs`; topic sidebars are explicit lists
 
 ### Adding a Template Filter
 1. Add filter function in `crates/nyl-render/src/template/mod.rs`
 2. Register in `TemplateEngine::new()`
 3. Add unit test
-4. Document in `book/src/templating.md`
+4. Document it in the Rendering section, `nyl/book/src/content/docs/rendering/`
 
 ### Adding a New Resource Type
 1. Define resource struct in `crates/nyl-core/src/resources/`
@@ -420,7 +421,8 @@ src/
 3. Add parsing logic in `crates/nyl-render/src/config/`
 4. Add validation in the resource type's `validate` method
 5. Add tests
-6. Document in `book/src/reference/resources/`
+6. Regenerate the schemas, which generate the reference page, and add a usage guide
+   under the owning section's `resource-guides/` directory
 
 ### Updating Dependencies
 1. Run `cargo update` to update within semver bounds

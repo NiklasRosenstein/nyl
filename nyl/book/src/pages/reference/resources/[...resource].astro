@@ -18,8 +18,8 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const processor = await createResourceMarkdownProcessor(base);
 const rendered = await processor.render(resourceMarkdown(schema));
 const guide = ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'].includes(resource.apiVersion)
-  ? `${base}/deployment-workflows/rendered-manifests/resource-guides/${resource.slug}/`
-  : `${base}/components/resource-guides/${resource.slug}/`;
+  ? `${base}/gitops/resource-guides/${resource.slug}/`
+  : `${base}/rendering/resource-guides/${resource.slug}/`;
 ---
 <StarlightPage frontmatter={{ title: resource.name, description: summary(schema), editUrl: false }} headings={rendered.metadata.headings.filter((heading) => heading.depth === 2)}>
   <p class="api-version"><code>{resource.apiVersion}</code>{resource.dynamicKind && <span> · Dynamic kind</span>}</p>
