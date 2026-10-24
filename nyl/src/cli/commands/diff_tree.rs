@@ -1131,7 +1131,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
-                "clusterRef": {"name": "kasoku"},
+                "clusterRef": {"name": "prod-eu-1"},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
                     "revision": "deploy/production",
@@ -1143,7 +1143,7 @@ mod tests {
         let cluster: Cluster = serde_json::from_value(serde_json::json!({
             "apiVersion": crate::constants::API_VERSION,
             "kind": "Cluster",
-            "metadata": {"name": "kasoku"},
+            "metadata": {"name": "prod-eu-1"},
             "spec": {
                 "destination": {"server": "https://kubernetes.default.svc"},
                 "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1"]}

@@ -746,7 +746,7 @@ metadata:
   name: production
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   publication:
     repository:
       repoURL: ssh://git@example/deploy.git
@@ -922,8 +922,8 @@ spec:
         fs::write(
             temporary.path().join("invalid.yaml"),
             TARGET.replace(
-                "  clusterRef:\n    name: kasoku",
-                "  clusterRef:\n    name: kasoku\n  unknown: true",
+                "  clusterRef:\n    name: prod-eu-1",
+                "  clusterRef:\n    name: prod-eu-1\n  unknown: true",
             ),
         )
         .unwrap();
@@ -943,7 +943,7 @@ spec:
             r"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: prod-eu-1
 spec:
   destination:
     server: https://kubernetes.default.svc
@@ -955,7 +955,7 @@ spec:
         .unwrap();
 
         let inventory = discover_gitops_inventory(temporary.path(), None).unwrap();
-        let cluster = inventory.get(GitOpsResourceKind::Cluster, "kasoku").unwrap();
+        let cluster = inventory.get(GitOpsResourceKind::Cluster, "prod-eu-1").unwrap();
         assert!(matches!(cluster.resource, Some(GitOpsResource::Cluster(_))));
     }
 
@@ -967,7 +967,7 @@ spec:
             r"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: prod-eu-1
 spec:
   destination:
     server: https://kubernetes.default.svc

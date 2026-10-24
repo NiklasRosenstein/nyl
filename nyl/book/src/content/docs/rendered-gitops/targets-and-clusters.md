@@ -50,6 +50,10 @@ data:
   clusterName: '{{ cluster.metadata.name }}'
 ```
 
+Local components can declare [value imports](/nyl/kubernetes/components/value-imports/)
+to receive selected values as chart value defaults without templating them
+into every invocation.
+
 ## Conditional applications and resources
 
 `DeploymentTarget.spec.applicationGroupSelector.matchLabels` selects groups using

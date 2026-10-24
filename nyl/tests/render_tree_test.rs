@@ -55,11 +55,11 @@ spec:
     )
     .unwrap();
     fs::write(
-        temp.path().join("config/clusters/kasoku.yaml"),
+        temp.path().join("config/clusters/prod-eu-1.yaml"),
         r#"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: prod-eu-1
 spec:
   destination:
     server: https://kubernetes.default.svc
@@ -87,7 +87,7 @@ metadata:
     environment: production
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   applicationGroupSelector:
     matchLabels:
       environment: production
@@ -168,7 +168,7 @@ data:
 fn colocate_gitops_resources(root: &std::path::Path) -> PathBuf {
     let resources = [
         "config/repositories/deploy.yaml",
-        "config/clusters/kasoku.yaml",
+        "config/clusters/prod-eu-1.yaml",
         "config/targets/production.yaml",
         "config/projects/workloads.yaml",
         "config/application-groups/workloads.yaml",
@@ -526,11 +526,11 @@ fn validation_render_overrides_and_complete_scope_are_explicit() {
 fn inherited_cluster_capabilities_render_without_production_access() {
     let fixture = fixture();
     fs::write(fixture.path().join("config/clusters/production.yaml"),
-        "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: production\nspec:\n  destination:\n    server: https://production.invalid\n  apiContractFrom:\n    clusterRef:\n      name: kasoku\n    mode: all\n").unwrap();
+        "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: production\nspec:\n  destination:\n    server: https://production.invalid\n  apiContractFrom:\n    clusterRef:\n      name: prod-eu-1\n    mode: all\n").unwrap();
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path)
         .unwrap()
-        .replace("name: kasoku", "name: production");
+        .replace("name: prod-eu-1", "name: production");
     fs::write(target_path, target).unwrap();
     let manifest_path = fixture.path().join("applications/workloads/api.yaml");
     fs::write(&manifest_path,
@@ -546,7 +546,7 @@ fn inherited_cluster_capabilities_render_without_production_access() {
         .success()
         .stdout(predicate::str::contains("1.31.4"))
         .stdout(predicate::str::contains("https://production.invalid"));
-    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
     fs::write(
         &cluster_path,
         fs::read_to_string(&cluster_path).unwrap().replace("1.31.4", "1.32.0"),
@@ -559,7 +559,7 @@ fn inherited_cluster_capabilities_render_without_production_access() {
         .args(["capture", "cluster", "production"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("capture source Cluster kasoku"));
+        .stderr(predicate::str::contains("capture source Cluster prod-eu-1"));
 }
 
 fn published_commit<'repo>(repository: &'repo Repository, branch: &str) -> git2::Commit<'repo> {
@@ -650,13 +650,13 @@ fn renders_plain_directory_applications_and_owned_layout() {
     let index: serde_json::Value = serde_json::from_slice(&fs::read(root.join("_nyl/index.json")).unwrap()).unwrap();
     assert_eq!(index["version"], 2);
     assert_eq!(index["target"], "production");
-    assert_eq!(index["cluster"], "kasoku");
+    assert_eq!(index["cluster"], "prod-eu-1");
     assert_eq!(index["publication"]["repository"], "deploy");
     assert!(index.get("profile").is_none());
     assert!(index.get("destination").is_none());
     for input in [
         "config/targets/production.yaml",
-        "config/clusters/kasoku.yaml",
+        "config/clusters/prod-eu-1.yaml",
         "config/repositories/deploy.yaml",
     ] {
         assert!(index["inputs"].get(input).is_some(), "missing provenance input {input}");
@@ -704,9 +704,13 @@ fn renders_plain_directory_applications_and_owned_layout() {
     assert_eq!(read_tree(&root), cached_tree);
 
     let index_before_live_context = fs::read(root.join("_nyl/index.json")).unwrap();
-    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
     let cluster = fs::read_to_string(&cluster_path).unwrap();
-    fs::write(&cluster_path, format!("{cluster}  live:\n    context: kind-kasoku\n")).unwrap();
+    fs::write(
+        &cluster_path,
+        format!("{cluster}  live:\n    context: kind-prod-eu-1\n"),
+    )
+    .unwrap();
     Command::cargo_bin("nyl")
         .unwrap()
         .current_dir(fixture.path())
@@ -1183,7 +1187,7 @@ metadata:
   name: central
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   namespace: gitops-system
 "#,
     )
@@ -1199,8 +1203,8 @@ spec:
 
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path).unwrap().replace(
-        "  clusterRef:\n    name: kasoku\n",
-        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: central\n",
+        "  clusterRef:\n    name: prod-eu-1\n",
+        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: central\n",
     );
     fs::write(target_path, target).unwrap();
     let output = fixture.path().join("deploy");
@@ -1391,14 +1395,14 @@ metadata:
   name: central
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
 "#,
     )
     .unwrap();
     let production_path = fixture.path().join("config/targets/production.yaml");
     let production = fs::read_to_string(&production_path).unwrap().replace(
-        "  clusterRef:\n    name: kasoku\n",
-        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: central\n",
+        "  clusterRef:\n    name: prod-eu-1\n",
+        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: central\n",
     );
     fs::write(production_path, production).unwrap();
     fs::write(
@@ -1411,7 +1415,7 @@ metadata:
     environment: production
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   argocdRef:
     name: central
   publication:
@@ -1439,7 +1443,7 @@ metadata:
     environment: production
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   publication:
     repositoryRef:
       name: deploy
@@ -1461,7 +1465,7 @@ fn test_validate_implicit_argocd_instances_on_one_cluster_require_cross_target_n
         .args(["validate"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("on Cluster \"kasoku\""))
+        .stderr(predicate::str::contains("on Cluster \"prod-eu-1\""))
         .stderr(predicate::str::contains(
             "'${ target.metadata.name }-${ release.metadata.name }'",
         ));
@@ -1632,7 +1636,7 @@ fn two_groups_with_one_release_name(fixture: &TempDir, cluster: &str, applicatio
     fs::write(
         root.join("config/targets/staging.yaml"),
         STAGING_TARGET_ON_KASOKU
-            .replace("    name: kasoku\n", &format!("    name: {cluster}\n"))
+            .replace("    name: prod-eu-1\n", &format!("    name: {cluster}\n"))
             .replace(
                 "  publication:\n",
                 "  applicationGroupSelector:\n    matchLabels:\n      tier: backend\n  publication:\n",
@@ -1652,16 +1656,16 @@ fn validate(fixture: &TempDir) -> assert_cmd::assert::Assert {
 #[test]
 fn test_validate_rejects_default_application_names_of_different_groups_on_one_cluster() {
     let fixture = fixture();
-    two_groups_with_one_release_name(&fixture, "kasoku", None);
+    two_groups_with_one_release_name(&fixture, "prod-eu-1", None);
     validate(&fixture).failure().stderr(predicate::str::contains(
-        "generate the same Argo CD Application argocd/api on Cluster \"kasoku\"",
+        "generate the same Argo CD Application argocd/api on Cluster \"prod-eu-1\"",
     ));
 }
 
 #[test]
 fn test_validate_rejects_application_name_templates_without_the_target() {
     let fixture = fixture();
-    two_groups_with_one_release_name(&fixture, "kasoku", Some("${ release.metadata.name }-app"));
+    two_groups_with_one_release_name(&fixture, "prod-eu-1", Some("${ release.metadata.name }-app"));
     validate(&fixture)
         .failure()
         .stderr(predicate::str::contains("Application argocd/api-app"));
@@ -1672,7 +1676,7 @@ fn test_validate_accepts_target_qualified_application_name_templates() {
     let fixture = fixture();
     two_groups_with_one_release_name(
         &fixture,
-        "kasoku",
+        "prod-eu-1",
         Some("${ target.metadata.name }-${ release.metadata.name }"),
     );
     validate(&fixture).success();
@@ -1681,13 +1685,13 @@ fn test_validate_accepts_target_qualified_application_name_templates() {
 #[test]
 fn test_validate_compares_clusters_by_argocd_destination() {
     let fixture = fixture();
-    let cluster = fs::read_to_string(fixture.path().join("config/clusters/kasoku.yaml")).unwrap();
+    let cluster = fs::read_to_string(fixture.path().join("config/clusters/prod-eu-1.yaml")).unwrap();
     fs::write(
-        fixture.path().join("config/clusters/kasoku-admin.yaml"),
-        cluster.replace("name: kasoku\n", "name: kasoku-admin\n"),
+        fixture.path().join("config/clusters/prod-eu-1-admin.yaml"),
+        cluster.replace("name: prod-eu-1\n", "name: prod-eu-1-admin\n"),
     )
     .unwrap();
-    two_groups_with_one_release_name(&fixture, "kasoku-admin", None);
+    two_groups_with_one_release_name(&fixture, "prod-eu-1-admin", None);
     validate(&fixture)
         .failure()
         .stderr(predicate::str::contains("Application argocd/api"));
@@ -1701,28 +1705,28 @@ fn test_validate_rejects_distinct_argocd_instances_sharing_a_namespace() {
         fs::write(
             fixture.path().join(format!("config/argocd-instances/{instance}.yaml")),
             format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {instance}\nspec:\n  clusterRef:\n    name: kasoku\n"
+                "apiVersion: k8s.gitops.nyl/v1\nkind: ArgoCDInstance\nmetadata:\n  name: {instance}\nspec:\n  clusterRef:\n    name: prod-eu-1\n"
             ),
         )
         .unwrap();
     }
     let production_path = fixture.path().join("config/targets/production.yaml");
     let production = fs::read_to_string(&production_path).unwrap().replace(
-        "  clusterRef:\n    name: kasoku\n",
-        "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: argocd-a\n",
+        "  clusterRef:\n    name: prod-eu-1\n",
+        "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: argocd-a\n",
     );
     fs::write(production_path, production).unwrap();
     fs::write(
         fixture.path().join("config/targets/staging.yaml"),
         STAGING_TARGET_ON_KASOKU.replace(
-            "  clusterRef:\n    name: kasoku\n",
-            "  clusterRef:\n    name: kasoku\n  argocdRef:\n    name: argocd-b\n",
+            "  clusterRef:\n    name: prod-eu-1\n",
+            "  clusterRef:\n    name: prod-eu-1\n  argocdRef:\n    name: argocd-b\n",
         ),
     )
     .unwrap();
     validate(&fixture)
         .failure()
-        .stderr(predicate::str::contains("on Cluster \"kasoku\""))
+        .stderr(predicate::str::contains("on Cluster \"prod-eu-1\""))
         .stderr(predicate::str::contains("applicationNameTemplate"));
 }
 
@@ -1786,7 +1790,7 @@ fn lists_and_validates_targets() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "production  kasoku   deploy@deploy/production  production",
+            "production  prod-eu-1  deploy@deploy/production  production",
         ));
 
     Command::cargo_bin("nyl")
@@ -1801,7 +1805,7 @@ fn lists_and_validates_targets() {
 #[test]
 fn target_rendering_requires_complete_cluster_capabilities() {
     let fixture = fixture();
-    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
     let cluster = fs::read_to_string(&cluster_path)
         .unwrap()
         .replace("    kubeVersion: 1.31.4\n", "")
@@ -1859,7 +1863,7 @@ metadata:
   name: overlap
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   publication:
     repositoryRef:
       name: deploy
@@ -1899,7 +1903,7 @@ metadata:
   name: overlap
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   publication:
     repositoryRef:
       name: deploy-alias
@@ -1947,7 +1951,7 @@ metadata:
   name: overlap
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   publication:
     repositoryRef:
       name: deploy-publisher
@@ -2003,7 +2007,7 @@ spec:
 #[test]
 fn applications_inherit_a_named_cluster_destination() {
     let fixture = fixture();
-    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
     let cluster = fs::read_to_string(&cluster_path)
         .unwrap()
         .replace("    server: https://kubernetes.default.svc", "    name: in-cluster");
@@ -2854,7 +2858,7 @@ fn publishes_a_new_publication_branch_with_cas_workflow() {
     assert!(message.contains("Nyl-Source-Repository: https://example.invalid/source.git"));
     assert!(message.contains(&format!("Nyl-Source-Commit: {source_commit}")));
     assert!(message.contains("Nyl-Deployment-Target: production"));
-    assert!(message.contains("Nyl-Cluster: kasoku"));
+    assert!(message.contains("Nyl-Cluster: prod-eu-1"));
     let tree = commit.tree().unwrap();
     assert!(tree
         .get_path(std::path::Path::new("production/workloads/api/configmap/api/api.yaml"))
@@ -3695,7 +3699,7 @@ fn validation_reports_export_findings_and_skipped_resources_without_losing_rende
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "\x1b[1;36mkubeconform · kasoku · Kubernetes 1.31.4\x1b[0m",
+            "\x1b[1;36mkubeconform · prod-eu-1 · Kubernetes 1.31.4\x1b[0m",
         ))
         .stderr(predicate::str::contains("\x1b[1;31mFAIL\x1b[0m"))
         .stderr(predicate::str::contains(
@@ -5336,7 +5340,7 @@ fn test_update_source_locks_moves_publication_prefix_locks_to_the_branch_head() 
     fs::write(
         fixture.path().join("config/targets/dev.yaml"),
         format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: kasoku\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
         ),
     )
     .unwrap();
@@ -5457,7 +5461,7 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     fs::write(
         fixture.path().join("config/targets/dev.yaml"),
         format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: kasoku\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
+            "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: dev\nspec:\n  clusterRef:\n    name: prod-eu-1\n  applicationGroupSelector:\n    matchLabels:\n      environment: dev\n  publication:\n    repository: {{repoURL: '{url}'}}\n    revision: deploy/dev\n    pathPrefix: dev\n"
         ),
     )
     .unwrap();
@@ -6366,7 +6370,7 @@ fn test_render_tree_accepts_deprecated_cluster_and_release_api_versions_with_a_w
     render_production(&current).success();
 
     let deprecated = fixture();
-    for file in ["config/clusters/kasoku.yaml", "applications/workloads/api.yaml"] {
+    for file in ["config/clusters/prod-eu-1.yaml", "applications/workloads/api.yaml"] {
         let path = deprecated.path().join(file);
         let text = fs::read_to_string(&path).unwrap();
         assert!(
@@ -6382,7 +6386,7 @@ fn test_render_tree_accepts_deprecated_cluster_and_release_api_versions_with_a_w
     render_production(&deprecated)
         .success()
         .stderr(predicate::str::contains(
-            "Cluster \"kasoku\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
+            "Cluster \"prod-eu-1\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
         ))
         .stderr(predicate::str::contains(
             "Release \"api\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
@@ -6497,7 +6501,7 @@ fn test_render_never_connects_to_the_cluster() {
     let fixture = fixture();
     // The Cluster names a context that does not exist; a namespaced resource
     // without a namespace once made render resolve it from the live cluster.
-    let cluster = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster = fixture.path().join("config/clusters/prod-eu-1.yaml");
     fs::write(
         &cluster,
         fs::read_to_string(&cluster)
@@ -6563,4 +6567,274 @@ fn test_render_with_a_source_kind_filter_renders_only_the_selected_resources() {
         .map(|document| document["kind"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(kinds, ["ConfigMap", "ConfigMap"]);
+}
+
+/// Write a Postgres-style component that imports platform defaults, and an App
+/// component whose chart renders a nested PostgresDb invocation.
+fn value_import_fixture() -> TempDir {
+    let fixture = fixture();
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
+    let cluster = fs::read_to_string(&cluster_path).unwrap().replace(
+        "spec:\n  destination:",
+        r"spec:
+  values:
+    postgres:
+      scheduling:
+        nodeSelector:
+          scheduling.example.com/pool: compute
+      storageClass: local-path-retain
+      backup:
+        destinationPath: s3://example-backups/postgresql
+        retentionPolicy: 30d
+  destination:",
+    );
+    fs::write(&cluster_path, cluster).unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap().replace(
+        "  values:\n    environment: production\n",
+        "  values:\n    environment: production\n    postgres:\n      backup:\n        retentionPolicy: 14d\n",
+    );
+    fs::write(&target_path, target).unwrap();
+
+    let postgres = fixture.path().join("components/example/v1/PostgresDb");
+    fs::create_dir_all(postgres.join("templates")).unwrap();
+    fs::write(
+        postgres.join("Chart.yaml"),
+        "apiVersion: v2\nname: postgres-db\nversion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(postgres.join("values.yaml"), "storage:\n  size: 10Gi\n").unwrap();
+    // Strict: every property an import supplies is required, and nothing else is allowed.
+    fs::write(
+        postgres.join("values.schema.json"),
+        r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["storage", "backup"],
+  "properties": {
+    "scheduling": {"type": "object"},
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storageClass", "size"],
+      "properties": {"storageClass": {"type": "string"}, "size": {"type": "string"}}
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destinationPath", "retentionPolicy"],
+      "properties": {"destinationPath": {"type": "string"}, "retentionPolicy": {"type": "string"}}
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        postgres.join("templates/configmap.yaml"),
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+data:
+  storageClass: {{ .Values.storage.storageClass | quote }}
+  size: {{ .Values.storage.size | quote }}
+  backup: {{ printf "%s/%s" .Values.backup.destinationPath .Release.Name | quote }}
+  retention: {{ .Values.backup.retentionPolicy | quote }}
+  nodeSelector: {{ (.Values.scheduling | default dict).nodeSelector | default dict | toJson | quote }}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        postgres.join("nyl-component.yaml"),
+        r"apiVersion: components.nyl/v1alpha1
+valueImports:
+  - name: scheduling
+    from: /postgres/scheduling
+    to: /scheduling
+  - name: storageClass
+    from: /postgres/storageClass
+    to: /storage/storageClass
+  - name: backup
+    from: /postgres/backup
+    to: /backup
+    required: true
+",
+    )
+    .unwrap();
+
+    let app = fixture.path().join("components/example/v1/App");
+    fs::create_dir_all(app.join("templates")).unwrap();
+    fs::write(app.join("Chart.yaml"), "apiVersion: v2\nname: app\nversion: 1.0.0\n").unwrap();
+    fs::write(
+        app.join("templates/database.yaml"),
+        r"apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: {{ .Release.Name }}-db
+  namespace: {{ .Release.Namespace }}
+spec:
+  storage:
+    size: {{ .Values.databaseSize }}
+",
+    )
+    .unwrap();
+
+    fs::write(
+        fixture.path().join("applications/workloads/db.yaml"),
+        r"apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: db
+  namespace: app
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: inherited-db
+  namespace: app
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: tuned-db
+  namespace: app
+spec:
+  storage:
+    size: 20Gi
+  backup:
+    retentionPolicy: 7d
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/App
+metadata:
+  name: web
+  namespace: app
+spec:
+  databaseSize: 5Gi
+",
+    )
+    .unwrap();
+    fixture
+}
+
+fn rendered_config_maps(stdout: &[u8]) -> BTreeMap<String, serde_json::Value> {
+    nyl::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
+        .unwrap()
+        .into_iter()
+        .filter(|document| document["kind"] == "ConfigMap")
+        .map(|document| {
+            (
+                document["metadata"]["name"].as_str().unwrap().to_owned(),
+                document["data"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn render_db_release(fixture: &TempDir, target: Option<&str>) -> assert_cmd::assert::Assert {
+    let mut command = Command::cargo_bin("nyl").unwrap();
+    command.current_dir(fixture.path()).args(["render", "--offline"]);
+    match target {
+        Some(target) => command.args(["--target", target]),
+        None => command.args(["--kube-version", "1.31.4", "--kube-api-versions", "v1"]),
+    };
+    command.arg("applications/workloads/db.yaml").assert()
+}
+
+#[test]
+fn component_value_imports_supply_platform_defaults_beneath_invocation_values() {
+    let fixture = value_import_fixture();
+    let output = render_db_release(&fixture, Some("production")).success();
+    let config_maps = rendered_config_maps(&output.get_output().stdout);
+
+    assert_eq!(
+        config_maps["inherited-db"],
+        serde_json::json!({
+            "storageClass": "local-path-retain",
+            "size": "10Gi",
+            "backup": "s3://example-backups/postgresql/inherited-db",
+            "retention": "14d",
+            "nodeSelector": r#"{"scheduling.example.com/pool":"compute"}"#,
+        })
+    );
+    assert_eq!(config_maps["tuned-db"]["size"], "20Gi");
+    assert_eq!(config_maps["tuned-db"]["retention"], "7d");
+    assert_eq!(
+        config_maps["tuned-db"]["backup"],
+        "s3://example-backups/postgresql/tuned-db"
+    );
+    // The nested invocation applies its own component's contract.
+    assert_eq!(config_maps["web-db"]["size"], "5Gi");
+    assert_eq!(config_maps["web-db"]["storageClass"], "local-path-retain");
+    assert_eq!(config_maps["web-db"]["retention"], "14d");
+}
+
+#[test]
+fn component_value_imports_fail_clearly_without_target_or_with_invalid_values() {
+    let fixture = value_import_fixture();
+    render_db_release(&fixture, None).failure().stderr(
+        predicate::str::contains("components.k8s.nyl/v1 example/v1/PostgresDb app/inherited-db")
+            .and(predicate::str::contains(r#"required value import "backup""#))
+            .and(predicate::str::contains("this render has no target")),
+    );
+
+    // The chart schema validates the merged values, imported ones included.
+    let cluster_path = fixture.path().join("config/clusters/prod-eu-1.yaml");
+    fs::write(
+        &cluster_path,
+        fs::read_to_string(&cluster_path)
+            .unwrap()
+            .replace("storageClass: local-path-retain", "storageClass: 5"),
+    )
+    .unwrap();
+    render_db_release(&fixture, Some("production"))
+        .failure()
+        .stderr(predicate::str::contains(
+            "at '/storage/storageClass': got number, want string",
+        ));
+}
+
+#[test]
+fn component_value_import_changes_invalidate_cached_tree_renders() {
+    let fixture = value_import_fixture();
+    let output = fixture.path().join("deploy");
+    let render_tree = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args(["render-tree", "--target", "production", "--output-dir"])
+            .arg(&output)
+            .assert()
+            .success();
+        read_resources(&output)
+    };
+    let first = render_tree();
+    assert!(first.contains("retention: 14d"), "{first}");
+    assert_eq!(render_tree(), first);
+
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target_path,
+        fs::read_to_string(&target_path)
+            .unwrap()
+            .replace("retentionPolicy: 14d", "retentionPolicy: 60d"),
+    )
+    .unwrap();
+    let retargeted = render_tree();
+    assert!(retargeted.contains("retention: 60d"), "{retargeted}");
+    assert!(retargeted.contains("retention: 7d"), "{retargeted}");
+
+    let contract_path = fixture
+        .path()
+        .join("components/example/v1/PostgresDb/nyl-component.yaml");
+    fs::write(
+        &contract_path,
+        fs::read_to_string(&contract_path).unwrap().replace(
+            "  - name: scheduling\n    from: /postgres/scheduling\n    to: /scheduling\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let recontracted = render_tree();
+    assert!(!recontracted.contains("scheduling.example.com/pool"), "{recontracted}");
 }

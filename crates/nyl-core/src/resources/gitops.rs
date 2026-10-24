@@ -1746,7 +1746,7 @@ mod tests {
             "kind": KIND_DEPLOYMENT_TARGET,
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
-                "clusterRef": {"name": "kasoku"},
+                "clusterRef": {"name": "prod-eu-1"},
                 "values": {"replicas": 3},
                 "publication": {
                     "repositoryRef": {"name": "deploy"},
@@ -1760,7 +1760,7 @@ mod tests {
         json!({
             "apiVersion": API_VERSION_K8S_GITOPS,
             "kind": KIND_CLUSTER,
-            "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
+            "metadata": {"name": "prod-eu-1", "labels": {"region": "fsn1"}},
             "spec": {
                 "destination": {"server": "https://kubernetes.default.svc"},
                 "kubernetes": {
@@ -1768,7 +1768,7 @@ mod tests {
                     "apiVersions": ["apps/v1", "v1"]
                 },
                 "values": {"region": "fsn1", "nested": {"unrestricted": true}},
-                "live": {"context": "kasoku"}
+                "live": {"context": "prod-eu-1"}
             }
         })
     }
@@ -1778,7 +1778,7 @@ mod tests {
             "apiVersion": API_VERSION_K8S_GITOPS,
             "kind": KIND_ARGOCD_INSTANCE,
             "metadata": {"name": "central"},
-            "spec": {"clusterRef": {"name": "kasoku"}}
+            "spec": {"clusterRef": {"name": "prod-eu-1"}}
         })
     }
 
@@ -1805,7 +1805,7 @@ mod tests {
             panic!("expected target");
         };
         assert_eq!(parsed.metadata.name, "production");
-        assert_eq!(parsed.cluster_name(), "kasoku");
+        assert_eq!(parsed.cluster_name(), "prod-eu-1");
         assert_eq!(parsed.spec.values["replicas"], 3);
         assert_eq!(parsed.publication_path_prefix(), "production");
     }
@@ -1828,7 +1828,7 @@ mod tests {
         let GitOpsResource::Cluster(parsed) = parsed else {
             panic!("expected cluster");
         };
-        assert_eq!(parsed.metadata.name, "kasoku");
+        assert_eq!(parsed.metadata.name, "prod-eu-1");
         assert_eq!(
             parsed.spec.destination.server.as_deref(),
             Some("https://kubernetes.default.svc")
@@ -1839,7 +1839,7 @@ mod tests {
         );
         assert_eq!(parsed.spec.kubernetes.as_ref().unwrap().api_versions, ["apps/v1", "v1"]);
         assert_eq!(parsed.spec.values["nested"]["unrestricted"], true);
-        assert_eq!(parsed.spec.live.unwrap().context, "kasoku");
+        assert_eq!(parsed.spec.live.unwrap().context, "prod-eu-1");
     }
 
     #[test]
