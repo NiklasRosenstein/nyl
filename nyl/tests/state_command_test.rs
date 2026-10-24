@@ -21,6 +21,8 @@ fn nyl(checkout: &Path, args: &[&str]) -> Command {
         .args(args)
         .env_remove("GITHUB_RUN_ID")
         .env_remove("CI_JOB_URL")
+        // CI forces colour; the assertions read plain text.
+        .env("NO_COLOR", "1")
         .env("GIT_AUTHOR_NAME", "Scenario")
         .env("GIT_COMMITTER_NAME", "Scenario")
         .env("GIT_AUTHOR_EMAIL", "scenario@example.invalid")
