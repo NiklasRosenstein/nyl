@@ -51,10 +51,9 @@ executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
    transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and
    run refs with compare-and-swap, the fenced transition commit, optional
    dedicated credentials, and the Environment and EnvironmentGroup resources.
-   Custom refs and atomic leased pushes pass against plain Git and Forgejo in
-   CI (`scripts/check-state-refs-forgejo.sh`); the same checks against GitHub
-   and GitLab (`scripts/check-state-refs.sh`) are run by hand before M3 is
-   marked done.
+   Custom refs and atomic leased pushes are verified on GitHub, GitLab,
+   Forgejo, and plain Git with both coordination prefixes
+   ([Git host compatibility](design/forge-compatibility.md)).
 3. Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`,
    `recover`, and `get -e`, with `FakePublication`, pinned source worktrees,
    execution keys, `--local` runs, and `nyl validate` of targets whose

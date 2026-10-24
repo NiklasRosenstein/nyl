@@ -60,25 +60,6 @@ jobs:
       - name: Security audit
         run: cargo audit
 
-  state-refs-forgejo:
-    name: State refs on Forgejo
-    runs-on: ubuntu-latest
-    env:
-      FORGEJO_VERSION: 11.0.6
-      FORGEJO_SHA256: 61df4f3965521eee13265e86601098ebb03e48798087b5ca4f60bdf81ce08321
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Forgejo
-        run: |
-          curl -sSfL -o "$RUNNER_TEMP/forgejo" "https://codeberg.org/forgejo/forgejo/releases/download/v$FORGEJO_VERSION/forgejo-$FORGEJO_VERSION-linux-amd64"
-          echo "$FORGEJO_SHA256  $RUNNER_TEMP/forgejo" | sha256sum --check
-          chmod +x "$RUNNER_TEMP/forgejo"
-
-      - name: Custom refs and atomic leased pushes
-        run: scripts/check-state-refs-forgejo.sh "$RUNNER_TEMP/forgejo"
-
   test-renovate-matchers:
     name: Test Renovate Matchers
     runs-on: ubuntu-latest

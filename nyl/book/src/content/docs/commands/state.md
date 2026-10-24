@@ -30,6 +30,10 @@ never overwrite state. Nyl never force-pushes a state ref. Protect the state
 branches against force pushes and deletion, and give push access to the CI
 identity and the operators who run `nyl` commands.
 
+GitHub, GitLab, and Forgejo accept the lease refs and atomic pushes Nyl needs.
+On a host that rejects refs outside `refs/heads/`, set
+`state.coordinationRefPrefix: refs/heads/nyl-run/` on the Environment.
+
 ## `nyl state init`
 
 ```bash

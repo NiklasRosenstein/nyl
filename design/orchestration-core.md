@@ -107,7 +107,8 @@ spec:
   namespace keeps them out of the branch list and out of push-triggered CI;
   a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
   refs. Changing it goes through `nyl state move` (see
-  [Initialization and moves](#initialization-and-moves)).
+  [Initialization and moves](#initialization-and-moves)). Hosts verified with
+  both prefixes are listed in [Git host compatibility](forge-compatibility.md).
 - Validation checks every configured state ref, and the coordination refs each
   environment implies, for names that Git cannot hold together, such as a
   shared state branch `nyl/previews` and an environment named `previews` whose
