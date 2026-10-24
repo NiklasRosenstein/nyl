@@ -2,6 +2,7 @@ import { defineConfig } from "astro/config";
 import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import starlightSidebarTopics from "starlight-sidebar-topics";
+import { consoleOutput } from "./src/lib/console-output.mjs";
 import { movedPages } from "./src/lib/moved-pages.mjs";
 import { resourceSidebar, resourceRedirects } from "./src/lib/resources.mjs";
 
@@ -46,6 +47,7 @@ export default defineConfig({
     starlight({
       title: "Nyl",
       description: "A fast Kubernetes manifest generator for rendered GitOps.",
+      expressiveCode: { plugins: [consoleOutput()] },
       social: [
         {
           icon: "github",

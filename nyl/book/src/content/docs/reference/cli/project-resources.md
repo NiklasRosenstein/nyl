@@ -21,6 +21,27 @@ An optional name filters the result. Output contains the resource name, source
 file and document, and concise kind-specific coordinates. The command does not
 render workloads, resolve remote sources, or contact Kubernetes.
 
+Each kind prints one table row per resource:
+
+```console
+$ nyl get clusters
+NAME     DESTINATION                       CONTEXT        VERSION  FILE
+primary  https://primary.example.com:6443  admin@primary  1.32.2   config/clusters/primary.yaml#document-1
+staging  https://staging.example.com:6443  -              1.31.4   config/clusters/staging.yaml#document-1
+$ nyl get targets
+NAME        CLUSTER  PUBLICATION      PATH-PREFIX  FILE
+production  primary  platform@deploy  production   config/targets/production.yaml#document-1
+staging     staging  platform@deploy  staging      config/targets/staging.yaml#document-1
+$ nyl get application-groups
+NAME        PROJECT                 SOURCE                   FILE
+monitoring  monitoring (generated)  applications/monitoring  applications/monitoring/group.yaml#document-1
+web         web (generated)         applications/web         applications/web/group.yaml#document-1
+```
+
+`CONTEXT` is the Cluster's `spec.live.context`, `PUBLICATION` the target's
+repository and revision, and `PROJECT` the ApplicationGroup's AppProject, marked
+`(generated)` when Nyl derives it.
+
 ## Update cluster capabilities
 
 Refresh `Cluster.spec.kubernetes` from the live cluster:
