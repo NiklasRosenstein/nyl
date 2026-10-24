@@ -302,7 +302,12 @@ impl SchemaCatalog {
     }
 
     fn resolve(&self, manifest: &Value) -> Option<SchemaTarget> {
-        let api_version = manifest.get("apiVersion")?.as_str()?;
+        // A deprecated API version gets the current schema, whose apiVersion
+        // constraint then points the editor at the migration.
+        let api_version = nyl_core::resources::schema::deprecated_api_version(manifest).map_or_else(
+            || manifest.get("apiVersion")?.as_str(),
+            |deprecated| Some(deprecated.replacement),
+        )?;
         let kind = manifest.get("kind")?.as_str()?;
         let key = (api_version.to_owned(), kind.to_owned());
         if let Some((file, schema)) = self.nyl.get(&key) {

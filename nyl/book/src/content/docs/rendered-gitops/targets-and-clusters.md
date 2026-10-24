@@ -2,7 +2,7 @@
 title: 'Targets and Cluster Variation'
 ---
 
-A [`Cluster`](/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/) models one concrete
+A [`Cluster`](/nyl/reference/resources/k8s.nyl/v1/cluster/) models one concrete
 Kubernetes destination and its render-time capabilities. A
 [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/) binds that
 Cluster to deployment intent and publication coordinates.
@@ -87,6 +87,6 @@ change because they can alter rendered output. See the
 
 ## Next steps
 
-- [Cluster reference](/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/)
+- [Cluster reference](/nyl/reference/resources/k8s.nyl/v1/cluster/)
 - [DeploymentTarget reference](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/)
 - [Render and validate](/nyl/rendered-gitops/workflow/render/)

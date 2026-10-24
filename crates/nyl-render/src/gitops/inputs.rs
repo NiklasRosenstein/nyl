@@ -1187,7 +1187,7 @@ mod tests {
         let declared = declarations(json!({"image": {"type": "string"}}));
         let release = |inputs: Value| -> crate::resources::Release {
             serde_json::from_value(json!({
-                "apiVersion": "k8s.gitops.nyl/v1",
+                "apiVersion": "k8s.nyl/v1",
                 "kind": "Release",
                 "metadata": {"name": "web", "namespace": "web"},
                 "spec": {"inputs": inputs},

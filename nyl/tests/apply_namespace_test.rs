@@ -175,7 +175,7 @@ fn project(server: &str) -> TempDir {
     std::fs::write(
         temp.path().join("cluster.yaml"),
         format!(
-            r"apiVersion: k8s.gitops.nyl/v1
+            r"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata: {{name: test}}
 spec:
@@ -215,7 +215,7 @@ users:
     .unwrap();
     std::fs::write(
         temp.path().join("manifest.yaml"),
-        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata: {name: example, namespace: traefik}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: example}\ndata: {a: b}\n",
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: example, namespace: traefik}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: example}\ndata: {a: b}\n",
     )
     .unwrap();
     temp

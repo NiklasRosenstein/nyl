@@ -366,8 +366,9 @@ src/
 
 ### Rendered GitOps invariants
 
-- Kubernetes control resources use `k8s.gitops.nyl/v1`; shared GitRepository
-  resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
+  (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
+  `k8s.gitops.nyl/v1`; shared GitRepository resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.
@@ -550,6 +551,10 @@ Mechanics that are easy to miss:
   or is referenced by other resources there. A changed reference field updates
   that diagram.
 - Regenerate schemas after changing a resource's Rust doc comments or fields.
+- A deprecation keeps the old form working, warns when the CLI reads it, and
+  adds a row to `reference/deprecations.md`. Deprecated API versions live in
+  `DEPRECATED_API_VERSIONS` (`nyl_core::resources::schema`); removing support
+  deletes the entry and its row together.
 - Write links as `/nyl/...`; the build rewrites them for preview deployments
   and fails on links to missing pages.
 - Show example output in a `console` block: commands start with `$ `, and every

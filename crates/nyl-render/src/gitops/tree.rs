@@ -3219,7 +3219,7 @@ mod tests {
 
     fn scoped_cluster() -> Cluster {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "k8s.gitops.nyl/v1", "kind": "Cluster", "metadata": {"name": "production"},
+            "apiVersion": "k8s.nyl/v1", "kind": "Cluster", "metadata": {"name": "production"},
             "spec": {"destination": {"server": "https://kubernetes.default.svc"},
                 "kubernetes": {"kubeVersion": "1.31.4",
                     "apiVersions": ["v1", "v1/Namespace", "v1/ConfigMap", "rbac.authorization.k8s.io/v1/ClusterRole"],

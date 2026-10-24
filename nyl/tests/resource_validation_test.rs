@@ -94,7 +94,7 @@ spec:
 fn test_release_unknown_field() {
     // Create a Release with an unknown field
     let yaml = r#"
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: my-release

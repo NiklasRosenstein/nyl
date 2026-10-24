@@ -13,7 +13,7 @@ Kubernetes-shaped configuration resources describe the deployment:
 
 1. A [`GitRepository`](/nyl/reference/resources/gitops.nyl/v1/git-repository/) names
    credential-free read and write coordinates.
-2. A [`Cluster`](/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/) records one concrete
+2. A [`Cluster`](/nyl/reference/resources/k8s.nyl/v1/cluster/) records one concrete
    destination and the Kubernetes capabilities used for offline rendering.
 3. A [`DeploymentTarget`](/nyl/reference/resources/k8s.gitops.nyl/v1/deployment-target/) binds that
    Cluster to deployment values and a publication repository, revision, and

@@ -223,7 +223,7 @@ and is a JSON Schema subset, so a richer schema can be added later. Deeper
 structure is left to downstream validators such as chart value schemas.
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata: {name: web, namespace: web}
 spec:

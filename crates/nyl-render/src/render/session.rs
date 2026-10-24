@@ -949,7 +949,7 @@ mod tests {
 
     fn cluster() -> Cluster {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": API_VERSION_K8S_GITOPS,
+            "apiVersion": API_VERSION,
             "kind": "Cluster",
             "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
             "spec": {
@@ -1173,7 +1173,7 @@ data:
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
-            r#"apiVersion: k8s.gitops.nyl/v1
+            r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: {{ target.metadata.name }}
@@ -1215,7 +1215,7 @@ data:
         fs::write(
             temp.path().join("app.yaml"),
             format!(
-                r#"apiVersion: k8s.gitops.nyl/v1
+                r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: strict-values
@@ -1251,7 +1251,7 @@ spec:
         fs::write(
             temp.path().join("bad.yaml"),
             format!(
-                r"apiVersion: k8s.gitops.nyl/v1
+                r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: strict-values

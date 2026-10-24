@@ -115,4 +115,4 @@ resources they created.
 ## See Also
 
 - [`apply`](/nyl/reference/cli/apply/) - Apply manifests and record release revisions
-- [Release resource](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) - Release metadata
+- [Release resource](/nyl/reference/resources/k8s.nyl/v1/release/) - Release metadata

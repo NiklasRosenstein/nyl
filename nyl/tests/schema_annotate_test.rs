@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use serde_json::json;
 use tempfile::TempDir;
 
-const CLUSTER: &str = "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n";
+const CLUSTER: &str = "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1]\n";
 
 /// A project with vendored editor schemas and a vendored Widget CRD.
 fn project() -> TempDir {
@@ -90,9 +90,8 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
         "# yaml-language-server: $schema=../../vendor/schemas/editor/crds/example.com/Widget_v1.json\napiVersion: example.com/v1\nkind: Widget\nmetadata:\n  name: web\nspec:\n  count: 1\n---\napiVersion: unknown.example/v1\nkind: Gadget\n"
     );
     let cluster = fs::read_to_string(directory.path().join("config/cluster.yaml")).unwrap();
-    assert!(cluster.starts_with(
-        "# yaml-language-server: $schema=../vendor/schemas/editor/nyl/k8s.gitops.nyl/v1/cluster.schema.json\n"
-    ));
+    assert!(cluster
+        .starts_with("# yaml-language-server: $schema=../vendor/schemas/editor/nyl/k8s.nyl/v1/cluster.schema.json\n"));
     // The vendored CRD's strict schema is written next to the Nyl schemas.
     let schema: serde_json::Value = serde_json::from_slice(
         &fs::read(

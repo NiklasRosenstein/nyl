@@ -106,7 +106,7 @@ source remote and requires both `revision` and `commit`. `Remote` renderer mode
 requires a remote source. Run `nyl update source-locks` to refresh commit locks.
 
 Source selectors identify candidate entry files. Nyl renders only candidates
-containing a literal, parseable `k8s.gitops.nyl/v1` Release document; other files
+containing a literal, parseable `k8s.nyl/v1` Release document; other files
 are ignored. It warns for each candidate that has no literal Release and is not
 claimed by another Release's `spec.include`. Use `Release.spec.include` to
 attach additional relative files or glob matches to that release.
@@ -155,7 +155,7 @@ options that a Release may merge with `spec.syncPolicy.+syncOptions` in its
 Application override:
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api

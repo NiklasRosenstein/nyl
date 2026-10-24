@@ -54,7 +54,7 @@ export const resourceSections = [
 ];
 /** Each resource's usage guide: its section's guide directory, unless it lives elsewhere. */
 const guideDirectories = { kubernetes: 'kubernetes', 'rendered-gitops': 'rendered-gitops', orchestration: 'orchestration' };
-const guideOverrides = { Release: 'rendered-gitops' };
+const guideOverrides = { Release: 'rendered-gitops', Cluster: 'rendered-gitops' };
 export function guideRoute(resource) {
   return `/${guideOverrides[resource.name] ?? guideDirectories[sectionOf(resource).id]}/resource-guides/${resource.slug}/`;
 }

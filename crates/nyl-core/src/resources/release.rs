@@ -5,7 +5,7 @@ use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::release_inputs::InputDeclaration;
-use crate::constants::API_VERSION_K8S_GITOPS;
+use crate::constants::API_VERSION;
 use crate::settings::StripEmptyMetadataLabelsMode;
 use crate::{CoreError, Result};
 
@@ -111,22 +111,25 @@ where
 }
 
 impl Release {
-    /// Check if a manifest is a Release resource
+    /// Check if a manifest is a Release resource, under its current or deprecated API version.
     pub fn is_release(manifest: &serde_json::Value) -> bool {
-        manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION_K8S_GITOPS)
-            && manifest.get("kind").and_then(|v| v.as_str()) == Some(KIND_RELEASE)
+        manifest.get("kind").and_then(|v| v.as_str()) == Some(KIND_RELEASE)
+            && (manifest.get("apiVersion").and_then(|v| v.as_str()) == Some(API_VERSION)
+                || super::schema::deprecated_api_version(manifest).is_some())
     }
 
-    /// Parse Release from JSON value
+    /// Parse Release from JSON value; a deprecated API version reads as the current one.
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        let release: Self = serde_json::from_value(value.clone())
-            .map_err(|e| CoreError::Config(format!("Invalid Release resource: {e}")))?;
+        let mut value = value.clone();
+        super::schema::canonicalize_api_version(&mut value);
+        let release: Self =
+            serde_json::from_value(value).map_err(|e| CoreError::Config(format!("Invalid Release resource: {e}")))?;
         release.validate()?;
         Ok(release)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.api_version != API_VERSION_K8S_GITOPS || self.kind != KIND_RELEASE {
+        if self.api_version != API_VERSION || self.kind != KIND_RELEASE {
             return Err(CoreError::config("Invalid Release resource envelope"));
         }
         validate_namespace_name("metadata.namespace", &self.metadata.namespace)?;
@@ -149,7 +152,7 @@ impl Release {
 
 pub fn generate_release_schema() -> serde_json::Value {
     let mut schema = serde_json::to_value(schema_for!(Release)).expect("schema serialization should never fail");
-    super::schema::set_envelope(&mut schema, API_VERSION_K8S_GITOPS, Some(KIND_RELEASE));
+    super::schema::set_envelope(&mut schema, API_VERSION, Some(KIND_RELEASE));
     schema
 }
 
@@ -222,7 +225,7 @@ mod tests {
     #[test]
     fn test_is_release_true() {
         let manifest = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "test",
@@ -247,6 +250,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deprecated_release_api_version_reads_as_the_current_one() {
+        let manifest = json!({
+            "apiVersion": "k8s.gitops.nyl/v1",
+            "kind": "Release",
+            "metadata": {"name": "api", "namespace": "api"}
+        });
+        assert!(Release::is_release(&manifest));
+        let release = Release::from_value(&manifest).unwrap();
+        assert_eq!(release.api_version, "k8s.nyl/v1");
+    }
+
+    #[test]
     fn test_is_release_false_wrong_api_version() {
         let manifest = json!({
             "apiVersion": "v1",
@@ -262,7 +277,7 @@ mod tests {
     #[test]
     fn test_from_value_valid() {
         let value = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -271,7 +286,7 @@ mod tests {
         });
 
         let release = Release::from_value(&value).unwrap();
-        assert_eq!(release.api_version, "k8s.gitops.nyl/v1");
+        assert_eq!(release.api_version, "k8s.nyl/v1");
         assert_eq!(release.kind, "Release");
         assert_eq!(release.metadata.name, "myapp");
         assert_eq!(release.metadata.namespace, "production");
@@ -280,7 +295,7 @@ mod tests {
     #[test]
     fn test_from_value_with_spec() {
         let value = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -296,7 +311,7 @@ mod tests {
     #[test]
     fn release_parses_bundle_and_namespace_scope() {
         let release = Release::from_value(&json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {
@@ -312,7 +327,7 @@ mod tests {
     #[test]
     fn release_rejects_duplicate_namespaces_and_include_traversal() {
         let duplicate = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {"additionalNamespaces": ["monitoring", "monitoring"]}
@@ -323,7 +338,7 @@ mod tests {
             .contains("duplicate"));
 
         let traversal = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "myapp", "namespace": "production"},
             "spec": {"include": ["../shared.yaml"]}
@@ -337,7 +352,7 @@ mod tests {
     #[test]
     fn test_from_value_with_application_override() {
         let value = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {
                 "name": "myapp",
@@ -376,7 +391,7 @@ mod tests {
     #[test]
     fn test_from_value_invalid_missing_metadata() {
         let value = json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release"
         });
 
@@ -387,7 +402,7 @@ mod tests {
     fn test_extract_release_with_release() {
         let manifests = vec![
             json!({
-                "apiVersion": "k8s.gitops.nyl/v1",
+                "apiVersion": "k8s.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "myapp",
@@ -438,7 +453,7 @@ mod tests {
     fn test_extract_release_multiple_error() {
         let manifests = vec![
             json!({
-                "apiVersion": "k8s.gitops.nyl/v1",
+                "apiVersion": "k8s.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "app1",
@@ -446,7 +461,7 @@ mod tests {
                 }
             }),
             json!({
-                "apiVersion": "k8s.gitops.nyl/v1",
+                "apiVersion": "k8s.nyl/v1",
                 "kind": "Release",
                 "metadata": {
                     "name": "app2",
@@ -463,7 +478,7 @@ mod tests {
     #[test]
     fn test_release_rejects_unknown_fields() {
         let yaml = r"
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: test
@@ -479,7 +494,7 @@ unknownField: should-fail
     #[test]
     fn test_release_rejects_non_object_application_override() {
         let yaml = r"
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: test
@@ -497,7 +512,7 @@ spec:
     #[test]
     fn test_release_parses_strip_empty_metadata_labels_override() {
         let yaml = r"
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: test
