@@ -5,15 +5,13 @@
 //! built-in schemas, which use a vendored copy when one exists and are
 //! downloaded otherwise. Every comment is a relative path to a schema Nyl
 //! writes, never a URL, so committed comments do not depend on the network.
-//! The schemas accept `{{ … }}` template expressions wherever a scalar is
-//! expected, so Helm and structurally templated Nyl files validate in editors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::gitops::reconcile::in_rendered_tree;
 use crate::gitops::{resolve_cluster_contract, GitOpsInventory};
@@ -177,7 +175,7 @@ async fn download_builtins(
     for (file, url) in downloads {
         let reason = match resolver.builtin(&url).await {
             Ok(Some(document)) => {
-                generated.insert(file, allow_templates(document.value));
+                generated.insert(file, document.value);
                 continue;
             }
             Ok(None) => format!("Built-in schema {url} is not published"),
@@ -242,7 +240,7 @@ impl SchemaCatalog {
         let mut components = None;
         for kind in ResourceKind::ALL {
             let file = PathBuf::from("nyl").join(kind.schema_path());
-            let schema = allow_templates(kind.schema());
+            let schema = kind.schema();
             if kind == ResourceKind::Component {
                 components = Some((kind.api_version().to_owned(), file, schema));
             } else {
@@ -274,7 +272,7 @@ impl SchemaCatalog {
                 };
                 for (version, variants) in definition.versions {
                     let key = (format!("{}/{version}", crd.group), crd.kind.clone());
-                    crds.entry(key).or_insert_with(|| allow_templates(variants.strict));
+                    crds.entry(key).or_insert(variants.strict);
                 }
             }
         }
@@ -342,9 +340,8 @@ impl SchemaCatalog {
                 let digest = self.builtins.get(&url)?;
                 serde_json::from_slice::<Value>(&store::read_blob(&self.vendor, digest).ok()?).ok()
             });
-        // Vendored copies are local, so they can accept template expressions too.
         if let Some(schema) = vendored {
-            return Some(SchemaTarget::Local(file, allow_templates(schema)));
+            return Some(SchemaTarget::Local(file, schema));
         }
         Some(SchemaTarget::Download(file, url))
     }
@@ -473,95 +470,6 @@ fn version_key(version: &str) -> Vec<u64> {
     version.split('.').map(|part| part.parse().unwrap_or(0)).collect()
 }
 
-/// Accept a `{{ … }}` template expression wherever the schema expects a scalar.
-pub fn allow_templates(schema: Value) -> Value {
-    relax(schema, true)
-}
-
-const SCHEMA_MAPS: [&str; 5] = [
-    "properties",
-    "patternProperties",
-    "definitions",
-    "$defs",
-    "dependentSchemas",
-];
-const SCHEMA_LISTS: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
-const SCHEMA_VALUES: [&str; 8] = [
-    "items",
-    "additionalProperties",
-    "additionalItems",
-    "not",
-    "if",
-    "then",
-    "else",
-    "contains",
-];
-
-/// Relax a schema's nested schemas, then, with `wrap`, the schema itself.
-///
-/// `oneOf` admits a value matching exactly one branch, and a template would
-/// match every relaxed branch. Its branches are therefore relaxed only beneath
-/// their top level, and the schema holding the `oneOf` accepts the template once.
-fn relax(schema: Value, wrap: bool) -> Value {
-    let Value::Object(mut object) = schema else {
-        return schema;
-    };
-    for key in SCHEMA_MAPS {
-        if let Some(Value::Object(members)) = object.get_mut(key) {
-            for member in members.values_mut() {
-                *member = relax(member.take(), true);
-            }
-        }
-    }
-    for key in SCHEMA_LISTS {
-        if let Some(Value::Array(members)) = object.get_mut(key) {
-            for member in members.iter_mut() {
-                *member = relax(member.take(), key != "oneOf");
-            }
-        }
-    }
-    for key in SCHEMA_VALUES {
-        if let Some(member) = object.get_mut(key) {
-            *member = match member.take() {
-                Value::Array(members) => Value::Array(members.into_iter().map(|member| relax(member, true)).collect()),
-                value => relax(value, true),
-            };
-        }
-    }
-    let constrained = constrains_scalar(&object)
-        || object.get("oneOf").and_then(Value::as_array).is_some_and(|branches| {
-            branches
-                .iter()
-                .any(|branch| branch.as_object().is_some_and(constrains_scalar))
-        });
-    if !wrap || !constrained {
-        return Value::Object(object);
-    }
-    // Annotations stay on the outer schema so editors keep showing them.
-    let mut outer = serde_json::Map::new();
-    for keyword in ["description", "title", "default", "examples", "$schema", "$id"] {
-        if let Some(value) = object.remove(keyword) {
-            outer.insert(keyword.to_owned(), value);
-        }
-    }
-    outer.insert(
-        "anyOf".to_owned(),
-        json!([Value::Object(object), {"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"}]),
-    );
-    Value::Object(outer)
-}
-
-/// Whether a schema restricts a value in a way a template string would fail.
-fn constrains_scalar(object: &serde_json::Map<String, Value>) -> bool {
-    let scalar_type = |value: &Value| matches!(value.as_str(), Some("boolean" | "integer" | "number"));
-    object.get("type").is_some_and(|value| match value {
-        Value::Array(types) => types.iter().any(scalar_type),
-        value => scalar_type(value),
-    }) || ["enum", "const", "pattern", "format"]
-        .iter()
-        .any(|keyword| object.contains_key(*keyword))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,49 +501,5 @@ mod tests {
             relative_reference(Path::new("/p"), Path::new("/p/.nyl/schemas/a.json")),
             "./.nyl/schemas/a.json"
         );
-    }
-
-    #[test]
-    fn test_allow_templates_accepts_expressions_for_scalars_only() {
-        let schema = allow_templates(json!({
-            "type": "object",
-            "properties": {
-                "enabled": {"type": "boolean", "description": "Toggle."},
-                "replicas": {"type": ["integer", "null"]},
-                "name": {"type": "string"},
-                "mode": {"enum": ["a", "b"]},
-                "items": {"type": "array", "items": {"type": "integer"}}
-            }
-        }));
-        let template = json!({"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"});
-        assert_eq!(
-            schema["properties"]["enabled"],
-            json!({"description": "Toggle.", "anyOf": [{"type": "boolean"}, template]})
-        );
-        assert_eq!(schema["properties"]["replicas"]["anyOf"][1], template);
-        assert_eq!(schema["properties"]["mode"]["anyOf"][1], template);
-        assert_eq!(schema["properties"]["items"]["items"]["anyOf"][1], template);
-        // Plain strings already accept expressions.
-        assert_eq!(schema["properties"]["name"], json!({"type": "string"}));
-    }
-
-    #[test]
-    fn test_allow_templates_accepts_expressions_once_for_one_of_enums() {
-        // Nyl's documented enums are a oneOf of const branches.
-        let policy = json!({"oneOf": [
-            {"const": "Foreground", "type": "string", "description": "Foreground."},
-            {"const": "Orphan", "type": "string"},
-            {"type": "object", "properties": {"count": {"type": "integer"}}}
-        ]});
-        let schema = allow_templates(json!({"properties": {"policy": policy.clone()}}));
-        let template = json!({"type": "string", "pattern": "\\{\\{[\\s\\S]*\\}\\}"});
-        let relaxed = &schema["properties"]["policy"];
-        assert_eq!(relaxed["anyOf"][1], template);
-        // The branches stay exclusive: only the outer alternative admits a template.
-        let branches = &relaxed["anyOf"][0]["oneOf"];
-        assert_eq!(branches[0], policy["oneOf"][0]);
-        assert_eq!(branches[1], policy["oneOf"][1]);
-        // Fields nested in a branch still accept templates.
-        assert_eq!(branches[2]["properties"]["count"]["anyOf"][1], template);
     }
 }

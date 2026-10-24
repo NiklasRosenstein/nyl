@@ -93,7 +93,7 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
     assert!(cluster.starts_with(
         "# yaml-language-server: $schema=../vendor/schemas/editor/nyl/k8s.gitops.nyl/v1/cluster.schema.json\n"
     ));
-    // The vendored CRD schema accepts template expressions for its scalars.
+    // The vendored CRD's strict schema is written next to the Nyl schemas.
     let schema: serde_json::Value = serde_json::from_slice(
         &fs::read(
             directory
@@ -103,10 +103,7 @@ fn test_schema_annotate_points_documents_at_vendored_schemas_and_checks_drift() 
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        schema["properties"]["spec"]["properties"]["count"]["anyOf"][0]["type"],
-        "integer"
-    );
+    assert_eq!(schema["properties"]["spec"]["properties"]["count"]["type"], "integer");
     assert_eq!(
         fs::read_to_string(directory.path().join("charts/web/templates/configmap.yaml")).unwrap(),
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n"
@@ -188,7 +185,7 @@ fn assert_builtin_comments(directory: &Path, schema_root: &str) {
         let schema: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.join(schema_root).join("builtins/v1.31.4").join(file)).unwrap())
                 .unwrap();
-        assert_eq!(schema["properties"][property]["anyOf"][0]["type"], "boolean");
+        assert_eq!(schema["properties"][property]["type"], "boolean");
     }
 }
 
