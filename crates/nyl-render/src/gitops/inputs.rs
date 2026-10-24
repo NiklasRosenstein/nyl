@@ -15,7 +15,9 @@
 //!   and each resolved input is digested for the ownership index.
 //!
 //! The declaration types and their pure rules live in
-//! [`nyl_core::resources::release_inputs`].
+//! [`nyl_core::resources::release_inputs`], and precedence, type checks, and
+//! aggregated issues in the shared resolver [`nyl_core::bindings`];
+//! [`InputSources`] is its provider for Release inputs.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +25,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::resources::release_inputs::{BindingKind, InputBinding, InputDeclaration, ReleaseKey};
+use nyl_core::bindings::{Provided, Providers, Provision, Resolved};
+
+use crate::resources::release_inputs::{
+    FileInputSource, GitInputSource, InputBinding, InputDeclaration, PromotionInputSource, PublicationInputSource,
+    ReleaseKey, UnitInputSource,
+};
 use crate::resources::{DeploymentTarget, InlineGitRepository};
 use crate::util::project_path::ProjectPaths;
 use crate::{NylError, Result};
@@ -382,11 +389,7 @@ pub enum InputOrigin {
 }
 
 /// One effective input.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedInput {
-    pub value: Value,
-    pub origin: InputOrigin,
-}
+pub type ResolvedInput = Resolved<InputOrigin>;
 
 /// Effective inputs of one Release that declares inputs.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -497,11 +500,11 @@ impl ResolvedTargetInputs {
     }
 }
 
+pub use nyl_core::bindings::select;
+
 /// Digest of an input's canonical JSON value.
 pub fn value_digest(value: &Value) -> Result<String> {
-    Ok(nyl_core::digest::sha256_hex(&nyl_core::digest::canonical_json_bytes(
-        value,
-    )?))
+    Ok(nyl_core::bindings::value_digest(value)?)
 }
 
 /// Resolve the inputs of every rendered Release of `target`.
@@ -613,20 +616,15 @@ pub fn undeclared_binding_issues(
     bindings: &BTreeMap<String, InputBinding>,
     declarations: &BTreeMap<String, InputDeclaration>,
 ) -> Vec<String> {
-    bindings
-        .keys()
-        .filter(|name| !declarations.contains_key(*name))
-        .map(|name| {
-            format!(
-                "spec.releaseInputs.{:?}.{name} binds an input Release {key} does not declare; declared inputs: {}",
-                key.to_string(),
-                declarations.keys().cloned().collect::<Vec<_>>().join(", ")
-            )
-        })
-        .collect()
+    nyl_core::bindings::undeclared_binding_issues(
+        &format!("spec.releaseInputs.{:?}", key.to_string()),
+        &format!("Release {key}"),
+        bindings,
+        declarations,
+    )
 }
 
-/// Resolve one Release's declared inputs.
+/// Resolve one Release's declared inputs through the shared resolver.
 ///
 /// `effective input = override, otherwise binding, otherwise default`.
 /// Overrides come from direct commands only. Problems are appended to
@@ -640,106 +638,110 @@ pub fn resolve_release_inputs(
     sources: &InputSources<'_>,
     issues: &mut Vec<String>,
 ) -> ResolvedReleaseInputs {
-    let mut resolved = ResolvedReleaseInputs::default();
-    for (name, declaration) in declarations {
-        let field = format!("{field_prefix}.{name}");
-        let binding = bindings.and_then(|bindings| bindings.get(name));
-        let candidate = if let Some(value) = overrides.get(name) {
-            Ok(Some(ResolvedInput {
-                value: value.clone(),
-                origin: InputOrigin::Override,
-            }))
-        } else {
-            // An unbound fromPublication binding (bootstrap) falls back to the
-            // default like a missing binding.
-            binding
-                .map(|binding| resolve_binding(&field, binding, sources))
-                .transpose()
-                .map(Option::flatten)
-                .map(|input| {
-                    input.or_else(|| {
-                        declaration.default.clone().map(|value| ResolvedInput {
-                            value,
-                            origin: InputOrigin::Default,
-                        })
-                    })
-                })
-        };
-        match candidate {
-            Ok(Some(input)) => match declaration.check(&input.value) {
-                Ok(()) => {
-                    resolved.inputs.insert(name.clone(), input);
-                }
-                Err(reason) => issues.push(format!(
-                    "{} for input {name:?} of Release {release} is invalid: {reason}",
-                    describe_origin(&field, &input.origin)
-                )),
-            },
-            Ok(None) => {
-                let description = declaration
-                    .description
-                    .as_deref()
-                    .map(|description| format!(" ({description})"))
-                    .unwrap_or_default();
-                let unavailable = sources
-                    .publication
-                    .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable);
-                issues.push(match binding.and_then(|binding| binding.from_publication.as_ref()) {
-                    Some(source) if unavailable => format!(
-                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default",
-                        source.path
-                    ),
-                    Some(source) => format!(
-                        "Release {release} requires input {name:?}{description}, but {field}.fromPublication state file {} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default",
-                        source.path
-                    ),
-                    None => format!(
-                        "Release {release} requires input {name:?}{description}, but it has no binding and no default; bind it in {field_prefix}"
-                    ),
-                });
+    let slots = nyl_core::bindings::resolve(
+        field_prefix,
+        &format!("Release {release}"),
+        declarations,
+        bindings,
+        overrides,
+        sources,
+        issues,
+    );
+    // Rendering has no later wave to wait for, so a blocked input fails.
+    issues.extend(
+        slots
+            .blocked
+            .into_iter()
+            .map(|blocked| format!("{} is not available yet: {}", blocked.field, blocked.reason)),
+    );
+    ResolvedReleaseInputs { inputs: slots.values }
+}
+
+impl nyl_core::bindings::Origin for InputOrigin {
+    fn from_default() -> Self {
+        Self::Default
+    }
+
+    fn from_override() -> Self {
+        Self::Override
+    }
+
+    fn from_value() -> Self {
+        Self::Value
+    }
+
+    fn describe(&self, field: &str) -> String {
+        match self {
+            Self::Default => "The default".to_owned(),
+            Self::Value => format!("{field}.value"),
+            Self::File(path) => format!("{field}.fromFile ({})", path.display()),
+            Self::Git { url, commit, path, .. } => format!("{field}.fromGit ({url}@{commit}/{path})"),
+            Self::Publication { path, commit, .. } => format!("{field}.fromPublication ({path} at {commit})"),
+            Self::Carried { source, .. } => {
+                format!("{field}.fromPublication carryFileFromWorktree ({})", source.display())
             }
-            Err(error) => issues.push(error),
+            Self::Override => "The --input/--inputs override".to_owned(),
         }
-    }
-    resolved
-}
-
-fn describe_origin(field: &str, origin: &InputOrigin) -> String {
-    match origin {
-        InputOrigin::Default => "The default".to_owned(),
-        InputOrigin::Value => format!("{field}.value"),
-        InputOrigin::File(path) => format!("{field}.fromFile ({})", path.display()),
-        InputOrigin::Git { url, commit, path, .. } => format!("{field}.fromGit ({url}@{commit}/{path})"),
-        InputOrigin::Publication { path, commit, .. } => format!("{field}.fromPublication ({path} at {commit})"),
-        InputOrigin::Carried { source, .. } => {
-            format!("{field}.fromPublication carryFileFromWorktree ({})", source.display())
-        }
-        InputOrigin::Override => "The --input/--inputs override".to_owned(),
     }
 }
 
-/// Resolve one binding; `Ok(None)` leaves the input unbound.
-fn resolve_binding(
-    field: &str,
-    binding: &InputBinding,
-    sources: &InputSources<'_>,
-) -> std::result::Result<Option<ResolvedInput>, String> {
-    let kind = binding.kind(field).map_err(|error| error.to_string())?;
-    if kind == BindingKind::FromPublication {
-        return resolve_publication(field, binding, sources);
+/// Release input sources: project files, locked Git blobs, and publication
+/// state. `fromUnit` and `fromPromotion` need orchestrated execution.
+impl Providers for InputSources<'_> {
+    type Origin = InputOrigin;
+
+    fn file(&self, field: &str, source: &FileInputSource) -> Provided<InputOrigin> {
+        resolve_file(field, source, self).map(Provision::Value)
     }
-    resolve_bound(field, kind, binding, sources).map(Some)
+
+    fn git(&self, field: &str, source: &GitInputSource) -> Provided<InputOrigin> {
+        resolve_git(field, source, self).map(Provision::Value)
+    }
+
+    fn publication(&self, field: &str, source: &PublicationInputSource) -> Provided<InputOrigin> {
+        resolve_publication(field, source, self).map(|input| input.map_or(Provision::Unbound, Provision::Value))
+    }
+
+    fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<InputOrigin> {
+        Err(needs_orchestration(field, "fromUnit"))
+    }
+
+    fn promotion(&self, field: &str, _source: &PromotionInputSource) -> Provided<InputOrigin> {
+        Err(needs_orchestration(field, "fromPromotion"))
+    }
+
+    /// Only `fromPublication` leaves an input unbound: before its state file
+    /// exists, or when its branch is unavailable.
+    fn unbound(&self, field: &str, binding: &InputBinding, requirement: &str) -> Option<String> {
+        let path = &binding.from_publication.as_ref()?.path;
+        Some(
+            if self
+                .publication
+                .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable)
+            {
+                format!(
+                "{requirement}, but {field}.fromPublication state file {path} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default"
+            )
+            } else {
+                format!(
+                "{requirement}, but {field}.fromPublication state file {path} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default"
+            )
+            },
+        )
+    }
+}
+
+fn needs_orchestration(field: &str, kind: &str) -> String {
+    format!(
+        "{field}.{kind} needs orchestrated execution, which resolves it into a pinned input snapshot; render-tree, publish-tree, diff-tree, and direct commands never resolve it"
+    )
 }
 
 fn resolve_publication(
     field: &str,
-    binding: &InputBinding,
+    source: &PublicationInputSource,
     sources: &InputSources<'_>,
 ) -> std::result::Result<Option<ResolvedInput>, String> {
-    let source = binding
-        .from_publication
-        .as_ref()
-        .expect("kind agrees with the set field");
     let field = format!("{field}.fromPublication");
     if let Some(carry) = &source.carry_file_from_worktree {
         let carry_path = sources
@@ -852,99 +854,90 @@ fn is_tracked(path: &Path) -> bool {
         .is_ok_and(|relative| index.get_path(relative, 0).is_some())
 }
 
-fn resolve_bound(
+fn resolve_file(
     field: &str,
-    kind: BindingKind,
-    binding: &InputBinding,
+    source: &FileInputSource,
     sources: &InputSources<'_>,
 ) -> std::result::Result<ResolvedInput, String> {
-    match kind {
-        BindingKind::Value => Ok(ResolvedInput {
-            value: binding.value.clone().expect("kind agrees with the set field"),
-            origin: InputOrigin::Value,
-        }),
-        BindingKind::FromFile => {
-            let source = binding.from_file.as_ref().expect("kind agrees with the set field");
-            let path = sources
-                .paths
-                .resolve(&format!("{field}.fromFile.path"), &source.path)
-                .map_err(|error| error.to_string())?;
-            let visible = path
-                .strip_prefix(&sources.paths.worktree_root)
-                .is_ok_and(|relative| sources.visible_files.contains(relative));
-            if !visible {
-                return Err(format!(
-                    "{field}.fromFile.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
-                    source.path
-                ));
-            }
-            let document = read_single_document(&path).map_err(|reason| format!("{field}.fromFile: {reason}"))?;
-            let value = select(&document, &source.pointer)
-                .map_err(|reason| format!("{field}.fromFile: {} {reason}", source.path))?;
-            Ok(ResolvedInput {
-                value,
-                origin: InputOrigin::File(path),
-            })
-        }
-        BindingKind::FromGit => {
-            let source = binding.from_git.as_ref().expect("kind agrees with the set field");
-            let (repository, repository_source) = match (&source.repository, &source.repository_ref) {
-                (Some(repository), _) => (repository.clone(), None),
-                (None, Some(reference)) => {
-                    let (repository, path) = (sources.repositories)(reference)
-                        .map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
-                    (repository, Some(path))
-                }
-                (None, None) => unreachable!("validated fromGit names a repository"),
-            };
-            let bytes = sources
-                .git
-                .read_blob(&repository.repo_url, &source.commit, &source.path)
-                .map_err(|error| match error {
-                    NylError::Git(_) => format!(
-                        "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
-                        source.path,
-                        source.commit,
-                        crate::util::sanitize_url(&repository.repo_url),
-                        crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
-                    ),
-                    // Vendor policy errors carry their own fix.
-                    NylError::Config(message) => format!(
-                        "{field}.fromGit: {}",
-                        crate::util::redact_url_credentials(&message, &repository.repo_url)
-                    ),
-                    other => format!(
-                        "{field}.fromGit: {}",
-                        crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
-                    ),
-                })?
-                .ok_or_else(|| {
-                    format!(
-                        "{field}.fromGit: commit {} of {} has no file {}",
-                        source.commit,
-                        crate::util::sanitize_url(&repository.repo_url),
-                        source.path
-                    )
-                })?;
-            let document = parse_single_document(&bytes).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
-            let value = select(&document, &source.pointer).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
-            Ok(ResolvedInput {
-                value,
-                origin: InputOrigin::Git {
-                    url: credential_free_url(&repository.repo_url),
-                    commit: source.commit.clone(),
-                    path: source.path.clone(),
-                    blob_digest: nyl_core::digest::sha256_hex(&bytes),
-                    repository_source,
-                },
-            })
-        }
-        BindingKind::FromPublication => unreachable!("resolved by resolve_publication"),
-        BindingKind::FromUnit | BindingKind::FromPromotion => Err(format!(
-            "{field}.{} needs orchestrated execution, which resolves it into a pinned input snapshot; render-tree, publish-tree, diff-tree, and direct commands never resolve it",
-            kind.field()
-        )),
+    let path = sources
+        .paths
+        .resolve(&format!("{field}.fromFile.path"), &source.path)
+        .map_err(|error| error.to_string())?;
+    let visible = path
+        .strip_prefix(&sources.paths.worktree_root)
+        .is_ok_and(|relative| sources.visible_files.contains(relative));
+    if !visible {
+        return Err(format!(
+            "{field}.fromFile.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
+            source.path
+        ));
     }
+    let document = read_single_document(&path).map_err(|reason| format!("{field}.fromFile: {reason}"))?;
+    let value =
+        select(&document, &source.pointer).map_err(|reason| format!("{field}.fromFile: {} {reason}", source.path))?;
+    Ok(ResolvedInput {
+        value,
+        origin: InputOrigin::File(path),
+    })
+}
+
+fn resolve_git(
+    field: &str,
+    source: &GitInputSource,
+    sources: &InputSources<'_>,
+) -> std::result::Result<ResolvedInput, String> {
+    let (repository, repository_source) = match (&source.repository, &source.repository_ref) {
+        (Some(repository), _) => (repository.clone(), None),
+        (None, Some(reference)) => {
+            let (repository, path) =
+                (sources.repositories)(reference).map_err(|error| format!("{field}.fromGit.repositoryRef: {error}"))?;
+            (repository, Some(path))
+        }
+        (None, None) => unreachable!("validated fromGit names a repository"),
+    };
+    let bytes = sources
+        .git
+        .read_blob(&repository.repo_url, &source.commit, &source.path)
+        .map_err(|error| match error {
+            NylError::Git(_) => format!(
+                "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
+                source.path,
+                source.commit,
+                crate::util::sanitize_url(&repository.repo_url),
+                crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
+            ),
+            // Vendor policy errors carry their own fix.
+            NylError::Config(message) => format!(
+                "{field}.fromGit: {}",
+                crate::util::redact_url_credentials(&message, &repository.repo_url)
+            ),
+            other => format!(
+                "{field}.fromGit: {}",
+                crate::util::redact_url_credentials(&other.to_string(), &repository.repo_url)
+            ),
+        })?
+        .ok_or_else(|| {
+            format!(
+                "{field}.fromGit: commit {} of {} has no file {}",
+                source.commit,
+                crate::util::sanitize_url(&repository.repo_url),
+                source.path
+            )
+        })?;
+    let document =
+        parse_single_document(&bytes).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
+    let value =
+        select(&document, &source.pointer).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
+    Ok(ResolvedInput {
+        value,
+        origin: InputOrigin::Git {
+            url: credential_free_url(&repository.repo_url),
+            commit: source.commit.clone(),
+            path: source.path.clone(),
+            blob_digest: nyl_core::digest::sha256_hex(&bytes),
+            repository_source,
+        },
+    })
 }
 
 /// Working-tree files the target's `fromPublication` bindings carry.
@@ -1071,13 +1064,6 @@ pub fn parse_single_document(bytes: &[u8]) -> std::result::Result<Value, String>
             "contains {count} YAML documents; an input file must hold exactly one"
         )),
     }
-}
-
-/// Select `pointer` inside `document`.
-pub fn select(document: &Value, pointer: &str) -> std::result::Result<Value, String> {
-    nyl_core::json_pointer::resolve(document, pointer)
-        .cloned()
-        .ok_or_else(|| format!("has no value at JSON Pointer {pointer:?}"))
 }
 
 #[cfg(test)]
