@@ -108,7 +108,7 @@ spec:
   a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
   refs. Changing it goes through `nyl state move` (see
   [Initialization and moves](#initialization-and-moves)). Hosts verified with
-  both prefixes are listed in [Git host compatibility](../nyl/book/src/content/docs/commands/state.md#git-host-compatibility).
+  both prefixes are listed in [Git host compatibility](../nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility).
 - Validation checks every configured state ref, and the coordination refs each
   environment implies, for names that Git cannot hold together, such as a
   shared state branch `nyl/previews` and an environment named `previews` whose
