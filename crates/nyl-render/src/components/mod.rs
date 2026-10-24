@@ -12,6 +12,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub mod value_imports;
+
 /// A component represents a reusable template/chart
 #[derive(Debug, Clone)]
 pub enum Component {

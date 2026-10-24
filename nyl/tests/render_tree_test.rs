@@ -6564,3 +6564,273 @@ fn test_render_with_a_source_kind_filter_renders_only_the_selected_resources() {
         .collect::<Vec<_>>();
     assert_eq!(kinds, ["ConfigMap", "ConfigMap"]);
 }
+
+/// Write a Postgres-style component that imports platform defaults, and an App
+/// component whose chart renders a nested PostgresDb invocation.
+fn value_import_fixture() -> TempDir {
+    let fixture = fixture();
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    let cluster = fs::read_to_string(&cluster_path).unwrap().replace(
+        "spec:\n  destination:",
+        r"spec:
+  values:
+    postgres:
+      scheduling:
+        nodeSelector:
+          scheduling.example.com/pool: compute
+      storageClass: local-path-retain
+      backup:
+        destinationPath: s3://example-backups/postgresql
+        retentionPolicy: 30d
+  destination:",
+    );
+    fs::write(&cluster_path, cluster).unwrap();
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    let target = fs::read_to_string(&target_path).unwrap().replace(
+        "  values:\n    environment: production\n",
+        "  values:\n    environment: production\n    postgres:\n      backup:\n        retentionPolicy: 14d\n",
+    );
+    fs::write(&target_path, target).unwrap();
+
+    let postgres = fixture.path().join("components/example/v1/PostgresDb");
+    fs::create_dir_all(postgres.join("templates")).unwrap();
+    fs::write(
+        postgres.join("Chart.yaml"),
+        "apiVersion: v2\nname: postgres-db\nversion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(postgres.join("values.yaml"), "storage:\n  size: 10Gi\n").unwrap();
+    // Strict: every property an import supplies is required, and nothing else is allowed.
+    fs::write(
+        postgres.join("values.schema.json"),
+        r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["storage", "backup"],
+  "properties": {
+    "scheduling": {"type": "object"},
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storageClass", "size"],
+      "properties": {"storageClass": {"type": "string"}, "size": {"type": "string"}}
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destinationPath", "retentionPolicy"],
+      "properties": {"destinationPath": {"type": "string"}, "retentionPolicy": {"type": "string"}}
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        postgres.join("templates/configmap.yaml"),
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+data:
+  storageClass: {{ .Values.storage.storageClass | quote }}
+  size: {{ .Values.storage.size | quote }}
+  backup: {{ printf "%s/%s" .Values.backup.destinationPath .Release.Name | quote }}
+  retention: {{ .Values.backup.retentionPolicy | quote }}
+  nodeSelector: {{ (.Values.scheduling | default dict).nodeSelector | default dict | toJson | quote }}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        postgres.join("nyl-component.yaml"),
+        r"apiVersion: components.nyl/v1alpha1
+valueImports:
+  - name: scheduling
+    from: /postgres/scheduling
+    to: /scheduling
+  - name: storageClass
+    from: /postgres/storageClass
+    to: /storage/storageClass
+  - name: backup
+    from: /postgres/backup
+    to: /backup
+    required: true
+",
+    )
+    .unwrap();
+
+    let app = fixture.path().join("components/example/v1/App");
+    fs::create_dir_all(app.join("templates")).unwrap();
+    fs::write(app.join("Chart.yaml"), "apiVersion: v2\nname: app\nversion: 1.0.0\n").unwrap();
+    fs::write(
+        app.join("templates/database.yaml"),
+        r"apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: {{ .Release.Name }}-db
+  namespace: {{ .Release.Namespace }}
+spec:
+  storage:
+    size: {{ .Values.databaseSize }}
+",
+    )
+    .unwrap();
+
+    fs::write(
+        fixture.path().join("applications/workloads/db.yaml"),
+        r"apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: db
+  namespace: app
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: inherited-db
+  namespace: app
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/PostgresDb
+metadata:
+  name: tuned-db
+  namespace: app
+spec:
+  storage:
+    size: 20Gi
+  backup:
+    retentionPolicy: 7d
+---
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/App
+metadata:
+  name: web
+  namespace: app
+spec:
+  databaseSize: 5Gi
+",
+    )
+    .unwrap();
+    fixture
+}
+
+fn rendered_config_maps(stdout: &[u8]) -> BTreeMap<String, serde_json::Value> {
+    nyl::yaml::parse_yaml_documents_k8s_compatible(std::str::from_utf8(stdout).unwrap())
+        .unwrap()
+        .into_iter()
+        .filter(|document| document["kind"] == "ConfigMap")
+        .map(|document| {
+            (
+                document["metadata"]["name"].as_str().unwrap().to_owned(),
+                document["data"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn render_db_release(fixture: &TempDir, target: Option<&str>) -> assert_cmd::assert::Assert {
+    let mut command = Command::cargo_bin("nyl").unwrap();
+    command.current_dir(fixture.path()).args(["render", "--offline"]);
+    match target {
+        Some(target) => command.args(["--target", target]),
+        None => command.args(["--kube-version", "1.31.4", "--kube-api-versions", "v1"]),
+    };
+    command.arg("applications/workloads/db.yaml").assert()
+}
+
+#[test]
+fn component_value_imports_supply_platform_defaults_beneath_invocation_values() {
+    let fixture = value_import_fixture();
+    let output = render_db_release(&fixture, Some("production")).success();
+    let config_maps = rendered_config_maps(&output.get_output().stdout);
+
+    assert_eq!(
+        config_maps["inherited-db"],
+        serde_json::json!({
+            "storageClass": "local-path-retain",
+            "size": "10Gi",
+            "backup": "s3://example-backups/postgresql/inherited-db",
+            "retention": "14d",
+            "nodeSelector": r#"{"scheduling.example.com/pool":"compute"}"#,
+        })
+    );
+    assert_eq!(config_maps["tuned-db"]["size"], "20Gi");
+    assert_eq!(config_maps["tuned-db"]["retention"], "7d");
+    assert_eq!(
+        config_maps["tuned-db"]["backup"],
+        "s3://example-backups/postgresql/tuned-db"
+    );
+    // The nested invocation applies its own component's contract.
+    assert_eq!(config_maps["web-db"]["size"], "5Gi");
+    assert_eq!(config_maps["web-db"]["storageClass"], "local-path-retain");
+    assert_eq!(config_maps["web-db"]["retention"], "14d");
+}
+
+#[test]
+fn component_value_imports_fail_clearly_without_target_or_with_invalid_values() {
+    let fixture = value_import_fixture();
+    render_db_release(&fixture, None).failure().stderr(
+        predicate::str::contains("components.k8s.nyl/v1 example/v1/PostgresDb app/inherited-db")
+            .and(predicate::str::contains(r#"required value import "backup""#))
+            .and(predicate::str::contains("this render has no target")),
+    );
+
+    // The chart schema validates the merged values, imported ones included.
+    let cluster_path = fixture.path().join("config/clusters/kasoku.yaml");
+    fs::write(
+        &cluster_path,
+        fs::read_to_string(&cluster_path)
+            .unwrap()
+            .replace("storageClass: local-path-retain", "storageClass: 5"),
+    )
+    .unwrap();
+    render_db_release(&fixture, Some("production"))
+        .failure()
+        .stderr(predicate::str::contains(
+            "at '/storage/storageClass': got number, want string",
+        ));
+}
+
+#[test]
+fn component_value_import_changes_invalidate_cached_tree_renders() {
+    let fixture = value_import_fixture();
+    let output = fixture.path().join("deploy");
+    let render_tree = || {
+        Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .args(["render-tree", "--target", "production", "--output-dir"])
+            .arg(&output)
+            .assert()
+            .success();
+        read_resources(&output)
+    };
+    let first = render_tree();
+    assert!(first.contains("retention: 14d"), "{first}");
+    assert_eq!(render_tree(), first);
+
+    let target_path = fixture.path().join("config/targets/production.yaml");
+    fs::write(
+        &target_path,
+        fs::read_to_string(&target_path)
+            .unwrap()
+            .replace("retentionPolicy: 14d", "retentionPolicy: 60d"),
+    )
+    .unwrap();
+    let retargeted = render_tree();
+    assert!(retargeted.contains("retention: 60d"), "{retargeted}");
+    assert!(retargeted.contains("retention: 7d"), "{retargeted}");
+
+    let contract_path = fixture
+        .path()
+        .join("components/example/v1/PostgresDb/nyl-component.yaml");
+    fs::write(
+        &contract_path,
+        fs::read_to_string(&contract_path).unwrap().replace(
+            "  - name: scheduling\n    from: /postgres/scheduling\n    to: /scheduling\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let recontracted = render_tree();
+    assert!(!recontracted.contains("scheduling.example.com/pool"), "{recontracted}");
+}

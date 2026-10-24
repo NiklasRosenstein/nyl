@@ -30,6 +30,9 @@ spec:
   environment: "{{ values.environment }}"
 ```
 
+A local component can instead declare [value imports](/nyl/kubernetes/components/value-imports/)
+that map selected target values to chart value defaults for every invocation.
+
 Example:
 
 ```yaml
