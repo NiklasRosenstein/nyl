@@ -585,6 +585,11 @@ impl DependencyRecorder {
         self.cacheable
     }
 
+    /// The dependencies recorded so far, by name.
+    pub fn dependencies(&self) -> &BTreeMap<String, RecordedDependency> {
+        &self.dependencies
+    }
+
     /// Close the recording into the dependency record stored beside the artifact with `artifact_digest`.
     pub fn finish(self, action: impl Into<String>, artifact_digest: String) -> DependencyRecord {
         DependencyRecord {

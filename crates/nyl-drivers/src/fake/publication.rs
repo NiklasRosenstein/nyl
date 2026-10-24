@@ -56,6 +56,13 @@ impl FakePublication {
             .map_err(|error| DriverError::before_effects(format!("spec.releases: {error}")))
     }
 
+    /// A render whose input record does not cover it executes every time,
+    /// as the contract requires of an uncacheable render: its key carries
+    /// the resolution time, which no later resolution repeats.
+    fn uncacheable_fingerprint(cacheable: bool, now: nyl_core::orchestration::time::Timestamp) -> Option<String> {
+        (!cacheable).then(|| format!("uncacheable render resolved at {}", now.to_rfc3339()))
+    }
+
     fn render(
         worktree: &std::path::Path,
         project_dir: &std::path::Path,
@@ -165,7 +172,7 @@ impl Driver for FakePublication {
         Ok(KeyInputs {
             files: rendered.input_record,
             excluded_fields: Vec::new(),
-            fingerprint: None,
+            fingerprint: Self::uncacheable_fingerprint(rendered.cacheable, ctx.now),
         })
     }
 
@@ -212,7 +219,11 @@ impl Driver for FakePublication {
             identity: identity.clone(),
             time: ctx.now,
         };
-        let prepared = prepare_target_publication(&rendered, &ctx.project_dir, &message, &signature)
+        // Credential variables come from the execution's admitted
+        // environment (PATH and the unit's declared passthrough), never from
+        // the process environment.
+        let variable = |name: &str| ctx.env.get(name).cloned();
+        let prepared = prepare_target_publication(&rendered, &ctx.project_dir, &message, &signature, &variable)
             .map_err(|error| DriverError::before_effects(format!("cannot prepare the publication: {error}")))?;
         let published = prepared
             .push()
@@ -303,6 +314,19 @@ mod tests {
         assert!(driver
             .validate_spec(&json!({"target": "dev", "releases": {"web/web": "x"}}))
             .is_err());
+    }
+
+    #[test]
+    fn test_uncacheable_render_never_repeats_its_key() {
+        use chrono::TimeZone;
+        let (first, second) = (
+            chrono::Utc.timestamp_opt(1, 0).unwrap(),
+            chrono::Utc.timestamp_opt(2, 0).unwrap(),
+        );
+        assert_eq!(FakePublication::uncacheable_fingerprint(true, first), None);
+        let one = FakePublication::uncacheable_fingerprint(false, first).unwrap();
+        let two = FakePublication::uncacheable_fingerprint(false, second).unwrap();
+        assert_ne!(one, two);
     }
 
     #[test]

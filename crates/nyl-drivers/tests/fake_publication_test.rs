@@ -65,7 +65,6 @@ impl World {
         git(world.root.path(), &["clone", "--quiet", &world.project_url(), "work"]);
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nyl/tests/scenarios/walkthroughs/_project");
         world.copy_into_work(&project);
-        world.declare_cluster_scopes();
         git(&world.work(), &["add", "--all"]);
         git(&world.work(), &["commit", "--quiet", "--message", "Initial project"]);
         git(&world.work(), &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
@@ -102,22 +101,6 @@ impl World {
                 .replace("%REGISTRY%", "registry.invalid:5000");
             std::fs::write(target, text).unwrap();
         }
-    }
-
-    /// The walkthrough Cluster records API versions only; rendering the
-    /// generated AppProject also needs the scope of each rendered kind.
-    fn declare_cluster_scopes(&self) {
-        let path = self.work().join("nyl/platform.yaml");
-        let text = std::fs::read_to_string(&path).unwrap();
-        if text.contains("clusterScopedKinds") {
-            return;
-        }
-        let text = text.replacen(
-            "    apiVersions: [v1, apps/v1]\n",
-            "    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]\n    clusterScopedKinds: [core/Namespace]\n",
-            1,
-        );
-        std::fs::write(path, text).unwrap();
     }
 
     fn files(&self, branch: &str) -> Vec<String> {

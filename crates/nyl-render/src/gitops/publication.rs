@@ -32,8 +32,8 @@ use super::reconcile::{
     RenderIndexPublication, DEFAULT_INDEX_PATH,
 };
 use super::{
-    compile_target_tree_cached_with_options, discover_gitops_inventory, CacheMode, CompiledTargetTree, GitOpsCache,
-    GitOpsInventory, TreeRenderOptions,
+    compile_target_tree_recorded, discover_gitops_inventory, CacheMode, CompiledTargetTree, GitOpsCache,
+    GitOpsInventory, TargetDependencies, TreeRenderOptions,
 };
 use crate::config::{ProjectConfig, ProjectFile};
 use crate::git::transport::GitAuth;
@@ -98,17 +98,24 @@ pub struct RenderedTarget {
     /// Files beneath the prefix, including `_nyl/index.json`, by path
     /// relative to the prefix.
     pub files: BTreeMap<PathBuf, Vec<u8>>,
-    /// The render's input record in portable form: repository-relative paths
-    /// (and other recorded inputs) with plain content digests; never machine
-    /// paths, cache locations, or cache-local keyed fingerprints. Rendering
-    /// the same commit from two worktrees with two cache directories yields
-    /// the same record.
+    /// The render's input record in portable form, built from the compile's
+    /// dependency recorder: every file, resource, template context value,
+    /// resolved Release input and source identity, Kubernetes capability,
+    /// and renderer tool fingerprint the render read, with plain content
+    /// digests. It never names machine paths or cache locations and holds no
+    /// cache-local keyed fingerprint, so rendering the same commit from two
+    /// worktrees with two cache directories yields the same record.
     ///
-    /// Project files are keyed by worktree-rooted path, such as
-    /// `/nyl/platform.yaml`; the `@`-prefixed entries of the ownership index
-    /// (resolved Release inputs, `fromGit` blobs, publication state) keep
-    /// their keys.
+    /// Files in the worktree are keyed by worktree-rooted path, such as
+    /// `/nyl/platform.yaml`; files of remote sources and other cached
+    /// checkouts by `@sources/<path>` or `@cache/<path>` beneath the cache;
+    /// every other recorded input by its recorder name prefixed with `@`,
+    /// such as `@resource:Cluster/dev` or `@tool:helm`.
     pub input_record: BTreeMap<String, String>,
+    /// False when the render read an input it could not observe completely.
+    /// The record then does not cover the render, and a caller keying work
+    /// on it must treat the render as changed every time.
+    pub cacheable: bool,
     /// How publication reconciles the tree: carried `fromPublication` state
     /// files are adopted and committed ones released, as `publish-tree` does.
     pub reconcile: ReconcileOptions,
@@ -159,7 +166,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         orchestrated_inputs: Some(OrchestratedInputs::Pinned(request.inputs.clone())),
         ..TreeRenderOptions::default()
     };
-    let compiled = compile_target_tree_cached_with_options(&inventory, request.target, &cache, options).await?;
+    let (compiled, dependencies) = compile_target_tree_recorded(&inventory, request.target, &cache, options).await?;
 
     let source_commit = Repository::discover(&inventory.worktree_root)
         .ok()
@@ -175,7 +182,15 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
                 .map_err(NylError::from)
         })
         .collect::<Result<_>>()?;
-    let input_record = portable_input_record(&inventory, &index.inputs)?;
+    // Recorded paths are canonical; a root the render never created holds
+    // no recorded file.
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut roots = vec![(canonical(&inventory.worktree_root), "/")];
+    if let Some(sources) = cache.external_cache_root() {
+        roots.push((canonical(sources), "@sources/"));
+    }
+    roots.push((canonical(request.cache_dir.unwrap_or(temporary.path())), "@cache/"));
+    let (input_record, cacheable) = portable_input_record(&dependencies, &roots);
     let mut files = desired
         .iter()
         .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
@@ -198,41 +213,58 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
         },
         files,
         input_record,
+        cacheable,
         reconcile: compiled.reconcile_options(false),
         publication_base: compiled.publication_base.clone(),
     })
 }
 
-/// The ownership index inputs with project paths rewritten to
-/// worktree-rooted paths, so the record names the same files wherever the
-/// worktree lives and wherever `nyl.toml` sits in it.
+/// The compile's dependency record in portable form (see
+/// [`RenderedTarget::input_record`]), and whether it covers the render.
+///
+/// `roots` maps machine directories to the portable prefix their files take,
+/// most specific first after sorting. A recorded path beneath none of them
+/// cannot be named portably; it is left out and the record marked as not
+/// covering the render. Keyed fingerprints (`secret` entries) are left out:
+/// orchestrated renders admit neither project secrets nor the process
+/// environment, so they fingerprint empty values, and their keys are local
+/// to one cache.
 fn portable_input_record(
-    inventory: &GitOpsInventory,
-    inputs: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>> {
-    let worktree = inventory.worktree_root.canonicalize()?;
-    let project = inventory.project_root.canonicalize()?;
-    let project_relative = project.strip_prefix(&worktree).map_err(|_| {
-        NylError::config(format!(
-            "Nyl project {} is outside worktree {}",
-            project.display(),
-            worktree.display()
-        ))
-    })?;
-    let project_relative = project_relative.to_string_lossy().replace('\\', "/");
-    Ok(inputs
-        .iter()
-        .map(|(key, digest)| {
-            let key = if key.starts_with('@') || key.starts_with('/') {
-                key.clone()
-            } else if project_relative.is_empty() {
-                format!("/{key}")
-            } else {
-                format!("/{project_relative}/{key}")
-            };
-            (key, digest.clone())
+    dependencies: &TargetDependencies,
+    roots: &[(PathBuf, &str)],
+) -> (BTreeMap<String, String>, bool) {
+    let mut roots = roots.to_vec();
+    roots.sort_by_key(|(path, _)| std::cmp::Reverse(path.as_os_str().len()));
+    let portable_path = |path: &str| {
+        let path = Path::new(path);
+        roots.iter().find_map(|(root, prefix)| {
+            let relative = path.strip_prefix(root).ok()?;
+            Some(format!("{prefix}{}", relative.to_string_lossy().replace('\\', "/")))
         })
-        .collect())
+    };
+    let mut cacheable = dependencies.cacheable;
+    let mut record = BTreeMap::new();
+    for (name, dependency) in &dependencies.dependencies {
+        if dependency.kind == "secret" {
+            continue;
+        }
+        let key = if let Some(path) = name.strip_prefix("file:") {
+            portable_path(path)
+        } else if let Some(path) = name.strip_prefix("directory:") {
+            portable_path(path).map(|path| format!("@directory:{path}"))
+        } else if let Some(path) = name.strip_prefix("vendor-lock:") {
+            portable_path(path).map(|path| format!("@vendor-lock:{path}"))
+        } else {
+            Some(format!("@{name}"))
+        };
+        match key {
+            Some(key) => {
+                record.insert(key, dependency.digest.clone());
+            }
+            None => cacheable = false,
+        }
+    }
+    (record, cacheable)
 }
 
 /// The ownership index of a compiled target before its files are recorded:
@@ -279,8 +311,10 @@ pub struct PublishedTree {
 /// Publish a rendered tree to its destination branch by compare-and-swap,
 /// reconciling only files the previous ownership index recorded, as
 /// `publish-tree` does. Publishing an unchanged tree creates no commit.
-/// `project_dir` supplies the project's `[git]` credentials; `signature`
-/// signs the commit.
+/// `project_dir` supplies the project's `[git]` credentials, whose
+/// variables are read only through `variable`: an orchestrated publication
+/// passes a lookup over the execution's admitted environment, `publish-tree`
+/// one over the process environment. `signature` signs the commit.
 ///
 /// Index v3 (owning environment and unit uid) is deferred to the
 /// KubernetesPublication driver (M5): the index is written as `publish-tree`
@@ -290,8 +324,9 @@ pub fn publish_target(
     project_dir: &Path,
     message: &str,
     signature: &PublicationSignature,
+    variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<PublishedTree> {
-    prepare_target_publication(rendered, project_dir, message, signature)?.push()
+    prepare_target_publication(rendered, project_dir, message, signature, variable)?.push()
 }
 
 /// [`publish_target`] in two phases: everything before the push, which has no
@@ -302,8 +337,9 @@ pub fn prepare_target_publication(
     project_dir: &Path,
     message: &str,
     signature: &PublicationSignature,
+    variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<PreparedTarget> {
-    let auth = project_git_auth(&load_project_file(project_dir)?, |name| std::env::var(name).ok())?;
+    let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
     let branch = writable_branch_name(&rendered.destination.branch)?;
     let index_bytes = rendered.files.get(Path::new(DEFAULT_INDEX_PATH)).ok_or_else(|| {
         NylError::config(format!(
@@ -731,28 +767,45 @@ spec:
 
     /// A committed worktree with `nyl.toml` in `nyl/`, publishing to `publication_url`.
     fn project(publication_url: &str) -> TempDir {
+        project_with_group(publication_url, GROUP)
+    }
+
+    /// [`project`] with `group` as the ApplicationGroup document.
+    fn project_with_group(publication_url: &str, group: &str) -> TempDir {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         for (path, contents) in [
             ("nyl/nyl.toml", "[project]\n".to_owned()),
             ("nyl/platform.yaml", platform(publication_url)),
-            ("nyl/web.yaml", GROUP.to_owned()),
+            ("nyl/web.yaml", group.to_owned()),
             ("applications/web/release.yaml", RELEASE.to_owned()),
         ] {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, contents).unwrap();
         }
-        let repository = Repository::init(root).unwrap();
+        commit_all(&Repository::init(root).unwrap());
+        directory
+    }
+
+    /// Commit every file of `repository`'s worktree on HEAD.
+    fn commit_all(repository: &Repository) -> Oid {
         let mut index = repository.index().unwrap();
         index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
         index.write().unwrap();
         let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
         let signature = git2::Signature::new("Test", "test@example.invalid", &git2::Time::new(0, 0)).unwrap();
+        let parent = repository.head().ok().and_then(|head| head.peel_to_commit().ok());
         repository
-            .commit(Some("HEAD"), &signature, &signature, "Initial", &tree, &[])
-            .unwrap();
-        directory
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Commit",
+                &tree,
+                &parent.iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
     }
 
     fn publication_repository() -> (TempDir, String) {
@@ -856,13 +909,20 @@ spec:
         let one = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
         let two = render(second.path(), &inputs, Some(second_cache.path())).unwrap();
 
-        assert_eq!(one.input_record, two.input_record);
-        assert!(
-            one.input_record.contains_key("/nyl/platform.yaml"),
-            "{:?}",
-            one.input_record
-        );
-        assert!(one.input_record.contains_key("/applications/web/release.yaml"));
+        assert_eq!(one.input_record, two.input_record, "{:#?}", one.input_record);
+        assert!(one.cacheable);
+        // Release files by worktree-rooted path, effective resources,
+        // Kubernetes capabilities, resolved inputs, and renderer tools.
+        for key in [
+            "/applications/web/release.yaml",
+            "/nyl/nyl.toml",
+            "@resource:DeploymentTarget/dev",
+            "@cluster-contract-capabilities:dev",
+            "@input:web/web/image",
+            "@tool:helm",
+        ] {
+            assert!(one.input_record.contains_key(key), "{key}: {:#?}", one.input_record);
+        }
         for (key, digest) in &one.input_record {
             assert!(key.starts_with('/') || key.starts_with('@'), "{key}");
             assert!(!key.contains(&first.path().display().to_string()), "{key}");
@@ -871,6 +931,154 @@ spec:
         // A cached second render yields the same record.
         let again = render(first.path(), &inputs, Some(first_cache.path())).unwrap();
         assert_eq!(again.input_record, one.input_record);
+    }
+
+    /// The record's entries for files of remote sources.
+    fn remote_entries(record: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        record
+            .iter()
+            .filter(|(key, _)| key.starts_with("@sources/"))
+            .map(|(key, digest)| (key.clone(), digest.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn test_render_target_input_record_follows_a_remote_source() {
+        let (_publication, url) = publication_repository();
+        let remote = TempDir::new().unwrap();
+        let remote_repository = Repository::init(remote.path()).unwrap();
+        std::fs::create_dir(remote.path().join("releases")).unwrap();
+        std::fs::write(remote.path().join("releases/release.yaml"), RELEASE).unwrap();
+        let first_commit = commit_all(&remote_repository);
+        std::fs::write(
+            remote.path().join("releases/release.yaml"),
+            RELEASE.replace("replicas: 1", "replicas: 2"),
+        )
+        .unwrap();
+        let second_commit = commit_all(&remote_repository);
+        let remote_url = format!("file://{}", remote.path().display());
+        let group = |commit: Oid| {
+            GROUP.replace(
+                "  source: {path: ../applications/web}\n",
+                &format!(
+                    "  source:\n    repository: {{repoURL: '{remote_url}'}}\n    revision: HEAD\n    commit: '{commit}'\n    path: releases\n"
+                ),
+            )
+        };
+        let inputs = snapshot("registry.test/web:1");
+        let cache = TempDir::new().unwrap();
+        let worktree = project_with_group(&url, &group(first_commit));
+        let one = render(worktree.path(), &inputs, Some(cache.path())).unwrap();
+        assert!(one.cacheable);
+        // The same commit from another worktree and cache records the same
+        // remote files.
+        let elsewhere = project_with_group(&url, &group(first_commit));
+        let again = render(elsewhere.path(), &inputs, None).unwrap();
+        assert_eq!(again.input_record, one.input_record);
+
+        let moved = project_with_group(&url, &group(second_commit));
+        let two = render(moved.path(), &inputs, Some(cache.path())).unwrap();
+        assert!(deployment(&two).contains("replicas: 2"));
+        let (before, after) = (remote_entries(&one.input_record), remote_entries(&two.input_record));
+        assert!(!before.is_empty(), "{:#?}", one.input_record);
+        assert!(!after.is_empty(), "{:#?}", two.input_record);
+        assert_ne!(before, after);
+    }
+
+    fn dependency(kind: &str, digest: &str) -> crate::render::cache::RecordedDependency {
+        crate::render::cache::RecordedDependency {
+            kind: kind.to_owned(),
+            digest: digest.to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_portable_input_record_keeps_tool_fingerprints_and_drops_machine_state() {
+        let roots = [
+            (PathBuf::from("/work/tree"), "/"),
+            (PathBuf::from("/cache/dir"), "@cache/"),
+            (PathBuf::from("/cache/dir/sources"), "@sources/"),
+        ];
+        let record = |helm: &str| TargetDependencies {
+            dependencies: BTreeMap::from([
+                ("file:/work/tree/nyl/nyl.toml".to_owned(), dependency("file", "a")),
+                (
+                    "file:/cache/dir/sources/x/releases/r.yaml".to_owned(),
+                    dependency("file", "b"),
+                ),
+                (
+                    "directory:/cache/dir/helm/chart".to_owned(),
+                    dependency("directory", "c"),
+                ),
+                ("tool:helm".to_owned(), dependency("tool", helm)),
+                ("context:secrets".to_owned(), dependency("secret", "keyed")),
+            ]),
+            cacheable: true,
+        };
+        let (one, cacheable) = portable_input_record(&record("helm-3.15"), &roots);
+        assert!(cacheable);
+        assert_eq!(
+            one,
+            BTreeMap::from([
+                ("/nyl/nyl.toml".to_owned(), "a".to_owned()),
+                ("@sources/x/releases/r.yaml".to_owned(), "b".to_owned()),
+                ("@directory:@cache/helm/chart".to_owned(), "c".to_owned()),
+                ("@tool:helm".to_owned(), "helm-3.15".to_owned()),
+            ])
+        );
+        // Upgrading a renderer tool changes the record.
+        let (upgraded, _) = portable_input_record(&record("helm-3.16"), &roots);
+        assert_ne!(upgraded, one);
+
+        // A path outside every root cannot be named portably: the record no
+        // longer covers the render.
+        let mut outside = record("helm-3.15");
+        outside
+            .dependencies
+            .insert("file:/etc/elsewhere".to_owned(), dependency("file", "d"));
+        let (record_outside, cacheable) = portable_input_record(&outside, &roots);
+        assert!(!cacheable);
+        assert!(record_outside.keys().all(|key| !key.contains("/etc/")));
+        // So does an uncacheable compile.
+        let mut uncacheable = record("helm-3.15");
+        uncacheable.cacheable = false;
+        assert!(!portable_input_record(&uncacheable, &roots).1);
+    }
+
+    #[test]
+    fn test_publication_credentials_are_read_only_through_the_given_lookup() {
+        let (publication, url) = publication_repository();
+        let worktree = project(&url);
+        let project_dir = worktree.path().join("nyl");
+        std::fs::write(
+            project_dir.join("nyl.toml"),
+            "[project]\n\n[[git.credentials]]\nurl = \"https://git.example.invalid/\"\ntoken_env = \"NYL_PUBLICATION_TEST_TOKEN\"\n",
+        )
+        .unwrap();
+        let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
+
+        // The lookup is the only source of credential variables.
+        let error = publish_target(&rendered, &project_dir, "publish", &signature(1), &|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL_PUBLICATION_TEST_TOKEN"), "{error}");
+        assert!(branch_files_or_empty(&publication.path().join("deploy.git"), "deploy").is_empty());
+
+        let read = std::cell::RefCell::new(Vec::new());
+        let lookup = |name: &str| {
+            read.borrow_mut().push(name.to_owned());
+            Some("token".to_owned())
+        };
+        publish_target(&rendered, &project_dir, "publish", &signature(1), &lookup).unwrap();
+        assert_eq!(read.into_inner(), ["NYL_PUBLICATION_TEST_TOKEN"]);
+    }
+
+    fn branch_files_or_empty(bare: &Path, branch: &str) -> Vec<String> {
+        let repository = Repository::open_bare(bare).unwrap();
+        if repository.find_reference(&format!("refs/heads/{branch}")).is_err() {
+            return Vec::new();
+        }
+        branch_files(bare, branch)
     }
 
     #[tokio::test]
@@ -912,6 +1120,7 @@ spec:
             &project_dir,
             "nyl: publish dev/kubernetes",
             &signature(1_700_000_000),
+            &|_| None,
         )
         .unwrap();
         let files = branch_files(&bare, "deploy");
@@ -955,6 +1164,7 @@ spec:
             &project_dir,
             "nyl: publish dev/kubernetes",
             &signature(1_800_000_000),
+            &|_| None,
         )
         .unwrap();
         assert_eq!(again, published);
