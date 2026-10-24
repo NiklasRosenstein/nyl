@@ -109,6 +109,9 @@ when <code dir="auto">strict = false</code>. Otherwise the strict schema is down
 rendered output trees (directories holding <code dir="auto">_nyl/index.json</code>), and the vendor
 directory are left untouched. When no Cluster records a <code dir="auto">kubeVersion</code>, Kubernetes
 built-ins get no comment and the command warns.</p>
+<p>Resources that are still invalid get their comment too, so the editor can point
+at the problem: the command reads each document’s <code dir="auto">apiVersion</code> and <code dir="auto">kind</code> and
+does not need the project to render.</p>
 <p>The schemas describe rendered values, so a template expression where the schema
 expects another type, such as <code dir="auto">enabled: '{{ values.enabled }}'</code>, is reported by
 the editor, as it is in Helm templates.</p>
