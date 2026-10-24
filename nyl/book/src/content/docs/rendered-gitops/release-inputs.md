@@ -1,5 +1,5 @@
 ---
-title: 'Release inputs'
+title: 'Release Inputs'
 ---
 
 A Release may declare typed inputs that each DeploymentTarget binds. Templates

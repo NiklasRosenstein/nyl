@@ -142,5 +142,5 @@ rendering.
 ## Next steps
 
 - [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
-- [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
+- [Render and validate](/nyl/rendered-gitops/workflow/render/)
 - [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)

@@ -67,8 +67,15 @@ Applications use ordinary Git directory sources with recursive discovery.
 - [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
   covers multiple environments, clusters, publication models, values, and
   conditional rendering.
-- [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
-  describes the generated tree and CI commands.
+- [Release inputs](/nyl/rendered-gitops/release-inputs/) declares the values a
+  Release takes and binds them per target.
+- [Rendered layout](/nyl/rendered-gitops/rendered-layout/) describes the
+  generated tree, its catalog, and the ownership index.
+- The workflow pages follow a CI pipeline in order:
+  [render and validate](/nyl/rendered-gitops/workflow/render/),
+  [diff in pull requests](/nyl/rendered-gitops/workflow/diff/),
+  [publish from the protected branch](/nyl/rendered-gitops/workflow/publish/),
+  and [move a publication](/nyl/rendered-gitops/workflow/move-publication/).
 - [Trust and admission boundaries](/nyl/rendered-gitops/security/)
   identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
   must enforce.
