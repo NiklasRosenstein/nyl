@@ -35,6 +35,7 @@ about Nyl's current CLI.
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 | M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
+| M9 | Domain resource collections as unit inputs | Proposed | M3, M4 |
 
 **Next step:** continue M3, delivered in six parts against the
 [orchestration core contract](design/orchestration-core.md) and its
@@ -497,6 +498,29 @@ identical inputs plans no change. A pinned commit must remain fetchable, so it
 must be reachable from a protected ref or its lock's own branch; run source
 commits must be reachable too, unless an environment opts into unprotected
 sources.
+
+### Domain resource collections (M9, proposed)
+
+Platform authors define domain types, such as `AwsAccount` or `GitHubTeam`,
+with a ResourceDefinition schema. Teams declare instances of them as literal
+YAML in paths they own, and explicitly registered units collect them through
+a `collections` field. The [domain resources design](design/domain-resources.md)
+splits this into stages: definition, discovery, admission (schema,
+referential integrity, Kyverno with trusted source-path context),
+collection, resolution, a tool-neutral resource bundle, and driver
+adaptation. It also covers `nyl prepare` and a guide outline.
+
+- Domain resources are data, never units. Changing one changes its consumers'
+  inputs and never their identity or kind.
+- Trust comes from `nyl.toml`, which lists where definitions and policies may
+  live. Source-path context comes from Git, never from editable metadata.
+- The bundle enters the execution key; provenance does not. Moving a file
+  re-runs nothing, and implementations never see provenance.
+- `fromCollection` is a reference form of the one resolver, so the built-in
+  kinds consume bundles without new drivers. Native adaptation, such as a
+  Terraform variables file, remains the driver's.
+- Removing a member is a native input change. Removing members waits for
+  approval by default, and Nyl keeps no native resource state.
 
 ### Promotion paths (M6)
 
@@ -1017,6 +1041,26 @@ nothing without `--allow-teardown`, and removing all units still produces a
 read-only MR lifecycle report. The in-memory adapter proves the same semantic graph and
 admission behavior without GitLab types or services.
 
+### M9 — Domain resource collections as unit inputs (proposed)
+
+Delivered in the slices of the [design](design/domain-resources.md#rollout):
+
+- [ ] R1: ResourceDefinitions from trusted paths, discovery of literal domain
+  resources, schema and referential admission, `nyl validate`,
+  `nyl get resources`, and editor schemas.
+- [ ] R2: unit `collections` with ownership claims, the versioned resource
+  bundle and its provenance in desired state, `fromCollection`, Command
+  adaptation, and `nyl prepare`.
+- [ ] R3: Kyverno validating policies with trusted source-path context.
+- [ ] R4: the driver `prepare` capability and `nyl prepare --native`,
+  OpenTofu/Terraform adaptation, removal approval, and `exec` with bundles.
+- [ ] R5: the worked AWS/GitHub/Bao guide, validated as a reference scenario.
+
+**Exit criterion:** colocated team declarations feed independently registered
+units; local and CI runs produce identical bundles and execution keys; moving a
+declaration re-runs nothing; schema, policy, and missing-evidence failures
+block only the consuming units, before any effect; the guide runs end to end.
+
 ## Open decisions
 
 Resolve these at the milestone where they affect implementation; they are not
@@ -1034,6 +1078,7 @@ reasons to delay independent work.
 | Provider capability/configuration schema and first GitLab adapter limits | M8 |
 | Trusted dispatcher policy and normalized admission authorization evidence | M8 |
 | Shared-run CI coordinator/worker protocol, fencing, liveness, and recovery | After M8, before distributed execution |
+| Domain resource schema subset, definition sharing and versioning, bundle size in state ([open decisions](design/domain-resources.md#open-decisions)) | M9 |
 
 ## Implementation reference points
 
@@ -1048,6 +1093,8 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
+- [Domain resource collections](design/domain-resources.md): the M9 proposal
+  for team-owned declarations as unit inputs
 
 - [Nyl rendering session and bundle](crates/nyl-render/src/render/session.rs)
 - [Nyl components](crates/nyl-render/src/components/mod.rs)
