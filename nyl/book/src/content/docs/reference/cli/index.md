@@ -17,7 +17,9 @@ nyl provides several commands for managing Kubernetes manifests:
 - [`release`](/nyl/reference/cli/release/) - Inspect release history and roll back to a previous revision
 - [`schema`](/nyl/reference/cli/schema/) - Generate project and resource schemas
 - [`vendor`](/nyl/reference/cli/vendor/) - Snapshot and verify remote renderer inputs
-- [`Rendered GitOps commands`](/nyl/reference/cli/gitops/) - Render, diff, lock, and publish target trees
+- [`render-tree`](/nyl/reference/cli/render-tree/) - Render a deployment target into a destination tree
+- [`diff-tree`](/nyl/reference/cli/diff-tree/) - Compare a target's desired tree with its publication or a source revision
+- [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
 - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 
 ## Global Options

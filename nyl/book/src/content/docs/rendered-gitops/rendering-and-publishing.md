@@ -254,7 +254,7 @@ diff bytes; no differences produce zero bytes.
 YAML comparisons normalize mapping order and presentation, so formatting and
 comment changes do not affect the patch, statistics, or `--fail-on-diff`.
 Use `--raw` for byte comparisons and text patches applicable to stored files.
-See the [comparison rules](/nyl/reference/cli/gitops/#nyl-diff-tree) for details.
+See the [comparison rules](/nyl/reference/cli/diff-tree/) for details.
 
 Use `--catalog` for generated Applications and AppProjects, `--applications`
 for every workload Application and payload, or repeat
@@ -321,6 +321,7 @@ order:
 
 When the repository or branch changes, do the same across the two branches.
 
-See the [Rendered GitOps command reference](/nyl/reference/cli/gitops/) for all flags
+See [`render-tree`](/nyl/reference/cli/render-tree/), [`diff-tree`](/nyl/reference/cli/diff-tree/),
+and [`publish-tree`](/nyl/reference/cli/publish-tree/) for all flags
 and the [security guide](/nyl/rendered-gitops/security/)
 for ownership and publication boundaries.

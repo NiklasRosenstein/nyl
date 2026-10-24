@@ -37,8 +37,8 @@ file. `--check` reports drift without writing.
 
 ## Update source locks
 
-Move every Git lock to the head of its revision: the pinned commits of remote
-ApplicationGroup sources and of `fromGit` Release input bindings:
+Resolve the revisions of remote ApplicationGroup sources and `fromGit` Release
+input bindings, and update their full commit locks:
 
 ```bash
 nyl update source-locks
@@ -47,7 +47,13 @@ nyl update source-locks --target production
 nyl update source-locks --check
 ```
 
-An ApplicationGroup name or `--target <name>` selects which locks move, never
-where they move. `--check` reports stale locks without modifying project
-source. See the [Rendered GitOps command reference](/nyl/reference/cli/gitops/) for
-details.
+A group name selects that ApplicationGroup and `--target` selects one
+DeploymentTarget's `fromGit` locks; without either, every lock is updated. The
+filters choose which locks move, never where: each lock's destination depends
+only on the lock, so a filtered update agrees with an unfiltered `--check`.
+Every lock moves to the head of its revision. Each repository is fetched once
+per run. Locks are edited in place by their
+position, so write `fromGit` bindings in block style.
+
+Mutable revisions must refresh successfully before a lock is reported current
+or updated. Immutable commit rendering can use an existing local cache.

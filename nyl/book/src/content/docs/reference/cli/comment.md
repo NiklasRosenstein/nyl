@@ -3,9 +3,16 @@ title: 'comment'
 description: 'Maintain a sticky Markdown comment on GitHub, GitLab, or Forgejo.'
 ---
 
-`nyl comment upsert` maintains one comment per stable key and authenticated
-account on a pull request or merge request. It works without a Nyl project and
-accepts Markdown from any report generator.
+`nyl comment upsert` posts a Markdown report, such as a
+[`diff-tree`](/nyl/reference/cli/diff-tree/) deployment check, as a comment on a
+pull request or merge request, and updates that same comment on every later run
+instead of adding new ones. It supports **GitHub** (including GitHub Enterprise
+Server), **GitLab** (gitlab.com and self-managed), and **Forgejo**, and detects
+the forge and the request from the CI environment.
+
+The comment is identified by a stable key and the authenticated account. The
+command works without a Nyl project and accepts Markdown from any report
+generator.
 
 ```bash
 nyl comment upsert --key gitops/kasoku --body-file report.md
@@ -137,7 +144,7 @@ absence when writes remain invisible during the recheck.
 report suitable for `--body-file`. It includes validation failures and available
 comparison results even when the command exits unsuccessfully. Capture that
 status, post the report, then return the captured failure. See the
-[combined-report CI example](/nyl/reference/cli/gitops/#markdown-prmr-comments) for the
+[combined-report CI example](/nyl/reference/cli/diff-tree/#markdown-prmr-comments) for the
 complete shell flow and artifact handling.
 
 Reports have a 60,000-byte Markdown budget, with explicit truncation notices for

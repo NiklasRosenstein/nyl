@@ -6,7 +6,7 @@ export const movedPages = {
   "/commands/comment": "/reference/cli/comment/",
   "/commands/create": "/reference/cli/create/",
   "/commands/diff": "/reference/cli/diff/",
-  "/commands/gitops": "/reference/cli/gitops/",
+  "/commands/gitops": "/reference/cli/render-tree/",
   "/commands/init": "/reference/cli/init/",
   "/commands/manifest-validation": "/kubernetes/validation/manifest-validation/",
   "/commands/project-resources": "/reference/cli/project-resources/",

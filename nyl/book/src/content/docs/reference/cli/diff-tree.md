@@ -1,67 +1,6 @@
 ---
-title: 'Rendered GitOps commands'
+title: 'diff-tree'
 ---
-
-## `nyl get targets`
-
-List every discovered target with its Cluster, publication repository, revision,
-and path prefix.
-
-```bash
-nyl get targets
-```
-
-## `nyl render-tree`
-
-Compile a target into a destination worktree. The target path prefix is appended
-to `--output-dir`.
-
-```bash
-nyl render-tree --target production --output-dir deploy
-nyl render-tree --target production --output-dir deploy --check
-nyl render-tree --target production --output-dir deploy --force
-nyl render-tree --target production --output-dir deploy --refresh
-nyl render-tree --target production --output-dir deploy --no-cache
-nyl render-tree --target production --output-dir deploy --offline
-```
-
-When a target has `fromPublication` Release inputs, `render-tree` fetches its
-publication branch and reports the commit it read the state from; `--offline`
-reads the cached branch head instead and says so.
-
-`--target` may be omitted when exactly one DeploymentTarget is configured. With
-multiple targets, Nyl requires an explicit selection and lists the available
-names. The same rule applies to `diff-tree` and `publish-tree`.
-
-`--check` renders and validates without writing files.
-By default, reconciliation rejects indexed files that are missing or differ
-from their recorded digest. `--force` warns and recreates those owned files from
-the current render. It does not overwrite unowned paths, cross ownership
-boundaries, or permit symbolic-link traversal.
-An existing ownership index is checked against the selected target before Nyl
-renders any Releases or Helm charts.
-
-`--refresh` bypasses render cache reads and repopulates successful entries.
-`--no-cache` uses ephemeral source storage and performs no persistent cache
-reads or writes. These mutually exclusive flags are also available on
-`diff-tree` and `publish-tree`.
-
-Tree rendering excludes the project secrets provider and `NYL_*` process
-environment by default. Pass `--allow-secret-inputs` to the individual
-`render-tree`, `diff-tree`, or `publish-tree` invocation when trusted central
-project templates intentionally depend on them. Explicit Kubernetes `Secret`
-manifests remain ordinary input resources. Remote and independently controlled
-source sessions never receive project secrets or process environment, including
-when this flag is set.
-
-All three tree commands report Release progress on stderr. The default
-`--progress auto` displays an updating bar when stderr is attached to a terminal
-and prints one line as each Release starts in CI or other non-interactive
-environments. Use `--progress bar` or `--progress plain` to select a presentation
-explicitly, or `--progress off` to disable it. A complete target-tree cache hit
-has no per-Release work to report.
-
-## `nyl diff-tree`
 
 Compare the current desired tree with the published destination revision:
 
@@ -152,7 +91,7 @@ their line numbers and blob hashes refer to that content, not the stored files.
 nyl diff-tree --target production --raw --output rendered.diff
 ```
 
-### Statistics and report exports
+## Statistics and report exports
 
 The combined report includes validation results, comparison context, file and
 line counts, and render/cache/source statistics. Validation checks the complete
@@ -217,7 +156,7 @@ validation stream automatically, so `--no-validation-stderr` is unnecessary.
 `--no-stats-stderr` suppresses the combined terminal report, including validation
 findings, without changing exported reports or validation's exit status.
 
-### Markdown PR/MR comments
+## Markdown PR/MR comments
 
 The title identifies the deployment check, target, and outcome, for example
 “Nyl deployment check · kasoku — validation failed.” The summary leads with
@@ -319,7 +258,7 @@ Added lines are green and removed lines red. Text file exports are plain in
 auto mode; `--color always` retains ANSI styling. Markdown and JSON never contain
 formatter ANSI sequences.
 
-### JSON report contract
+## JSON report contract
 
 JSON always includes every changed file, independently of `--stats-files`. The
 report has `schema_version: 2` and these top-level fields:
@@ -385,7 +324,7 @@ entries mean zero. Bypass-reason strings are descriptive, not stable identifiers
 Consumers should ignore additional fields; incompatible changes require a new
 schema version.
 
-### Selecting files
+## Selecting files
 
 Limit the comparison to the generated catalog, all workload Applications, or
 specific Argo CD Application identities:
@@ -410,74 +349,5 @@ and path prefix through a synthetic `_nyl/publication.json` diff entry. Scoped
 views leave those coordinates in the comparison report. Mutable comparison refs
 must refresh successfully; cached refs are not accepted as current state.
 
-## `nyl update source-locks`
-
-Resolve the revisions of remote ApplicationGroup sources and `fromGit` Release
-input bindings, and update their full commit locks:
-
-```bash
-nyl update source-locks
-nyl update source-locks workloads
-nyl update source-locks --target production
-nyl update source-locks --check
-```
-
-A group name selects that ApplicationGroup and `--target` selects one
-DeploymentTarget's `fromGit` locks; without either, every lock is updated. The
-filters choose which locks move, never where: each lock's destination depends
-only on the lock, so a filtered update agrees with an unfiltered `--check`.
-Every lock moves to the head of its revision. Each repository is fetched once
-per run. Locks are edited in place by their
-position, so write `fromGit` bindings in block style.
-
-Mutable revisions must refresh successfully before a lock is reported current
-or updated. Immutable commit rendering can use an existing local cache.
-
-## `nyl publish-tree`
-
-Render and publish one destination branch with compare-and-swap protection:
-
-```bash
-nyl publish-tree --target production
-nyl publish-tree --target production --dry-run
-nyl publish-tree --target production --no-cache
-nyl publish-tree --target production --require-clean
-nyl publish-tree --target production --allow-dirty
-```
-
-The source worktree must have a committed revision. When it is dirty, Nyl
-renders the selected target again from a temporary clean checkout of `HEAD`.
-Publication proceeds when both rendered trees and their publication coordinates
-match, using the clean checkout for provenance. Local files such as editor
-configuration therefore do not block a reproducible publication.
-
-`--require-clean` rejects any non-ignored source worktree change before
-rendering. `--allow-dirty` skips the clean-checkout comparison and publishes the
-working-tree render explicitly; the ownership index records `dirty: true` and
-the commit message includes `Nyl-Source-Dirty: true`. The two options are
-mutually exclusive.
-
-Nyl clones the destination branch into a clean checkout, reconciles indexed
-files, stages only the selected target prefix, commits the result, fetches the
-branch again, and refuses to push when its remote tip changed. A publication
-branch that does not exist starts as an empty branch rather than inheriting the
-repository's default branch.
-The completion summary names the destination repository, branch, and resulting
-commit. Publication commit messages carry `Nyl-Source-Repository`,
-`Nyl-Source-Commit`, `Nyl-Deployment-Target`, and `Nyl-Cluster` provenance
-trailers. `--message` replaces the subject while retaining those trailers.
-
-Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
-`GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
-`NYL_GIT_AUTHOR_NAME` and `NYL_GIT_AUTHOR_EMAIL` for a Nyl-specific override.
-
-See [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
-for CI patterns and rendered layout. The
-[Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
-documents the configuration model.
-
-## Manifest validation
-
-Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
-CRD schemas, inherited Cluster contracts, and offline schema vendoring.
+See the [options shared by the tree commands](/nyl/reference/cli/render-tree/#options-shared-by-the-tree-commands) for target selection, caching, secret inputs, progress,
+and validation.
