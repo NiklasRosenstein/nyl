@@ -33,10 +33,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # The Cargo workspace is the repository root, so its target directory is
+      # ./target (the default). Only develop saves caches; pull requests restore
+      # them, which keeps the repository under the Actions cache size limit.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nyl
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Format check
         working-directory: nyl
@@ -86,10 +89,13 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.98.1
 
+      # The Cargo workspace is the repository root, so its target directory is
+      # ./target (the default). Only develop saves caches; pull requests restore
+      # them, which keeps the repository under the Actions cache size limit.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nyl
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Install pinned Helm and kubeconform
         uses: jdx/mise-action@v3

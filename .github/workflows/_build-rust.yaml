@@ -7,7 +7,7 @@
 # - Architecture support (x86_64, aarch64)
 # - ABI variants (gnu, musl, darwin, msvc)
 # - Static linking verification for musl targets
-# - Consistent caching with rust-cache@v2
+# - Consistent caching with rust-cache@v2, one cache per target
 
 name: Build Rust Binaries
 
@@ -49,10 +49,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The Cargo workspace is the repository root, so its target directory is
+      # ./target (the default). Matrix entries share this job's name, so the
+      # target keeps their caches apart. Only develop saves caches.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nyl
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Cross-compilation setup for aarch64 Linux GNU
       - name: Install cross-compilation tools (aarch64-gnu)
