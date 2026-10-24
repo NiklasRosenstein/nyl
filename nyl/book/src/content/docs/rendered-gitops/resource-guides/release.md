@@ -2,7 +2,7 @@
 title: 'Using Release'
 ---
 
-See the [Release resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) for the API, example, and field definitions.
+See the [Release resource reference](/nyl/reference/resources/k8s.nyl/v1/release/) for the API, example, and field definitions.
 
 [`nyl create release`](/nyl/reference/cli/create/#create-releases) writes a new
 Release into the source directory of a matching ApplicationGroup.
@@ -36,7 +36,7 @@ applications/api/
 
 ```yaml
 # applications/api/release.yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api

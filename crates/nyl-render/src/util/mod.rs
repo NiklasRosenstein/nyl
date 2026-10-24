@@ -1,6 +1,7 @@
 //! Shared utilities: file system and project path helpers, source context,
 //! and small formatting helpers. Content digests live in `nyl_core::digest`.
 
+pub mod deprecation;
 pub mod fs;
 pub mod project_path;
 pub mod source_context;

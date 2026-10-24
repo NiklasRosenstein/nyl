@@ -8,7 +8,7 @@ spec:
   repoURL: '%PROJECT_URL%'
   publishURL: '%PROJECT_URL%'
 ---
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
   name: dev

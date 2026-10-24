@@ -7,7 +7,7 @@ fn render_rejects_obsolete_expansion_and_release_envelopes() {
     let project = TempDir::new().unwrap();
     std::fs::write(project.path().join("nyl.toml"), "[project]\n").unwrap();
     for (kind, api, expected) in [
-        ("Release", "gitops.nyl/v1", "k8s.gitops.nyl/v1"),
+        ("Release", "gitops.nyl/v1", "k8s.nyl/v1"),
         ("HelmChart", "nyl.niklasrosenstein.github.com/v1", "k8s.nyl/v1"),
         ("RemoteManifest", "nyl.niklasrosenstein.github.com/v1", "k8s.nyl/v1"),
         (
@@ -37,7 +37,7 @@ fn discovery_rejects_obsolete_envelopes_with_structurally_templated_specs() {
     std::fs::write(project.path().join("nyl.toml"), "[project]\n").unwrap();
     for (kind, api, expected) in [
         ("ApplicationGroup", "gitops.nyl/v1", "k8s.gitops.nyl/v1"),
-        ("Release", "gitops.nyl/v1", "k8s.gitops.nyl/v1"),
+        ("Release", "gitops.nyl/v1", "k8s.nyl/v1"),
     ] {
         std::fs::write(project.path().join("resource.yaml"), format!("apiVersion: {api}\nkind: {kind}\nmetadata:\n  name: test\nspec:\n{{% if values.enabled %}}\n  enabled: true\n{{% endif %}}\n")).unwrap();
         let error = nyl::gitops::discover_gitops_inventory(project.path(), None)
@@ -116,4 +116,27 @@ fn generated_helm_chart_in_kubernetes_api_group_is_preserved() {
         .stdout(predicate::str::contains("kind: HelmChart"))
         .stdout(predicate::str::contains("name: generated"))
         .stdout(predicate::str::contains("chart: example"));
+}
+
+#[test]
+fn render_accepts_a_release_under_its_deprecated_api_version_with_a_warning() {
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("nyl.toml"), "[project]\n").unwrap();
+    let release = "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\n  namespace: api\n";
+    std::fs::write(project.path().join("api.yaml"), release).unwrap();
+    let current = release.replacen("k8s.gitops.nyl/v1", "k8s.nyl/v1", 1);
+    std::fs::write(project.path().join("current.yaml"), current).unwrap();
+    let render = |file: &str| {
+        Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+            .current_dir(project.path())
+            .args(["render", "--offline", file])
+            .assert()
+            .success()
+    };
+    let deprecated = render("api.yaml").stderr(predicate::str::contains(
+        "Release \"api\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
+    ));
+    let output = String::from_utf8(deprecated.get_output().stdout.clone()).unwrap();
+    let expected = String::from_utf8(render("current.yaml").get_output().stdout.clone()).unwrap();
+    assert_eq!(output, expected, "the deprecated version renders the same manifests");
 }

@@ -550,6 +550,10 @@ Mechanics that are easy to miss:
   or is referenced by other resources there. A changed reference field updates
   that diagram.
 - Regenerate schemas after changing a resource's Rust doc comments or fields.
+- A deprecation keeps the old form working, warns when the CLI reads it, and
+  adds a row to `reference/deprecations.md`. Deprecated API versions live in
+  `DEPRECATED_API_VERSIONS` (`nyl_core::resources::schema`); removing support
+  deletes the entry and its row together.
 - Write links as `/nyl/...`; the build rewrites them for preview deployments
   and fails on links to missing pages.
 

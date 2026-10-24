@@ -8,7 +8,7 @@ use tracing::{debug, info};
 
 use crate::cli::resource_file::{append_document, atomic_replace};
 use crate::config::ProjectConfig;
-use crate::constants::API_VERSION_K8S_GITOPS;
+use crate::constants::API_VERSION;
 use crate::gitops::{
     central_group_source_root, derived_group_source_root, discover_gitops_inventory, DiscoveredGitOpsResource,
     GitOpsInventory, GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
@@ -519,7 +519,7 @@ fn project_destination_namespaces(inventory: &GitOpsInventory, project: &str) ->
 
 fn render_release_scaffold(name: &str, namespace: &str, additional_namespaces: &[String]) -> Result<String> {
     let mut document = json!({
-        "apiVersion": API_VERSION_K8S_GITOPS,
+        "apiVersion": API_VERSION,
         "kind": KIND_RELEASE,
         "metadata": {"name": name, "namespace": namespace},
     });
@@ -528,9 +528,8 @@ fn render_release_scaffold(name: &str, namespace: &str, additional_namespaces: &
     }
     // Reject invalid namespaces before the file is written.
     Release::from_value(&document)?;
-    let schema = format!(
-        "https://niklasrosenstein.github.io/nyl/reference/schemas/{API_VERSION_K8S_GITOPS}/{RELEASE_SCHEMA_FILENAME}"
-    );
+    let schema =
+        format!("https://niklasrosenstein.github.io/nyl/reference/schemas/{API_VERSION}/{RELEASE_SCHEMA_FILENAME}");
     let body = crate::yaml::serialize_yaml_value(&document)?;
     Ok(format!(
         "# yaml-language-server: $schema={schema}\n{body}\n# Add this Release's workload manifests as further YAML documents below.\n"
@@ -666,7 +665,7 @@ fn render_resource_scaffold(
         GitOpsResourceKind::Cluster => {
             let context = cluster_context.unwrap_or(name);
             format!(
-                "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl capture cluster {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
+                "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: {name}\nspec:\n  destination:\n    server: https://kubernetes.default.svc\n  # Populate from the selected context with: nyl capture cluster {name}\n  kubernetes:\n    apiVersions: []\n  values: {{}}\n  live:\n    context: {context}\n"
             )
         }
         GitOpsResourceKind::ArgoCDInstance => format!(

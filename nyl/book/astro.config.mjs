@@ -155,6 +155,7 @@ export default defineConfig({
               },
               { label: "Configuration", items: ["reference/configuration"] },
               "reference/editor-schemas",
+              "reference/deprecations",
             ],
           },
         ]),

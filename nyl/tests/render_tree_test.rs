@@ -56,7 +56,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("config/clusters/kasoku.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -146,7 +146,7 @@ spec:
     .unwrap();
     fs::write(
         temp.path().join("applications/workloads/api.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -526,7 +526,7 @@ fn validation_render_overrides_and_complete_scope_are_explicit() {
 fn inherited_cluster_capabilities_render_without_production_access() {
     let fixture = fixture();
     fs::write(fixture.path().join("config/clusters/production.yaml"),
-        "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: production\nspec:\n  destination:\n    server: https://production.invalid\n  apiContractFrom:\n    clusterRef:\n      name: kasoku\n    mode: all\n").unwrap();
+        "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: production\nspec:\n  destination:\n    server: https://production.invalid\n  apiContractFrom:\n    clusterRef:\n      name: kasoku\n    mode: all\n").unwrap();
     let target_path = fixture.path().join("config/targets/production.yaml");
     let target = fs::read_to_string(&target_path)
         .unwrap()
@@ -607,7 +607,7 @@ fn renders_plain_directory_applications_and_owned_layout() {
         "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 2)\n# Nyl-Provenance: Resource: v1 ConfigMap api/api"
     ));
     assert!(resources.contains(
-        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)\n# Nyl-Provenance: Resource: k8s.gitops.nyl/v1 Release api/api\n# Nyl-Provenance: Generated: Namespace \"api\" for Release \"api\""
+        "# Nyl-Provenance: Source: applications/workloads/api.yaml (document 1)\n# Nyl-Provenance: Resource: k8s.nyl/v1 Release api/api\n# Nyl-Provenance: Generated: Namespace \"api\" for Release \"api\""
     ));
     assert!(resources.contains("Delete=confirm,Prune=confirm"));
     assert!(!root.join("_nyl/namespaces").exists());
@@ -838,7 +838,7 @@ fn warm_target_cache_reports_the_rendering_work_it_avoids() {
     .unwrap();
     fs::write(
         fixture.path().join("applications/workloads/helm.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: helm
@@ -1058,7 +1058,7 @@ fn changing_one_release_reuses_unchanged_release_artifacts() {
     let worker = fixture.path().join("applications/workloads/worker.yaml");
     fs::write(
         &worker,
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -1121,7 +1121,7 @@ fn rerendered_release_reuses_unchanged_helm_output() {
     let release = fixture.path().join("applications/workloads/helm.yaml");
     fs::write(
         &release,
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: helm
@@ -1503,7 +1503,7 @@ fn second_group_with_the_same_release_name(fixture: &TempDir) {
     fs::create_dir_all(root.join("applications/extras")).unwrap();
     fs::write(
         root.join("applications/extras/api.yaml"),
-        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: extras\n",
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: extras\n",
     )
     .unwrap();
 }
@@ -1550,7 +1550,7 @@ fn test_render_tree_names_a_release_application_that_takes_the_catalog_name() {
     fs::create_dir_all(root.join("applications/extras")).unwrap();
     fs::write(
         root.join("applications/extras/catalog.yaml"),
-        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: production-catalog\n  namespace: extras\n",
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: production-catalog\n  namespace: extras\n",
     )
     .unwrap();
     let output = root.join("deploy");
@@ -1619,7 +1619,7 @@ fn two_groups_with_one_release_name(fixture: &TempDir, cluster: &str, applicatio
         fs::create_dir_all(root.join(format!("applications/{group}"))).unwrap();
         fs::write(
             root.join(format!("applications/{group}/api.yaml")),
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n",
         )
         .unwrap();
     }
@@ -2046,7 +2046,7 @@ fn one_dedicated_application_owns_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -2098,7 +2098,7 @@ fn one_release_can_own_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -2151,7 +2151,7 @@ fn external_shared_namespace_is_not_managed() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -2307,7 +2307,7 @@ fn shared_namespace_requires_explicit_policy() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -2348,7 +2348,7 @@ fn non_owner_release_cannot_render_a_shared_namespace() {
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/worker.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: worker
@@ -2391,7 +2391,7 @@ fn external_namespace_cannot_be_rendered_by_a_release() {
     fs::write(group_path, group).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/api.yaml"),
-        r"apiVersion: k8s.gitops.nyl/v1
+        r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -2678,7 +2678,7 @@ metadata:
     fs::write(api_path, api).unwrap();
     fs::write(
         fixture.path().join("applications/workloads/coredns.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: coredns
@@ -3796,7 +3796,7 @@ fn diff_tree_exports_validation_failures_and_independent_comparison_results() {
     .unwrap();
     for (namespace, name) in [("rise", "rise-db"), ("rise-dash", "dash-db")] {
         fs::write(fixture.path().join(format!("applications/workloads/{namespace}.yaml")), format!(
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata: {{name: {namespace}, namespace: {namespace}}}\n---\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata: {{name: {name}, namespace: {namespace}}}\nspec:\n  affinity: null\n"
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {{name: {namespace}, namespace: {namespace}}}\n---\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata: {{name: {name}, namespace: {namespace}}}\nspec:\n  affinity: null\n"
         )).unwrap();
     }
     let source = Repository::open(fixture.path()).unwrap();
@@ -4545,7 +4545,7 @@ fn test_publish_tree_removes_the_clean_head_worktree_when_the_committed_project_
     assert_eq!(worktrees.len(), 0, "{:?}", worktrees.iter().collect::<Vec<_>>());
 }
 
-const API_RELEASE_WITH_INPUTS: &str = r#"apiVersion: k8s.gitops.nyl/v1
+const API_RELEASE_WITH_INPUTS: &str = r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -4685,7 +4685,7 @@ fn test_render_without_target_uses_defaults_and_overrides_only() {
     fs::create_dir_all(fixture.path().join("scratch")).unwrap();
     fs::write(
         fixture.path().join("scratch/local.yaml"),
-        "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: local\n  namespace: local\nspec:\n  inputs:\n    image: {type: string}\n    replicas: {type: integer, default: 2}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: local\n  namespace: local\ndata:\n  image: '{{ inputs.image }}'\n  replicas: '{{ inputs.replicas }}'\n",
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: local\n  namespace: local\nspec:\n  inputs:\n    image: {type: string}\n    replicas: {type: integer, default: 2}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: local\n  namespace: local\ndata:\n  image: '{{ inputs.image }}'\n  replicas: '{{ inputs.replicas }}'\n",
     )
     .unwrap();
     nyl_render(&fixture, &["scratch/local.yaml"])
@@ -5014,7 +5014,7 @@ fn remote_application_groups_receive_resolved_inputs_only() {
     fs::create_dir(remote.path().join("releases")).unwrap();
     fs::write(
         remote.path().join("releases/api.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -5108,7 +5108,7 @@ impl StateRepository {
 fn with_image_binding(fixture: &TempDir, bindings: &str) {
     fs::write(
         fixture.path().join("applications/workloads/api.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -5589,7 +5589,7 @@ fn test_tree_commands_render_every_non_orchestrated_input_kind() {
     );
     fs::write(
         fixture.path().join("applications/workloads/api.yaml"),
-        r#"apiVersion: k8s.gitops.nyl/v1
+        r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -6286,7 +6286,7 @@ fn assert_git_helm_chart_offline_command(tree: bool) {
     fs::write(
         fixture.path().join("applications/workloads/api.yaml"),
         format!(
-            r#"apiVersion: k8s.gitops.nyl/v1
+            r#"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api
@@ -6356,4 +6356,42 @@ fn test_render_git_helm_chart_obeys_offline_and_refreshes_moved_refs() {
 #[test]
 fn test_render_tree_git_helm_chart_obeys_offline_and_refreshes_moved_refs() {
     assert_git_helm_chart_offline_command(true);
+}
+
+/// Cluster and Release moved to `k8s.nyl/v1`. A project still on their old API
+/// version renders the same manifests and is told to migrate.
+#[test]
+fn test_render_tree_accepts_deprecated_cluster_and_release_api_versions_with_a_warning() {
+    let current = fixture();
+    render_production(&current).success();
+
+    let deprecated = fixture();
+    for file in ["config/clusters/kasoku.yaml", "applications/workloads/api.yaml"] {
+        let path = deprecated.path().join(file);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("apiVersion: k8s.nyl/v1"),
+            "{file} uses the current version"
+        );
+        fs::write(
+            &path,
+            text.replacen("apiVersion: k8s.nyl/v1", "apiVersion: k8s.gitops.nyl/v1", 1),
+        )
+        .unwrap();
+    }
+    render_production(&deprecated)
+        .success()
+        .stderr(predicate::str::contains(
+            "Cluster \"kasoku\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
+        ))
+        .stderr(predicate::str::contains(
+            "Release \"api\" uses deprecated apiVersion k8s.gitops.nyl/v1; set apiVersion to k8s.nyl/v1",
+        ));
+
+    // Only the ownership index differs: it records the digests of the edited sources.
+    let mut expected = read_tree(&current.path().join("deploy/production"));
+    let mut actual = read_tree(&deprecated.path().join("deploy/production"));
+    let index = PathBuf::from("_nyl/index.json");
+    assert!(expected.remove(&index).is_some() && actual.remove(&index).is_some());
+    assert_eq!(actual, expected);
 }

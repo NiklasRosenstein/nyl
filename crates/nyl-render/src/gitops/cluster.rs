@@ -123,7 +123,7 @@ mod tests {
     }
 
     fn cluster(directory: &std::path::Path, name: &str, mode: Option<&str>, source: &str) {
-        let mut value = json!({"apiVersion":"k8s.gitops.nyl/v1","kind":"Cluster","metadata":{"name":name},
+        let mut value = json!({"apiVersion":"k8s.nyl/v1","kind":"Cluster","metadata":{"name":name},
             "spec":{"destination":{"server":format!("https://{name}.example.com")},"values":{"identity":name},
                 "live":{"context":format!("{name}-admin")}}});
         if mode != Some("all") {

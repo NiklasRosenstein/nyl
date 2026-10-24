@@ -155,7 +155,7 @@ options that a Release may merge with `spec.syncPolicy.+syncOptions` in its
 Application override:
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: api

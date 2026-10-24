@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::git_source::GitSource;
 use super::strict::DenyUnknownFields;
-use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
+use crate::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
 
 pub const KIND_GIT_REPOSITORY: &str = "GitRepository";
@@ -823,6 +823,7 @@ impl GitOpsResourceKind {
     pub const fn api_version(self) -> &'static str {
         match self {
             Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
+            Self::Cluster => API_VERSION,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -947,20 +948,26 @@ pub fn is_gitops_resource(value: &serde_json::Value) -> bool {
 
 pub fn gitops_resource_kind(value: &serde_json::Value) -> Option<GitOpsResourceKind> {
     let kind = GitOpsResourceKind::parse(value.get("kind")?.as_str()?)?;
-    (value.get("apiVersion")?.as_str()? == kind.api_version()).then_some(kind)
+    (value.get("apiVersion")?.as_str()? == kind.api_version() || super::schema::deprecated_api_version(value).is_some())
+        .then_some(kind)
 }
 
 /// Parse only the static envelope. Unrelated manifests return `None`.
 pub fn parse_gitops_resource_identity(value: &serde_json::Value) -> Result<Option<GitOpsResourceIdentity>> {
     super::schema::validate_resource_api(value)?;
     let api_version = value.get("apiVersion").and_then(serde_json::Value::as_str);
-    if !matches!(api_version, Some(API_VERSION_GITOPS | API_VERSION_K8S_GITOPS)) {
+    let kind_text = value.get("kind").and_then(serde_json::Value::as_str);
+    // k8s.nyl/v1 holds rendering resources too; only its Cluster is a control resource.
+    if api_version == Some(API_VERSION) && kind_text != Some(KIND_CLUSTER) {
         return Ok(None);
     }
-    let kind_text = value
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| CoreError::config("GitOps resource kind must be a static string"))?;
+    if !matches!(
+        api_version,
+        Some(API_VERSION | API_VERSION_GITOPS | API_VERSION_K8S_GITOPS)
+    ) {
+        return Ok(None);
+    }
+    let kind_text = kind_text.ok_or_else(|| CoreError::config("GitOps resource kind must be a static string"))?;
     // Release is discovered by the workload bundle loader.
     if kind_text == super::KIND_RELEASE {
         return Ok(None);
@@ -988,6 +995,10 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
     let Some(identity) = parse_gitops_resource_identity(value)? else {
         return Ok(None);
     };
+    // A deprecated API version reads as the current one.
+    let mut value = value.clone();
+    super::schema::canonicalize_api_version(&mut value);
+    let value = &value;
     let resource = match identity.kind {
         GitOpsResourceKind::GitRepository => GitOpsResource::GitRepository(parse_as(value, KIND_GIT_REPOSITORY)?),
         GitOpsResourceKind::Cluster => GitOpsResource::Cluster(parse_as(value, KIND_CLUSTER)?),
@@ -1882,6 +1893,25 @@ mod tests {
         let automated = parsed.spec.catalog_application_defaults.sync_policy.automated.unwrap();
         assert_eq!(automated.enabled, Some(false));
         assert_eq!(serde_json::to_value(automated).unwrap()["enabled"], false);
+    }
+
+    #[test]
+    fn test_clusters_parse_under_the_current_and_the_deprecated_api_version() {
+        for api_version in [API_VERSION, API_VERSION_K8S_GITOPS] {
+            let mut cluster = super::super::schema::resource_example(super::super::schema::ResourceKind::Cluster);
+            cluster["apiVersion"] = serde_json::json!(api_version);
+            let Some(GitOpsResource::Cluster(parsed)) = parse_gitops_resource(&cluster).unwrap() else {
+                panic!("{api_version}: expected a Cluster");
+            };
+            assert_eq!(
+                parsed.api_version, API_VERSION,
+                "{api_version} reads as the current version"
+            );
+            parsed.validate().unwrap();
+        }
+        // The rendering resources in k8s.nyl/v1 are not control resources.
+        let helm_chart = super::super::schema::resource_example(super::super::schema::ResourceKind::HelmChart);
+        assert!(parse_gitops_resource_identity(&helm_chart).unwrap().is_none());
     }
 
     #[test]

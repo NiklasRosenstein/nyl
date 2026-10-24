@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use git2::{Repository, Status, StatusOptions};
 
 use crate::config::ProjectConfig;
-use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
+use crate::constants::{API_VERSION, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::resources::{
     parse_gitops_resource, parse_gitops_resource_identity, GitOpsResource, GitOpsResourceIdentity, GitOpsResourceKind,
 };
@@ -632,27 +632,28 @@ fn is_yaml_document_marker(line: &str, marker: &str) -> bool {
             .is_some_and(|tail| tail.starts_with([' ', '#']))
 }
 
+/// Whether a document declares a control resource: any GitOps API version,
+/// or a Cluster in `k8s.nyl/v1`, whose other kinds are rendering resources.
 fn advertises_gitops_api(document: &str) -> bool {
-    document.lines().any(|line| {
-        if line.starts_with([' ', '\t']) {
-            return false;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            return false;
-        };
-        key.trim() == "apiVersion" && matches!(parse_static_scalar(value), API_VERSION_GITOPS | API_VERSION_K8S_GITOPS)
-    })
+    match top_level_value(document, "apiVersion") {
+        Some(API_VERSION_GITOPS | API_VERSION_K8S_GITOPS) => true,
+        Some(API_VERSION) => top_level_value(document, "kind") == Some(crate::resources::KIND_CLUSTER),
+        _ => false,
+    }
 }
 
 fn advertises_release_kind(document: &str) -> bool {
-    document.lines().any(|line| {
+    top_level_value(document, "kind") == Some(crate::resources::KIND_RELEASE)
+}
+
+/// The static scalar of a top-level key, if the document has one.
+fn top_level_value<'a>(document: &'a str, wanted: &str) -> Option<&'a str> {
+    document.lines().find_map(|line| {
         if line.starts_with([' ', '\t']) {
-            return false;
+            return None;
         }
-        let Some((key, value)) = line.split_once(':') else {
-            return false;
-        };
-        key.trim() == "kind" && parse_static_scalar(value) == crate::resources::KIND_RELEASE
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == wanted).then(|| parse_static_scalar(value))
     })
 }
 
@@ -938,7 +939,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: k8s.gitops.nyl/v1
+            r"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -962,7 +963,7 @@ spec:
         let (temporary, _repository) = project();
         fs::write(
             temporary.path().join("cluster.yaml"),
-            r"apiVersion: k8s.gitops.nyl/v1
+            r"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
   name: kasoku
@@ -1002,7 +1003,7 @@ spec:
         fs::write(temporary.path().join("two.yaml"), TARGET).unwrap();
         fs::write(
             temporary.path().join("broken.yaml"),
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Cluster\nmetadata:\n  name: broken\nspec:\n  destination: 42\n",
+            "apiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: broken\nspec:\n  destination: 42\n",
         )
         .unwrap();
 

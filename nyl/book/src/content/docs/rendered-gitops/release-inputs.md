@@ -11,7 +11,7 @@ reference or connection facts produced by another tool. A Release without
 ## Declaring inputs
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: web

@@ -198,7 +198,7 @@ spec:
 ## Complete Example
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: myapp
@@ -281,4 +281,4 @@ nyl render --target production app.yaml
 
 - [Git Integration](/nyl/kubernetes/git-integration/) - Git repository management
 - [Configuration](/nyl/reference/configuration/) - Search paths and settings
-- [Release](/nyl/reference/resources/k8s.gitops.nyl/v1/release/) - Release metadata
+- [Release](/nyl/reference/resources/k8s.nyl/v1/release/) - Release metadata

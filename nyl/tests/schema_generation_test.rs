@@ -47,7 +47,7 @@ fn resource_schema_cli_supports_release() {
         .args(["schema", "resource", "Release"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"const\": \"k8s.gitops.nyl/v1\""))
+        .stdout(predicate::str::contains("\"const\": \"k8s.nyl/v1\""))
         .stdout(predicate::str::contains("\"const\": \"Release\""))
         .stdout(predicate::str::contains("\"additionalNamespaces\""))
         .stdout(predicate::str::contains("\"include\""));
@@ -118,5 +118,5 @@ fn rendering_schema_cli_supports_api_qualification_and_dynamic_kinds() {
         .args(["schema", "resource", "Cluster", "--api-version", "gitops.nyl/v1"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("k8s.gitops.nyl/v1"));
+        .stderr(predicate::str::contains("k8s.nyl/v1"));
 }

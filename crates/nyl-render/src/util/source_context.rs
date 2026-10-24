@@ -30,7 +30,15 @@ impl SourceContext {
     /// This wraps YAML parsing to provide better error messages
     /// with file context and field path information.
     pub fn parse_yaml_documents(&self, yaml: &str) -> Result<Vec<serde_json::Value>> {
-        crate::yaml::parse_yaml_documents_k8s_compatible(yaml).map_err(|e| self.enhance_yaml_error(e, "YAML parsing"))
+        let mut documents = crate::yaml::parse_yaml_documents_k8s_compatible(yaml)
+            .map_err(|e| self.enhance_yaml_error(e, "YAML parsing"))?;
+        // A deprecated API version reads as the current one everywhere after
+        // loading, so it never changes rendered output.
+        for document in &mut documents {
+            super::deprecation::warn_deprecated_api_version(&self.file_path, document);
+            nyl_core::resources::schema::canonicalize_api_version(document);
+        }
+        Ok(documents)
     }
 
     /// Parse a single YAML/JSON value with source context

@@ -1141,7 +1141,7 @@ mod tests {
         }))
         .unwrap();
         let cluster: Cluster = serde_json::from_value(serde_json::json!({
-            "apiVersion": crate::constants::API_VERSION_K8S_GITOPS,
+            "apiVersion": crate::constants::API_VERSION,
             "kind": "Cluster",
             "metadata": {"name": "kasoku"},
             "spec": {

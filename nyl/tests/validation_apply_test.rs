@@ -69,7 +69,7 @@ fn validation_failure_prevents_resource_and_release_writes() {
     std::fs::write(
         temp.path().join("cluster.yaml"),
         format!(
-            r#"apiVersion: k8s.gitops.nyl/v1
+            r#"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata: {{name: test}}
 spec:

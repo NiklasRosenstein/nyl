@@ -140,7 +140,7 @@ A production Cluster can use a committed staging contract when production is
 inaccessible to the rendering pipeline:
 
 ```yaml
-apiVersion: k8s.gitops.nyl/v1
+apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
   name: production

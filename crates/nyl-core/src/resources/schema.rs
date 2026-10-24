@@ -79,7 +79,7 @@ impl ResourceKind {
     pub fn api_version(self) -> &'static str {
         match self {
             Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
-            Self::HelmChart | Self::RemoteManifest => API_VERSION,
+            Self::HelmChart | Self::RemoteManifest | Self::Cluster | Self::Release => API_VERSION,
             Self::Component => API_VERSION_COMPONENTS,
             _ => API_VERSION_K8S_GITOPS,
         }
@@ -139,9 +139,54 @@ pub(crate) fn set_envelope(schema: &mut Value, api_version: &str, kind: Option<&
     }
 }
 
+/// An API version a kind still accepts after moving to another one. Nyl reads
+/// it as the replacement and warns; the documentation's deprecation list names
+/// when support ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeprecatedApiVersion {
+    pub kind: &'static str,
+    pub api_version: &'static str,
+    pub replacement: &'static str,
+}
+
+/// Every deprecated API version Nyl still accepts.
+pub const DEPRECATED_API_VERSIONS: [DeprecatedApiVersion; 2] = [
+    DeprecatedApiVersion {
+        kind: "Cluster",
+        api_version: API_VERSION_K8S_GITOPS,
+        replacement: API_VERSION,
+    },
+    DeprecatedApiVersion {
+        kind: "Release",
+        api_version: API_VERSION_K8S_GITOPS,
+        replacement: API_VERSION,
+    },
+];
+
+/// The deprecation a manifest's API version and kind fall under, if any.
+pub fn deprecated_api_version(value: &Value) -> Option<DeprecatedApiVersion> {
+    let api = value.get("apiVersion")?.as_str()?;
+    let kind = value.get("kind")?.as_str()?;
+    DEPRECATED_API_VERSIONS
+        .into_iter()
+        .find(|deprecated| deprecated.api_version == api && deprecated.kind == kind)
+}
+
+/// Rewrite a deprecated API version to its replacement, returning the
+/// deprecation that applied.
+pub fn canonicalize_api_version(value: &mut Value) -> Option<DeprecatedApiVersion> {
+    let deprecated = deprecated_api_version(value)?;
+    value["apiVersion"] = Value::String(deprecated.replacement.to_owned());
+    Some(deprecated)
+}
+
 /// Reject recognized Nyl resources in an API group that does not define them.
-/// Unrelated Kubernetes APIs and custom component aliases remain available.
+/// Unrelated Kubernetes APIs and custom component aliases remain available,
+/// and so do deprecated API versions.
 pub fn validate_resource_api(value: &Value) -> Result<()> {
+    if deprecated_api_version(value).is_some() {
+        return Ok(());
+    }
     let Some(api) = value.get("apiVersion").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -186,6 +231,17 @@ pub fn schema_artifacts() -> BTreeMap<String, Value> {
             json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": path}),
         );
         manifest.push(json!({"name": kind.name(), "apiVersion": kind.api_version(), "slug": kind.slug(), "schema": path, "dynamicKind": kind == ResourceKind::Component}));
+    }
+    // Files that reference a deprecated API version's schema URL keep working.
+    for deprecated in DEPRECATED_API_VERSIONS {
+        let kind = ResourceKind::ALL
+            .into_iter()
+            .find(|kind| kind.name() == deprecated.kind)
+            .expect("deprecations name known kinds");
+        files.insert(
+            format!("{}/{}.schema.json", deprecated.api_version, kind.slug()),
+            json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": format!("../../{}", kind.schema_path())}),
+        );
     }
     files.insert("resources.json".into(), json!({"resources": manifest}));
     files.insert(
@@ -477,6 +533,27 @@ mod tests {
         let mut required = schemars::Schema::default();
         exclusive_fields(&mut required, &[("first", "Does the first thing.")], None);
         assert_eq!(required.get("oneOf").and_then(Value::as_array).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_deprecated_api_versions_are_accepted_and_canonicalized() {
+        for deprecated in DEPRECATED_API_VERSIONS {
+            let kind = ResourceKind::ALL
+                .into_iter()
+                .find(|kind| kind.name() == deprecated.kind)
+                .unwrap();
+            assert_eq!(kind.api_version(), deprecated.replacement, "{}", deprecated.kind);
+            let mut example = resource_example(kind);
+            example["apiVersion"] = json!(deprecated.api_version);
+            validate_resource_api(&example).unwrap();
+            assert_eq!(canonicalize_api_version(&mut example), Some(deprecated));
+            assert_eq!(example["apiVersion"], deprecated.replacement);
+            assert_eq!(deprecated_api_version(&example), None);
+        }
+        // Only the listed kinds keep their old API version.
+        let mut target = resource_example(ResourceKind::DeploymentTarget);
+        target["apiVersion"] = json!(API_VERSION);
+        assert!(validate_resource_api(&target).is_err());
     }
 
     #[test]

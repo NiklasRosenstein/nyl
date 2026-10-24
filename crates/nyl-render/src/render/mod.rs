@@ -240,7 +240,7 @@ metadata:
     #[test]
     fn test_is_known_nyl_resource_release() {
         let resource = serde_json::json!({
-            "apiVersion": "k8s.gitops.nyl/v1",
+            "apiVersion": "k8s.nyl/v1",
             "kind": "Release",
             "metadata": {"name": "test", "namespace": "default"}
         });
@@ -883,7 +883,7 @@ metadata:
 
     #[test]
     fn test_best_effort_parse_yaml_documents_skips_jinja() {
-        let raw = r"apiVersion: k8s.gitops.nyl/v1
+        let raw = r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: my-app
@@ -917,7 +917,7 @@ data:
         let entry = temporary.path().join("release.yaml");
         std::fs::write(
             &entry,
-            r"apiVersion: k8s.gitops.nyl/v1
+            r"apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: example
@@ -977,7 +977,7 @@ spec:
         let entry = temporary.path().join("release.yaml");
         std::fs::write(
             &entry,
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['missing/*.yaml']\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['missing/*.yaml']\n",
         )
         .unwrap();
         let context = TemplateContext {
@@ -995,12 +995,12 @@ spec:
 
         std::fs::write(
             &entry,
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['nested.yaml']\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\nspec:\n  include: ['nested.yaml']\n",
         )
         .unwrap();
         std::fs::write(
             temporary.path().join("nested.yaml"),
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: nested\n  namespace: nested\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: nested\n  namespace: nested\n",
         )
         .unwrap();
         assert!(load_release_bundle(&entry, &context)
@@ -1015,7 +1015,7 @@ spec:
         let structural = temporary.path().join("structural.yaml");
         std::fs::write(
             &structural,
-            "{% if values.enabled %}\napiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
+            "{% if values.enabled %}\napiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: example\n{% endif %}\n",
         )
         .unwrap();
         assert!(static_release_envelope(&structural).unwrap().is_none());
@@ -1023,7 +1023,7 @@ spec:
         let value_templated = temporary.path().join("value.yaml");
         std::fs::write(
             &value_templated,
-            "apiVersion: k8s.gitops.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: example\n  namespace: '{{ values.namespace }}'\n",
         )
         .unwrap();
         assert_eq!(

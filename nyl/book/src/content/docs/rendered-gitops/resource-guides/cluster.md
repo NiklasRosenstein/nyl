@@ -2,7 +2,7 @@
 title: 'Using Cluster'
 ---
 
-See the [Cluster resource reference](/nyl/reference/resources/k8s.gitops.nyl/v1/cluster/) for the API, example, and field definitions.
+See the [Cluster resource reference](/nyl/reference/resources/k8s.nyl/v1/cluster/) for the API, example, and field definitions.
 
 Exactly one of `destination.server` and `destination.name` is required. Values
 such as region, architecture, storage class, and ingress implementation belong

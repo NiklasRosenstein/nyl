@@ -1,6 +1,8 @@
 // Pages that moved when the docs were split into header sections, old
 // route to new. Astro serves a redirect at each old route.
 export const movedPages = {
+  "/reference/resources/k8s.gitops.nyl/v1/cluster": "/reference/resources/k8s.nyl/v1/cluster/",
+  "/reference/resources/k8s.gitops.nyl/v1/release": "/reference/resources/k8s.nyl/v1/release/",
   "/commands/state": "/reference/cli/state/",
   "/deployment-workflows/rendered-manifests/resource-guides/environment": "/orchestration/resource-guides/environment/",
   "/deployment-workflows/rendered-manifests/resource-guides/environment-group": "/orchestration/resource-guides/environment-group/",
