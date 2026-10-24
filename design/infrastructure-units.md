@@ -142,7 +142,7 @@ handling: the old incarnation is deleted under its deletion policy and the new
 kind starts a new incarnation. To switch without destroying anything, first set
 `deletionPolicy: Retain` and reconcile, then change the kind; the new
 incarnation converges against the same backend, after any state migration the
-tools require has been done by hand. A teardown caused by a kind change always
+tools require, done with the [repair](#repair) flow. A teardown caused by a kind change always
 requires `--allow-teardown`.
 
 ### Execution
@@ -256,9 +256,38 @@ commit itself is excluded; the matched bytes stand for it.
 `plan` and `verify` only read, so they never take the backend's state lock and
 never collide with a running `reconcile`. A state lock left behind by a lost
 runner makes the next execution fail with the lock ID, as a non-retryable
-`ownership` failure. The operator releases it with the tool's
-`force-unlock` and then runs `nyl recover --retry`; Nyl never releases locks
-itself.
+`ownership` failure. The operator releases it with
+`nyl exec -e <env> --unit <u> -- force-unlock <id>` while the unit is held, or
+with the tool directly, and then resumes the unit or runs `nyl recover --retry`;
+Nyl never releases locks itself.
+
+A unit with a receipt whose backend now holds no state fails before planning
+with `NYL-TOFU-STATE-MISSING`, a non-retryable `ownership` failure, instead of
+planning to create everything again: a wrong `key`, a lost bucket, or a
+misconfigured backend looks exactly like that. `nyl recover --retry --reason`
+accepts the empty state for the current ownership scope when it is intended.
+
+### Repair
+
+Both drivers declare the `exec` capability (see
+[Operator exec](orchestration-core.md#operator-exec)). `nyl exec` runs `tofu`
+or `terraform` in a fresh worktree of the unit's current desired document,
+after the same `init`, with the same variables and credentials.
+`--backend <file>` replaces the backend configuration for that invocation
+only, so state can be inspected or rebuilt at a separate location without
+changing source. Relocating a broken or lost backend:
+
+1. `nyl hold -e <env> --unit <u> --reason <text>`.
+2. Recover the state into the new location, for example
+   `nyl exec -e <env> --unit <u> --backend new.json -- state push backup.tfstate`,
+   or `-- state pull` from the old backend when it is still readable.
+3. Inspect it with `nyl exec … --backend new.json -- plan`.
+4. Change `backend` in source to the new location and merge it.
+5. `nyl resume -e <env> --unit <u>`. The next reconcile re-executes the unit
+   against the new backend; a matching state plans no changes.
+
+The same flow covers `state mv`, `state rm`, and `import` repairs without a
+backend change, skipping step 4.
 
 ## Terraform to Terraform outputs
 

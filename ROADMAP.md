@@ -120,13 +120,22 @@ the existing milestone references stable.
 The first backend uses separate invocations and therefore serializes effects
 under the environment lease. It does not claim one run or an atomic observed
 snapshot across jobs. Full ownership stays selected; current receipts skip work,
-and reconciliation lifecycle changes remain explicit environment-level operations.
-Read-only planning always reports removals, including when no units remain.
-CI owns event mapping and runner configuration, while Nyl rechecks evidence,
-approvals, and the current deployment generation under the lease on every worker
-attempt, including retries. A rollback needs a new authorized admission.
-Parallel workers of one Nyl run require a later coordinator/worker contract,
-including fencing and recovery; they are not implied by graph export.
+and units leaving ownership go to one lifecycle job that never tears down
+without `--allow-teardown`. Read-only planning always reports removals,
+including when no units remain. CI owns event mapping and runner configuration,
+while Nyl rechecks evidence, approvals, and holds on every worker attempt.
+
+Deployment admission is opt-in per environment. It records the current
+generation, the source chosen by the environment's normal source rules, and
+only moves forward: an older source needs an authorized rollback. Workers whose
+generation was overtaken skip without effects; unit-level operator actions never
+touch the admission. Security is a deployment choice, not a separate mode: on
+one ref admission is a consistency fence, and on a dispatcher-only ref it also
+keeps worker credentials from choosing what is deployed. Every CI action has a
+CLI form, and `nyl exec` gives held units a recorded repair path through their
+native tool, such as relocating an OpenTofu backend. Parallel workers of one
+Nyl run require a later coordinator/worker contract, including fencing and
+recovery; they are not implied by graph export.
 
 ## Architectural frame
 
@@ -853,17 +862,21 @@ value-only path promotes each value from what its consuming Application runs.
   fail explicitly or use a documented safe fallback.
 - [ ] Generate stable, collision-checked job IDs and `needs` edges, a pinned
   public graph manifest, per-unit reports, and an always-run read-only summary.
-  Include current producers and unresolved consumers; reject reconciliation
-  lifecycle work that ordinary unit jobs cannot perform. Planning emits a
-  separate environment-level lifecycle report, including empty selections,
-  preserving the caller's `--fail-on-leaving` policy without state writes.
-- [ ] Bind jobs to immutable source, project, environment, operation, and adapter
-  configuration. Implement a versioned protected-state deployment admission
-  record with unique generations, expected-generation admission, and normalized
-  authorization evidence. Under the environment lease, reject stale admission
-  on every worker attempt before intent writes, imports, or effects. Direct
-  environment mutations invalidate admission; rollback requires a new request.
-  Provider pipeline serialization is an optional optimization, not the fence.
+  Include current producers and unresolved consumers, and a lifecycle node:
+  `reconcile --leaving` after the unit jobs for reconciliation, and a read-only
+  lifecycle report for planning, including empty selections, preserving the
+  caller's `--fail-on-leaving` policy without state writes.
+- [ ] Bind jobs to the admitted source, project, environment, operation, and
+  adapter configuration. Implement opt-in deployment admission: a versioned
+  record on `state.admissionRef` with forward-only generations chosen by the
+  environment's source rules, idempotent re-dispatch, authorized rollback, and
+  normalized authorization evidence. Under the environment lease, superseded
+  worker attempts skip before intent writes, imports, or effects; `state
+  restore` carries the record forward. Provider pipeline serialization is an
+  optional optimization, not the fence.
+- [ ] Add `nyl exec` for held units of drivers with the `exec` capability,
+  starting with OpenTofu and Terraform, including backend substitution and the
+  missing-state guard.
 - [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
   revalidate approvals and never pass authoritative outputs through CI artifacts.
 - [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)
@@ -876,8 +889,9 @@ preserves the local core's freshness, lease, approval, and recovery rules across
 retries and cancellation. Independent unit jobs are observably serialized within
 one environment; no distributed-run guarantee is made. Retrying an old worker
 after a newer admission has no deployment effects, and a newly authorized
-rollback remains possible. Removing all units still produces a read-only MR
-lifecycle report. The in-memory adapter proves the same semantic graph and
+rollback remains possible. Removing a unit shows a lifecycle job that destroys
+nothing without `--allow-teardown`, and removing all units still produces a
+read-only MR lifecycle report. The in-memory adapter proves the same semantic graph and
 admission behavior without GitLab types or services.
 
 ## Open decisions

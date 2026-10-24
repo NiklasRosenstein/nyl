@@ -126,9 +126,13 @@ Top-level fields are `contract`, `milestone`, optional `tiers` (default
 scenario directory, so scenarios can share one project), and `steps`. Before
 the first commit, the harness replaces `%SCENARIO_TMP%` in project and patch
 files with a per-scenario temporary directory, `%PROJECT_URL%` with the URL
-of `project.git`, and `%REGISTRY%` with the registry's host and port. The harness reads every scenario at every milestone,
-runs those whose `milestone` it has reached, and fails on a field or step kind
-it does not know, so the files cannot drift from the format.
+of `project.git`, and `%REGISTRY%` with the registry's host and port. The
+harness knows every step kind and field this format documents, including those
+of later milestones, and validates every scenario against them at every
+milestone. It runs only the scenarios whose `milestone` it has reached and
+fails on a field or step kind the format does not document, so the files cannot
+drift from the format. A later milestone's step kinds are added to the format,
+and to the harness's validation, together with the first scenario using them.
 
 | Step | Effect |
 | --- | --- |
@@ -164,34 +168,36 @@ step that depends on one, or on a scripted observer response, carries
 
 ### M8 CI conformance steps
 
-The [CI execution contract](ci-execution.md) adds these operations to the scenario
-harness in M8, exercised against GitLab graph rendering and an in-memory adapter.
-They are proposed harness operations; M3 does not execute M8 scenarios. Each
-invocation takes a fresh clone and uses the real core/state implementation with
-fake authorization and drivers in tier 1. References to admissions are harness
-aliases for captured generation IDs, never production caller-selected IDs.
+The [CI execution contract](ci-execution.md) adds these step kinds, exercised
+against GitLab graph rendering and an in-memory adapter. The harness validates
+them from M3 on and executes them from M8. Each invocation takes a fresh clone
+and uses the real core/state implementation with fake authorization and drivers
+in tier 1. Admission `id`s are harness aliases for captured generation IDs,
+never caller-selected production IDs.
 
 | Step | Effect |
 | --- | --- |
-| `ci-admit: {id, request, expected, rollback?}` | Trusted test dispatcher admits the current source/graph binding under the lease; `expected` is a prior admission alias or `none`; saves the generation as `id`. `rollback: true` supplies explicit test authorization for a new rollback request. Repeating a superseded request is rejected, not renewed. |
-| `ci-worker: {admission, unit}` | Executes an attempt through the ordinary core admission gate using the captured manifest/source/generation and only the named unit. It must not read source from the current branch tip instead. |
-| `ci-export: {operation, fail-on-leaving?}` | Read-only graph export for dev through each adapter; `expect.ci.lifecycleLeaving` is the exact leaving-unit set in its lifecycle plan node, which runs even with an empty unit selection. A `fail-on-leaving` policy applies when evaluating that read-only lifecycle plan, not as a required reconciliation. |
+| `ci-admit: {id, rollback?}` | Runs `nyl ci admit -e dev` through the trusted test dispatcher and saves the resulting generation as `id`. `rollback: true` adds `--rollback` with test authorization. |
+| `ci-worker: {admission, unit}` or `{admission, leaving: true, allow-teardown?}` | Runs one worker attempt with the captured generation, checked out at that generation's admitted commit: `reconcile --unit <unit>`, or the lifecycle job's `reconcile --leaving`, adding `--allow-teardown` when requested |
+| `ci-export: {operation, fail-on-leaving?}` | Read-only graph export for dev through each adapter; `fail-on-leaving` applies to the lifecycle plan node of a `plan` export |
 
-Like `nyl`, these steps accept `at: <branch>` (default `main`). `ci-admit` and
-`ci-export` read that checkout; `ci-worker` always uses its captured binding.
-All use `exit` and the existing `expect.executed`, `expect.commits`, and
-`expect.codes`. `ci-export` additionally checks the lifecycle plan node's result
-without running reconciliation workers. Rejected worker assertions count no
-desired/observed transition commits and no driver execution; lease coordination
-refs are allowed to change. Test dispatcher policies permit the requested new
-deployments/rollback and reject stale request reuse. Exporter failures use
-`NYL-CI-LIFECYCLE-REQUIRES-OPERATION`; stale attempts/request reuse use
-`NYL-CI-ADMISSION-SUPERSEDED`. These codes are planned with M8's typed reports.
+Like `nyl`, `ci-admit` and `ci-export` accept `at: <branch>` (default `main`)
+and read that checkout; `ci-worker` always uses its captured binding. All use
+`exit` and the existing `expect` keys, plus `expect.ci`:
 
-After admitting A, the harness keeps its source manifest unchanged across later
-commits and new admissions. Both adapters must retain identical semantic bindings
-and report outcomes. Provider-specific scheduling behavior remains a separate
-integration check; conformance needs no hosted CI account.
+| Key | Checks |
+| --- | --- |
+| `ci.admission` | For `ci-admit`, the alias of the generation it returned, such as an earlier `id` when the same deployment is dispatched again |
+| `ci.units` | For `ci-export`, exactly the units that received unit jobs |
+| `ci.lifecycleLeaving` | For `ci-export`, exactly the units in the lifecycle node; the node exists, and is checked, even with an empty unit selection |
+| `ci.superseded` | For `ci-worker`, the units it reported superseded |
+
+A superseded or refused attempt asserts `commits: {desired: 0, observed: 0}`
+and no driver execution; lease coordination refs may still change. Test
+dispatcher policies authorize the requested rollback and nothing else. Both
+adapters must retain identical semantic bindings and report outcomes.
+Provider-specific scheduling behavior remains a separate integration check;
+conformance needs no hosted CI account.
 
 ## Reference project
 

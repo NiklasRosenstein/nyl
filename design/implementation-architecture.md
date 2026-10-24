@@ -166,20 +166,31 @@ Scheduler syntax, provider environment variables, and job IDs are absent from
 these semantic types; opaque CI trace metadata may appear in diagnostics.
 `nyl-orchestration` owns the pure extraction and validation of
 dependency edges, shared with local scheduling, including unresolved data edges.
-Provider YAML serialization and runner mappings live in CLI-side adapter code;
-they introduce no GitLab types or IO into the orchestration core. Workers wire
-unit-scoped operations through the core admission gate, with the same typed
-reports and state/driver implementations. The admission decision is pure over
-the current generation and normalized authorization evidence; the orchestration
-shell checks it under the environment lease and `nyl-state` persists it through
-the existing fenced transition mechanism. A worker cannot perform the check in
-a CLI preflight separated from the state mutation by another lease acquisition.
-Artifact aggregation is presentation, not receipt admission. Lifecycle planning
-uses the existing read-only planner and never requires deployment admission.
+It also owns every CI rule: job-ID encoding and collision checks, the export
+plan derived from a provider's declared capabilities (rejection or documented
+fallback), the lifecycle node for leaving units, and the admission decisions.
+Admission is two pure functions: minting compares the newly resolved source
+with the current generation (same, newer, or rollback needing authorization),
+and gating compares a worker's generation with the current record (current or
+superseded). The orchestration shell evaluates both under the environment lease,
+and `nyl-state` persists the record on the admission ref through the existing
+fenced transition mechanism. A worker cannot perform the check in a CLI
+preflight separated from the state mutation by another lease acquisition.
 
-Adapters map scheduler capabilities and presentation only. GitLab and an
-in-memory test adapter share graph, admission, and result conformance fixtures;
-future providers implement this boundary without changing unit/resource schemas.
+Provider adapters hold no business rules: each serializes an export plan into
+its scheduler's syntax and maps runner profiles and job observations, behind a
+trait in `nyl-core`. The GitLab adapter lives in `nyl-drivers` beside the other
+effectful implementations; `nyl-cli` only wires it. GitLab and an in-memory test
+adapter share graph, admission, and result conformance fixtures, so the rules
+are proven once; future providers implement this boundary without changing
+unit/resource schemas. Artifact aggregation is presentation, not receipt
+admission. Lifecycle planning uses the existing read-only planner and never
+requires deployment admission.
+
+Operator `exec` is a driver capability like `plan` or `teardown`: the driver
+prepares the tool invocation from the desired document and an optional
+substituted configuration, and the shell requires the hold and the lease and
+records the transition.
 
 The [CI execution design](ci-execution.md) specifies the first, separate-run
 backend. A later shared-run backend must extend the orchestration shell and
