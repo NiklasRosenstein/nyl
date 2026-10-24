@@ -8,10 +8,24 @@
       "slug": "git-repository"
     },
     {
-      "apiVersion": "k8s.gitops.nyl/v1",
+      "apiVersion": "gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "Environment",
+      "schema": "gitops.nyl/v1/environment.schema.json",
+      "slug": "environment"
+    },
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "EnvironmentGroup",
+      "schema": "gitops.nyl/v1/environment-group.schema.json",
+      "slug": "environment-group"
+    },
+    {
+      "apiVersion": "k8s.nyl/v1",
       "dynamicKind": false,
       "name": "Cluster",
-      "schema": "k8s.gitops.nyl/v1/cluster.schema.json",
+      "schema": "k8s.nyl/v1/cluster.schema.json",
       "slug": "cluster"
     },
     {
@@ -43,10 +57,10 @@
       "slug": "app-project-definition"
     },
     {
-      "apiVersion": "k8s.gitops.nyl/v1",
+      "apiVersion": "k8s.nyl/v1",
       "dynamicKind": false,
       "name": "Release",
-      "schema": "k8s.gitops.nyl/v1/release.schema.json",
+      "schema": "k8s.nyl/v1/release.schema.json",
       "slug": "release"
     },
     {
