@@ -11,7 +11,7 @@ use std::time::Duration;
 use colored::Colorize;
 
 use crate::{
-    kubernetes::{ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey},
+    kubernetes::{prune::PruneDecision, ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey},
     Result,
 };
 
@@ -37,6 +37,11 @@ pub(crate) enum ApplyEvent<'a> {
     PruneWaitTimedOut { keys: &'a [&'a ResourceKey] },
     /// Pruning finished.
     PruneFinished,
+    /// A resource no longer desired is kept by its Argo CD `Prune` sync option.
+    PruneKept {
+        key: &'a ResourceKey,
+        decision: PruneDecision,
+    },
 }
 
 /// Receiver of [`ApplyEvent`]s.
@@ -120,6 +125,19 @@ impl<'a> ApplyRenderer<'a> {
                 }
             }
             ApplyEvent::PruneFinished => println!(),
+            ApplyEvent::PruneKept {
+                key,
+                decision: PruneDecision::Retain,
+            } => println!(
+                "{} Kept {}: its sync option Prune=false retains it",
+                "!".yellow().bold(),
+                key
+            ),
+            ApplyEvent::PruneKept { key, .. } => println!(
+                "{} Kept {}: its sync option Prune=confirm needs --confirm-prune to delete it",
+                "!".yellow().bold(),
+                key
+            ),
         }
     }
 

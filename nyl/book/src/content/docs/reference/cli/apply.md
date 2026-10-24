@@ -13,8 +13,10 @@ nyl apply [--target <TARGET>] [OPTIONS] <FILE>
 ## Description
 
 The `apply` command renders manifests, applies them with server-side apply, and tracks release state.
-For shared rendering behavior and namespace resolution details, see
-[Rendering Pipeline](/nyl/kubernetes/pipeline/).
+It applies a Release as its Argo CD Application would deploy it from the
+`render-tree` output, including managed Namespaces, and prunes as an Argo CD sync
+prunes. See [Rendering Pipeline](/nyl/kubernetes/pipeline/#the-releases-application)
+for the behavior `render`, `diff`, and `apply` share.
 
 ## Arguments
 
@@ -28,13 +30,19 @@ For shared rendering behavior and namespace resolution details, see
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
 - `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
+- `--release-only` - Settle the Release alone instead of taking it from the compiled target; see [`render`](/nyl/reference/cli/render/#common-options).
+- `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the applied manifests.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
+
+`--input`, `--inputs`, `--application-group`, `--defaults-only`, and the cache
+options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Release Options
 
 - `--name <NAME>` - Release name (required if no Release in file)
-- `--namespace <NAMESPACE>` - Release namespace (required if no Release in file)
+- `--namespace <NAMESPACE>` - Release namespace, and the namespace of resources that set none (required if no Release in file)
+- `--confirm-prune` - Also prune resources whose Argo CD sync option is `Prune=confirm`, such as managed Namespaces
 - `--append-release` - Merge current resources with the previous deployed revision and skip pruning removed resources
 - `--no-release` - Apply resources without creating release revisions, without release metadata, and without pruning
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest after a successful apply; `0` keeps every revision, otherwise `N` must be at least `2`. Overrides `[release] history_limit` in [`nyl.toml`](/nyl/reference/configuration/#release-history)
@@ -91,6 +99,13 @@ behind an aggregated API that is unavailable, stays recorded in the new revision
 so the next apply retries deleting it, and the command exits non-zero. Changing a
 resource's apiVersion does not prune it.
 
+Like an Argo CD sync, pruning reads each live resource's
+`argocd.argoproj.io/sync-options`: `Prune=false` keeps the resource and stops
+tracking it, and `Prune=confirm` keeps it, still tracked, until an apply with
+`--confirm-prune`. Managed Namespaces carry `Prune=confirm` by default, so
+dropping a namespace from a Release never deletes it and its contents
+unconfirmed. See [Pruning and deletion](/nyl/kubernetes/pipeline/#pruning-and-deletion).
+
 Each resource's outcome (`+` created, `~` updated, `=` unchanged, `✗` failed) is
 printed as soon as it completes, in completion order. The summary is followed by
 the time spent in API discovery, validation, apply, and release bookkeeping.
@@ -145,12 +160,16 @@ nyl apply --target production --no-release manifest.yaml
 - A `Release` resource in the manifest provides release metadata automatically.
 - Release state is tracked in Kubernetes Secrets in the release namespace. Use [`nyl release`](/nyl/reference/cli/release/) to inspect history or [roll back](/nyl/reference/cli/release/#rollback) to a previous revision.
 - Each release keeps its five most recent revisions unless `[release] history_limit` says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.
-- The release namespace is created when it is missing, before the manifests are
-  applied. Nyl does not own that namespace and never prunes it. Other namespaces
-  a release writes to, including `spec.additionalNamespaces`, need their own
-  `Namespace` manifest.
+- The destination namespace and `spec.additionalNamespaces` are applied as
+  managed Namespace objects owned by the release, by the group's `namespace`
+  policy, as in the published tree. Nyl also creates the release namespace
+  before anything else when it is missing, because the release state lives
+  there.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
-- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for namespace resolution and filter semantics.
+- Resources without `metadata.namespace` take the destination namespace of the
+  Release's Application, or `--namespace` for a file without a Release. The kube
+  context's default namespace is never used. See
+  [Namespaces in diff and apply](/nyl/kubernetes/pipeline/#namespaces-in-diff-and-apply).
 
 ## Manifest validation
 

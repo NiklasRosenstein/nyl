@@ -263,20 +263,44 @@ impl RenderSession {
     }
 
     /// Build the session used by `render`, `apply`, and `diff`.
+    ///
+    /// Like tree rendering, it admits the project's secrets provider and
+    /// `NYL_*` process environment only when `allow_secret_inputs` is set.
     pub fn for_cli(
         project_root: &Path,
         project_config: &ProjectConfig,
         target: Option<(&DeploymentTarget, &Cluster)>,
         explicit_capabilities: Option<(String, Vec<String>)>,
         missing_capabilities_error: Option<String>,
+        allow_secret_inputs: bool,
     ) -> Result<Self> {
         let session = if let Some((target, cluster)) = target {
-            Self::build(project_root, Some(project_config), target, cluster, true, false, true)?
+            Self::build(
+                project_root,
+                Some(project_config),
+                target,
+                cluster,
+                allow_secret_inputs,
+                false,
+                true,
+            )?
         } else {
             let project_root = project_root
                 .canonicalize()
                 .map_err(|error| NylError::config(format!("Failed to resolve project root: {error}")))?;
-            let secrets = SecretsConfig::load_from_dir(None, Some(&project_root))?;
+            let template_context = if allow_secret_inputs {
+                let secrets = SecretsConfig::load_from_dir(None, Some(&project_root))?;
+                TemplateContext::build(serde_json::json!({}), &secrets)?
+            } else {
+                TemplateContext {
+                    values: serde_json::json!({}),
+                    secrets: serde_json::json!({}),
+                    env: serde_json::Map::new(),
+                    cluster: None,
+                    target: None,
+                    inputs: None,
+                }
+            };
             let (kube_version, api_versions) = explicit_capabilities.unwrap_or_default();
             Self {
                 project_root,
@@ -284,7 +308,7 @@ impl RenderSession {
                 target_name: None,
                 kube_version,
                 api_versions,
-                template_context: TemplateContext::build(serde_json::json!({}), &secrets)?,
+                template_context,
                 missing_capabilities_error,
                 cache: None,
                 git_offline: false,

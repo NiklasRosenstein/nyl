@@ -13,8 +13,11 @@ nyl render [OPTIONS] <FILE>
 ## Description
 
 The `render` command generates Kubernetes manifests and writes final YAML to stdout.
-For detailed shared pipeline behavior (also used by `diff` and `apply`), see
-[Rendering Pipeline](/nyl/kubernetes/pipeline/).
+It never connects to Kubernetes. With `--target`, a Release renders as
+`render-tree` publishes it for its Argo CD Application, including managed
+Namespaces; resources without a namespace keep none. See
+[Rendering Pipeline](/nyl/kubernetes/pipeline/#the-releases-application) for the
+behavior `render`, `diff`, and `apply` share.
 
 ## Arguments
 
@@ -32,16 +35,19 @@ For detailed shared pipeline behavior (also used by `diff` and `apply`), see
 - `--inputs <FILE>` - Read Release inputs from a YAML or JSON object.
 - `--application-group <NAME>` - With `--target`, apply this ApplicationGroup's bindings when the Release file is not in exactly one selected group's local source.
 - `--defaults-only` - With `--target`, apply no target binding: only Release defaults and overrides.
+- `--release-only` - Settle the Release alone instead of taking it from the compiled target. Faster for large targets, but namespace conflicts with the target's other Releases go undetected.
+- `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the output, as for the tree commands. Without it, templates see neither.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--refresh` - Bypass cached rendering results and replace successful entries.
 - `--no-cache` - Perform no persistent cache reads or writes.
 
-### Offline Mode Options
+### Source and Capability Options
 
-- `--offline` - Skip Kubernetes discovery and use the target Cluster or explicit API information. `fromPublication` Release inputs read the cached publication branch head, as with `render-tree --offline`.
-- `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless offline render.
-- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless offline render, comma-separated or repeated.
+- `--offline` - Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
+- `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless render of Helm charts. With `--target`, the Cluster's committed capabilities apply.
+- `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless render, comma-separated or repeated.
+- `--context` - Deprecated and ignored, since `render` never connects to Kubernetes; see [Deprecations](/nyl/reference/deprecations/).
 
 ## Examples
 
@@ -64,13 +70,13 @@ nyl render --only-source-kind apps/v1/Deployment manifest.yaml
 nyl render --only-kind Deployment,Service manifest.yaml
 ```
 
-### Offline Mode
+### Capabilities and Cached Sources
 
 ```bash
-# Targetless offline render with explicit Kubernetes capabilities
-nyl render --offline --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
+# Targetless render of Helm charts with explicit Kubernetes capabilities
+nyl render --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
 
-# Target-aware offline render using the Cluster's committed capabilities
+# Use the Cluster's committed capabilities and only cached Git refs
 nyl render --target production --offline manifest.yaml
 ```
 
@@ -101,7 +107,7 @@ nyl render --target staging --max-depth 3 --track-parent manifest.yaml
 - Nyl accepts one entry file. `Release.spec.include` can attach additional relative manifest files and glob matches; directory arguments are not supported.
 - Expansion failures report the originating manifest path, document number, and recursive Component or HelmChart resource chain. This provenance is internal and is not added to rendered Kubernetes objects.
 - Bundle and Helm rendering use the shared content-addressed render cache. `diff` and `apply` reuse the same desired-manifest artifacts before performing their live-cluster operations.
-- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for namespace resolution, filter semantics, and online/offline behavior.
+- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for the Release's Application, namespaces, and filter semantics.
 
 ## Manifest validation
 

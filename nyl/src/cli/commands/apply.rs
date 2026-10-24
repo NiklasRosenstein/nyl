@@ -16,8 +16,10 @@ use crate::{
         namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     },
     kubernetes::{
-        enforce_release_history_limit, ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage,
-        ObjectIdentity, ReleaseState, ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
+        enforce_release_history_limit,
+        prune::{prune_decision, PruneDecision},
+        ApplyOutcome, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseState,
+        ReleaseStatus, ReleaseStorage, ResourceKey, ResourceOrdering,
     },
     NylError, Result,
 };
@@ -45,6 +47,11 @@ pub struct ApplyArgs {
     /// Skips pruning to preserve resources from previous releases.
     #[arg(long)]
     pub append_release: bool,
+
+    /// Prune resources whose Argo CD sync option is `Prune=confirm`, such as managed Namespaces.
+    /// Without it they are kept and stay tracked until a confirmed apply.
+    #[arg(long, conflicts_with = "no_release")]
+    pub confirm_prune: bool,
 
     /// Apply resources without creating release revisions or pruning.
     #[arg(long, conflicts_with_all = ["append_release", "name", "namespace"])]
@@ -83,9 +90,6 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
-        resolve_namespaces: false,
-        release_namespace_hint: None,
-        adjust_duplicate_keys: false,
         discovery_progress: DiscoveryProgress::Announce,
     })
     .await?;
@@ -111,13 +115,10 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let release_namespace_hint = release
-        .as_ref()
-        .map(|release| release.metadata.namespace.as_str())
-        .or(args.namespace.as_deref());
+    let destination_namespace = preflight.destination_namespace.as_deref().or(args.namespace.as_deref());
 
     let (collapsed, mut scopes) =
-        prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, release_namespace_hint).await?;
+        prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, destination_namespace).await?;
     desired_manifests = collapsed;
 
     // Display duplicate resources warning if any
@@ -221,6 +222,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
             ApplySettings {
                 concurrency,
                 history_limit,
+                confirm_prune: args.confirm_prune,
             },
             &mut timings,
             &mut |event| renderer.event(event),
@@ -523,10 +525,10 @@ pub(crate) async fn prepare_desired_manifests(
     client: &dyn KubeClient,
     mut manifests: Vec<serde_json::Value>,
     duplicates: &mut HashMap<ResourceKey, usize>,
-    release_namespace: Option<&str>,
+    destination_namespace: Option<&str>,
 ) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
-    resolve_manifest_namespaces(client, &mut manifests, release_namespace).await?;
-    *duplicates = adjust_duplicate_keys_for_namespace_resolution(client, duplicates, release_namespace).await?;
+    resolve_manifest_namespaces(client, &mut manifests, destination_namespace).await?;
+    *duplicates = adjust_duplicate_keys_for_namespace_resolution(client, duplicates, destination_namespace).await?;
     collapse_rendered_duplicates(client, manifests, duplicates).await
 }
 
@@ -848,6 +850,10 @@ impl<'s> ReleaseRecorder<'s> {
                 let live_keys_list: Vec<ResourceKey> = live_keys.iter().cloned().collect();
                 scopes.load(client, &live_keys_list).await;
                 let to_prune = keys_to_prune(&live_keys, &release.resource_keys, scopes);
+                let (to_prune, awaiting) =
+                    filter_by_prune_option(client, to_prune, settings.confirm_prune, on_event).await;
+                // Resources awaiting confirmation stay tracked, so a confirmed apply prunes them.
+                release.resource_keys.extend(awaiting.into_iter().cloned());
                 let failed = prune_resources(client, to_prune, settings.concurrency, on_event).await;
                 prune_failed_count = failed.len();
                 release.resource_keys.extend(failed.into_iter().cloned());
@@ -871,6 +877,42 @@ pub(crate) struct ApplySettings {
     pub(crate) concurrency: usize,
     /// Revisions to keep after a successful apply; 0 keeps every revision.
     pub(crate) history_limit: u32,
+    /// `--confirm-prune`: prune resources whose sync option is `Prune=confirm`.
+    pub(crate) confirm_prune: bool,
+}
+
+/// Split the resources to prune by their live Argo CD `Prune` sync option
+/// ([`prune_decision`]): returns those to delete and those awaiting
+/// confirmation, and reports every resource kept. A resource that cannot be read
+/// is pruned as before; deleting it reports the error.
+async fn filter_by_prune_option<'k>(
+    client: &dyn KubeClient,
+    keys: Vec<&'k ResourceKey>,
+    confirmed: bool,
+    on_event: &mut ApplyEventSink<'_>,
+) -> (Vec<&'k ResourceKey>, Vec<&'k ResourceKey>) {
+    let mut prune = Vec::new();
+    let mut awaiting = Vec::new();
+    for key in keys {
+        let live = client
+            .get_resource(&key.gvk, key.namespace.as_deref(), &key.name)
+            .await
+            .ok()
+            .flatten();
+        let decision = prune_decision(
+            live.as_ref().and_then(|object| object.metadata.annotations.as_ref()),
+            confirmed,
+        );
+        match decision {
+            PruneDecision::Prune => prune.push(key),
+            PruneDecision::Retain => on_event(ApplyEvent::PruneKept { key, decision }),
+            PruneDecision::AwaitConfirmation => {
+                on_event(ApplyEvent::PruneKept { key, decision });
+                awaiting.push(key);
+            }
+        }
+    }
+    (prune, awaiting)
 }
 
 /// Delete release revisions beyond `history_limit` once `release` deployed.
@@ -1682,6 +1724,72 @@ mod tests {
         assert_eq!(previous.status, ReleaseStatus::Superseded);
     }
 
+    /// Pruning keeps what Argo CD keeps: `Prune=false` resources stay and are no
+    /// longer tracked, `Prune=confirm` resources stay tracked until a confirmed apply.
+    #[tokio::test(start_paused = true)]
+    async fn test_release_recorder_prunes_by_argocd_prune_sync_option() {
+        for confirm_prune in [false, true] {
+            let storage = crate::cli::commands::release::rollback::tests::MockReleaseStorage::new();
+            let client = crate::kubernetes::MockKubeClient::new();
+            let previous = [
+                ("retained", "Prune=false"),
+                ("confirmed", "Delete=confirm,Prune=confirm"),
+                ("plain", ""),
+            ];
+            for (name, options) in previous {
+                let object: DynamicObject = serde_json::from_value(json!({
+                    "apiVersion": "v1", "kind": "Namespace",
+                    "metadata": {"name": name, "annotations": {"argocd.argoproj.io/sync-options": options}}
+                }))
+                .unwrap();
+                client.add_resource(key("v1", "Namespace", None, name), object);
+            }
+            storage
+                .save_release(&release_with_keys(
+                    1,
+                    ReleaseStatus::Deployed,
+                    previous
+                        .iter()
+                        .map(|(name, _)| key("v1", "Namespace", None, name))
+                        .collect(),
+                ))
+                .await
+                .unwrap();
+            let mut scopes = ObjectScopes::default();
+            let recorder = ReleaseRecorder::reserve(&storage, "app", "app", &[], false, &client, &mut scopes)
+                .await
+                .unwrap();
+            let settings = ApplySettings {
+                confirm_prune,
+                ..settings(0)
+            };
+            let release = recorder
+                .run(&client, &[], &mut scopes, settings, &mut Vec::new(), &mut |_| {})
+                .await
+                .unwrap()
+                .release;
+
+            let mut live = client
+                .get_all_resources()
+                .into_keys()
+                .map(|key| key.name)
+                .collect::<Vec<_>>();
+            live.sort();
+            let tracked = release
+                .resource_keys
+                .iter()
+                .map(|key| key.name.as_str())
+                .collect::<Vec<_>>();
+            if confirm_prune {
+                assert_eq!(live, ["retained"]);
+                assert!(tracked.is_empty());
+            } else {
+                assert_eq!(live, ["confirmed", "retained"]);
+                assert_eq!(tracked, ["confirmed"]);
+            }
+        }
+    }
+
     /// A release that renders nothing is still recorded and prunes everything the
     /// previous revision deployed.
     #[tokio::test(start_paused = true)]
@@ -1821,6 +1929,7 @@ mod tests {
         ApplySettings {
             concurrency: 8,
             history_limit,
+            confirm_prune: false,
         }
     }
 
