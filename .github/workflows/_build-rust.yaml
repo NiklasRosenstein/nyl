@@ -7,7 +7,7 @@
 # - Architecture support (x86_64, aarch64)
 # - ABI variants (gnu, musl, darwin, msvc)
 # - Static linking verification for musl targets
-# - Consistent caching with rust-cache@v2
+# - Consistent caching with rust-cache@v2, one cache per target
 
 name: Build Rust Binaries
 
@@ -23,6 +23,11 @@ on:
         required: false
         type: boolean
         default: true
+      profile:
+        description: 'Cargo profile to build with: release (fat LTO) or dist (thin LTO, as cargo-dist release binaries)'
+        required: false
+        type: string
+        default: release
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,10 +54,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The Cargo workspace is the repository root, so its target directory is
+      # ./target (the default). Matrix entries share this job's name, so the
+      # target keeps their caches apart. Only develop saves caches.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nyl
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Cross-compilation setup for aarch64 Linux GNU
       - name: Install cross-compilation tools (aarch64-gnu)
@@ -82,18 +91,18 @@ jobs:
       # Build binary using cross for aarch64-musl
       - name: Build release binary (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --profile ${{ inputs.profile }} --target ${{ matrix.target }}
 
       # Build binary using standard cargo for all other targets
       - name: Build release binary
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --profile ${{ inputs.profile }} --target ${{ matrix.target }}
 
       # Verify static linking for musl targets used in the CI image.
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
         run: |
-          binary="../target/${{ matrix.target }}/release/nyl"
+          binary="../target/${{ matrix.target }}/${{ inputs.profile }}/nyl"
           file_output=$(file "$binary")
           echo "Binary info: $file_output"
           if echo "$file_output" | grep -q "static.*linked"; then
@@ -111,7 +120,7 @@ jobs:
         with:
           name: nyl-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/nyl
-            target/${{ matrix.target }}/release/nyl.exe
+            target/${{ matrix.target }}/${{ inputs.profile }}/nyl
+            target/${{ matrix.target }}/${{ inputs.profile }}/nyl.exe
           if-no-files-found: ignore
           retention-days: 7
