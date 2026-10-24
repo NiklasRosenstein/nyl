@@ -46,6 +46,90 @@
       },
       "type": "object"
     },
+    "CredentialEntry": {
+      "additionalProperties": false,
+      "description": "One dedicated credential. Set exactly one of `ssh_key_file`, `ssh_key_env`, and `token_env`.",
+      "properties": {
+        "ssh_key_env": {
+          "description": "Environment variable holding a private SSH key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssh_key_file": {
+          "description": "Private SSH key file used instead of the SSH agent and config identities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_env": {
+          "description": "Environment variable holding an HTTPS access token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Prefix of the repository URLs this credential applies to, such as `https://gitlab.example.com/platform/`.",
+          "type": "string"
+        },
+        "username": {
+          "description": "HTTPS username sent with the token. Default `x-access-token`; GitLab expects `oauth2`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "EditorSchemas": {
+      "description": "Where generated editor schemas live.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Generate them into `.nyl/schemas`, ignored by Git; each checkout runs `nyl schema annotate`.",
+          "type": "string"
+        },
+        {
+          "const": "vendored",
+          "description": "Commit them under the vendor directory in `schemas/editor`.",
+          "type": "string"
+        }
+      ]
+    },
+    "EditorSettings": {
+      "additionalProperties": false,
+      "description": "Editor integration settings.",
+      "properties": {
+        "schemas": {
+          "$ref": "#/$defs/EditorSchemas",
+          "default": "local",
+          "description": "Where `nyl schema annotate` writes the schemas its comments reference."
+        }
+      },
+      "type": "object"
+    },
+    "GitSettings": {
+      "additionalProperties": false,
+      "description": "The `[git]` table of `nyl.toml`.",
+      "properties": {
+        "credentials": {
+          "default": [],
+          "description": "Dedicated credentials for state pushes and publication, by repository URL prefix.",
+          "items": {
+            "$ref": "#/$defs/CredentialEntry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "KubeconformSettings": {
       "additionalProperties": false,
       "description": "Kubeconform's schema inputs and bounded execution policy.",
@@ -147,6 +231,20 @@
       },
       "type": "object"
     },
+    "ReleaseSettings": {
+      "additionalProperties": false,
+      "description": "Release history settings in the `[release]` section of `nyl.toml`.",
+      "properties": {
+        "history_limit": {
+          "default": 5,
+          "description": "Maximum number of revisions kept per release, `5` by default. After a\nrevision deploys successfully through `nyl apply` or `nyl release rollback`,\nthe oldest revisions beyond this limit are deleted. `0` keeps every revision;\notherwise the limit must be at least `2` so the previous revision stays\navailable to roll back to.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "StripEmptyMetadataLabelsMode": {
       "description": "Controls when empty `metadata.labels` maps are stripped from emitted manifests.",
       "oneOf": [
@@ -239,6 +337,20 @@
       },
       "description": "Defaults for explicit cluster capture."
     },
+    "editor": {
+      "$ref": "#/$defs/EditorSettings",
+      "default": {
+        "schemas": "local"
+      },
+      "description": "Editor integration, such as where `nyl schema annotate` writes schemas."
+    },
+    "git": {
+      "$ref": "#/$defs/GitSettings",
+      "default": {
+        "credentials": []
+      },
+      "description": "Optional dedicated credentials for state pushes and publication."
+    },
     "project": {
       "$ref": "#/$defs/ProjectSettings",
       "default": {
@@ -253,6 +365,13 @@
         "previous_paths": [],
         "strip_empty_metadata_labels": "always"
       }
+    },
+    "release": {
+      "$ref": "#/$defs/ReleaseSettings",
+      "default": {
+        "history_limit": 5
+      },
+      "description": "Release history retention for `nyl apply` and `nyl release rollback`."
     },
     "validation": {
       "$ref": "#/$defs/ValidationSettings",
