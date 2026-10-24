@@ -1,62 +1,38 @@
 ---
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { createResourceMarkdownProcessor } from '../../../lib/resource-markdown.mjs';
-import { resourceGroups, resourceUsage, summary } from '../../../lib/resources.mjs';
+import { resourceGroups, summary } from '../../../lib/resources.mjs';
 import { schemaFor } from '../../../lib/schema-documents';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const processor = await createResourceMarkdownProcessor(base);
+// One line per resource: its purpose without the surrounding paragraph.
+const inline = (html: string) => html.trim().replace(/^<p>/, '').replace(/<\/p>$/, '');
 const groups = await Promise.all(resourceGroups().map(async (group) => ({
   ...group,
-  resources: await Promise.all(group.resources.map(async (resource) => {
-    const schema = schemaFor(resource);
-    const usage = await Promise.all(resourceUsage(schema).map(async ({ label, markdown }) => ({
-      label, html: (await processor.render(markdown)).code,
-    })));
-    return { ...resource, purpose: (await processor.render(summary(schema))).code, usage };
-  })),
+  resources: await Promise.all(group.resources.map(async (resource) => ({
+    ...resource,
+    purpose: inline((await processor.render(summary(schemaFor(resource)))).code),
+  }))),
 })));
 ---
 <StarlightPage frontmatter={{ title: 'Resources', description: 'Nyl resource APIs and their purposes.', editUrl: false, tableOfContents: false }}>
-  <p>Choose a resource by its purpose. Each entry explains when to declare the resource and what happens if it is omitted. These conditions concern whole resources; field requirements are documented in each reference.</p>
-  <table class="resources">
-    <thead><tr><th>Resource</th><th>Purpose and usage</th></tr></thead>
-    {groups.map((group) => <tbody>
-      <tr class="group" id={group.apiVersion.replace('/', '-')}>
-        <th colspan="2" scope="rowgroup">{group.label} <code>{group.apiVersion}</code></th>
-      </tr>
-      {group.resources.map((resource) => <tr>
-        <td><a href={`${base}${resource.route}`}>{resource.name}</a></td>
-        <td>
-          <Fragment set:html={resource.purpose} />
-          {resource.usage.map(({ label, html }) =>
-            <details><summary>{label}</summary><Fragment set:html={html} /></details>)}
-        </td>
-      </tr>)}
-    </tbody>)}
-  </table>
+  <p>Choose a resource by its purpose. Each reference explains when to declare the resource, what happens if it is omitted, and every field.</p>
+  <ul class="catalog">
+    {groups.map((group) => <li id={group.apiVersion.replace('/', '-')}>
+      <strong>{group.label}</strong> <code>{group.apiVersion}</code>
+      <ul>
+        {group.resources.map((resource) => <li>
+          <a href={`${base}${resource.route}`}><strong>{resource.name}</strong></a>: <Fragment set:html={resource.purpose} />
+        </li>)}
+      </ul>
+    </li>)}
+  </ul>
   <p>Native Kubernetes, Argo CD, and <a href={`${base}/kubernetes/validation/kyverno-policies/`}>Kyverno policies</a> use their upstream API versions.</p>
 </StarlightPage>
 
 <style>
-  /* Without a table of contents, the catalog takes the width it frees. */
-  :global(:root) { --sl-content-width: 60rem; }
-  table { width: 100%; display: table; }
-  td { vertical-align: top; }
-  td:first-child { white-space: nowrap; }
-  td p:first-child { margin-top: 0; }
-  td details { margin-top: 0.5rem; }
-  tr.group th {
-    padding-top: 1.5rem;
-    font-size: var(--sl-text-lg);
-    background: var(--sl-color-gray-7, var(--sl-color-gray-6));
-  }
-  tr.group code { margin-inline-start: 0.5rem; font-size: var(--sl-text-sm); font-weight: 400; }
-  @media (max-width: 50rem) {
-    table, tbody, tr, td, th { display: block; }
-    thead { display: none; }
-    tr { padding-block: 1rem; border-bottom: 1px solid var(--sl-color-gray-5); }
-    tr.group { padding-block: 0; border: 0; }
-    td { padding: 0; border: 0; }
-    td:first-child { margin-bottom: 0.75rem; font-weight: 600; font-size: 1.125rem; }
-  }
+  .catalog > li + li { margin-top: 1.25rem; }
+  .catalog > li > code { margin-inline-start: 0.25rem; }
+  .catalog ul { margin-top: 0.5rem; }
+  .catalog ul > li + li { margin-top: 0.5rem; }
 </style>
