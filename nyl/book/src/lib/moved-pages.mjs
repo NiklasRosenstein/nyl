@@ -44,5 +44,6 @@ export const movedPages = {
   "/getting-started": "/start/getting-started/",
   "/git-integration": "/kubernetes/git-integration/",
   "/introduction": "/start/introduction/",
+  "/reference/resources/gitops": "/rendered-gitops/resources/",
   "/reference/kyverno-policies": "/kubernetes/validation/kyverno-policies/",
 };

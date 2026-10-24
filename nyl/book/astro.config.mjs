@@ -102,6 +102,7 @@ export default defineConfig({
             items: [
               "rendered-gitops",
               "rendered-gitops/project-structure",
+              "rendered-gitops/resources",
               "rendered-gitops/targets-and-clusters",
               "rendered-gitops/release-inputs",
               "rendered-gitops/rendering-and-publishing",
@@ -137,12 +138,11 @@ export default defineConfig({
                 label: "YAML resources",
                 items: [
                   { label: "All resources", link: "/reference/resources/" },
-                  "reference/resources/gitops",
                   ...resourceSidebar(),
-                  "reference/editor-schemas",
                 ],
               },
               { label: "Configuration", items: ["reference/configuration"] },
+              "reference/editor-schemas",
             ],
           },
         ]),

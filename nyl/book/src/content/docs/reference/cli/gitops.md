@@ -473,7 +473,7 @@ Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 
 See [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
 for CI patterns and rendered layout. The
-[Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
+[Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
 documents the configuration model.
 
 ## Manifest validation

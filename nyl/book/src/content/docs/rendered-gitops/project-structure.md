@@ -143,4 +143,4 @@ rendering.
 
 - [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
 - [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
-- [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
+- [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)

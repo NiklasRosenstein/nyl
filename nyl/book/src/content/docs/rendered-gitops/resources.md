@@ -1,5 +1,7 @@
 ---
 title: 'Rendered GitOps Resources'
+sidebar:
+  label: 'Resources'
 ---
 
 Rendered GitOps uses shared repository configuration in `gitops.nyl/v1` and

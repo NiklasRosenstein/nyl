@@ -72,7 +72,7 @@ Applications use ordinary Git directory sources with recursive discovery.
 - [Trust and admission boundaries](/nyl/rendered-gitops/security/)
   identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
   must enforce.
-- [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
+- [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)
   documents every configuration field by resource kind.
 
 For direct cluster operations and debugging, see
