@@ -1,0 +1,39 @@
+# Separate-invocation foundation for the M8 CI adapter; no exporter required.
+contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev, --unit, database]
+    exit: 2
+    expect:
+      executed: []
+      blocked: [database]
+  - nyl: [reconcile, -e, dev, --unit, network]
+    exit: 0
+    expect:
+      executed: [network]
+  - nyl: [reconcile, -e, dev, --unit, web-image]
+    exit: 0
+    expect:
+      executed: [web-image]
+  - nyl: [reconcile, -e, dev, --unit, database]
+    exit: 0
+    expect:
+      executed: [database]
+  - nyl: [reconcile, -e, dev, --unit, kubernetes]
+    exit: 0
+    expect:
+      executed: [kubernetes]
+  - nyl: [reconcile, -e, dev, --unit, database]
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      executed: []
+      current: [network, web-image, database, kubernetes]
+      commits: {desired: 0, observed: 0}

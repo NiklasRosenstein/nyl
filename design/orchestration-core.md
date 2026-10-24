@@ -1275,6 +1275,15 @@ Nyl-Version: 0.7.0
 
 ## Execution
 
+The optional [CI execution adapter](ci-execution.md) exposes the same dependency
+graph as separate jobs. Its first backend invokes ordinary unit-scoped operations:
+each job is a separate run, acquires the environment lease, and revalidates
+current evidence. CI success never replaces a receipt. The full ownership set
+is resolved in every invocation; changed-path selection must not imply deletion.
+This backend does not distribute one run or relax the lease. M3's graph interface
+must represent blocked references before their values exist, so export does not
+depend on a complete native plan.
+
 `nyl reconcile -e <env>`:
 
 1. **Lease.** Take the environment's run lease (see
@@ -2366,6 +2375,15 @@ Reconcile, teardown, verify, and status reports have the same shape, with
 
 ## Walkthroughs
 
+**Separate CI unit jobs (M3 foundation, M8 adapter).** Starting without receipts,
+the `database` job is blocked and executes nothing. Separate jobs for `network`
+and `web-image` record their results under the normal environment lease. A fresh
+`database` invocation resolves `network`'s receipt, then `kubernetes` resolves
+both producers. Retrying `database` executes nothing. Every invocation resolves
+the full ownership set, and existing competing-run and recovery rules still
+apply; these jobs are separate runs, not one distributed transaction.
+([`unit-jobs`](../nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml))
+
 Each walkthrough is an executable scenario under
 [`nyl/tests/scenarios/walkthroughs/`](../nyl/tests/scenarios/walkthroughs/),
 in the format the [reference scenarios](reference-scenarios.md#scenario-files)
@@ -2487,3 +2505,4 @@ extended the expiry first.
 | Built-in approver lookups beyond GitHub, starting with GitLab | After M3 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
+

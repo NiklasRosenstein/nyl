@@ -158,6 +158,21 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Concurrency lives in one place: a wave executor with a bounded semaphore on
   the existing tokio runtime, and a single writer task for state commits.
 
+## CI graph boundary
+
+`nyl-core` owns versioned execution-graph and adapter-manifest types with typed
+unit addresses. `nyl-orchestration` owns the pure extraction and validation of
+dependency edges, shared with local scheduling, including unresolved data edges.
+Provider YAML serialization and runner mappings live in CLI-side adapter code;
+they introduce no GitLab types or IO into the orchestration core. Workers wire
+ordinary unit-scoped operations, with the same typed reports and state/driver
+implementations. Artifact aggregation is presentation, not receipt admission.
+
+The [CI execution design](ci-execution.md) specifies the first, separate-run
+backend. A later shared-run backend must extend the orchestration shell and
+state protocol explicitly; it cannot be implemented by a CLI adapter taking
+per-unit leases or writing receipts directly.
+
 ## Getting there
 
 - **M2** stays in today's rendering code. `nyl-core` and `nyl-render` are
@@ -172,3 +187,4 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   from the first commit.
 - **M4–M6** add drivers, the Kubernetes adapter, and promotion inside those
   boundaries; each contract walkthrough they introduce lands as a scenario.
+

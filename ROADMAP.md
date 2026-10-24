@@ -34,6 +34,7 @@ about Nyl's current CLI.
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
+| M8 | CI execution graph and GitLab unit jobs | Planned | M3, M4 |
 
 **Next step:** move binding resolution into a generic resolver in
 `nyl_core::bindings` (see M2), then finish the Release inputs of M2 against the
@@ -84,11 +85,14 @@ exact values proven in one environment to the next.
 - Explicit promotion paths between environments with recorded lineage.
 - Consistent local and CI commands for planning, reconciliation, inspection,
   verification, promotion, and deletion intent.
+- An opt-in CI adapter exposing named units as individual jobs from Nyl's
+  dependency graph, with Nyl retaining readiness and lifecycle decisions.
 
 ### Outside the initial scope
 
 - A general CI pipeline or workflow language: no conditionals, loops, matrix
-  expansion, or ordering beyond the dependency graph.
+  expansion, or ordering beyond the dependency graph. Exporting that graph to
+  CI jobs does not add a second workflow language.
 - A universal resource database replacing native state backends.
 - Cross-system transactions or a guarantee of reversible external effects.
 - Promotion of native tool state; each environment keeps its own Terraform
@@ -102,6 +106,23 @@ exact values proven in one environment to the next.
 A command invoked locally or in CI is the initial execution model. Events such
 as "a new dev receipt was published" trigger CI jobs that call Nyl; the core
 stores no event triggers. Continuous observation is an M7 decision.
+
+### CI execution and observability
+
+The [CI execution design](design/ci-execution.md) defines an optional GitLab
+adapter for per-unit logs, durations, reports, and retries. M3 exposes a pure,
+versioned dependency graph independently of complete native plans. M8 exports
+one job per unit, all pinned to one source commit, invoking ordinary unit-scoped
+operations. M8 depends on M3/M4 and need not wait for M5–M7; its identifier keeps
+the existing milestone references stable.
+
+The first backend uses separate invocations and therefore serializes effects
+under the environment lease. It does not claim one run or an atomic observed
+snapshot across jobs. Full ownership stays selected; current receipts skip work,
+and lifecycle changes remain explicit environment-level operations. CI owns
+event mapping and runner configuration, while Nyl rechecks evidence and approvals.
+Parallel workers of one Nyl run require a later coordinator/worker contract,
+including fencing and recovery; they are not implied by graph export.
 
 ## Architectural frame
 
@@ -707,6 +728,11 @@ byte-identical output to the previous release.
   effect succeeds but receipt publication fails.
 - [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
+- [ ] Expose a pure, versioned graph of literal unit addresses and dependency
+  edges before upstream values exist, shared by local execution and future CI
+  exporters. Prove separate unit-scoped invocations through the
+  [unit-jobs walkthrough](nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml)
+  without changing environment-wide lease or ownership semantics.
 - [ ] Add the `test-clock` Cargo feature, the test-only fake kinds, and the
   two-tier harness for the reference scenarios: in-process with fakes, and
   through the real binary under the `tier2` Cargo feature.
@@ -811,6 +837,30 @@ value-only path promotes each value from what its consuming Application runs.
 - [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 
+### M8 — CI execution graph and GitLab unit jobs
+
+- [ ] Implement `nyl ci export gitlab` for one environment, with reconcile and
+  read-only plan operations, consuming M3's graph and typed reports. Keep CI
+  runner configuration separate from unit semantics.
+- [ ] Generate stable, collision-checked job IDs and `needs` edges, a pinned
+  public graph manifest, per-unit reports, and an always-run read-only summary.
+  Include current producers and unresolved consumers; reject lifecycle work
+  that ordinary unit jobs cannot perform.
+- [ ] Bind jobs to immutable source, project, environment, operation, and adapter
+  configuration. Validate bindings before effects; serialize deployment
+  pipelines per environment and reject superseded source at admission.
+- [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
+  revalidate approvals and never pass authoritative outputs through CI artifacts.
+- [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)
+  with fake drivers and local Git repositories, plus a GitLab configuration and
+  integration check. Demonstrate the generated jobs with M4's real drivers.
+
+**Exit criterion:** a GitLab child pipeline displays separate producer and
+consumer jobs, executes at a pinned source, explains no-ops and blockers, and
+preserves the local core's freshness, lease, approval, and recovery rules across
+retries and cancellation. Independent unit jobs are observably serialized within
+one environment; no distributed-run guarantee is made.
+
 ## Open decisions
 
 Resolve these at the milestone where they affect implementation; they are not
@@ -824,11 +874,15 @@ reasons to delay independent work.
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
+| GitLab adapter configuration schema, job limits, and source admission mechanism | M8 |
+| Shared-run CI coordinator/worker protocol, fencing, liveness, and recovery | After M8, before distributed execution |
 
 ## Implementation reference points
 
 - [Implementation architecture](design/implementation-architecture.md): crate
   boundaries, pure decisions, rule ownership, and scenario tests for M2–M7
+- [CI execution adapters](design/ci-execution.md): dependency graph export,
+  separate unit jobs, observability, and the distributed-execution boundary
 - [Reference scenarios](design/reference-scenarios.md): end-to-end acceptance
   scenarios for M3–M5, runnable without hosted repositories, CI, or pull
   requests, and the scenario file format
@@ -848,3 +902,4 @@ reasons to delay independent work.
 - [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
 
 These are navigation aids, not frozen API guarantees.
+
