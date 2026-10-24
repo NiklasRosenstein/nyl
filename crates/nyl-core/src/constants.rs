@@ -9,6 +9,12 @@ pub const API_VERSION_GITOPS: &str = "gitops.nyl/v1";
 /// API version for Kubernetes rendered-GitOps configuration resources.
 pub const API_VERSION_K8S_GITOPS: &str = "k8s.gitops.nyl/v1";
 
+/// API version of the built-in unit kinds.
+pub const API_VERSION_UNITS: &str = "units.gitops.nyl/v1";
+
+/// API version of the built-in artifact kinds.
+pub const API_VERSION_ARTIFACTS: &str = "artifacts.gitops.nyl/v1";
+
 /// API version for Component resources
 pub const API_VERSION_COMPONENTS: &str = "components.k8s.nyl/v1";
 

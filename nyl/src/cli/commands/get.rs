@@ -185,7 +185,7 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
                     .unwrap_or_else(|| name.clone());
                 format!("{generated} (generated)")
             });
-            let source = group.spec.source.as_ref().map_or("-", |source| source.path.as_str());
+            let source = group.spec.source.as_ref().map_or("-", |source| source.git.path());
             vec![name.clone(), project, source.to_owned(), file]
         }
         None => templated_resource_row(kind, name, file),

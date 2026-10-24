@@ -27,6 +27,7 @@ pub mod digest;
 pub mod error;
 pub mod json_pointer;
 pub mod local_path;
+pub mod orchestration;
 pub mod resources;
 pub mod settings;
 pub mod template_syntax;

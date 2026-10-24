@@ -11,6 +11,8 @@ use clap::ValueEnum;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
+use super::git_source::GitSource;
+use super::strict::DenyUnknownFields;
 use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
 
@@ -613,23 +615,11 @@ pub struct AppProjectResourcePattern {
 
 /// A local source when no repository is given, otherwise an immutable remote source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 #[schemars(transform = super::schema::source_constraints)]
 pub struct ApplicationGroupSource {
-    /// GitRepository name for a remote source. Mutually exclusive with inline `repository`; requires `revision` and `commit`.
-    #[serde(rename = "repositoryRef", skip_serializing_if = "Option::is_none")]
-    pub repository_ref: Option<LocalReference>,
-    /// Inline remote Git coordinates. Mutually exclusive with `repositoryRef`; requires `revision` and `commit`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository: Option<InlineGitRepository>,
-    /// Human-readable remote Git revision refreshed by `nyl update source-locks`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    /// Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.
-    pub path: String,
+    /// Where the Releases are read from. A remote source requires `revision` and its `commit` lock; a local one admits neither.
+    #[serde(flatten)]
+    pub git: GitSource,
     /// Relative candidate file globs. Only entries with a literal Release are rendered; attach other files using Release `spec.include`.
     #[serde(default = "default_source_include")]
     pub include: Vec<String>,
@@ -642,6 +632,9 @@ pub struct ApplicationGroupSource {
     /// Whether remote rendering uses central configuration or the remote project. Remote sessions cannot access secrets or the process environment.
     #[serde(rename = "rendererConfig", default)]
     pub renderer_config: RendererConfig,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown_fields: DenyUnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1388,47 +1381,17 @@ impl AppProjectTemplate {
 
 impl ApplicationGroupSource {
     pub fn is_remote(&self) -> bool {
-        self.repository_ref.is_some() || self.repository.is_some()
+        self.git.is_remote()
     }
 
     /// The path inside the remote checkout, without the optional leading `/`.
     pub fn checkout_path(&self) -> &str {
-        self.path.strip_prefix('/').unwrap_or(&self.path)
+        self.git.checkout_path()
     }
 
     pub fn validate(&self) -> Result<()> {
         let remote = self.is_remote();
-        if remote {
-            validate_relative_path("spec.source.path", self.checkout_path(), false, false)?;
-        } else {
-            crate::local_path::validate_local_path("spec.source.path", &self.path)?;
-        }
-        match (&self.repository_ref, &self.repository) {
-            (Some(reference), None) => validate_static_required("spec.source.repositoryRef.name", &reference.name)?,
-            (None, Some(repository)) => repository.validate("spec.source.repository")?,
-            (Some(_), Some(_)) => {
-                return Err(CoreError::config(
-                    "spec.source.repositoryRef and spec.source.repository are mutually exclusive",
-                ))
-            }
-            (None, None) => {}
-        }
-        if remote {
-            let revision = self
-                .revision
-                .as_deref()
-                .ok_or_else(|| CoreError::config("spec.source.revision is required for a remote source"))?;
-            validate_static_required("spec.source.revision", revision)?;
-            let commit = self
-                .commit
-                .as_deref()
-                .ok_or_else(|| CoreError::config("spec.source.commit is required for a remote source"))?;
-            validate_immutable_git_commit("spec.source.commit", commit)?;
-        } else if self.revision.is_some() || self.commit.is_some() {
-            return Err(CoreError::config(
-                "spec.source.revision and spec.source.commit require a remote repository",
-            ));
-        }
+        self.git.validate_application_group("spec.source")?;
         for pattern in self.include.iter().chain(&self.exclude) {
             glob::Pattern::new(pattern).map_err(|error| {
                 CoreError::config(format!(

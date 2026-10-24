@@ -1,1 +1,2 @@
 nyl/tests/fixtures/render-tree-without-inputs/** -text
+crates/nyl-core/tests/golden/** -text

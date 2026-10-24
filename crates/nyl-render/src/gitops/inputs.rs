@@ -205,6 +205,30 @@ impl PublicationBase {
     }
 }
 
+/// The state `fromPublication` bindings read must be the state at the base
+/// commit a publication builds on, so the published commit holds the state
+/// and the manifests rendered from it. `head` is the publication branch head
+/// the commit is built on; a branch created while rendering counts as a push.
+pub fn verify_publication_base(
+    base: Option<&PublicationBase>,
+    head: Option<&str>,
+    publication_url: &str,
+    branch: &str,
+) -> Result<()> {
+    let Some(base) = base else {
+        return Ok(());
+    };
+    if base.commit.as_deref() == head {
+        return Ok(());
+    }
+    Err(NylError::config(format!(
+        "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
+        crate::util::sanitize_url(publication_url),
+        head.unwrap_or("no commit"),
+        base.commit.as_deref().unwrap_or("no commit"),
+    )))
+}
+
 /// Where resolution may read binding sources from.
 pub struct InputSources<'a> {
     /// Local path rule of this project, for `fromFile`.
@@ -895,7 +919,7 @@ fn resolve_git(
     source: &GitInputSource,
     sources: &InputSources<'_>,
 ) -> std::result::Result<ResolvedInput, String> {
-    let (repository, repository_source) = match (&source.repository, &source.repository_ref) {
+    let (repository, repository_source) = match (&source.git.repository, &source.git.repository_ref) {
         (Some(repository), _) => (repository.clone(), None),
         (None, Some(reference)) => {
             let (repository, path) =
@@ -904,14 +928,15 @@ fn resolve_git(
         }
         (None, None) => unreachable!("validated fromGit names a repository"),
     };
+    let (commit, path) = (source.commit(), source.path());
     let bytes = sources
         .git
-        .read_blob(&repository.repo_url, &source.commit, &source.path)
+        .read_blob(&repository.repo_url, commit, path)
         .map_err(|error| match error {
             NylError::Git(_) => format!(
                 "{field}.fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
-                source.path,
-                source.commit,
+                path,
+                commit,
                 crate::util::sanitize_url(&repository.repo_url),
                 crate::util::redact_url_credentials(&error.to_string(), &repository.repo_url)
             ),
@@ -928,21 +953,19 @@ fn resolve_git(
         .ok_or_else(|| {
             format!(
                 "{field}.fromGit: commit {} of {} has no file {}",
-                source.commit,
+                commit,
                 crate::util::sanitize_url(&repository.repo_url),
-                source.path
+                path
             )
         })?;
-    let document =
-        parse_single_document(&bytes).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
-    let value =
-        select(&document, &source.pointer).map_err(|reason| format!("{field}.fromGit: {} {reason}", source.path))?;
+    let document = parse_single_document(&bytes).map_err(|reason| format!("{field}.fromGit: {} {reason}", path))?;
+    let value = select(&document, &source.pointer).map_err(|reason| format!("{field}.fromGit: {} {reason}", path))?;
     Ok(ResolvedInput {
         value,
         origin: InputOrigin::Git {
             url: credential_free_url(&repository.repo_url),
-            commit: source.commit.clone(),
-            path: source.path.clone(),
+            commit: commit.to_owned(),
+            path: path.to_owned(),
             blob_digest: nyl_core::digest::sha256_hex(&bytes),
             repository_source,
         },
@@ -1097,6 +1120,33 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_verify_publication_base_rejects_a_state_push_while_rendering() {
+        let base_at = |commit: Option<&str>| PublicationBase {
+            url: "https://example.invalid/deploy.git".to_owned(),
+            branch: "deploy".to_owned(),
+            prefix: "production".to_owned(),
+            commit: commit.map(str::to_owned),
+            origin: PublicationBaseOrigin::Refreshed,
+        };
+        let url = "https://example.invalid/deploy.git";
+        let read_at = "a".repeat(40);
+        let pushed = "b".repeat(40);
+        let base = base_at(Some(&read_at));
+        verify_publication_base(Some(&base), Some(&read_at), url, "deploy").unwrap();
+        verify_publication_base(None, Some(&pushed), url, "deploy").unwrap();
+
+        let error = verify_publication_base(Some(&base), Some(&pushed), url, "deploy")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another writer pushed while rendering"), "{error}");
+        // A branch created while rendering counts as a push too.
+        let error = verify_publication_base(Some(&base_at(None)), Some(&pushed), url, "deploy")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another writer pushed while rendering"), "{error}");
+    }
 
     fn target(release_inputs: Value) -> DeploymentTarget {
         serde_json::from_value(json!({

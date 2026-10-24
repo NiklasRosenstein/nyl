@@ -6,6 +6,7 @@ use git2::build::CheckoutBuilder;
 use git2::{IndexAddOption, Repository, ResetType, Signature, StatusOptions};
 
 use crate::git::{GitManager, WorktreeManager};
+use crate::gitops::inputs::verify_publication_base;
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory,
     reconcile_rendered_tree_with_options, resolve_deployment_target_name, CompiledTargetTree, GitOpsCache,
@@ -157,7 +158,10 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let inventory = discover_gitops_inventory(&args.path, None)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let carried = crate::gitops::inputs::carry_paths(&inventory, &target_name)?;
-    let (source_commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
+    let crate::gitops::provenance::WorktreeSourceState {
+        commit: source_commit,
+        dirty,
+    } = crate::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
     let Some(source_commit) = source_commit else {
         return Err(NylError::config(
             "publish-tree requires the source worktree to have a committed revision",
@@ -252,7 +256,7 @@ fn publish_compiled(
         // base means the branch moved while rendering.
         verify_publication_base(
             compiled.publication_base.as_ref(),
-            Some(commit),
+            Some(&commit.to_string()),
             publication_url,
             branch,
         )?;
@@ -267,7 +271,12 @@ fn publish_compiled(
     let temp = tempfile::TempDir::new()?;
     let repository = clone_branch(publication_url, branch, temp.path())?;
     let expected = remote_branch_oid(&repository, branch);
-    verify_publication_base(compiled.publication_base.as_ref(), expected, publication_url, branch)?;
+    verify_publication_base(
+        compiled.publication_base.as_ref(),
+        expected.map(|oid| oid.to_string()).as_deref(),
+        publication_url,
+        branch,
+    )?;
 
     let output_root = if compiled.target.publication_path_prefix().is_empty() {
         temp.path().to_path_buf()
@@ -456,7 +465,7 @@ fn compilation_differences(working: &CompiledTargetTree, committed: &CompiledTar
 }
 
 fn commit_rendered_tree(input: &CommitRenderedTreeInput<'_>) -> Result<Option<git2::Oid>> {
-    let inputs = super::render_tree::hash_inputs(input.inventory, input.compiled)?;
+    let inputs = crate::gitops::provenance::hash_inputs(input.inventory, input.compiled)?;
     let repository_identity = input
         .compiled
         .repository_name
@@ -527,30 +536,6 @@ fn copy_carried_files(working: &GitOpsInventory, committed: &GitOpsInventory, ta
         }
     }
     Ok(())
-}
-
-/// The state `fromPublication` bindings read must be the state at the base
-/// commit this publication builds on, so the published commit holds the
-/// state and the manifests rendered from it.
-fn verify_publication_base(
-    base: Option<&crate::gitops::inputs::PublicationBase>,
-    expected: Option<git2::Oid>,
-    publication_url: &str,
-    branch: &str,
-) -> Result<()> {
-    let Some(base) = base else {
-        return Ok(());
-    };
-    let expected = expected.map(|oid| oid.to_string());
-    if base.commit == expected {
-        return Ok(());
-    }
-    Err(NylError::config(format!(
-        "Publication {}@{branch} is at {} but fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
-        crate::util::sanitize_url(publication_url),
-        expected.as_deref().unwrap_or("no commit"),
-        base.commit.as_deref().unwrap_or("no commit"),
-    )))
 }
 
 fn publication_current_commit(
@@ -832,33 +817,6 @@ mod tests {
         repository
             .commit(Some("HEAD"), &signature, &signature, "Initial", &tree, &[])
             .unwrap()
-    }
-
-    #[test]
-    fn test_verify_publication_base_rejects_a_state_push_while_rendering() {
-        let base_at = |commit: Option<&str>| crate::gitops::inputs::PublicationBase {
-            url: "https://example.invalid/deploy.git".to_owned(),
-            branch: "deploy".to_owned(),
-            prefix: "production".to_owned(),
-            commit: commit.map(str::to_owned),
-            origin: crate::gitops::inputs::PublicationBaseOrigin::Refreshed,
-        };
-        let url = "https://example.invalid/deploy.git";
-        let read_at = git2::Oid::from_str(&"a".repeat(40)).unwrap();
-        let pushed = git2::Oid::from_str(&"b".repeat(40)).unwrap();
-        let base = base_at(Some(&read_at.to_string()));
-        verify_publication_base(Some(&base), Some(read_at), url, "deploy").unwrap();
-        verify_publication_base(None, Some(pushed), url, "deploy").unwrap();
-
-        let error = verify_publication_base(Some(&base), Some(pushed), url, "deploy")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("another writer pushed while rendering"), "{error}");
-        // A branch created while rendering counts as a push too.
-        let error = verify_publication_base(Some(&base_at(None)), Some(pushed), url, "deploy")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("another writer pushed while rendering"), "{error}");
     }
 
     #[test]

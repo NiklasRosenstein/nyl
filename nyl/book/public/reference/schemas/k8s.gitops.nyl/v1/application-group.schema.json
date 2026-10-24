@@ -305,7 +305,7 @@
       ],
       "properties": {
         "commit": {
-          "description": "Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.",
+          "description": "Full 40-character lowercase commit ID that is read, refreshed by `nyl update source-locks`.",
           "type": [
             "string",
             "null"
@@ -330,7 +330,7 @@
           "type": "array"
         },
         "path": {
-          "description": "Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.",
+          "description": "Path in the repository. In this repository it follows the local path rule: relative to the directory containing `nyl.toml`, may begin with `..` segments, or starts with `/` to name a path from the Git worktree root, and never leaves the worktree. In a remote repository it is relative to the checkout root, with an optional leading `/`.",
           "type": "string"
         },
         "recursive": {
@@ -354,7 +354,7 @@
               "type": "null"
             }
           ],
-          "description": "Inline remote Git coordinates. Mutually exclusive with `repositoryRef`; requires `revision` and `commit`."
+          "description": "Inline repository coordinates to read from. Mutually exclusive with `repositoryRef`."
         },
         "repositoryRef": {
           "anyOf": [
@@ -365,10 +365,10 @@
               "type": "null"
             }
           ],
-          "description": "GitRepository name for a remote source. Mutually exclusive with inline `repository`; requires `revision` and `commit`."
+          "description": "Project-local `gitops.nyl/v1` GitRepository to read from. Mutually exclusive with inline `repository`."
         },
         "revision": {
-          "description": "Human-readable remote Git revision refreshed by `nyl update source-locks`.",
+          "description": "Human-readable branch or tag that `nyl update source-locks` resolves.",
           "type": [
             "string",
             "null"

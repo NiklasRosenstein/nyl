@@ -9,10 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::resources::{
-    schema, validate_immutable_git_commit, validate_relative_path, validate_repository_choice, validate_static_required,
-};
-use crate::resources::{InlineGitRepository, LocalReference};
+use crate::resources::{schema, validate_relative_path};
+use crate::resources::{DenyUnknownFields, GitSource};
 use crate::{CoreError, Result};
 
 /// Where one Release input's value comes from. Set exactly one field.
@@ -155,34 +153,34 @@ pub struct FileInputSource {
 /// Rendering reads only `commit` and never resolves `revision`; `nyl update
 /// source-locks` moves the lock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(transform = git_input_source_constraints)]
 pub struct GitInputSource {
-    /// Project-local `gitops.nyl/v1` GitRepository to read from.
-    #[serde(rename = "repositoryRef", default, skip_serializing_if = "Option::is_none")]
-    pub repository_ref: Option<LocalReference>,
-    /// Inline repository coordinates to read from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<InlineGitRepository>,
-    /// Human-readable branch or tag that `nyl update source-locks` resolves.
-    pub revision: String,
-    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
-    pub commit: String,
-    /// Repository-relative path of a YAML or JSON file holding one document.
-    pub path: String,
+    /// The repository, `revision`, its `commit` lock, and the repository-relative path of a YAML or JSON file holding one document.
+    #[serde(flatten)]
+    pub git: GitSource,
     /// JSON Pointer selecting the value inside the document; the whole document when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pointer: String,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown_fields: DenyUnknownFields,
 }
 
 impl GitInputSource {
     /// Validate the static form of this source.
     pub fn validate(&self, field: &str) -> Result<()> {
-        validate_repository_choice(self.repository_ref.as_ref(), self.repository.as_ref(), field)?;
-        validate_static_required(&format!("{field}.revision"), &self.revision)?;
-        validate_immutable_git_commit(&format!("{field}.commit"), &self.commit)?;
-        validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
+        self.git.validate_locked_file(field)?;
         crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)
+    }
+
+    /// The locked commit; present once [`Self::validate`] passed.
+    pub fn commit(&self) -> &str {
+        self.git.commit.as_deref().unwrap_or_default()
+    }
+
+    /// The repository-relative file path.
+    pub fn path(&self) -> &str {
+        self.git.path()
     }
 }
 
@@ -195,6 +193,7 @@ fn git_input_source_constraints(schema: &mut schemars::Schema) {
         ],
         None,
     );
+    schema::require_git_source_fields(schema, &["revision", "commit", "path"]);
 }
 
 /// A value read from a state file in the target's own publication branch.

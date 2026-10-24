@@ -1,0 +1,19 @@
+[package]
+name = "nyl-orchestration"
+description = "Nyl orchestration: resolution, selection, lifecycle, recovery, and the orchestration shell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Test doubles of the core ports: a settable clock and sequential identifiers.
+testing = []
+
+[dependencies]
+nyl-core = { workspace = true }
+
+chrono = { workspace = true }
+
