@@ -14,8 +14,9 @@ pub use crate::render::{RenderSession, RenderedBundle};
 pub(crate) use argocd::merge_sync_options;
 pub use argocd::{build_directory_application, DirectoryApplicationInput};
 pub use discovery::{
-    central_group_source_root, derived_group_source_root, discover_gitops_inventory, resolve_deployment_target_name,
-    DiscoveredGitOpsResource, GitOpsInventory, GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
+    central_group_source_root, derived_group_source_root, discover_gitops_inventory,
+    discover_gitops_inventory_for_editing, resolve_deployment_target_name, DiscoveredGitOpsResource, GitOpsInventory,
+    GitOpsInventoryKey, APPLICATION_GROUP_FILE_NAME,
 };
 pub(crate) use layout::render_manifest_layout_with_provenance;
 pub use layout::{

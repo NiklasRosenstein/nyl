@@ -67,7 +67,7 @@ pub async fn execute(args: SchemaArgs) -> Result<()> {
 }
 
 async fn annotate(check: bool) -> Result<()> {
-    let inventory = crate::gitops::discover_gitops_inventory(&std::env::current_dir()?, None)?;
+    let inventory = crate::gitops::discover_gitops_inventory_for_editing(&std::env::current_dir()?)?;
     let report = crate::editor::annotate_project(&inventory, check).await?;
     for (_, reason) in &report.unavailable_schemas {
         eprintln!("warning: {reason}; its comment is written, rerun nyl schema annotate once it is reachable");
