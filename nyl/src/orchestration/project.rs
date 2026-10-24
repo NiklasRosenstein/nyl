@@ -5,11 +5,12 @@ use std::path::PathBuf;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
+use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::StateLocation;
 use nyl_core::resources::environment::{Environment, EnvironmentGroup};
 use nyl_orchestration::rules::environment_groups::sharing_group;
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
-use nyl_state::git::{Endpoint, GitStateStore};
+use nyl_state::git::{CommitSigner, Endpoint, GitStateStore};
 
 use crate::gitops::GitOpsInventory;
 use crate::resources::{GitOpsResource, InlineGitRepository};
@@ -122,13 +123,53 @@ pub fn resolve_environment(
 
 /// The Git state store for a resolved environment, with the project's
 /// optional dedicated credentials.
-pub fn open_store(inventory: &GitOpsInventory, resolved: &ResolvedEnvironment) -> Result<GitStateStore> {
+/// Its commits are signed by `signer`.
+pub fn open_store(
+    inventory: &GitOpsInventory,
+    resolved: &ResolvedEnvironment,
+    signer: CommitSigner,
+) -> Result<GitStateStore> {
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let store = GitStateStore::new(&resolved.git_dir, auth);
+    let store = GitStateStore::new(&resolved.git_dir, auth, signer);
     Ok(match &resolved.endpoint {
         Some(endpoint) => store.with_endpoint(resolved.location.repository.clone(), endpoint.clone()),
         None => store,
     })
+}
+
+/// Who writes state commits: `author` (`--author "Name <email>"`) when
+/// given, else the clone's Git `user.name` and `user.email`.
+///
+/// Contract: [Transition commits](../../../design/orchestration-core.md#transition-commits);
+/// decided for M3 part 3: the command line resolves the identity once and
+/// passes it, with the injected clock, to `nyl-state`.
+///
+/// TODO(cli-integration): this skeleton keeps the previous fallback to
+/// `Nyl <nyl@localhost>` so existing tests pass. The cli-integration package
+/// replaces it with a [`Code::CommitIdentityMissing`] finding whose fix names
+/// `--author` and `git config user.name/user.email`.
+pub fn commit_identity(
+    git_dir: &std::path::Path,
+    author: Option<&str>,
+) -> std::result::Result<CommitIdentity, Finding> {
+    if let Some(author) = author {
+        return author.parse().map_err(|error: String| {
+            Finding::new(Code::CommitIdentityMissing, error, "pass --author \"Name <email>\"")
+        });
+    }
+    let configured = git2::Repository::open(git_dir)
+        .ok()
+        .and_then(|repository| repository.config().ok())
+        .and_then(|config| {
+            Some(CommitIdentity {
+                name: config.get_string("user.name").ok()?,
+                email: config.get_string("user.email").ok()?,
+            })
+        });
+    Ok(configured.unwrap_or_else(|| CommitIdentity {
+        name: "Nyl".to_owned(),
+        email: "nyl@localhost".to_owned(),
+    }))
 }
 
 /// Who runs Nyl: the CI job's URL when a CI system says so, else `user@host`.

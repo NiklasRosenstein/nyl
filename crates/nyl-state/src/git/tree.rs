@@ -75,6 +75,7 @@ pub fn prefix(directory: &str) -> String {
 /// nothing writes nothing.
 pub fn commit(
     repository: &Repository,
+    signer: &super::CommitSigner,
     files: &Files,
     message: &str,
     parents: &[Oid],
@@ -90,7 +91,7 @@ pub fn commit(
         }
     }
     let tree = repository.find_tree(tree).map_err(unavailable)?;
-    let signature = signature(repository)?;
+    let signature = signature(signer)?;
     let parents = parents
         .iter()
         .map(|parent| repository.find_commit(*parent).map_err(unavailable))
@@ -102,10 +103,10 @@ pub fn commit(
         .map_err(unavailable)
 }
 
-fn signature(repository: &Repository) -> StateResult<Signature<'static>> {
-    repository
-        .signature()
-        .or_else(|_| Signature::now("Nyl", "nyl@localhost"))
+/// The signer's identity at the injected clock's time, in UTC.
+fn signature(signer: &super::CommitSigner) -> StateResult<Signature<'static>> {
+    let time = git2::Time::new(signer.clock.now().timestamp(), 0);
+    Signature::new(&signer.identity.name, &signer.identity.email, &time)
         .map(|signature| signature.to_owned())
         .map_err(unavailable)
 }

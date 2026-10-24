@@ -5,7 +5,7 @@
 //! turns waits, such as a `delay` teardown wait, into clock advances, so
 //! end-to-end tests of the real binary control time per child process.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use nyl_core::orchestration::ports::Clock;
 use nyl_core::orchestration::time::{Duration, Timestamp};
@@ -55,12 +55,12 @@ impl Clock for AdvancingClock {
 
 /// The clock of this process: the system clock, or with the `test-clock`
 /// feature the time `NYL_TEST_NOW` names, when it is set.
-pub fn process_clock() -> Result<Box<dyn Clock>, String> {
+pub fn process_clock() -> Result<Arc<dyn Clock>, String> {
     #[cfg(feature = "test-clock")]
     if let Ok(value) = std::env::var("NYL_TEST_NOW") {
-        return AdvancingClock::parse(&value).map(|clock| Box::new(clock) as Box<dyn Clock>);
+        return AdvancingClock::parse(&value).map(|clock| Arc::new(clock) as Arc<dyn Clock>);
     }
-    Ok(Box::new(SystemClock))
+    Ok(Arc::new(SystemClock))
 }
 
 #[cfg(test)]

@@ -11,12 +11,14 @@ use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
-use nyl_state::git::Endpoint;
+use nyl_state::git::{CommitSigner, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
 use crate::orchestration::clock::process_clock;
 use crate::orchestration::ids::UuidV7;
-use crate::orchestration::project::{finding_error, open_store, requested_by, resolve_environment, runner};
+use crate::orchestration::project::{
+    commit_identity, finding_error, open_store, requested_by, resolve_environment, runner,
+};
 use crate::{NylError, Result};
 
 /// Output format of state commands.
@@ -219,14 +221,22 @@ fn run(
 ) -> Result<()> {
     let inventory = discover_gitops_inventory(&common.path, None)?;
     let resolved = resolve_environment(&inventory, &common.environment).map_err(|finding| finding_error(&finding))?;
-    let mut store = open_store(&inventory, &resolved)?;
+    let clock = process_clock().map_err(NylError::config)?;
+    let identity = commit_identity(&resolved.git_dir, None).map_err(|finding| finding_error(&finding))?;
+    let mut store = open_store(
+        &inventory,
+        &resolved,
+        CommitSigner {
+            identity,
+            clock: clock.clone(),
+        },
+    )?;
     if let Some((identity, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
         if identity != resolved.location.repository {
             store = store.with_endpoint(identity, endpoint);
         }
     }
-    let clock = process_clock().map_err(NylError::config)?;
     let context = Context {
         store: &store,
         clock: clock.as_ref(),

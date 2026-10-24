@@ -197,6 +197,10 @@ impl Driver for FakeInfra {
         Vec::new()
     }
 
+    fn source_fields(&self, _spec: &Value) -> Vec<String> {
+        vec!["/source".to_owned()]
+    }
+
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.pointer("/backend/path")
             .and_then(Value::as_str)

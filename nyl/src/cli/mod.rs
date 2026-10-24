@@ -98,6 +98,15 @@ enum Commands {
 
     /// Manage an environment's run lease
     Lease(commands::state::LeaseArgs),
+
+    /// Show what a reconcile of an environment would do
+    Plan(commands::plan::PlanArgs),
+
+    /// Execute an environment's ready units
+    Reconcile(commands::reconcile::ReconcileArgs),
+
+    /// Show an environment's units, lease, and runs
+    Status(commands::status::StatusArgs),
 }
 
 impl Cli {
@@ -123,6 +132,33 @@ impl Cli {
             Commands::Vendor(args) => commands::vendor::execute(args).await,
             Commands::State(args) => commands::state::execute_state(args),
             Commands::Lease(args) => commands::state::execute_lease(args),
+            Commands::Plan(_) | Commands::Reconcile(_) | Commands::Status(_) => {
+                let owned = crate::orchestration::run::ProcessWiring::new();
+                let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
+                let outcome = self.execute_in_process(&wiring)?;
+                print!("{}", outcome.stdout);
+                eprint!("{}", outcome.stderr);
+                if outcome.exit != 0 {
+                    std::process::exit(i32::from(outcome.exit));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Run an orchestration command (`plan`, `reconcile`, `status`, `get`
+    /// with `-e`, `state`, `lease`) with injected dependencies, returning its
+    /// outcome instead of printing and exiting. The tier-1 scenario harness
+    /// calls this; other commands are an error.
+    pub fn execute_in_process(
+        self,
+        wiring: &crate::orchestration::run::Wiring<'_>,
+    ) -> Result<crate::orchestration::run::CommandOutcome> {
+        match self.command {
+            Commands::Plan(args) => commands::plan::run(&args, wiring),
+            Commands::Reconcile(args) => commands::reconcile::run(&args, wiring),
+            Commands::Status(args) => commands::status::run(&args, wiring),
+            _ => todo!("cli-integration: state, lease, and get -e in-process"),
         }
     }
 }

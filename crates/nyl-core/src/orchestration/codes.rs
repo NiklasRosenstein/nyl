@@ -42,10 +42,42 @@ pub enum Code {
     EnvironmentGroupOverlap,
     /// An environment name no Environment declares.
     EnvironmentUnknown,
+    /// Neither `--author` nor Git's `user.name` and `user.email` name who writes state commits.
+    CommitIdentityMissing,
+    /// Two unit documents share a name; names are unique per environment across kinds.
+    UnitNameDuplicate,
+    /// No driver serves a unit's `apiVersion` and `kind`.
+    UnitKindUnknown,
+    /// A unit's rendered spec fails its kind's validation.
+    UnitInvalid,
+    /// Two units of the ownership set claim overlapping native resources.
+    UnitOwnershipOverlap,
+    /// A reference names a unit outside the ownership set, an undeclared or sensitive output, a mismatched artifact kind, or a value of the wrong type.
+    ReferenceInvalid,
+    /// A `nyl get` value form found no current receipt to read.
+    ReferenceUnresolved,
+    /// `--allow-stale` printed a value from a receipt that is not current.
+    ReferenceStale,
+    /// `dependsOn` names a unit outside the ownership set.
+    DependencyUnknown,
+    /// Dependencies and references form a cycle.
+    DependencyCycle,
+    /// The source commit cannot be resolved, checked out, or rendered.
+    SourceUnavailable,
+    /// A source commit is not reachable from the refs it must be reachable from.
+    SourceUnreachable,
+    /// A driver call failed on Nyl's side before any effect started.
+    DriverError,
+    /// A unit reported outputs it does not declare; they were ignored.
+    OutputUndeclared,
+    /// Units leave the ownership set; their deletion follows.
+    PlanUnitsLeaving,
+    /// Publication units of two environments place the same DeploymentTarget.
+    TargetEnvironmentConflict,
 }
 
 impl Code {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 31] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -61,6 +93,22 @@ impl Code {
         Self::UnitUnknown,
         Self::EnvironmentGroupOverlap,
         Self::EnvironmentUnknown,
+        Self::CommitIdentityMissing,
+        Self::UnitNameDuplicate,
+        Self::UnitKindUnknown,
+        Self::UnitInvalid,
+        Self::UnitOwnershipOverlap,
+        Self::ReferenceInvalid,
+        Self::ReferenceUnresolved,
+        Self::ReferenceStale,
+        Self::DependencyUnknown,
+        Self::DependencyCycle,
+        Self::SourceUnavailable,
+        Self::SourceUnreachable,
+        Self::DriverError,
+        Self::OutputUndeclared,
+        Self::PlanUnitsLeaving,
+        Self::TargetEnvironmentConflict,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -80,6 +128,22 @@ impl Code {
             Self::UnitUnknown => "NYL-UNIT-UNKNOWN",
             Self::EnvironmentGroupOverlap => "NYL-ENVIRONMENT-GROUP-OVERLAP",
             Self::EnvironmentUnknown => "NYL-ENVIRONMENT-UNKNOWN",
+            Self::CommitIdentityMissing => "NYL-COMMIT-IDENTITY-MISSING",
+            Self::UnitNameDuplicate => "NYL-UNIT-NAME-DUPLICATE",
+            Self::UnitKindUnknown => "NYL-UNIT-KIND-UNKNOWN",
+            Self::UnitInvalid => "NYL-UNIT-INVALID",
+            Self::UnitOwnershipOverlap => "NYL-UNIT-OWNERSHIP-OVERLAP",
+            Self::ReferenceInvalid => "NYL-REFERENCE-INVALID",
+            Self::ReferenceUnresolved => "NYL-REFERENCE-UNRESOLVED",
+            Self::ReferenceStale => "NYL-REFERENCE-STALE",
+            Self::DependencyUnknown => "NYL-DEPENDENCY-UNKNOWN",
+            Self::DependencyCycle => "NYL-DEPENDENCY-CYCLE",
+            Self::SourceUnavailable => "NYL-SOURCE-UNAVAILABLE",
+            Self::SourceUnreachable => "NYL-SOURCE-UNREACHABLE",
+            Self::DriverError => "NYL-DRIVER-ERROR",
+            Self::OutputUndeclared => "NYL-OUTPUT-UNDECLARED",
+            Self::PlanUnitsLeaving => "NYL-PLAN-UNITS-LEAVING",
+            Self::TargetEnvironmentConflict => "NYL-TARGET-ENVIRONMENT-CONFLICT",
         }
     }
 }

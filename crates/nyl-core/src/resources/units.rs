@@ -188,7 +188,7 @@ pub struct DependsOnEntry {
 }
 
 /// Evidence a consumer requires from its producer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Evidence {
     /// A current receipt.

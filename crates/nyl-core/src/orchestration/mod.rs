@@ -9,6 +9,7 @@
 
 pub mod codes;
 pub mod driver;
+pub mod graph;
 pub mod ids;
 pub mod ports;
 pub mod state;

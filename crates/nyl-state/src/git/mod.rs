@@ -17,12 +17,13 @@ mod tree;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use git2::{Oid, Repository};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError, StateResult, StateStore,
-    StateTips, Transition, TransitionChanges,
+    Checkpoint, Clock, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError,
+    StateResult, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation};
 use nyl_git::GitAuth;
@@ -44,7 +45,27 @@ const REBASE_ATTEMPTS: usize = 5;
 pub struct GitStateStore {
     git_dir: PathBuf,
     auth: GitAuth,
+    signer: CommitSigner,
     endpoints: BTreeMap<String, Endpoint>,
+}
+
+/// Who signs every commit this store writes, and when: transition commits,
+/// leases, run checkpoints, and signals. The command line resolves the
+/// identity once and passes its injected clock, so the store reads neither
+/// Git configuration nor the system clock.
+#[derive(Clone)]
+pub struct CommitSigner {
+    pub identity: CommitIdentity,
+    pub clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for CommitSigner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommitSigner")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How to reach a repository that state locations name by identity: the
@@ -62,10 +83,11 @@ impl GitStateStore {
     /// checkout's clone, whose own branches are the state when a location
     /// names [`LOCAL_REPOSITORY`], and which keeps the fetched objects and
     /// the fast-forwarded local state branches otherwise.
-    pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
+    pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth, signer: CommitSigner) -> Self {
         Self {
             git_dir: git_dir.into(),
             auth,
+            signer,
             endpoints: BTreeMap::new(),
         }
     }
@@ -306,7 +328,15 @@ impl StateStore for GitStateStore {
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = expected.map(Oid::from_str).transpose().map_err(unavailable)?;
-        write_lease(&repository, &refs, &name, lease, expected, StateError::LeaseRace)
+        write_lease(
+            &repository,
+            &self.signer,
+            &refs,
+            &name,
+            lease,
+            expected,
+            StateError::LeaseRace,
+        )
     }
 
     fn update_lease(
@@ -320,7 +350,15 @@ impl StateStore for GitStateStore {
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = Oid::from_str(expected).map_err(unavailable)?;
-        write_lease(&repository, &refs, &name, lease, Some(expected), StateError::LeaseLost)
+        write_lease(
+            &repository,
+            &self.signer,
+            &refs,
+            &name,
+            lease,
+            Some(expected),
+            StateError::LeaseLost,
+        )
     }
 
     fn release_lease(
@@ -389,7 +427,7 @@ impl StateStore for GitStateStore {
         }
         let parents = tip.into_iter().collect::<Vec<_>>();
         let message = format!("nyl: run {} of {environment}", run.run);
-        let Some(commit) = tree::commit(&repository, &files, &message, &parents, true)? else {
+        let Some(commit) = tree::commit(&repository, &self.signer, &files, &message, &parents, true)? else {
             return Ok(());
         };
         match refs.update(&[Update {
@@ -465,7 +503,8 @@ impl StateStore for GitStateStore {
         let index = files.len();
         files.insert(format!("signals/{index:04}.yaml"), to_yaml(signal)?);
         let parents = tip.into_iter().collect::<Vec<_>>();
-        let commit = tree::commit(&repository, &files, "nyl: signal", &parents, true)?.expect("allow_empty commits");
+        let commit = tree::commit(&repository, &self.signer, &files, "nyl: signal", &parents, true)?
+            .expect("allow_empty commits");
         match refs.update(&[Update {
             name: name.clone(),
             new: Some(commit),
@@ -503,13 +542,20 @@ impl StateStore for GitStateStore {
             apply_changes(&mut inner, &transition.changes, desired, observed)?;
             let files = replace_beneath(&all, &location.path, &inner);
             let parents = tip.into_iter().collect::<Vec<_>>();
-            tree::commit(&repository, &files, &transition.message, &parents, false)
+            tree::commit(&repository, &self.signer, &files, &transition.message, &parents, false)
         };
         // The lease moves to a new commit with the same document, so that
         // the push checks it: git never compares an unchanged ref.
         let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
-        let renewed =
-            tree::commit(&repository, &lease_files, "nyl: lease", &[lease_oid], true)?.expect("allow_empty commits");
+        let renewed = tree::commit(
+            &repository,
+            &self.signer,
+            &lease_files,
+            "nyl: lease",
+            &[lease_oid],
+            true,
+        )?
+        .expect("allow_empty commits");
 
         // Each attempt builds on the tips the last one lost to.
         let (mut tip_desired, mut tip_observed) = (base_desired, base_observed);
@@ -693,6 +739,7 @@ fn directory_unchanged(
 
 fn write_lease(
     repository: &Repository,
+    signer: &CommitSigner,
     refs: &Refs<'_>,
     name: &str,
     lease: &Lease,
@@ -705,7 +752,7 @@ fn write_lease(
         .filter(|oid| repository.find_commit(*oid).is_ok())
         .into_iter()
         .collect::<Vec<_>>();
-    let commit = tree::commit(repository, &files, &message, &parents, true)?.expect("allow_empty commits");
+    let commit = tree::commit(repository, signer, &files, &message, &parents, true)?.expect("allow_empty commits");
     match refs.update(&[Update {
         name: name.to_owned(),
         new: Some(commit),

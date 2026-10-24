@@ -52,6 +52,10 @@ pub struct TreeRenderOptions {
     /// key: the state enters it through the resolved inputs.
     #[serde(skip)]
     pub pinned_state_files: Option<BTreeMap<PathBuf, Vec<u8>>>,
+    /// Values of the bindings only orchestration resolves; `None` rejects
+    /// them. Part of the render-cache key, since the values are rendered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrated_inputs: Option<super::inputs::OrchestratedInputs>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -523,6 +527,7 @@ async fn compile_target_tree_inner(
         git_blobs.as_ref(),
         publication_base.as_ref(),
         pinned_state_files,
+        options.orchestrated_inputs.as_ref(),
     )?;
 
     let target_cache_inputs = TargetCacheInputs {
@@ -2666,6 +2671,7 @@ struct StaticReleaseFile {
 
 /// Resolve the target's Release inputs before any Release renders, so every
 /// binding problem of the target is reported together.
+#[allow(clippy::too_many_arguments)] // Each is one independent input source of the bindings.
 fn resolve_prepared_release_inputs(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
@@ -2674,6 +2680,7 @@ fn resolve_prepared_release_inputs(
     git: &dyn super::inputs::GitBlobSource,
     publication: Option<&super::inputs::PublicationBase>,
     pinned_state: Option<&BTreeMap<PathBuf, Vec<u8>>>,
+    orchestrated: Option<&super::inputs::OrchestratedInputs>,
 ) -> Result<super::inputs::ResolvedTargetInputs> {
     let releases = groups
         .iter()
@@ -2708,6 +2715,7 @@ fn resolve_prepared_release_inputs(
             git,
             publication,
             pinned_state,
+            orchestrated,
             visible_files: &inventory.worktree_data_files,
         },
     )

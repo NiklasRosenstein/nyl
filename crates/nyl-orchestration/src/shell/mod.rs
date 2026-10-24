@@ -4,7 +4,9 @@
 //! Decisions come from [`crate::rules`]; the shell reads snapshots, asks the
 //! rules, and writes what they decide.
 
+pub mod inspect;
 pub mod lease;
+pub mod run;
 pub mod state;
 
 use nyl_core::orchestration::ports::{Clock, IdGenerator, StateStore};

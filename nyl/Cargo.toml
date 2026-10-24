@@ -64,6 +64,8 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 nyl-orchestration = { workspace = true, features = ["testing"] }
+# Tier-1 scenarios run the fake kinds in-process.
+nyl-drivers = { workspace = true, features = ["test-kinds"] }
 assert_cmd = { workspace = true }
 # Paused virtual time for deterministic latency-injected apply tests.
 tokio = { workspace = true, features = ["test-util"] }

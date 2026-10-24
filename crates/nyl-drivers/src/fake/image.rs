@@ -125,6 +125,10 @@ impl Driver for FakeImage {
         Vec::new()
     }
 
+    fn source_fields(&self, _spec: &Value) -> Vec<String> {
+        vec!["/context".to_owned()]
+    }
+
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         spec.get("repository")
             .and_then(Value::as_str)

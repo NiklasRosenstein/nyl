@@ -15,5 +15,8 @@
 //! knows nothing about the state layout or orchestration decisions. See
 //! `design/implementation-architecture.md`.
 
+pub mod command;
 #[cfg(any(test, feature = "test-kinds"))]
 pub mod fake;
+pub mod process;
+pub mod registry;
