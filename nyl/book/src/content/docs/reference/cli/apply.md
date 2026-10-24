@@ -143,6 +143,59 @@ nyl apply --target production --context admin@production manifest.yaml
 nyl apply --target production --history-limit 10 manifest.yaml
 ```
 
+### Output
+
+The first apply creates the Release's resources, including its managed
+Namespaces. The release namespace shows as updated because Nyl creates it first
+to store the release state:
+
+```console
+$ nyl apply --target production applications/web/release.yaml
+~ Namespace web
++ Namespace web-jobs
++ ConfigMap web-jobs/cleanup-schedule
++ ConfigMap web/web-config
++ Deployment web/web
+
+Summary: 4 created, 1 updated, 0 unchanged
+Timings: discovery (aggregated) 0.09s, validation 0.00s, apply 0.12s, release 0.01s
+
+Release: web revision 1 deployed successfully to namespace web
+```
+
+After the Release drops its `web-jobs` namespace, apply prunes the ConfigMap
+there but keeps the managed Namespace, which awaits confirmation:
+
+```console
+$ nyl apply --target production applications/web/release.yaml
+= Namespace web
+= ConfigMap web/web-config
+~ Deployment web/web
+! Kept Namespace web-jobs: its sync option Prune=confirm needs --confirm-prune to delete it
+
+Pruning 1 resources...
+  ✓ Deleted ConfigMap web-jobs/cleanup-schedule
+
+
+Summary: 0 created, 1 updated, 2 unchanged
+Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.02s
+
+Release: web revision 2 deployed successfully to namespace web
+$ nyl apply --target production --confirm-prune applications/web/release.yaml
+= Namespace web
+= ConfigMap web/web-config
+= Deployment web/web
+
+Pruning 1 resources...
+  ✓ Deleted Namespace web-jobs
+
+
+Summary: 0 created, 0 updated, 3 unchanged
+Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.02s
+
+Release: web revision 3 deployed successfully to namespace web
+```
+
 ### Dry Run
 
 Use `nyl diff` to preview changes before running `nyl apply`.

@@ -51,6 +51,48 @@ behavior `render`, `diff`, and `apply` share.
 
 ## Examples
 
+### Output
+
+With `--target`, the Release's resources come out as its Argo CD Application
+deploys them: the ConfigMap and Deployment keep no namespace, so the
+Application's destination namespace `web` applies, and the managed Namespace
+awaits confirmation before it is pruned. Render statistics go to stderr.
+
+```console
+$ nyl render --target production applications/web/release.yaml
+apiVersion: v1
+data:
+  greeting: hello
+kind: ConfigMap
+metadata:
+  name: web-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - image: nginx:1.27
+        name: web
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=confirm,Prune=confirm
+  name: web
+```
+
 ### Basic Rendering
 
 ```bash

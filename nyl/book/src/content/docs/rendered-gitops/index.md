@@ -48,11 +48,17 @@ The wizard detects the Git remote and current kube context, writes a compact
 `applications/` source directory. See [`nyl init`](/nyl/reference/cli/init/)
 for fully non-interactive flags and stdout mode.
 
-Then validate and render one target:
+Then list the targets, and validate and render one:
+
+```console
+$ nyl get targets
+NAME        CLUSTER  PUBLICATION      PATH-PREFIX  FILE
+production  primary  platform@deploy  production   config/targets/production.yaml#document-1
+staging     staging  platform@deploy  staging      config/targets/staging.yaml#document-1
+```
 
 ```bash
 nyl validate
-nyl get targets
 nyl render-tree --target production --output-dir deploy-worktree
 ```
 

@@ -98,10 +98,46 @@ nyl diff --target production --context admin@production manifest.yaml
 
 ## Output
 
-The diff command shows:
-- **Green (+)**: Lines that will be added
-- **Red (-)**: Lines that will be removed
-- **Summary**: Count of resources to create, update, or delete
+Each resource is listed with what `apply` would do to it: `+` create, `~`
+update (followed by the unified diff), `-` prune, `!` keep although no longer
+rendered, and `=` leave unchanged. The summary counts each. Here the Release
+raised its replicas and dropped its `web-jobs` namespace, whose managed
+Namespace awaits prune confirmation:
+
+```console
+$ nyl diff --target production applications/web/release.yaml
+~ Deployment web/web
+@@ -5,7 +5,7 @@   namespace: web
+ spec:
+   progressDeadlineSeconds: 600
+-  replicas: 2
++  replicas: 3
+   revisionHistoryLimit: 10
+   selector:
+     matchLabels:
+
+- ConfigMap web-jobs/cleanup-schedule
+! Namespace web-jobs (kept: Prune=confirm needs --confirm-prune)
+
+= ConfigMap web/web-config
+= Namespace web
+
+Summary: 0 to add, 1 to modify, 1 to delete, 2 unchanged, 1 kept
+```
+
+Before the first apply, every resource is new, including the managed Namespaces
+the Release's Application deploys:
+
+```console
+$ nyl diff --target production applications/web/release.yaml
++ ConfigMap web/web-config
++ ConfigMap web-jobs/cleanup-schedule
++ Deployment web/web
++ Namespace web-jobs
++ Namespace web
+
+Summary: 5 to add, 0 to modify, 0 to delete, 0 unchanged
+```
 
 ## Notes
 
