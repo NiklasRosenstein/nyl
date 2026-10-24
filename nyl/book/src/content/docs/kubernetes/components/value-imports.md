@@ -68,7 +68,7 @@ Nyl merges the two as described in
 apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: prod-eu-1
 spec:
   values:
     postgres:
