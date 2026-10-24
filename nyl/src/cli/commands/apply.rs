@@ -393,8 +393,8 @@ async fn run_concurrently<T, R, Fut>(
     }
 }
 
-/// How long pruning waits for deleted resources to terminate before deleting the
-/// resources they may depend on.
+/// How long one prune waits in total for deleted resources to terminate before
+/// deleting the resources they may depend on.
 const PRUNE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(120);
 const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
 
@@ -405,9 +405,11 @@ const PRUNE_TERMINATION_POLL: Duration = Duration::from_secs(1);
 /// dependents first; the resources of one kind are deleted concurrently. Before the
 /// next batch, pruning waits until the deleted resources are gone, so a resource
 /// whose finalizer needs its controller, CRD, or webhook is finalized before those
-/// are deleted. Resources still terminating after [`PRUNE_TERMINATION_TIMEOUT`] are
-/// reported and pruning continues. A resource whose kind no longer exists, such as a
-/// custom resource whose CRD is gone, is already deleted.
+/// are deleted. Once [`PRUNE_TERMINATION_TIMEOUT`] has passed, resources still
+/// terminating are reported and pruning continues without waiting. A resource whose
+/// version is no longer served is deleted through another served version; one whose
+/// whole kind is gone ([`KubeClient::is_kind_removed`]), such as a custom resource
+/// whose CRD was deleted, is already deleted.
 async fn prune_resources<'k>(
     client: &dyn KubeClient,
     mut keys: Vec<&'k ResourceKey>,
@@ -419,6 +421,8 @@ async fn prune_resources<'k>(
         return failed;
     }
     on_event(ApplyEvent::PruneStarted { count: keys.len() });
+    // One deadline for the whole prune, however many kinds have slow finalizers.
+    let deadline = tokio::time::Instant::now() + PRUNE_TERMINATION_TIMEOUT;
     let batches = ResourceOrdering::prune_batches(&mut keys);
     let last = batches.len() - 1;
     for (position, batch) in batches.into_iter().enumerate() {
@@ -431,7 +435,12 @@ async fn prune_resources<'k>(
                     .delete_resource(&key.gvk, key.namespace.as_deref(), &key.name)
                     .await
                 {
-                    Err(err) if err.is_api_resource_not_found_error() => Ok(()),
+                    // Objects of a removed kind are gone with it; anything else, such
+                    // as an aggregated API that is down, stays recorded and is retried.
+                    Err(err) if err.is_api_resource_not_found_error() => match client.is_kind_removed(&key.gvk).await {
+                        Ok(true) => Ok(()),
+                        _ => Err(err),
+                    },
                     result => result,
                 }
             },
@@ -446,7 +455,7 @@ async fn prune_resources<'k>(
         )
         .await;
         if position < last {
-            wait_until_terminated(client, deleted, concurrency, on_event).await;
+            wait_until_terminated(client, deleted, concurrency, deadline, on_event).await;
         }
     }
     on_event(ApplyEvent::PruneFinished);
@@ -458,21 +467,28 @@ async fn wait_until_terminated(
     client: &dyn KubeClient,
     mut remaining: Vec<&ResourceKey>,
     concurrency: usize,
+    deadline: tokio::time::Instant,
     on_event: &mut ApplyEventSink<'_>,
 ) {
-    let deadline = tokio::time::Instant::now() + PRUNE_TERMINATION_TIMEOUT;
     let mut announced = false;
     loop {
         let mut terminating = Vec::new();
         run_concurrently(
             remaining.iter().copied(),
             concurrency,
-            |key: &ResourceKey| client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name),
+            |key: &ResourceKey| async move {
+                match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
+                    Ok(found) => Ok(found.is_some()),
+                    // Gone with its kind, or unreachable while its aggregated API is down.
+                    Err(err) if err.is_api_resource_not_found_error() => {
+                        client.is_kind_removed(&key.gvk).await.map(|removed| !removed)
+                    }
+                    Err(err) => Err(err),
+                }
+            },
             |key, result| match result {
-                Ok(Some(_)) => terminating.push(key),
-                // Gone, or its kind is gone with it.
-                Ok(None) => {}
-                Err(err) if err.is_api_resource_not_found_error() => {}
+                Ok(true) => terminating.push(key),
+                Ok(false) => {}
                 // Keep waiting on transient errors; the deadline bounds the wait.
                 Err(err) => {
                     tracing::debug!(resource = %key, error = %err, "Checking pruned resource failed");
@@ -709,20 +725,24 @@ impl<'s> ReleaseRecorder<'s> {
         on_event: &mut ApplyEventSink<'_>,
     ) -> Result<ReleaseRun> {
         let storage = self.storage;
-        let reserved = (
-            self.release.release_name.clone(),
-            self.release.release_namespace.clone(),
-            self.release.revision,
-        );
+        let reserved = self.release.clone();
         let completed = AtomicBool::new(false);
+        // Keys applied so far, recorded if the apply does not complete.
+        let mut applied_keys: Vec<ResourceKey> = Vec::new();
+        let mut track = |event: ApplyEvent<'_>| {
+            if let ApplyEvent::Applied { key, result: Ok(_) } = &event {
+                applied_keys.push((*key).clone());
+            }
+            on_event(event);
+        };
         let work = async {
             let apply_started = Instant::now();
-            let apply = apply_sorted_manifests(client, manifests, settings.concurrency, on_event).await?;
+            let apply = apply_sorted_manifests(client, manifests, settings.concurrency, &mut track).await?;
             timings.push(PhaseTiming::new(Phase::Apply, apply_started.elapsed()));
 
             let release_started = Instant::now();
             let (release, prune_failed_count) = self
-                .complete(client, &apply, scopes, settings, on_event, &completed)
+                .complete(client, &apply, scopes, settings, &mut track, &completed)
                 .await?;
             timings.push(PhaseTiming::new(Phase::Release, release_started.elapsed()));
             Ok(ReleaseRun {
@@ -733,33 +753,40 @@ impl<'s> ReleaseRecorder<'s> {
         };
         let result = tokio::select! {
             result = work => result,
-            _ = tokio::signal::ctrl_c() => Err(NylError::Other("Interrupted".to_string())),
+            Ok(()) = tokio::signal::ctrl_c() => Err(NylError::Other("Interrupted".to_string())),
         };
 
         if let Err(err) = &result {
             if !completed.load(AtomicOrdering::SeqCst) {
-                let (release_name, release_namespace, revision) = reserved;
-                let error = format!("apply did not complete: {err}");
-                if let Err(mark_err) = storage
-                    .update_release_status(
-                        &release_name,
-                        &release_namespace,
-                        revision,
-                        ReleaseStatus::Failed,
-                        Some(error),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "Failed to mark release {} revision {} failed: {}",
-                        release_name,
-                        revision,
-                        mark_err
-                    );
+                // Record only what this apply wrote, so a later prune never deletes
+                // objects it did not create. A second Ctrl-C exits without waiting.
+                let failed = Self::failed_revision(reserved, applied_keys, err);
+                tokio::select! {
+                    () = Self::record_failed(storage, &failed) => {}
+                    Ok(()) = tokio::signal::ctrl_c() => std::process::exit(130),
                 }
             }
         }
         result
+    }
+
+    /// The reserved revision as recorded when its apply did not complete.
+    fn failed_revision(mut release: ReleaseState, applied_keys: Vec<ResourceKey>, err: &NylError) -> ReleaseState {
+        release.status = ReleaseStatus::Failed;
+        release.error = Some(format!("apply did not complete: {err}"));
+        release.resource_keys = applied_keys;
+        release
+    }
+
+    async fn record_failed(storage: &dyn ReleaseStorage, failed: &ReleaseState) {
+        if let Err(err) = storage.complete_release(failed).await {
+            tracing::warn!(
+                "Failed to mark release {} revision {} failed: {}",
+                failed.release_name,
+                failed.revision,
+                err
+            );
+        }
     }
 
     /// Record the apply's outcome, prune, and supersede the previous revision.
@@ -1203,8 +1230,10 @@ mod tests {
         refresh_fails: bool,
         /// Deleted resources that stay terminating for this many reads, by name.
         terminating_reads: std::sync::Mutex<HashMap<String, usize>>,
-        /// A kind the cluster no longer serves.
+        /// A kind whose recorded version the cluster no longer serves.
         removed_kind: &'static str,
+        /// Whether `removed_kind` is gone in every version.
+        kind_gone: bool,
     }
 
     impl LatencyClient {
@@ -1219,6 +1248,7 @@ mod tests {
                 refresh_fails: false,
                 terminating_reads: std::sync::Mutex::default(),
                 removed_kind: "",
+                kind_gone: true,
             }
         }
 
@@ -1300,6 +1330,10 @@ mod tests {
 
         async fn get_normalized_resource(&self, resource: &DynamicObject, manager: &str) -> Result<DynamicObject> {
             self.inner.get_normalized_resource(resource, manager).await
+        }
+
+        async fn is_kind_removed(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            Ok(gvk.kind == self.removed_kind && self.kind_gone)
         }
 
         async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
@@ -1737,6 +1771,12 @@ mod tests {
         let revision = storage.get_release("app", "app", 1).await.unwrap().unwrap();
         assert_eq!(revision.status, ReleaseStatus::Failed);
         assert!(revision.error.unwrap().contains("connection reset"));
+        // Only the CRD applied; the Widget was never written, so it is not recorded
+        // as partially applied, and a later prune cannot delete an object it never made.
+        assert_eq!(
+            revision.resource_keys,
+            vec![manifest_keys(&manifests).unwrap()[0].clone()]
+        );
     }
 
     /// Pruning deletes what a terminating resource may depend on only once it is gone.
@@ -1811,5 +1851,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage.list_revisions("app", "app").await.unwrap(), vec![3, 4]);
+    }
+
+    /// A recorded version that is no longer served, while the kind still exists in
+    /// another version, is not "deleted": the key stays recorded for a retry.
+    #[tokio::test(start_paused = true)]
+    async fn test_prune_resources_keeps_kinds_served_in_other_versions() {
+        let client = LatencyClient {
+            removed_kind: "HorizontalPodAutoscaler",
+            kind_gone: false,
+            ..LatencyClient::new("")
+        };
+        let keys = [key(
+            "autoscaling/v2beta2",
+            "HorizontalPodAutoscaler",
+            Some("app"),
+            "web",
+        )];
+
+        let failed = prune_resources(&client, keys.iter().collect(), 8, &mut |_| {}).await;
+
+        assert_eq!(failed.len(), 1);
     }
 }

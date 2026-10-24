@@ -80,6 +80,9 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `--context <CONTEXT>` - Kubernetes context to use
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same
   time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/commands/apply/#apply-order-and-progress).
+- `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest
+  after a successful rollback; `0` keeps every revision. Overrides `[release]
+  history_limit` in [`nyl.toml`](/nyl/configuration/#release-history).
 
 #### Examples
 
