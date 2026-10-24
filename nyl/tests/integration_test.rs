@@ -10,14 +10,14 @@ fn create_gitops_target_fixture(temp: &TempDir) {
     fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
     fs::write(temp.path().join("secrets.yaml"), "provider: null\n").unwrap();
     fs::write(
-        temp.path().join("config/clusters/kasoku.yaml"),
+        temp.path().join("config/clusters/prod-eu-1.yaml"),
         r#"apiVersion: k8s.nyl/v1
 kind: Cluster
 metadata:
-  name: kasoku
+  name: prod-eu-1
 spec:
   destination:
-    name: kasoku
+    name: prod-eu-1
   kubernetes:
     kubeVersion: 1.31.0
     apiVersions: [v1, apps/v1]
@@ -35,7 +35,7 @@ metadata:
   name: production
 spec:
   clusterRef:
-    name: kasoku
+    name: prod-eu-1
   values:
     environment: production
   publication:
@@ -439,10 +439,10 @@ data:
 
     let mut list = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
     list.current_dir(temp.path()).args(["get", "clusters"]);
-    let cluster_source = std::path::Path::new("config").join("clusters").join("kasoku.yaml");
+    let cluster_source = std::path::Path::new("config").join("clusters").join("prod-eu-1.yaml");
     list.assert()
         .success()
-        .stdout(predicate::str::contains("kasoku"))
+        .stdout(predicate::str::contains("prod-eu-1"))
         .stdout(predicate::str::contains(format!(
             "{}#document-1",
             cluster_source.display()
@@ -457,7 +457,7 @@ data:
         .success()
         .stdout(predicate::str::contains("environment: production"))
         .stdout(predicate::str::contains("region: fsn1"))
-        .stdout(predicate::str::contains("cluster: kasoku"))
+        .stdout(predicate::str::contains("cluster: prod-eu-1"))
         .stdout(predicate::str::contains("target: production"));
 
     let mut conflicting = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));

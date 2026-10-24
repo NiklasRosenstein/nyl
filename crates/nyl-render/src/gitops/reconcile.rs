@@ -486,7 +486,7 @@ mod tests {
     fn index() -> RenderIndex {
         RenderIndex::new(
             "production".to_string(),
-            "kasoku".to_string(),
+            "prod-eu-1".to_string(),
             RenderIndexPublication {
                 repository: "deploy".to_string(),
                 revision: "deploy/production".to_string(),

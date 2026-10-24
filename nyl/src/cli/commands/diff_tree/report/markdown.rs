@@ -698,7 +698,7 @@ mod tests {
     fn invalid_resource(index: usize, findings: usize) -> ResourceResult {
         ResourceResult {
             validator: "kubeconform".into(),
-            destination: "kasoku".into(),
+            destination: "prod-eu-1".into(),
             resource: ResourceIdentity {
                 api_version: "postgresql.cnpg.io/v1".into(),
                 kind: "Cluster".into(),
@@ -752,7 +752,7 @@ mod tests {
             ..Default::default()
         };
         validation.resources[0].schema_origin = Some(SchemaOrigin::Captured {
-            cluster: "kasoku".into(),
+            cluster: "prod-eu-1".into(),
             digest: "abc123".into(),
         });
         validation.resources[1].findings[0].path = Some(String::new());
@@ -775,7 +775,7 @@ mod tests {
         assert!(markdown.contains("document 1) · items[0]"));
         assert!(markdown.contains("More validation failures (1 resource)"));
         assert!(markdown.find("Validation details").unwrap() < markdown.find("Changed files").unwrap());
-        assert!(markdown.contains("Schema      Captured from cluster kasoku"));
+        assert!(markdown.contains("Schema      Captured from cluster prod-eu-1"));
         assert!(markdown.contains("- <code>/spec/affinity</code>: got null, want object"));
         let json: serde_json::Value =
             serde_json::from_str(&report.format(ReportFormat::Json, false, false).unwrap()).unwrap();
