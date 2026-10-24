@@ -104,6 +104,7 @@ then changes the Dockerfile and rebuilds.
 | build | Supported: `nyl build <unit> [-e <env>]` builds from the current worktree and loads the image into the local Docker engine with `--load`, or pushes it with `--push`, which is safe because nothing consumes an image until a reference names it. It pushes only the spec's `tags` and `--tag` values, never the `nyl-` tag that identifies recorded executions |
 | teardown | Not supported: registry deletion differs between registries and may break consumers. The default `deletionPolicy` for this kind is therefore `Retain`, and an explicit `Teardown` is rejected. Removing the unit leaves the image in the registry and drops the unit from state without a tombstone; an EnvironmentTemplate's forced `Teardown` skips it the same way |
 | recovery | `converge`. A rebuild after an uncertain execution pushes again; a non-reproducible build may produce a different digest, which consumers then pick up |
+| exec | Not supported: registry tools need no unit context |
 | ownership scope | The `repository` with the tag prefix `nyl-<environment>-`; units may share a repository, and two units of one environment pushing to the same repository are rejected |
 
 ## Terraform and OpenTofu
@@ -142,7 +143,7 @@ handling: the old incarnation is deleted under its deletion policy and the new
 kind starts a new incarnation. To switch without destroying anything, first set
 `deletionPolicy: Retain` and reconcile, then change the kind; the new
 incarnation converges against the same backend, after any state migration the
-tools require has been done by hand. A teardown caused by a kind change always
+tools require, done with the [repair](#repair) flow. A teardown caused by a kind change always
 requires `--allow-teardown`.
 
 ### Execution
@@ -251,14 +252,69 @@ commit itself is excluded; the matched bytes stand for it.
 | inspect | Not supported; recovery is `converge` |
 | teardown | `plan -destroy -out=<planfile>`, then `apply`. For `bind: plan` units, the destroy plan's digest is compared with the approved digest from the execution context, and a mismatch returns `AwaitingApproval` without effects |
 | recovery | `converge`: the backend's state lock guards concurrent effects, and a new plan after an uncertain execution shows what is still missing |
+| exec | Interactive: `init` as in execution step 1, then `tofu` or `terraform` with the operator's arguments (see [Repair](#repair)) |
 | ownership scope | The backend configuration without credentials, canonicalized, with `key` and the workspace (`default` unless the spec selects one); two units claiming the same scope are rejected, across environments too |
 
 `plan` and `verify` only read, so they never take the backend's state lock and
 never collide with a running `reconcile`. A state lock left behind by a lost
 runner makes the next execution fail with the lock ID, as a non-retryable
-`ownership` failure. The operator releases it with the tool's
-`force-unlock` and then runs `nyl recover --retry`; Nyl never releases locks
-itself.
+`ownership` failure. The operator holds the unit, releases the lock with
+`nyl exec -e <env> --unit <u> -- force-unlock <id>` or with the tool directly,
+and then resumes the unit or runs `nyl recover --retry`; Nyl never releases
+locks itself.
+
+A unit with a receipt whose backend now holds no state fails before planning
+with `NYL-TOFU-STATE-MISSING`, a non-retryable `ownership` failure, instead of
+planning to create everything again: a wrong `key`, a lost bucket, or a
+misconfigured backend looks exactly like that. `nyl recover --retry --reason`
+accepts the empty state for the current ownership scope when it is intended.
+
+### Repair
+
+Both drivers implement the [`exec` capability](orchestration-core.md#operator-exec)
+by preparing an execution exactly as for `reconcile`, `init` included, and then
+running `tofu` or `terraform` with the operator's arguments instead of `plan`
+and `apply`. Nothing in the command is specific to these kinds: a repair that
+needs another backend, workspace, version, or module is an edit to the unit
+definition, used through `--worktree` before it is merged.
+
+With `--worktree`, the module itself is read from a snapshot of the checkout,
+so a change of the module's `backend` block, which backend configuration alone
+cannot change, works the same way, and temporary edits reach the tool too: an
+`import` block for a resource created
+by hand, a `removed` block that drops a resource from state without destroying
+it, `prevent_destroy` while applying the rest with `-target`, or a broken
+resource commented out. A repair with temporary edits:
+
+1. `nyl hold -e <env> --unit <u> --reason <text>`.
+2. Edit the module locally, then run
+   `nyl exec -e <env> --unit <u> --worktree -- plan` and `-- apply` until the
+   state is right.
+3. Revert the temporary edits; commit, review, and merge any that should stay.
+4. `nyl resume -e <env> --unit <u>`. `nyl plan -e <env> --unit <u>` shows what
+   the committed source would do to the repaired state.
+5. `nyl reconcile -e <env> --unit <u> --approve <u>=<digest>`; the first
+   execution after `exec` always needs that approval.
+
+Relocating a broken or lost backend:
+
+1. `nyl hold -e <env> --unit <u> --reason <text>`.
+2. If the old location is still readable, save its state with
+   `nyl exec -e <env> --unit <u> -- state pull > old.tfstate`, which uses the
+   deployed spec.
+3. On a branch, change the unit's `backend` to the new location.
+4. Write the state there with
+   `nyl exec -e <env> --unit <u> --worktree -- state push old.tfstate`, or a
+   backup if step 2 was impossible. The scope check refuses a location another
+   unit owns.
+5. Check it with `nyl exec -e <env> --unit <u> --worktree -- plan`, expecting
+   no changes.
+6. Merge the branch, then `nyl resume -e <env> --unit <u>`, and approve the
+   next execution's plan, which against a matching state shows no changes.
+
+Repairs that change no configuration, such as `state mv`, `state rm`,
+`import`, or `force-unlock`, are a hold, `nyl exec` with the deployed spec, a
+resume, and the approved next execution.
 
 ## Terraform to Terraform outputs
 

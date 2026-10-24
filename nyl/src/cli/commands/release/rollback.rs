@@ -5,6 +5,7 @@ use dialoguer::Confirm;
 use crate::{
     cli::commands::apply::{apply_and_record_release, apply_sorted_manifests, print_apply_summary},
     cli::commands::cluster::load_target_kube_config,
+    config::ProjectConfig,
     kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
     NylError, Result,
 };
@@ -85,7 +86,9 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     ResourceOrdering::sort_by_priority(&mut manifests)?;
     let apply_result = apply_sorted_manifests(&kube_client, &manifests).await?;
 
-    // Record the rollback as a new revision (supersede previous + prune), reusing the apply path.
+    // Record the rollback as a new revision (supersede previous + prune + history
+    // limit), reusing the apply path.
+    let history_limit = ProjectConfig::load(None)?.release_history_limit();
     let release = apply_and_record_release(
         &storage,
         &kube_client,
@@ -94,6 +97,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         &args.name,
         &args.namespace,
         false,
+        history_limit,
     )
     .await?;
 

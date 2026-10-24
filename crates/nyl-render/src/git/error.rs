@@ -31,6 +31,17 @@ pub enum GitError {
     #[error("Command execution failed: {0}\nHint: Ensure git is installed and available in PATH.")]
     Command(String),
 
+    /// A failure that is not about running `git`, such as unreadable content.
+    #[error("{0}")]
+    Other(String),
+
+    #[error("{operation} failed for {url}: {message}\nHint: Nyl runs git for remote access, with your SSH config, SSH agent, and credential helpers; check that `git ls-remote {url}` succeeds in the same environment.")]
+    RemoteFailed {
+        operation: String,
+        url: String,
+        message: String,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -44,6 +55,9 @@ pub enum GitError {
 
     #[error("Authentication failed for {url}: {reason}\nHint: For SSH, ensure your SSH key is available to the agent. For HTTPS, configure an appropriate Git credential helper or token.")]
     AuthenticationFailed { url: String, reason: String },
+
+    #[error("'{ref_name}' of {url} is not in the local Git cache\nHint: Run once without --offline to fetch it.")]
+    NotCachedRef { url: String, ref_name: String },
 
     #[error("No cached copy of {url} exists\nHint: Run once without --offline to populate the Git cache.")]
     NotCached { url: String },

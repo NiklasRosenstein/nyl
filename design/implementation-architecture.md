@@ -158,6 +158,46 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
 - Concurrency lives in one place: a wave executor with a bounded semaphore on
   the existing tokio runtime, and a single writer task for state commits.
 
+## CI graph boundary
+
+`nyl-core` owns provider-neutral, versioned execution-graph, execution-manifest,
+and deployment-admission types with typed unit addresses and generation IDs.
+Scheduler syntax, provider environment variables, and job IDs are absent from
+these semantic types; opaque CI trace metadata may appear in diagnostics.
+`nyl-orchestration` owns the pure extraction and validation of
+dependency edges, shared with local scheduling, including unresolved data edges.
+It also owns every CI rule: job-ID encoding and collision checks, the export
+plan derived from a provider's declared capabilities (rejection or documented
+fallback), the lifecycle node for leaving units, and the admission decisions.
+Admission is two pure functions: minting compares the newly resolved source
+with the current generation (same, newer, or rollback needing authorization),
+and gating compares a worker's generation with the current record (current or
+superseded). The orchestration shell evaluates both under the environment lease,
+and `nyl-state` persists the record on the admission ref through the existing
+fenced transition mechanism. A worker cannot perform the check in a CLI
+preflight separated from the state mutation by another lease acquisition.
+
+Provider adapters hold no business rules: each serializes an export plan into
+its scheduler's syntax and maps runner profiles and job observations, behind a
+trait in `nyl-core`. The GitLab adapter lives in `nyl-drivers` beside the other
+effectful implementations; `nyl-cli` only wires it. GitLab and an in-memory test
+adapter share graph, admission, and result conformance fixtures, so the rules
+are proven once; future providers implement this boundary without changing
+unit/resource schemas. Artifact aggregation is presentation, not receipt
+admission. Lifecycle planning uses the existing read-only planner and never
+requires deployment admission.
+
+Operator `exec` is a driver capability like `plan` or `teardown`. The shell
+chooses the spec (desired document, or a worktree rendering), requires the hold
+and the lease, checks ownership scopes, admits credentials, and records the
+transition; the driver only prepares and runs its tool from that spec and
+returns how it ended. No CLI option is specific to a kind.
+
+The [CI execution design](ci-execution.md) specifies the first, separate-run
+backend. A later shared-run backend must extend the orchestration shell and
+state protocol explicitly; it cannot be implemented by a CLI adapter taking
+per-unit leases or writing receipts directly.
+
 ## Getting there
 
 - **M2** stays in today's rendering code. `nyl-core` and `nyl-render` are
@@ -174,3 +214,4 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   replaces the two Git source types M2 leaves with the one `GitSource`.
 - **M4–M6** add drivers, the Kubernetes adapter, and promotion inside those
   boundaries; each contract walkthrough they introduce lands as a scenario.
+

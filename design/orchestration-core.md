@@ -49,10 +49,12 @@ spec:
     observedRef: nyl/production/observed    # default nyl/<environment>/observed
     path: ''                                # optional directory within the refs; default the root
     coordinationRefPrefix: refs/nyl/        # where leases, runs, signals, and keep refs live
+    admissionRef: nyl/production/admission  # optional (M8); default the desired ref
   source: {revision: main, commit: 3e7b…}   # optional; omitted: the entry worktree's commit (see Source)
   protectedRefs: [main, 'release/*']        # default: each repository's default branch
   allowUnprotectedSource: false             # true lets runs use commits outside protectedRefs
   attestations: [qa]                        # environment-wide, recorded with nyl attest
+  admission: required                       # optional (M8); CI deployment admission, default off
 ```
 
 | Field | Type | Default |
@@ -64,10 +66,12 @@ spec:
 | `state.desiredRef`, `state.observedRef` | ref name | `nyl/<environment>/desired`, `nyl/<environment>/observed` |
 | `state.path` | relative directory | `''` |
 | `state.coordinationRefPrefix` | ref prefix ending in `/` | `refs/nyl/` |
+| `state.admissionRef` (M8) | ref name | the desired ref |
 | `source` | Git source without `path`, or `{fromPromotion}` | the entry worktree's commit |
 | `protectedRefs` | list of ref names or globs | the group's, else each repository's default branch |
 | `allowUnprotectedSource` | boolean | the group's, else `false` |
 | `attestations` | list of attestation names | `[]` |
+| `admission` (M8) | `off` or `required` | the group's, else `off` |
 
 - An Environment is static at discovery, like a DeploymentTarget.
 - `unitSelector` matches literal unit `metadata.labels` across all unit kinds;
@@ -120,6 +124,13 @@ spec:
 - `protectedRefs` lists the refs that pinned commits and run source commits
   must be reachable from; `allowUnprotectedSource` relaxes that for run source
   commits (see [Pinned commits](#pinned-commits)).
+- `admission: required` makes state-writing runs work at the source of the
+  current [deployment admission](ci-execution.md#deployment-admission), so a
+  delayed or retried CI job cannot redeploy an overtaken source. The record
+  lives in `admission.yaml` on `state.admissionRef`; giving that ref its own
+  branch, pushable only by the dispatcher, separates admission authority from
+  worker credentials. Both fields are read from the entry worktree, like
+  `state`, so changing them is a reviewed change.
 
 ### Environment groups
 
@@ -151,15 +162,15 @@ spec:
 - Shared fields are defaults. `values` merge recursively beneath the
   Environment's `values`, where the Environment wins, as target values win over
   Cluster values; `state.repositoryRef`, `state.repository`, `protectedRefs`,
-  and `allowUnprotectedSource` apply where the Environment leaves them unset.
-  A group sets no refs, paths, sources, or unit selectors, which stay each
+  `allowUnprotectedSource`, and `admission` apply where the Environment leaves
+  them unset. A group sets no refs, paths, sources, or unit selectors, which stay each
   environment's own.
 - The defaults belong to the Environment's configuration, not to the
   invocation: they apply whether an environment is reconciled through its
   group, with `-e`, or by a selector.
 - Groups are read like the Environment itself (see [Source](#source)): the
-  defaults for `state`, `protectedRefs`, and `allowUnprotectedSource` come
-  from the entry worktree, together with any GitRepository they name, because
+  defaults for `state`, `protectedRefs`, `allowUnprotectedSource`, and
+  `admission` come from the entry worktree, together with any GitRepository they name, because
   they are needed before the source commit S is known; `values` come from S.
   Execution keys depend only on what is read at S, so the same source commit
   always renders the same units and execution keys.
@@ -202,11 +213,11 @@ spec:
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
   or its own `revision`, and `nyl update source-locks` refreshes it with the
   other locks, `--check` included.
-- Nyl reads four fields from the Environment in the entry worktree, because
-  they decide S or where state lives: `source`, `state`, `protectedRefs`, and
-  `allowUnprotectedSource`, together with the EnvironmentGroup defaults for
-  them and the GitRepository resources they name. Every other field is read at
-  S; the copy of `source` inside S is ignored.
+- Nyl reads five fields from the Environment in the entry worktree, because
+  they decide S or where state lives: `source`, `state`, `protectedRefs`,
+  `allowUnprotectedSource`, and `admission`, together with the
+  EnvironmentGroup defaults for them and the GitRepository resources they
+  name. Every other field is read at S; the copy of `source` inside S is ignored.
 - State records S for every run (`desired/environment.yaml` and the
   `Nyl-Source-Commit` trailer). Runs that are not entered from the
   environment's own source use that record: the fleet reconcile, and a plain
@@ -223,6 +234,13 @@ spec:
   every run does, and the next run uses the environment's source again. It
   must satisfy the same reachability rules, the transition commit marks it as
   an override, and a fleet reconcile rejects it.
+- With `admission: required` (M8), the current
+  [deployment admission](ci-execution.md#deployment-admission) chooses S for
+  state-writing runs: admission resolves the environment's source by the rules
+  above, and runs use the admitted commit, recorded with `admission` and the
+  generation as how S was chosen. Before the first admission they exit 2 with
+  `NYL-CI-ADMISSION-MISSING`. `reconcile --source` is refused, since a
+  different source is a rollback admission; `plan --source` still previews.
 - A run keeps its S to the end. When a promotion or a source change lands
   while it runs, its final commit is resolved again against the new state but
   at the same S, and the next run picks up the new source.
@@ -1035,6 +1053,7 @@ layout does not depend on whether the two refs coincide:
 
 ```text
 state.yaml                                   # state location and history, written by `nyl state`
+admission.yaml                               # current DeploymentAdmission (M8), on the admission ref only
 desired/
   environment.yaml                           # resolved Environment, source commit, ownership set
   units/<unit>.yaml                          # DesiredUnit, including lifecycle (deletion, hold)
@@ -1048,11 +1067,14 @@ observed/
 ```
 
 With separate refs, `desired/` exists only on the desired ref and `observed/`
-only on the observed ref; `state.yaml` exists on both.
+only on the observed ref; `state.yaml` exists on both. `admission.yaml` exists
+only on the admission ref, which is the desired ref unless `state.admissionRef`
+names another.
 
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
-`ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`; artifacts use their own
+`ObservedUnit`, `Observation`, `Attestation`, `Lease`, `Run`, and `Signal`, plus
+`DeploymentAdmission` from M8; artifacts use their own
 kinds. JSON Schemas for all of them are generated from the Rust types and
 published with the other resource references. Digests, including execution
 keys, are computed over a canonical JSON form (RFC 8785), so formatting never
@@ -1065,7 +1087,8 @@ files cover every version, and a reader rejects a version it does not know.
 | Kind | Location | Content |
 | --- | --- | --- |
 | `StateRecord` | `state.yaml` | `environment`, `template` and `params` for instances, `expiresAt`, `location` (repository, refs, `path`, `coordinationRefPrefix`), and `events`: `state-initialized` (with `fresh`), `state-moved`, `state-restored`, each with time, requester, and reason |
-| `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
+| `EnvironmentRecord` | `desired/environment.yaml` | The resolved Environment spec with group defaults applied, `sourceCommit` S and how it was chosen (`entry`, `revision`, `commit`, `promotion` with the record's path and `sequence`, `admission` with the generation, or `override`), `appliedPromotionSequence`, and the ownership set as unit names with uids |
+| `DeploymentAdmission` (M8) | `admission.yaml` on the admission ref | The current generation: ID, sequence, source commit and how it was chosen, semantic graph digest, and normalized authorizing actor, request, and reason; only a newer admission replaces it (see [Deployment admission](ci-execution.md#deployment-admission)) |
 | `DesiredUnit` | `desired/units/<unit>.yaml` | See [Desired unit](#desired-unit); a `retained` tombstone is a DesiredUnit with `lifecycle.state: retained` that also embeds the last receipt, and has no observed file |
 | `PromotionRecord` | `desired/promotions/<path>.yaml` | See the [promotion contract](promotion.md#promotionrecord) |
 | `ObservedUnit` | `observed/units/<unit>.yaml` | See [Observed unit](#observed-unit) |
@@ -1267,7 +1290,8 @@ Nyl-Version: 0.7.0
 - Operator actions add `Nyl-Requested-By` and `Nyl-Reason`; approvals are part
   of the summary and of each receipt.
 - Operations: `reconcile`, `promote`, `teardown`, `hold`, `resume`,
-  `recover`, `verify`, `attest`, `state-init`, `state-move`, `state-delete`,
+  `recover`, `verify`, `attest`, `exec`, `ci-admit`, `state-init`,
+  `state-move`, `state-delete`,
   `state-forget`, and `state-restore`. `state reset` rewrites only the clone's
   local branches, and `lease break` writes only the lease ref; the next
   transition commit lists the break under `leaseBroken` with who broke it and
@@ -1276,6 +1300,34 @@ Nyl-Version: 0.7.0
   they name, reproduces every state decision.
 
 ## Execution
+
+The optional [CI execution adapter](ci-execution.md) exposes the same dependency
+graph as separate jobs. Its first backend invokes ordinary unit-scoped operations:
+each job is a separate run, acquires the environment lease, and revalidates
+current evidence. CI success never replaces a receipt. The full ownership set
+is resolved in every invocation; changed-path selection must not imply deletion.
+This backend does not distribute one run or relax the lease. M3's graph interface
+must represent blocked references before their values exist, so export does not
+depend on a complete native plan.
+
+M8's [deployment admission](ci-execution.md#deployment-admission) is shared by
+all CI providers and opt-in per environment with `admission: required`. The
+admission record is state, not a CI artifact, and only a newer admission
+replaces it; `nyl ci admit` writes it under the lease, resolving S by the
+environment's source rules and refusing an older or diverging source unless
+it is an authorized rollback. A worker presenting `--generation` acquires the
+lease and compares its generation with the record before resolution writes,
+result import, or driver calls. A superseded generation executes nothing,
+writes no desired/observed state, and reports `superseded`. Holds, recovery,
+attestations, lifecycle work, and local runs change unit state, not deployment
+intent, so they never touch the admission. Environments without
+`admission: required` keep M3 semantics.
+
+CI planning remains ordinary read-only planning, including the unfiltered
+leaving section and the caller's `--fail-on-leaving` policy, and needs no
+admission. CI reconciliation hands units leaving the ownership set to one
+lifecycle job running `reconcile --leaving` after the unit jobs; the deletion
+rules below apply unchanged.
 
 `nyl reconcile -e <env>`:
 
@@ -1319,6 +1371,9 @@ apply to desired state without mixing with observed commits.
   the named unit `blocked`; dependencies and dependents are not executed.
 - `plan --unit` resolves the whole environment too and reports only the named
   units, plus the leaving section, which is never filtered.
+- `--leaving` selects exactly the units with state outside the ownership set:
+  newly leaving, `deleting`, `pending-teardown`, or `tearing-down`. Lifecycle
+  work can then run on its own after unit-scoped runs. It excludes `--unit`.
 
 **Transition commit conflicts.** Operations on one environment are serialized
 by its lease, and the final push is fenced by it (see
@@ -1456,7 +1511,8 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    `--wait-lease <duration>` waits up to that long for the lease instead, for
    jobs such as a preview's close job that must not give up. Every
    state-writing operation takes the lease (`reconcile`, `promote`,
-   `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `state init`,
+   `teardown`, `hold`, `resume`, `recover`, `verify`, `attest`, `exec`,
+   `ci admit`, `state init`,
    `state move`, `state delete`, `state forget`, `state restore`), so only one
    runs per environment at a time. `promote` takes the target environment's
    lease only. `lease break` is the one command that changes a lease it does
@@ -1576,6 +1632,70 @@ categories treat them alike across drivers:
 
 A driver may set `retryable` explicitly for a single failure; the defaults
 apply otherwise.
+
+#### Operator exec
+
+Some repairs need a unit's native tool: moving or importing native state,
+releasing a native lock, or relocating a state backend. `exec` is a driver
+capability like `plan` or `teardown`; which tool it runs, and how the driver
+prepares it from the spec, is the driver's implementation:
+
+```text
+nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text>] -- <tool arguments>
+```
+
+- **Spec.** Without `--worktree`, the unit's current desired document, which is
+  what is deployed. With `--worktree`, the unit rendered from the entry
+  worktree, uncommitted edits included, as `nyl build` renders it, and resolved
+  against current receipts. Changing a setting for a repair, such as an
+  OpenTofu backend, a tool version, or a variable, is an edit to the unit
+  definition, the same edit that is then reviewed and merged; `exec` has no
+  kind-specific options. The rendering must keep the unit's name and kind.
+- **Source files.** With `--worktree`, every source field that resolves to the
+  entry repository at S, the default, reads from a snapshot of the entry
+  worktree instead of a checkout of S: the Git-visible files `nyl render`
+  sees, uncommitted and untracked ones included. The snapshot is copied into
+  the execution's own directory, so the tool never writes into the operator's
+  checkout, and temporary edits to the applied source, such as an `import` or
+  `removed` block, reach the tool. A source pinned to its own `revision` or
+  `commit`, or to another repository, is read at that pin; repairing with edits
+  there means pointing the pin at a pushed repair branch in the unit edit,
+  under the ordinary reachability rules.
+- **Guards.** The unit must be held, so no run reconciles it during the repair,
+  and `exec` takes the environment lease like every state-writing operation,
+  with a deadline from `--timeout`, defaulting to the unit's `timeout`. The
+  ownership scopes of the spec must not overlap another unit's, so a changed
+  setting cannot point the tool at state another unit owns. Credentials are
+  the spec's admitted `env`, so a credential change is also a recorded edit.
+- **Tool.** The driver prepares the tool from the spec in the execution's own
+  worktree and temporary directory, then runs it with the arguments after
+  `--` unchanged, through the context's process handling and masking. Stdin and
+  the terminal are passed through only when the driver declares the tool
+  interactive and Nyl runs on a terminal.
+- **Record.** The transition commit records the operator, reason, tool
+  arguments, the tool's exit status, and the spec used: the desired document,
+  or the worktree's commit, whether it was dirty, the spec digest, the fields
+  that differ from the desired document, with values only where they are not
+  sensitive, and the snapshot's digest with the paths that differ from that
+  commit. It never records file contents, secrets, or tool output.
+- **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
+  consumers keep resolving from it, as for any hold. After `resume`, the next
+  execution of the unit needs explicit approval, whatever its `approval`
+  setting, because the committed source may disagree with what the repair
+  left behind, for example after temporary edits were reverted: kinds with
+  `change_digest` need `--approve <unit>=<digest>` for the plan that
+  `nyl plan --unit` shows against the repaired state, and others a plain
+  `--approve <unit>`. Until then the unit is `awaiting-approval`, so a CI job
+  exits 2 instead of applying. That execution follows the recovery policy
+  (`converge` re-executes, `inspect` inspects, `manual` still waits for
+  `recover --retry`), and its receipt clears the mark.
+- **Exit status.** Once the tool has started, `exec` exits with the tool's
+  status, or 128 plus the signal that ended it. Before that, Nyl refuses with
+  exit 125 and a stable code, such as `NYL-EXEC-NOT-HELD`,
+  `NYL-EXEC-UNSUPPORTED`, `NYL-EXEC-SCOPE-CONFLICT`, or `NYL-LEASE-HELD`, so
+  scripts can tell a refusal from the tool's own failure.
+- `exec` ignores deployment admission: it repairs a unit, it does not deploy a
+  source.
 
 ## Deletion
 
@@ -1855,6 +1975,8 @@ experiments from a workstation:
   last commit without the trailer. `nyl state restore -e <env> --to <commit>`
   writes a forward commit restoring that commit's content, so protected
   branches need no force push, and records the local transitions as rejected.
+  It never restores `admission.yaml`: the current deployment admission is
+  carried forward, so a restore cannot move the deployment generation back.
   Pushed local transitions are never accepted, because their source commits
   may be unpushed or dirty and were never checked for reachability.
 
@@ -1883,8 +2005,10 @@ revisions, and locked `fromGit` bindings.
 ### Credentials and branch protection
 
 - State pushes use the same Git credentials as `publish-tree`, through the
-  GitRepository's `publishURL`. Today `publish-tree` authenticates through the
-  SSH agent only; SSH keys and HTTPS tokens for both are an M3 item.
+  GitRepository's `publishURL`. Remote Git operations run the `git` command
+  line, so `publish-tree` authenticates as the user's `git` does (SSH config
+  and keys, SSH agent, credential helpers); state pushes use the same
+  transport.
 - Nyl never force-pushes a state ref. A non-fast-forward state ref is treated
   as corruption and stops every command until an operator repairs it.
 - Recommended protection: force pushes and deletion are disabled on both state
@@ -1928,6 +2052,7 @@ trait Driver {
     fn inspect(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Inspection>>;
     fn teardown(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<Outcome>>; // lifecycle: deleting
     fn build(&self, ctx: &ExecutionContext, unit: &DesiredUnit, push: bool) -> Result<Supported<Vec<Artifact>>>; // outside orchestration
+    fn exec(&self, ctx: &ExecutionContext, unit: &DesiredUnit, args: &[OsString]) -> Result<Supported<ExecStatus>>; // operator repair, see Operator exec
 }
 
 struct Capabilities {
@@ -1935,6 +2060,7 @@ struct Capabilities {
     observe: bool,              // verify records observations, such as Argo CD health
     build: Option<BuildPush>,   // None: no `nyl build`; Some(Safe | LoadOnly)
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed
+    exec: Option<ExecTerminal>, // None: no `nyl exec`; Some(Interactive | NonInteractive)
 }
 
 enum Supported<T> {
@@ -1959,6 +2085,7 @@ enum Outcome {
 | `Artifact` | An artifact document without `metadata.unit` and `executionKey`, which Nyl fills in |
 | `Verification` | `drift`: `clean`, `drifted` with a summary, or `unknown` with a reason; `observations`; `attestations` |
 | `Inspection` | `Applied { outputs, artifacts }`, `NotApplied`, or `Unknown { reason }`, the three results of the `inspect` recovery policy |
+| `ExecStatus` | `Exited { code }` or `Signaled { signal }` of the operator's tool; `exec` reports how the tool ended, never an outcome or receipt |
 | `OwnershipScope` | A typed claim, such as `{terraformBackend: <canonical backend config and key>, workspace}`, `{ociRepository, tagPrefix}`, or `{publication: {repository, revision, pathPrefix}}` |
 
 - `Waiting` is how a two-phase teardown reports that phase 1 is published and
@@ -1968,7 +2095,9 @@ enum Outcome {
 - `Result` errors are Nyl-side problems, such as an unreadable worktree; they
   give the unit an `uncertain` condition when an effect may have started, and
   otherwise fail the invocation with exit 1.
-- `ExecutionContext` provides the worktree at the effective source revision,
+- `ExecutionContext` provides the worktree at the effective source revision
+  (for `exec --worktree`, the snapshot described in
+  [Operator exec](#operator-exec)),
   the resolved spec, admitted environment variables and secrets, the approved
   change digest for `bind: plan` units, the deadline, a cancellation signal,
   the unit's observed file, and a transcript sink that masks secret values.
@@ -2147,6 +2276,9 @@ spec:
 | `recover` | Clear an uncertain condition or non-retryable failure for re-execution, or with `--accept <run>` adopt a checkpointed result | One observed commit |
 | `teardown` | Tear down a unit, replacing it if still selected; `--hold` keeps it down; `--all` tears down every unit; `--confirm-removed` ends a publication's teardown wait on the operator's word, under any strategy | One transition commit per state ref |
 | `hold` | Freeze a unit: reconcile no changes to it until resumed | One desired commit |
+| `exec` | Run a held unit's tool, through its driver's `exec` capability, with the deployed spec or one rendered from the worktree (see [Operator exec](#operator-exec)) | One observed commit |
+| `ci admit` (M8) | Record a new deployment generation, or confirm the current one (see [Deployment admission](ci-execution.md#deployment-admission)) | One commit on the admission ref |
+| `ci export` (M8) | Export the dependency graph as a provider workflow (see [CI execution](ci-execution.md)) | Nothing |
 | `resume` | Lift a hold | One desired commit |
 | `state init` | Create state at the configured location; `--fresh` starts over deliberately; `--template` creates or updates an instance | `state.yaml` on each ref |
 | `state delete` | Remove an environment's state after all its units are torn down, for template instances and declared environments; `--teardown` tears them down first | One commit removing its directory from a shared ref, or deletion of its own refs |
@@ -2300,6 +2432,7 @@ nyl get promotions -e staging      # PromotionRecords with each value's source a
 Common options: `-e`/`--environment`, `--unit`/`--units`,
 `--approve <unit>[=<digest>]`, `--approve-all`, `--approved-by`, `--approval-source`,
 `--allow-teardown`, `--allow-dependents`, `--allow-incomplete`, `--confirm-removed`, `--wait-lease`, `--make-room`, `--renew`, `--no-extend`, `--template`, `--source`, `--local`,
+`--leaving`, `--generation`,
 `--concurrency`, and `--output json` for versioned machine results on
 stdout, with human diagnostics on stderr.
 
@@ -2314,7 +2447,7 @@ execute (all of them without `--unit`/`--units`):
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Every selected unit is current, or its deletion completed |
+| 0 | Every selected unit is current, or its deletion completed; or the run's deployment generation was superseded and it executed nothing |
 | 1 | Configuration, resolution, or operational error |
 | 2 | Not everything was reconciled, and nothing failed: a unit is held, blocked by a held dependency, or waiting for evidence, approval, `--allow-teardown`, `--allow-dependents`, a teardown wait, or another run's lease |
 | 3 | At least one execution or verification failed |
@@ -2337,6 +2470,7 @@ The table applies to each command as follows:
 | `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
+| `exec` | The tool's own exit status once it has started; 125 when Nyl refuses before starting it (see [Operator exec](#operator-exec)) | | | | |
 | `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done | Error or refusal | The lease is held, `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
 
 `--output json` prints the operation's typed report, the same one that renders
@@ -2365,6 +2499,32 @@ Reconcile, teardown, verify, and status reports have the same shape, with
 `apiVersion` versions the machine output.
 
 ## Walkthroughs
+
+**CI lifecycle (M8).** An MR removes `database` and the binding that consumed
+it. Its read-only planning workflow lists `database` as leaving, writes no
+state, and fails only when `--fail-on-leaving` is requested. After merge, the
+reconciliation export has unit jobs for the remaining units and a lifecycle job
+for `database`; without `--allow-teardown` that job leaves it
+`pending-teardown`, exit 2, and with it the unit is torn down. Deselecting
+every unit still exports a lifecycle node naming all of them.
+([`ci-lifecycle`](../nyl/tests/scenarios/walkthroughs/ci-lifecycle/scenario.yaml))
+
+**CI admission and retries (M8).** Deployment A's jobs finish, B is admitted
+and deploys, and a worker from A is retried: it reports superseded, executing
+and writing nothing. Re-dispatching A is refused as a rollback, while
+re-dispatching B returns B. A hold and resume in between leave B current. An
+authorized rollback admits C at A's source, which then reconciles. These are
+shared core admission scenarios, executed by every CI adapter's conformance
+suite. ([`ci-admission`](../nyl/tests/scenarios/walkthroughs/ci-admission/scenario.yaml))
+
+**Separate CI unit jobs (M3 foundation, M8 adapter).** Starting without receipts,
+the `database` job is blocked and executes nothing. Separate jobs for `network`
+and `web-image` record their results under the normal environment lease. A fresh
+`database` invocation resolves `network`'s receipt, then `kubernetes` resolves
+both producers. Retrying `database` executes nothing. Every invocation resolves
+the full ownership set, and existing competing-run and recovery rules still
+apply; these jobs are separate runs, not one distributed transaction.
+([`unit-jobs`](../nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml))
 
 Each walkthrough is an executable scenario under
 [`nyl/tests/scenarios/walkthroughs/`](../nyl/tests/scenarios/walkthroughs/),
@@ -2487,3 +2647,4 @@ extended the expiry first.
 | Built-in approver lookups beyond GitHub, starting with GitLab | After M3 |
 
 Driver-specific questions are in the [infrastructure units contract](infrastructure-units.md).
+

@@ -11,7 +11,7 @@ use git2::Repository;
 use crate::git::GitManager;
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
-    GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions,
+    resource_path, GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
 };
 use crate::util::project_path::{locate_checkout_project, ProjectLocation};
 use crate::{NylError, Result};
@@ -103,7 +103,8 @@ pub struct DiffTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Read fromPublication state at the cached publication branch head.
+    /// Read Git charts, the published tree, `--source-ref`, and fromPublication state
+    /// from the cached refs of the local Git cache instead of fetching them.
     #[arg(long)]
     pub offline: bool,
 }
@@ -194,7 +195,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
     args.validation.validate_outputs(false, &protected, &[])?;
     report::validate_outputs(&args.output, &args.stats_output)?;
     let mut report = Report::new(&args);
-    evaluate(&args, &mut report).await;
+    Box::pin(evaluate(&args, &mut report)).await;
     // Each artifact is independently useful, including after another write fails.
     let mut delivery_errors = Vec::new();
     if let Some(patch) = &report.patch {
@@ -421,8 +422,8 @@ fn comparison_files(
             })
         }
         DiffSelection::Catalog => Ok(ComparisonFiles {
-            base: files_beneath(&baseline.files(), Path::new("_nyl/catalog")),
-            desired: files_beneath(&borrowed(&desired.files), Path::new("_nyl/catalog")),
+            base: files_beneath(&baseline.files(), Path::new(CATALOG_DIRECTORY)),
+            desired: files_beneath(&borrowed(&desired.files), Path::new(CATALOG_DIRECTORY)),
         }),
         DiffSelection::Applications(selectors) => application_comparison_files(
             selectors,
@@ -497,40 +498,45 @@ fn derive_application_views(
     files: &crate::gitops::DesiredFiles<'_>,
     publication_path_prefix: &str,
 ) -> Result<BTreeMap<String, ApplicationView>> {
-    let catalog_root = Path::new("_nyl/catalog/applications");
     let mut views = BTreeMap::new();
-    for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(catalog_root)) {
-        let expected_identity = application_identity_from_catalog_path(path)?;
+    for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(CATALOG_DIRECTORY)) {
         let text = std::str::from_utf8(bytes).map_err(|error| {
             NylError::config(format!(
-                "Generated Argo CD Application {} is not UTF-8: {error}",
+                "Generated catalog file {} is not UTF-8: {error}",
                 path.display()
             ))
         })?;
-        let application = crate::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
+        let manifest = crate::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
             NylError::config(format!(
-                "Failed to parse generated Argo CD Application {}: {error}",
+                "Failed to parse generated catalog file {}: {error}",
                 path.display()
             ))
         })?;
-        if application.get("apiVersion").and_then(serde_json::Value::as_str) != Some("argoproj.io/v1alpha1")
-            || application.get("kind").and_then(serde_json::Value::as_str) != Some("Application")
+        if manifest.get("apiVersion").and_then(serde_json::Value::as_str) != Some("argoproj.io/v1alpha1")
+            || manifest.get("kind").and_then(serde_json::Value::as_str) != Some("Application")
         {
-            return Err(NylError::config(format!(
-                "Generated catalog path {} does not contain an argoproj.io/v1alpha1 Application",
-                path.display()
-            )));
+            continue;
         }
-        let namespace = required_application_string(&application, "/metadata/namespace", path)?;
-        let name = required_application_string(&application, "/metadata/name", path)?;
+        let namespace = required_application_string(&manifest, "/metadata/namespace", path)?;
+        let name = required_application_string(&manifest, "/metadata/name", path)?;
         let identity = format!("{namespace}/{name}");
-        if identity != expected_identity {
+        let key = crate::kubernetes::ResourceKey::from_json_value(&manifest)?;
+        let expected = Path::new(CATALOG_DIRECTORY).join(resource_path(&key)?);
+        // Publications rendered before the per-resource catalog layout stored
+        // Applications at applications/<namespace>/<name>.yaml; they remain
+        // readable as a comparison baseline.
+        let legacy = Path::new(CATALOG_DIRECTORY)
+            .join("applications")
+            .join(namespace)
+            .join(format!("{name}.yaml"));
+        if *path != expected && *path != legacy {
             return Err(NylError::config(format!(
-                "Generated Argo CD Application {} has identity {identity:?}, expected {expected_identity:?} from its catalog path",
-                path.display()
+                "Generated Argo CD Application {identity:?} is at {}, expected {}",
+                crate::resources::relative_path_to_posix("generated catalog path", path)?,
+                crate::resources::relative_path_to_posix("generated catalog path", &expected)?
             )));
         }
-        let rendered_path = required_application_string(&application, "/spec/source/path", path)?;
+        let rendered_path = required_application_string(&manifest, "/spec/source/path", path)?;
         crate::resources::validate_relative_path(
             "generated Application spec.source.path",
             rendered_path,
@@ -540,7 +546,7 @@ fn derive_application_views(
         let payload_path = strip_publication_prefix(rendered_path, publication_path_prefix, path)?;
         let view = ApplicationView {
             catalog_file: path.to_path_buf(),
-            catalog_application: payload_path == Path::new("_nyl/catalog"),
+            catalog_application: payload_path == Path::new(CATALOG_DIRECTORY),
             payload_path,
         };
         if views.insert(identity.clone(), view).is_some() {
@@ -551,38 +557,6 @@ fn derive_application_views(
     }
     validate_application_payloads(&views)?;
     Ok(views)
-}
-
-fn application_identity_from_catalog_path(path: &Path) -> Result<String> {
-    let relative = path
-        .strip_prefix("_nyl/catalog/applications")
-        .expect("caller filters catalog Application paths");
-    let components = relative.components().collect::<Vec<_>>();
-    if components.len() != 2 {
-        return Err(NylError::config(format!(
-            "Generated Argo CD Application path {} must use _nyl/catalog/applications/<namespace>/<name>.yaml",
-            path.display()
-        )));
-    }
-    let namespace = components[0].as_os_str().to_str().ok_or_else(|| {
-        NylError::config(format!(
-            "Generated Argo CD Application path {} is not UTF-8",
-            path.display()
-        ))
-    })?;
-    let filename = components[1].as_os_str().to_str().ok_or_else(|| {
-        NylError::config(format!(
-            "Generated Argo CD Application path {} is not UTF-8",
-            path.display()
-        ))
-    })?;
-    let name = filename.strip_suffix(".yaml").ok_or_else(|| {
-        NylError::config(format!(
-            "Generated Argo CD Application path {} must end in .yaml",
-            path.display()
-        ))
-    })?;
-    Ok(format!("{namespace}/{name}"))
 }
 
 fn required_application_string<'a>(application: &'a serde_json::Value, pointer: &str, path: &Path) -> Result<&'a str> {
@@ -714,7 +688,7 @@ fn published_tree(
         .and_then(|base| Some((base.url.as_str(), base.commit.as_deref()?)))
     {
         Some((url, commit)) => manager.resolve_ref(url, Some(commit), None),
-        None if offline => manager.resolve_ref(&compiled.repository.repo_url, Some(revision), None),
+        None if offline => manager.resolve_ref_cached(&compiled.repository.repo_url, Some(revision), None),
         None => manager.resolve_ref_fresh(&compiled.repository.repo_url, Some(revision), None),
     }
     .map_err(NylError::Git)?;
@@ -803,9 +777,12 @@ async fn source_derived_tree(
             .ok_or_else(|| NylError::config("Source repository has no origin; pass --source-repository"))?
     };
     let mut manager = git_manager(cache)?;
-    let checkout = manager
-        .resolve_ref_fresh(&repository_url, Some(source_ref), None)
-        .map_err(NylError::Git)?;
+    let checkout = if options.publication_read == crate::gitops::inputs::PublicationRead::Cached {
+        manager.resolve_ref_cached(&repository_url, Some(source_ref), None)
+    } else {
+        manager.resolve_ref_fresh(&repository_url, Some(source_ref), None)
+    }
+    .map_err(NylError::Git)?;
     let commit = checkout_commit(&checkout)?;
     let located = locate_checkout_project(
         &checkout,
@@ -1045,19 +1022,19 @@ mod tests {
     fn derives_application_views_from_generated_catalog() {
         let files = BTreeMap::from([
             (
-                PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
+                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
                 application_yaml("argocd", "api", "production/workloads/api"),
             ),
             (
-                PathBuf::from("_nyl/catalog/applications/argocd/production-catalog.yaml"),
+                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml"),
                 application_yaml("argocd", "production-catalog", "production/_nyl/catalog"),
             ),
             (
-                PathBuf::from("_nyl/catalog/projects/workloads.yaml"),
+                PathBuf::from("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml"),
                 b"kind: AppProject\n".to_vec(),
             ),
             (
-                PathBuf::from("workloads/api/resources.yaml"),
+                PathBuf::from("workloads/api/configmap/api/api.yaml"),
                 b"kind: ConfigMap\n".to_vec(),
             ),
         ]);
@@ -1076,10 +1053,12 @@ mod tests {
         )
         .unwrap();
         for selected in [&comparison.base, &comparison.desired] {
-            assert!(selected.contains_key(Path::new("_nyl/catalog/applications/argocd/api.yaml")));
-            assert!(selected.contains_key(Path::new("workloads/api/resources.yaml")));
-            assert!(!selected.contains_key(Path::new("_nyl/catalog/projects/workloads.yaml")));
-            assert!(!selected.contains_key(Path::new("_nyl/catalog/applications/argocd/production-catalog.yaml")));
+            assert!(selected.contains_key(Path::new("_nyl/catalog/application.argoproj.io/argocd/api.yaml")));
+            assert!(selected.contains_key(Path::new("workloads/api/configmap/api/api.yaml")));
+            assert!(!selected.contains_key(Path::new("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")));
+            assert!(!selected.contains_key(Path::new(
+                "_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml"
+            )));
         }
 
         let selectors = BTreeSet::from(["argocd/production-catalog".to_owned()]);
@@ -1093,21 +1072,43 @@ mod tests {
         .unwrap();
         assert!(comparison
             .base
-            .contains_key(Path::new("_nyl/catalog/projects/workloads.yaml")));
-        assert!(comparison
-            .base
-            .contains_key(Path::new("_nyl/catalog/applications/argocd/production-catalog.yaml")));
+            .contains_key(Path::new("_nyl/catalog/appproject.argoproj.io/argocd/workloads.yaml")));
+        assert!(comparison.base.contains_key(Path::new(
+            "_nyl/catalog/application.argoproj.io/argocd/production-catalog.yaml"
+        )));
+    }
+
+    #[test]
+    fn application_views_accept_legacy_baselines_and_reject_misplaced_applications() {
+        let legacy = BTreeMap::from([(
+            PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
+            application_yaml("argocd", "api", "production/workloads/api"),
+        )]);
+        let views = derive_application_views(&borrowed(&legacy), "production").unwrap();
+        assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
+
+        let misplaced = BTreeMap::from([(
+            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/web.yaml"),
+            application_yaml("argocd", "api", "production/workloads/api"),
+        )]);
+        let error = derive_application_views(&borrowed(&misplaced), "production").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected _nyl/catalog/application.argoproj.io/argocd/api.yaml"),
+            "{error}"
+        );
     }
 
     #[test]
     fn rejects_ambiguous_or_escaping_application_payloads() {
         let overlapping = BTreeMap::from([
             (
-                PathBuf::from("_nyl/catalog/applications/argocd/parent.yaml"),
+                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/parent.yaml"),
                 application_yaml("argocd", "parent", "production/workloads"),
             ),
             (
-                PathBuf::from("_nyl/catalog/applications/argocd/child.yaml"),
+                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/child.yaml"),
                 application_yaml("argocd", "child", "production/workloads/child"),
             ),
         ]);
@@ -1115,7 +1116,7 @@ mod tests {
         assert!(error.to_string().contains("overlapping payload paths"));
 
         let escaping = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
+            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
             application_yaml("argocd", "api", "another-target/workloads/api"),
         )]);
         let error = derive_application_views(&borrowed(&escaping), "production").unwrap_err();

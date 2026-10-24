@@ -221,7 +221,7 @@ fn project_scope_options_narrow_the_generated_application_group() {
     let yaml = fs::read_to_string(repository.path().join("gitops.yaml")).unwrap();
     assert!(yaml.contains("projectTemplate:"));
     assert!(yaml.contains("name: workloads"));
-    assert!(yaml.contains("- apps"));
+    assert!(yaml.contains("namespace: apps"));
     assert!(yaml.contains("kind: Namespace"));
     assert!(!yaml.contains("kind: AppProjectDefinition"));
 }

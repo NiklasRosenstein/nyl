@@ -524,6 +524,7 @@ impl VendorStore for DirectoryVendorStore {
 pub struct ArtifactResolver {
     source_cache_root: PathBuf,
     cache_mode: CacheMode,
+    git_offline: bool,
     vendor_mode: VendorMode,
     vendor: Option<DirectoryVendorStore>,
     render_cache: Option<RenderCache>,
@@ -569,6 +570,7 @@ impl ArtifactResolver {
         Ok(Self {
             source_cache_root,
             cache_mode,
+            git_offline: false,
             vendor_mode,
             vendor,
             render_cache,
@@ -577,7 +579,27 @@ impl ArtifactResolver {
         })
     }
 
+    /// Use cached Git refs without contacting chart remotes.
+    #[must_use]
+    pub fn with_git_offline(mut self, offline: bool) -> Self {
+        self.git_offline = offline;
+        self
+    }
+
+    /// Whether Git chart versions must resolve without remote access.
+    pub fn git_offline(&self) -> bool {
+        self.git_offline
+    }
+
     pub fn lookup(&self, request: &ArtifactRequest) -> Result<Option<ResolvedArtifact>> {
+        if let Some(artifact) = self.lookup_vendor(request)? {
+            return Ok(Some(artifact));
+        }
+        self.lookup_cache(request, request)
+    }
+
+    /// Resolve the authoritative vendor pin before revalidating mutable selectors.
+    pub fn lookup_vendor(&self, request: &ArtifactRequest) -> Result<Option<ResolvedArtifact>> {
         let population = self
             .render_cache
             .as_ref()
@@ -606,13 +628,26 @@ impl ArtifactResolver {
                 request.display()
             )));
         }
-        if population_refresh {
+        Ok(None)
+    }
+
+    /// Read an exact cache key while recording the authored selector for vendoring.
+    pub fn lookup_cache(
+        &self,
+        request: &ArtifactRequest,
+        cache_key: &ArtifactRequest,
+    ) -> Result<Option<ResolvedArtifact>> {
+        if self
+            .render_cache
+            .as_ref()
+            .is_some_and(RenderCache::vendor_population_refresh)
+        {
             return Ok(None);
         }
         if !self.cache_mode.reads() {
             return Ok(None);
         }
-        let fingerprint = request.fingerprint()?;
+        let fingerprint = cache_key.fingerprint()?;
         let record_path = self
             .source_cache_root
             .join("records")
@@ -665,6 +700,18 @@ impl ArtifactResolver {
         format: ArtifactFormat,
         resolved_ref: Option<String>,
     ) -> Result<ResolvedArtifact> {
+        self.store_with_cache_key(request, request, source, format, resolved_ref)
+    }
+
+    /// Store by resolved identity, preserving the authored selector in vendor observations.
+    pub fn store_with_cache_key(
+        &self,
+        request: &ArtifactRequest,
+        cache_key: &ArtifactRequest,
+        source: &Path,
+        format: ArtifactFormat,
+        resolved_ref: Option<String>,
+    ) -> Result<ResolvedArtifact> {
         let bytes = fs::read(source)?;
         let digest = sha256_hex(&bytes);
         if !self.cache_mode.writes() {
@@ -698,7 +745,7 @@ impl ArtifactResolver {
             digest: digest.clone(),
             resolved_ref: resolved_ref.clone(),
         };
-        let fingerprint = request.fingerprint()?;
+        let fingerprint = cache_key.fingerprint()?;
         atomic_replace(
             &self
                 .source_cache_root

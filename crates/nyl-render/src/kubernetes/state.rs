@@ -101,6 +101,51 @@ pub trait ReleaseStorage: Send + Sync {
     async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32>;
 }
 
+/// Select the revisions a release history limit removes, oldest first.
+///
+/// Retention runs only after `deployed_revision` was recorded as
+/// [`ReleaseStatus::Deployed`]. That revision alone describes the resources live on
+/// the cluster, so every older revision may go; `deployed_revision` and anything
+/// recorded after it are always kept. A `history_limit` of `0` keeps every revision.
+pub fn revisions_beyond_history_limit(revisions: &[u32], deployed_revision: u32, history_limit: u32) -> Vec<u32> {
+    if history_limit == 0 {
+        return Vec::new();
+    }
+    let mut sorted = revisions.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let excess = sorted.len().saturating_sub(history_limit as usize);
+    sorted
+        .into_iter()
+        .take(excess)
+        .take_while(|revision| *revision < deployed_revision)
+        .collect()
+}
+
+/// Delete the oldest revisions of a release beyond `history_limit` after
+/// `deployed_revision` was deployed.
+///
+/// Applies [`revisions_beyond_history_limit`] to the stored revisions and returns
+/// the revisions deleted, oldest first. Only revision labels are read, so a
+/// revision whose stored state cannot be parsed is deleted like any other.
+pub async fn enforce_release_history_limit(
+    storage: &dyn ReleaseStorage,
+    release_name: &str,
+    namespace: &str,
+    deployed_revision: u32,
+    history_limit: u32,
+) -> Result<Vec<u32>> {
+    if history_limit == 0 {
+        return Ok(Vec::new());
+    }
+    let revisions = storage.list_revisions(release_name, namespace).await?;
+    let to_delete = revisions_beyond_history_limit(&revisions, deployed_revision, history_limit);
+    for &revision in &to_delete {
+        storage.delete_release(release_name, namespace, revision).await?;
+    }
+    Ok(to_delete)
+}
+
 /// Kubernetes-based release storage using Secrets
 pub struct KubernetesReleaseStorage {
     client: Client,
@@ -654,6 +699,59 @@ mod tests {
 
             Ok(count)
         }
+    }
+
+    fn revision_with_status(revision: u32, status: ReleaseStatus) -> ReleaseState {
+        ReleaseState {
+            release_name: "myapp".to_string(),
+            release_namespace: "default".to_string(),
+            revision,
+            resource_keys: vec![],
+            manifest: String::new(),
+            status,
+            rendered_at: Utc::now(),
+            applied_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_revisions_beyond_history_limit_removes_oldest() {
+        assert_eq!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], 5, 2), vec![1, 2, 3]);
+        assert!(revisions_beyond_history_limit(&[1, 2, 3], 3, 3).is_empty());
+    }
+
+    #[test]
+    fn test_revisions_beyond_history_limit_zero_keeps_everything() {
+        assert!(revisions_beyond_history_limit(&[1, 2, 3, 4, 5], 5, 0).is_empty());
+    }
+
+    #[test]
+    fn test_revisions_beyond_history_limit_keeps_deployed_and_later_revisions() {
+        // A revision recorded concurrently after the deployed one is never removed.
+        assert_eq!(revisions_beyond_history_limit(&[1, 2, 3, 4], 3, 1), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_enforce_release_history_limit_deletes_oldest_revisions() {
+        let storage = MockReleaseStorage::new();
+        for revision in 1..=4 {
+            storage
+                .save_release(&revision_with_status(revision, ReleaseStatus::Superseded))
+                .await
+                .unwrap();
+        }
+        storage
+            .save_release(&revision_with_status(5, ReleaseStatus::Deployed))
+            .await
+            .unwrap();
+
+        let deleted = enforce_release_history_limit(&storage, "myapp", "default", 5, 3)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, vec![1, 2]);
+        assert_eq!(storage.list_revisions("myapp", "default").await.unwrap(), vec![3, 4, 5]);
     }
 
     #[tokio::test]

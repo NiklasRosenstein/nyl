@@ -11,42 +11,65 @@ selection, `spec.enabled` may be structurally templated per target.
 ## Project assignment
 
 A group that declares neither `projectRef` nor `projectTemplate` owns an
-implied AppProject named after the group. It is permissive: the target workload
-Cluster as its only destination, every namespace, and every cluster-scoped
-resource. Nothing outside the group needs to exist for it to render, and Argo CD
-still confines the project to that one cluster and to the target publication
-repository.
+implied AppProject named after the group. It admits only what the group's
+Applications deploy: the target publication repository, the target workload
+Cluster with the group's Release namespaces, and the resource kinds the group
+renders. Nothing outside the group needs to exist for it to render.
 
 `projectRef` retains a reusable AppProjectDefinition contract. A `Rendered`
 definition is copied into the target catalog once; an `External` definition
 only supplies the project name.
 
-`projectTemplate` replaces the implied project with a least-privilege one.
-Declaring it opts into explicit scope, so it requires `destinationNamespaces`
-unless `spec.destinationNamespace` fixes the namespace:
+`projectTemplate` generates the group's AppProject. `name`, `labels`,
+`annotations`, and `finalizers` set its metadata, and the remaining fields mirror the
+[Argo CD AppProject](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)
+spec: `description`, `sourceRepos`, `sourceNamespaces`, `destinations`,
+`clusterResourceWhitelist`, `clusterResourceBlacklist`,
+`namespaceResourceWhitelist`, `namespaceResourceBlacklist`, `roles`,
+`syncWindows`, `orphanedResources`, `signatureKeys`,
+`permitOnlyProjectScopedClusters`, and `destinationServiceAccounts`. Declared
+fields are kept as written. Every omitted field is derived from the group, so a
+bare template only renames the implied project:
 
 ```yaml
 projectTemplate:
   name: workloads
-  destinationNamespaces:
-    - workloads
-    - 'preview-*'
+  sourceRepos:
+    - https://git.example.com/deploy.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: workloads
+    - server: https://kubernetes.default.svc
+      namespace: 'preview-*'
   clusterResourceWhitelist:
     - group: apiextensions.k8s.io
       kind: CustomResourceDefinition
 ```
 
-The name defaults to the ApplicationGroup name. Remove the whole
-`projectTemplate` to go back to the implied permissive project. Nyl fixes
-`sourceRepos` to the target publication repository, `sourceNamespaces` to `applicationNamespace`,
-and destinations to the target workload Cluster. A fixed
-`destinationNamespace` is automatically added. Without one, at least one
-destination namespace pattern is required. Every effective Release destination
-and `additionalNamespaces` entry must match the declared policy.
+| Omitted field | Generated value |
+| --- | --- |
+| `sourceRepos` | The target publication repository |
+| `destinations` | The target workload Cluster with each Release destination and additional namespace |
+| `clusterResourceWhitelist` | The cluster-scoped kinds the group renders, including Namespaces Nyl creates for it |
+| `namespaceResourceWhitelist` | The namespaced kinds the group renders |
 
-When namespace creation is enabled, Nyl adds Namespace permissions for the
-approved destination patterns. Other cluster-scoped permissions remain
-explicit. Argo CD's AppProject admission remains the authorization boundary.
+The whitelists need each rendered kind's scope, which comes from a CRD rendered
+in the same target or from the Cluster's recorded capabilities. Recapture a
+Cluster with `nyl capture cluster` when rendering reports an unknown scope, or
+declare both whitelists.
+
+The name defaults to the ApplicationGroup name. Nyl always adds
+`applicationNamespace` to `sourceNamespaces`. Each `destinations` entry names a
+`server` or `name` pattern and a `namespace` pattern. A fixed
+`destinationNamespace` not covered by an entry for the target workload Cluster
+is added for that Cluster. Every effective Release destination and
+`additionalNamespaces` entry must match an entry that admits the target
+workload Cluster.
+
+A declared `clusterResourceWhitelist`, including `[]`, admits only its
+patterns; when namespace creation is enabled, Nyl then adds Namespace
+permissions for the target Cluster's admitted namespace patterns. Argo CD's
+AppProject admission remains the authorization boundary.
 
 ## Application names
 

@@ -68,6 +68,21 @@ pub struct KubeRsClient {
 }
 
 impl KubeRsClient {
+    /// Discovered cluster-scoped kinds as `group/Kind`, with `core` for the core API group.
+    pub fn cluster_scoped_kinds(&self) -> Vec<String> {
+        let mut kinds = std::collections::BTreeSet::new();
+        for group in self.discovery.groups() {
+            for version in group.versions() {
+                for (resource, capabilities) in group.versioned_resources(version) {
+                    if capabilities.scope == Scope::Cluster {
+                        kinds.insert(crate::resources::group_kind_key(&resource.group, &resource.kind));
+                    }
+                }
+            }
+        }
+        kinds.into_iter().collect()
+    }
+
     /// Build kube config from explicit path/context options.
     ///
     /// Exec-based auth plugins inherit stderr when they may interact with the user,

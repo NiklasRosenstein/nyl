@@ -50,7 +50,7 @@ The `default` AppProject must exist before the catalog can manage itself. After
 rendering and publishing a target for the first time, seed its parent once:
 
 ```bash
-kubectl apply -f deploy/<target>/_nyl/catalog/applications/argocd/<target>-catalog.yaml
+kubectl apply -f deploy/<target>/_nyl/catalog/application.argoproj.io/argocd/<target>-catalog.yaml
 ```
 
 Use the actual rendered output path and configured namespace when they differ.

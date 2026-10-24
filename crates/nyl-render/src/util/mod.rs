@@ -79,8 +79,20 @@ pub fn credential_free_url(url: &str) -> String {
 
 /// Replace every occurrence of `url` in `text` with its [`sanitize_url`] form,
 /// for messages that embed errors which may quote a credential-bearing URL.
+///
+/// The userinfo is also redacted wherever else it appears, because tools
+/// such as `git` quote the URL in a rewritten form.
 pub fn redact_url_credentials(text: &str, url: &str) -> String {
-    text.replace(url, &sanitize_url(url))
+    let redacted = text.replace(url, &sanitize_url(url));
+    let userinfo = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .map(|(userinfo, _)| userinfo)
+        .filter(|userinfo| !userinfo.is_empty() && !userinfo.contains('/'));
+    match userinfo {
+        Some(userinfo) => redacted.replace(&format!("{userinfo}@"), "***@"),
+        None => redacted,
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +105,10 @@ mod tests {
         assert_eq!(
             redact_url_credentials(&format!("Failed to clone {url}: timeout"), url),
             "Failed to clone https://***@git.example.com/state.git: timeout"
+        );
+        assert_eq!(
+            redact_url_credentials("fatal: '//user:token@git.example.com/state' not found", url),
+            "fatal: '//***@git.example.com/state' not found"
         );
     }
 

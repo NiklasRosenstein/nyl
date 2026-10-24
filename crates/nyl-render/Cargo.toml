@@ -24,6 +24,7 @@ hex = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 minijinja = { workspace = true }
+percent-encoding = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 same-file = { workspace = true }

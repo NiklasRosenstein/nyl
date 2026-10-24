@@ -34,6 +34,7 @@ about Nyl's current CLI.
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
+| M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
 
 **Next step:** start M3 from the
 [orchestration core contract](design/orchestration-core.md) and its
@@ -83,11 +84,14 @@ exact values proven in one environment to the next.
 - Explicit promotion paths between environments with recorded lineage.
 - Consistent local and CI commands for planning, reconciliation, inspection,
   verification, promotion, and deletion intent.
+- An opt-in CI adapter exposing named units as individual jobs from Nyl's
+  dependency graph, with Nyl retaining readiness and lifecycle decisions.
 
 ### Outside the initial scope
 
 - A general CI pipeline or workflow language: no conditionals, loops, matrix
-  expansion, or ordering beyond the dependency graph.
+  expansion, or ordering beyond the dependency graph. Exporting that graph to
+  CI jobs does not add a second workflow language.
 - A universal resource database replacing native state backends.
 - Cross-system transactions or a guarantee of reversible external effects.
 - Promotion of native tool state; each environment keeps its own Terraform
@@ -101,6 +105,37 @@ exact values proven in one environment to the next.
 A command invoked locally or in CI is the initial execution model. Events such
 as "a new dev receipt was published" trigger CI jobs that call Nyl; the core
 stores no event triggers. Continuous observation is an M7 decision.
+
+### CI execution and observability
+
+The [CI execution design](design/ci-execution.md) defines provider-neutral
+execution manifests, deployment admission, and adapter conformance for per-unit
+logs, durations, reports, and retries. GitLab is the first adapter. M3 exposes a pure,
+versioned dependency graph independently of complete native plans. M8 exports
+one job per unit, all pinned to one source commit, invoking ordinary unit-scoped
+operations. M8 depends on M3/M4 and need not wait for M5–M7; its identifier keeps
+the existing milestone references stable.
+
+The first backend uses separate invocations and therefore serializes effects
+under the environment lease. It does not claim one run or an atomic observed
+snapshot across jobs. Full ownership stays selected; current receipts skip work,
+and units leaving ownership go to one lifecycle job that never tears down
+without `--allow-teardown`. Read-only planning always reports removals,
+including when no units remain. CI owns event mapping and runner configuration,
+while Nyl rechecks evidence, approvals, and holds on every worker attempt.
+
+Deployment admission is opt-in per environment. It records the current
+generation, the source chosen by the environment's normal source rules, and
+only moves forward: an older source needs an authorized rollback. Workers whose
+generation was overtaken skip without effects; unit-level operator actions never
+touch the admission. Security is a deployment choice, not a separate mode: on
+one ref admission is a consistency fence, and on a dispatcher-only ref it also
+keeps worker credentials from choosing what is deployed. Every CI action has a
+CLI form, and `nyl exec`, a driver capability, gives held units a recorded
+repair path through their own tool; changed settings, such as a relocated
+OpenTofu backend, are edits to the unit definition used from the worktree. Parallel workers of one
+Nyl run require a later coordinator/worker contract, including fencing and
+recovery; they are not implied by graph export.
 
 ## Architectural frame
 
@@ -481,8 +516,13 @@ The lifecycle contract must address:
 Clusters can explicitly borrow CRD schemas or the complete Kubernetes API
 contract from another declared Cluster. Effective capabilities drive both
 rendering and validation; destinations, values, and live connection settings
-remain local. `nyl capture cluster` refreshes committed capabilities and
-CRD schema snapshots by default, with capabilities-only overrides. Project-configured
+remain local. `nyl capture cluster` refreshes committed capabilities, including
+which kinds are cluster-scoped, and vendors whole CRDs by default, with
+capabilities-only overrides. A vendored CRD is the single record of its API
+versions, scope, and schemas: the Cluster omits what the snapshot supplies, and
+rendering fails rather than guessing when the snapshot is missing or stale.
+Effective resource scopes let generated Argo CD AppProjects default to the
+kinds a group actually renders. Project-configured
 validators check final artifacts. Complete tree validation uses desired CRDs for
 rendered resources by default, with an invocation opt-out; compatibility outside
 the rendered input and upgrade ordering require separate handling. Builtin schema
@@ -678,7 +718,15 @@ implicit per-target Argo CD instances.
   transition commit per operation with a machine-readable summary, pushed
   atomically with the lease check.
 - [ ] Support SSH keys and HTTPS tokens, besides the SSH agent, for state
-  pushes and `publish-tree`.
+  pushes and `publish-tree`. Remote Git operations run the `git` command line,
+  so fetches and `publish-tree` already authenticate as the user's `git` does
+  (SSH config and keys, agent, credential helpers) and push with a
+  `--force-with-lease` compare-and-swap; libgit2 handles only local
+  repository access, because its SSH transport ignores SSH config. Dedicated
+  SSH keys and HTTPS tokens are supplied to the same `git` invocations, for
+  example through `GIT_SSH_COMMAND` or a credential helper. State pushes must
+  use the same transport, including atomic multi-ref pushes with per-ref
+  leases.
 - [ ] Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown`
   (including `--hold`), `hold`, and `resume` for a dependency graph of command
   units with `fromUnit` references, including `--local` runs next to remote
@@ -708,6 +756,11 @@ implicit per-target Argo CD instances.
   one commit-lock rule.
 - [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
+- [ ] Expose a pure, versioned graph of literal unit addresses and dependency
+  edges before upstream values exist, shared by local execution and future CI
+  exporters. Prove separate unit-scoped invocations through the
+  [unit-jobs walkthrough](nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml)
+  without changing environment-wide lease or ownership semantics.
 - [ ] Add the `test-clock` Cargo feature, the test-only fake kinds, and the
   two-tier harness for the reference scenarios: in-process with fakes, and
   through the real binary under the `tier2` Cargo feature.
@@ -812,6 +865,52 @@ value-only path promotes each value from what its consuming Application runs.
 - [ ] Evaluate application-level checks as promotion evidence.
 - [ ] Record the selected direction and constraints in this roadmap.
 
+### M8 — Provider-neutral CI execution and first GitLab adapter
+
+- [ ] Implement `nyl ci export gitlab` for one environment, with reconcile and
+  read-only plan operations, consuming M3's graph and typed reports. Keep CI
+  runner configuration separate from unit semantics.
+- [ ] Specify provider-neutral graph/manifest types, capability negotiation,
+  normalized diagnostics, and a conformance suite shared by GitLab and an
+  in-memory test adapter. Provider IDs and scheduler syntax never enter unit
+  identity, receipt formats, or the execution key. Unsupported capabilities
+  fail explicitly or use a documented safe fallback.
+- [ ] Generate stable, collision-checked job IDs and `needs` edges, a pinned
+  public graph manifest, per-unit reports, and an always-run read-only summary.
+  Include current producers and unresolved consumers, and a lifecycle node:
+  `reconcile --leaving` after the unit jobs for reconciliation, and a read-only
+  lifecycle report for planning, including empty selections, preserving the
+  caller's `--fail-on-leaving` policy without state writes.
+- [ ] Bind jobs to the admitted source, project, environment, operation, and
+  adapter configuration. Implement opt-in deployment admission: a versioned
+  record on `state.admissionRef` with forward-only generations chosen by the
+  environment's source rules, idempotent re-dispatch, authorized rollback, and
+  normalized authorization evidence. Under the environment lease, superseded
+  worker attempts skip before intent writes, imports, or effects; `state
+  restore` carries the record forward. Provider pipeline serialization is an
+  optional optimization, not the fence.
+- [ ] Add the `exec` driver capability and `nyl exec` for held units, with the
+  deployed or `--worktree` spec and source snapshot, ownership-scope checks,
+  recorded spec differences, approval of the first execution afterwards, and
+  refusal exit 125; implement it for OpenTofu and Terraform,
+  with their missing-state guard.
+- [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
+  revalidate approvals and never pass authoritative outputs through CI artifacts.
+- [ ] Cover the [CI acceptance scenarios](design/ci-execution.md#acceptance-scenarios)
+  with fake drivers and local Git repositories, plus a GitLab configuration and
+  integration check. Demonstrate the generated jobs with M4's real drivers.
+
+**Exit criterion:** a GitLab child pipeline displays separate producer and
+consumer jobs, executes at a pinned source, explains no-ops and blockers, and
+preserves the local core's freshness, lease, approval, and recovery rules across
+retries and cancellation. Independent unit jobs are observably serialized within
+one environment; no distributed-run guarantee is made. Retrying an old worker
+after a newer admission has no deployment effects, and a newly authorized
+rollback remains possible. Removing a unit shows a lifecycle job that destroys
+nothing without `--allow-teardown`, and removing all units still produces a
+read-only MR lifecycle report. The in-memory adapter proves the same semantic graph and
+admission behavior without GitLab types or services.
+
 ## Open decisions
 
 Resolve these at the milestone where they affect implementation; they are not
@@ -825,11 +924,16 @@ reasons to delay independent work.
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
+| Provider capability/configuration schema and first GitLab adapter limits | M8 |
+| Trusted dispatcher policy and normalized admission authorization evidence | M8 |
+| Shared-run CI coordinator/worker protocol, fencing, liveness, and recovery | After M8, before distributed execution |
 
 ## Implementation reference points
 
 - [Implementation architecture](design/implementation-architecture.md): crate
   boundaries, pure decisions, rule ownership, and scenario tests for M2–M7
+- [CI execution adapters](design/ci-execution.md): dependency graph export,
+  separate unit jobs, observability, and the distributed-execution boundary
 - [Reference scenarios](design/reference-scenarios.md): end-to-end acceptance
   scenarios for M3–M5, runnable without hosted repositories, CI, or pull
   requests, and the scenario file format
@@ -849,3 +953,4 @@ reasons to delay independent work.
 - [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
 
 These are navigation aids, not frozen API guarantees.
+

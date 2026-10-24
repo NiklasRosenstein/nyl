@@ -82,7 +82,7 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Offline mode: never connect to Kubernetes, and read `fromPublication` Release inputs at the cached publication branch head, as `render-tree --offline` does
+    /// Offline mode: never connect to Kubernetes, resolve Git charts from cached refs, and read `fromPublication` Release inputs at the cached publication branch head
     #[arg(long)]
     pub offline: bool,
 
@@ -212,6 +212,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     let render_cache = cache::RenderCache::new(&project_root, options.common.cache.mode())?;
     let _cache_reporter = render_cache.reporter();
     session.set_cache(Some(render_cache.clone()));
+    session.set_git_offline(options.offline);
     let path = Path::new(&options.common.path);
     let provenance_root = project_config
         .file
