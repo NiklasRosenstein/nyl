@@ -876,8 +876,9 @@ value-only path promotes each value from what its consuming Application runs.
   restore` carries the record forward. Provider pipeline serialization is an
   optional optimization, not the fence.
 - [ ] Add the `exec` driver capability and `nyl exec` for held units, with the
-  deployed or `--worktree` spec, ownership-scope checks, recorded spec
-  differences, and refusal exit 125; implement it for OpenTofu and Terraform,
+  deployed or `--worktree` spec and source snapshot, ownership-scope checks,
+  recorded spec differences, approval of the first execution afterwards, and
+  refusal exit 125; implement it for OpenTofu and Terraform,
   with their missing-state guard.
 - [ ] Preserve waiting/failure/uncertainty categories and receipt-based retries;
   revalidate approvals and never pass authoritative outputs through CI artifacts.

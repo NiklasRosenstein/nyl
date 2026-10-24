@@ -276,10 +276,25 @@ by preparing an execution exactly as for `reconcile`, `init` included, and then
 running `tofu` or `terraform` with the operator's arguments instead of `plan`
 and `apply`. Nothing in the command is specific to these kinds: a repair that
 needs another backend, workspace, version, or module is an edit to the unit
-definition, used through `--worktree` before it is merged. With `--worktree`
-the unit's source also comes from the worktree, so even a change of the
-module's `backend` block, which backend configuration alone cannot change,
-works the same way.
+definition, used through `--worktree` before it is merged.
+
+With `--worktree`, the module itself is read from a snapshot of the checkout,
+so a change of the module's `backend` block, which backend configuration alone
+cannot change, works the same way, and temporary edits reach the tool too: an
+`import` block for a resource created
+by hand, a `removed` block that drops a resource from state without destroying
+it, `prevent_destroy` while applying the rest with `-target`, or a broken
+resource commented out. A repair with temporary edits:
+
+1. `nyl hold -e <env> --unit <u> --reason <text>`.
+2. Edit the module locally, then run
+   `nyl exec -e <env> --unit <u> --worktree -- plan` and `-- apply` until the
+   state is right.
+3. Revert the temporary edits; commit, review, and merge any that should stay.
+4. `nyl resume -e <env> --unit <u>`. `nyl plan -e <env> --unit <u>` shows what
+   the committed source would do to the repaired state.
+5. `nyl reconcile -e <env> --unit <u> --approve <u>=<digest>`; the first
+   execution after `exec` always needs that approval.
 
 Relocating a broken or lost backend:
 
@@ -294,13 +309,12 @@ Relocating a broken or lost backend:
    unit owns.
 5. Check it with `nyl exec -e <env> --unit <u> --worktree -- plan`, expecting
    no changes.
-6. Merge the branch, then `nyl resume -e <env> --unit <u>`. The next reconcile
-   re-executes the unit against the new backend; a matching state plans no
-   changes.
+6. Merge the branch, then `nyl resume -e <env> --unit <u>`, and approve the
+   next execution's plan, which against a matching state shows no changes.
 
 Repairs that change no configuration, such as `state mv`, `state rm`,
-`import`, or `force-unlock`, are a hold, `nyl exec` with the deployed spec, and
-a resume.
+`import`, or `force-unlock`, are a hold, `nyl exec` with the deployed spec, a
+resume, and the approved next execution.
 
 ## Terraform to Terraform outputs
 

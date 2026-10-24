@@ -304,9 +304,11 @@ definition, used before it is merged and then reviewed like any change (see the
 kind-specific options. It requires the unit to be held, so CI cannot race the
 repair, refuses settings that overlap another unit's ownership scope, and
 records the spec used, its differences from the deployed spec, the command,
-operator, and reason in a transition commit. After `nyl resume`, the next
-reconcile treats the unit's receipt as stale and re-executes it under its
-recovery policy, so the native state and Nyl's receipt converge again.
+operator, and reason in a transition commit. With `--worktree`, temporary edits
+to the applied source reach the tool from a snapshot of the checkout. After
+`nyl resume`, the unit's next execution waits for explicit approval of its
+plan against the repaired state, so a CI job exits 2 instead of applying the
+committed source over the repair.
 
 ## Later backend: workers of one run
 

@@ -1649,6 +1649,16 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
   OpenTofu backend, a tool version, or a variable, is an edit to the unit
   definition, the same edit that is then reviewed and merged; `exec` has no
   kind-specific options. The rendering must keep the unit's name and kind.
+- **Source files.** With `--worktree`, every source field that resolves to the
+  entry repository at S, the default, reads from a snapshot of the entry
+  worktree instead of a checkout of S: the Git-visible files `nyl render`
+  sees, uncommitted and untracked ones included. The snapshot is copied into
+  the execution's own directory, so the tool never writes into the operator's
+  checkout, and temporary edits to the applied source, such as an `import` or
+  `removed` block, reach the tool. A source pinned to its own `revision` or
+  `commit`, or to another repository, is read at that pin; repairing with edits
+  there means pointing the pin at a pushed repair branch in the unit edit,
+  under the ordinary reachability rules.
 - **Guards.** The unit must be held, so no run reconciles it during the repair,
   and `exec` takes the environment lease like every state-writing operation,
   with a deadline from `--timeout`, defaulting to the unit's `timeout`. The
@@ -1662,13 +1672,21 @@ nyl exec -e <env> --unit <u> [--worktree] [--timeout <duration>] [--reason <text
   interactive and Nyl runs on a terminal.
 - **Record.** The transition commit records the operator, reason, tool
   arguments, the tool's exit status, and the spec used: the desired document,
-  or the worktree's commit, whether it was dirty, the spec digest, and the
-  fields that differ from the desired document, with values only where they
-  are not sensitive. It never records secrets or tool output.
+  or the worktree's commit, whether it was dirty, the spec digest, the fields
+  that differ from the desired document, with values only where they are not
+  sensitive, and the snapshot's digest with the paths that differ from that
+  commit. It never records file contents, secrets, or tool output.
 - **Afterwards.** The unit's receipt is marked `operator-modified`. While held,
   consumers keep resolving from it, as for any hold. After `resume`, the next
-  `reconcile` executes the unit again under its recovery policy: `converge`
-  re-executes, `inspect` inspects, and `manual` waits for `recover --retry`.
+  execution of the unit needs explicit approval, whatever its `approval`
+  setting, because the committed source may disagree with what the repair
+  left behind, for example after temporary edits were reverted: kinds with
+  `change_digest` need `--approve <unit>=<digest>` for the plan that
+  `nyl plan --unit` shows against the repaired state, and others a plain
+  `--approve <unit>`. Until then the unit is `awaiting-approval`, so a CI job
+  exits 2 instead of applying. That execution follows the recovery policy
+  (`converge` re-executes, `inspect` inspects, `manual` still waits for
+  `recover --retry`), and its receipt clears the mark.
 - **Exit status.** Once the tool has started, `exec` exits with the tool's
   status, or 128 plus the signal that ended it. Before that, Nyl refuses with
   exit 125 and a stable code, such as `NYL-EXEC-NOT-HELD`,
@@ -2075,7 +2093,9 @@ enum Outcome {
 - `Result` errors are Nyl-side problems, such as an unreadable worktree; they
   give the unit an `uncertain` condition when an effect may have started, and
   otherwise fail the invocation with exit 1.
-- `ExecutionContext` provides the worktree at the effective source revision,
+- `ExecutionContext` provides the worktree at the effective source revision
+  (for `exec --worktree`, the snapshot described in
+  [Operator exec](#operator-exec)),
   the resolved spec, admitted environment variables and secrets, the approved
   change digest for `bind: plan` units, the deadline, a cancellation signal,
   the unit's observed file, and a transcript sink that masks secret values.
