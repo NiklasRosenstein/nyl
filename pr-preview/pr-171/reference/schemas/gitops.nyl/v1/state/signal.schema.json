@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "ApprovalIdentity": {
+      "description": "How Nyl learned an approver's identity. An audit record, not authorization.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Read from the CI system, by a built-in lookup or the project's hook.",
+          "type": "string"
+        },
+        {
+          "const": "asserted",
+          "description": "Passed with `--approved-by`.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The Git user of a workstation run.",
+          "type": "string"
+        }
+      ]
+    },
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "SignalKind": {
+      "const": "Signal"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A message to a running run, such as a teardown confirmation.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "by": {
+      "type": "string"
+    },
+    "from": {
+      "description": "Where the confirmation came from, such as a CI run URL.",
+      "type": "string"
+    },
+    "identity": {
+      "$ref": "#/$defs/ApprovalIdentity"
+    },
+    "kind": {
+      "$ref": "#/$defs/SignalKind"
+    },
+    "phase1Commit": {
+      "$ref": "#/$defs/CommitId"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run": {
+      "$ref": "#/$defs/RunId"
+    },
+    "unit": {
+      "$ref": "#/$defs/UnitName"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "run",
+    "unit",
+    "phase1Commit",
+    "by",
+    "identity",
+    "at",
+    "from"
+  ],
+  "title": "Signal",
+  "type": "object"
+}
