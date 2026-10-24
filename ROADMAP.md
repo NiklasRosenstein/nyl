@@ -53,7 +53,7 @@ executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
    dedicated credentials, and the Environment and EnvironmentGroup resources.
    Custom refs and atomic leased pushes are verified on GitHub, GitLab,
    Forgejo, and plain Git with both coordination prefixes
-   ([Git host compatibility](design/forge-compatibility.md)).
+   ([Git host compatibility](nyl/book/src/content/docs/commands/state.md#git-host-compatibility)).
 3. Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`,
    `recover`, and `get -e`, with `FakePublication`, pinned source worktrees,
    execution keys, `--local` runs, and `nyl validate` of targets whose
