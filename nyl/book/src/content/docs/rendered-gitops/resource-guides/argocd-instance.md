@@ -42,7 +42,7 @@ spec:
 
 When no ArgoCDInstance resources exist, each target gets an implicit local
 instance using its workload Cluster, the `argocd` namespace, and these defaults.
-Nyl logs that choice. Once any explicit instance exists, every target must set
+`--verbose` logs that choice. Once any explicit instance exists, every target must set
 `spec.argocdRef.name`; this prevents accidental attachment to the wrong control
 plane.
 

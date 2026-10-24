@@ -1,9 +1,12 @@
 use clap::Args;
 use git2::Repository;
-use std::path::Path;
-use tracing::{debug, info, warn};
+use nyl_core::orchestration::codes::Finding;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use tracing::debug;
 
-use crate::config::ProjectConfig;
+use crate::config::{ConfigWarning, ProjectConfig};
+use crate::util::path_for_display;
 use crate::{NylError, Result};
 
 /// Validate project configuration
@@ -19,112 +22,183 @@ pub struct ValidateArgs {
 }
 
 pub async fn execute(args: ValidateArgs) -> Result<()> {
-    info!("Validating project configuration");
-    debug!("Validation path: {}", args.path);
-    debug!("Strict mode: {}", args.strict);
-
-    // Load project configuration
-    let project_dir = Path::new(&args.path);
-
-    // Try to find config file
-    let config_file = ProjectConfig::find(Some(project_dir))?;
-
-    if let Some(ref file) = config_file {
-        println!("✓ Found project config: {}", file.display());
+    debug!(
+        "Validating project configuration at {} (strict: {})",
+        args.path, args.strict
+    );
+    let mut report = ValidationReport::default();
+    let gitops = collect(Path::new(&args.path), &mut report).await;
+    if let Err(error) = gitops {
+        // Report what passed before the failure; the error itself follows.
+        print!("{}", report.render(None));
+        return Err(error);
+    }
+    let failed = args.strict && !report.warnings.is_empty();
+    print!("{}", report.render(Some(args.strict)));
+    if failed {
+        Err(NylError::Validation("Validation failed in strict mode".to_string()))
     } else {
-        warn!("No project configuration file found, using defaults");
-        println!("⚠ No project configuration file found, using defaults");
+        Ok(())
     }
+}
 
-    // Load configuration
-    let config = ProjectConfig::load(config_file.clone())?;
+/// Everything `nyl validate` found. The command prints it once, through
+/// [`ValidationReport::render`].
+#[derive(Debug, Default)]
+struct ValidationReport {
+    /// The project configuration file, relative to the current directory.
+    config_file: Option<String>,
+    /// The directory containing `nyl.toml`; paths display relative to it.
+    config_dir: Option<PathBuf>,
+    /// Search paths that exist.
+    search_paths: Vec<(SearchPathKind, PathBuf)>,
+    /// Counts from a successful GitOps validation.
+    gitops: Option<GitOpsSummary>,
+    warnings: Vec<ValidationWarning>,
+}
 
-    for path in config.get_components_search_paths() {
-        if path.exists() {
-            println!("✓ Components search path exists: {}", path.display());
-        } else {
-            warn!("Components search path does not exist: {}", path.display());
-            println!("⚠ Components search path does not exist: {}", path.display());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPathKind {
+    Components,
+    HelmChart,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GitOpsSummary {
+    resources: usize,
+    yaml_files: usize,
+}
+
+#[derive(Debug)]
+enum ValidationWarning {
+    NoProjectConfig,
+    Config(ConfigWarning),
+    Environment(Finding),
+}
+
+impl ValidationReport {
+    /// Render the report. `strict` is the requested mode once validation
+    /// completed, or `None` when it stopped at an error.
+    fn render(&self, strict: Option<bool>) -> String {
+        let display = |path: &Path| display_project_path(self.config_dir.as_deref(), path);
+        let mut out = String::new();
+        if let Some(file) = &self.config_file {
+            let _ = writeln!(out, "✓ Found project config: {file}");
         }
-    }
-
-    for path in config.get_helm_chart_search_paths() {
-        if path.exists() {
-            println!("✓ Helm chart search path exists: {}", path.display());
-        } else {
-            warn!("Helm chart search path does not exist: {}", path.display());
-            println!("⚠ Helm chart search path does not exist: {}", path.display());
-        }
-    }
-
-    // Validate configuration
-    let validation_warnings = config.validate();
-
-    // Print any additional warnings from validation
-    let mut has_warnings = false;
-    if !validation_warnings.is_empty() {
-        println!("\nValidation warnings:");
-        for warning in &validation_warnings {
-            has_warnings = true;
-            warn!("{}", warning);
-            println!("  ⚠ {}", warning);
-        }
-    }
-
-    if let Some(config_file) = config_file {
-        let project_root = config_file.parent().unwrap_or(project_dir);
-        if Repository::discover(project_root).is_ok() {
-            let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
-            crate::gitops::validate_gitops_inventory(&inventory)?;
-            for warning in crate::orchestration::project::validate_environments(&inventory)? {
-                has_warnings = true;
-                warn!("{}", warning);
-                println!("  ⚠ {}: {} ({})", warning.code, warning.message, warning.fix);
-            }
-            let target_names = inventory
-                .resources
-                .values()
-                .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
-                .map(|resource| resource.identity.name.clone())
-                .collect::<Vec<_>>();
-            // Like `vendor --check`, validation reads fromPublication state at
-            // the refreshed branch head and falls back to the cached head, so
-            // it also works offline.
-            let options = crate::gitops::TreeRenderOptions {
-                publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
-                ..crate::gitops::TreeRenderOptions::default()
+        for (kind, path) in &self.search_paths {
+            let label = match kind {
+                SearchPathKind::Components => "Components",
+                SearchPathKind::HelmChart => "Helm chart",
             };
-            let mut compiled = Vec::with_capacity(target_names.len());
-            for target in target_names {
-                compiled
-                    .push(crate::gitops::compile_target_tree_with_options(&inventory, &target, options.clone()).await?);
-            }
-            crate::gitops::validate_compiled_argocd_names(&inventory, &compiled)?;
-            println!(
+            let _ = writeln!(out, "✓ {label} search path exists: {}", display(path));
+        }
+        if let Some(gitops) = &self.gitops {
+            let _ = writeln!(
+                out,
                 "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
-                inventory.resources.len(),
-                inventory.yaml_files.len()
+                gitops.resources, gitops.yaml_files
             );
-        } else if project_root.join("gitops.yaml").exists() {
+        }
+        for warning in &self.warnings {
+            let text = match warning {
+                ValidationWarning::NoProjectConfig => "No project configuration file found, using defaults".to_string(),
+                ValidationWarning::Config(warning) => warning.describe(display),
+                ValidationWarning::Environment(finding) => finding.to_string(),
+            };
+            let _ = writeln!(out, "⚠ {text}");
+        }
+        let Some(strict) = strict else {
+            return out;
+        };
+        out.push('\n');
+        out.push_str(match (self.warnings.is_empty(), strict) {
+            (true, _) => "✓ Validation passed\n",
+            (false, false) => "✓ Validation passed with warnings\n",
+            (false, true) => "✗ Validation failed in strict mode (warnings treated as errors)\n",
+        });
+        out
+    }
+}
+
+/// Run every check, recording results in `report`. GitOps validation errors
+/// end the run.
+async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()> {
+    let config_file = ProjectConfig::find(Some(project_dir))?;
+    let config = ProjectConfig::load(config_file.clone())?;
+    report.config_dir = config_file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+    match &config_file {
+        Some(file) => report.config_file = Some(slash_path(&path_for_display(file))),
+        None => report.warnings.push(ValidationWarning::NoProjectConfig),
+    }
+    for (kind, search_paths) in [
+        (SearchPathKind::Components, config.get_components_search_paths()),
+        (SearchPathKind::HelmChart, config.get_helm_chart_search_paths()),
+    ] {
+        for path in search_paths.iter().filter(|path| path.exists()) {
+            report.search_paths.push((kind, path.clone()));
+        }
+    }
+    report
+        .warnings
+        .extend(config.validate().into_iter().map(ValidationWarning::Config));
+
+    let Some(config_file) = config_file else {
+        return Ok(());
+    };
+    let project_root = config_file.parent().unwrap_or(project_dir);
+    if Repository::discover(project_root).is_err() {
+        if project_root.join("gitops.yaml").exists() {
             return Err(NylError::config(format!(
                 "GitOps configuration {} requires a Git worktree",
                 project_root.join("gitops.yaml").display()
             )));
         }
+        return Ok(());
     }
+    let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
+    crate::gitops::validate_gitops_inventory(&inventory)?;
+    report.warnings.extend(
+        crate::orchestration::project::validate_environments(&inventory)?
+            .into_iter()
+            .map(ValidationWarning::Environment),
+    );
+    let target_names = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
+        .map(|resource| resource.identity.name.clone())
+        .collect::<Vec<_>>();
+    // Like `vendor --check`, validation reads fromPublication state at
+    // the refreshed branch head and falls back to the cached head, so
+    // it also works offline.
+    let options = crate::gitops::TreeRenderOptions {
+        publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
+        ..crate::gitops::TreeRenderOptions::default()
+    };
+    let mut compiled = Vec::with_capacity(target_names.len());
+    for target in target_names {
+        compiled.push(crate::gitops::compile_target_tree_with_options(&inventory, &target, options.clone()).await?);
+    }
+    crate::gitops::validate_compiled_argocd_names(&inventory, &compiled)?;
+    report.gitops = Some(GitOpsSummary {
+        resources: inventory.resources.len(),
+        yaml_files: inventory.yaml_files.len(),
+    });
+    Ok(())
+}
 
-    // Determine result
-    if args.strict && has_warnings {
-        println!("\n✗ Validation failed in strict mode (warnings treated as errors)");
-        Err(NylError::Validation("Validation failed in strict mode".to_string()))
-    } else {
-        if has_warnings {
-            println!("\n✓ Validation passed with warnings");
-        } else {
-            println!("\n✓ Validation passed");
-        }
-        Ok(())
+/// A configured path as `nyl.toml` names it: relative to its directory, or
+/// absolute. Paths of a project without `nyl.toml` display as given.
+fn display_project_path(project_root: Option<&Path>, path: &Path) -> String {
+    match project_root.and_then(|root| path.strip_prefix(root).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+        Some(relative) => slash_path(relative),
+        None => slash_path(path),
     }
+}
+
+fn slash_path(path: &Path) -> String {
+    path.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 #[cfg(test)]
@@ -133,22 +207,67 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Collect and render the report for `dir`, without the first line,
+    /// which names `nyl.toml` relative to the current directory.
+    async fn rendered(dir: &Path, strict: bool) -> String {
+        let mut report = ValidationReport::default();
+        collect(dir, &mut report).await.unwrap();
+        assert!(report.config_file.is_some());
+        let rendered = report.render(Some(strict));
+        rendered.split_once('\n').unwrap().1.to_string()
+    }
+
     #[tokio::test]
     async fn test_validate_with_valid_config() {
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl.toml");
-        let components_dir = temp.path().join("components");
+        fs::write(temp.path().join("nyl.toml"), "[project]\n").unwrap();
+        fs::create_dir(temp.path().join("components")).unwrap();
 
-        fs::write(&config_path, "[project]\n").unwrap();
-        fs::create_dir(&components_dir).unwrap();
+        assert_eq!(
+            rendered(temp.path(), false).await,
+            "✓ Components search path exists: components\n\
+             ✓ Helm chart search path exists: .\n\
+             \n\
+             ✓ Validation passed\n"
+        );
+    }
 
-        let args = ValidateArgs {
-            path: temp.path().to_str().unwrap().to_string(),
-            strict: false,
-        };
+    #[tokio::test]
+    async fn test_validate_reports_each_warning_once_with_project_relative_paths() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("nyl.toml"),
+            "[project]\ncomponents_search_paths = [\"missing\"]\n\n[project.aliases]\nbad = \"x\"\n",
+        )
+        .unwrap();
 
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        assert_eq!(
+            rendered(temp.path(), false).await,
+            "✓ Helm chart search path exists: .\n\
+             ⚠ Components search path does not exist: missing\n\
+             ⚠ Alias key 'bad' is invalid; expected '<apiVersion>/<kind>'\n\
+             \n\
+             ✓ Validation passed with warnings\n"
+        );
+        assert!(rendered(temp.path(), true)
+            .await
+            .ends_with("\n✗ Validation failed in strict mode (warnings treated as errors)\n"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_displays_search_paths_relative_to_nyl_toml() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+        fs::create_dir_all(temp.path().join("nyl")).unwrap();
+        fs::write(
+            temp.path().join("nyl/nyl.toml"),
+            "[project]\ncomponents_search_paths = [\"../shared/components\"]\n",
+        )
+        .unwrap();
+
+        assert!(rendered(temp.path(), false)
+            .await
+            .contains("⚠ Components search path does not exist: ../shared/components\n"));
     }
 
     #[tokio::test]
@@ -179,22 +298,5 @@ mod tests {
         let result = execute(args).await;
         // Should fail in strict mode due to validation warning
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_validate_missing_components_dir() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("nyl.toml");
-        fs::write(&config_path, "[project]\n").unwrap();
-        // Don't create components directory
-
-        let args = ValidateArgs {
-            path: temp.path().to_str().unwrap().to_string(),
-            strict: false,
-        };
-
-        let result = execute(args).await;
-        // Should succeed with warnings
-        assert!(result.is_ok());
     }
 }

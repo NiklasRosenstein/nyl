@@ -99,3 +99,9 @@ id = "915c739d-16c6-47be-9584-c80957f0f7b4"
 type = "breaking change"
 description = "Upgrade templating to MiniJinja 3, which aligns template behavior more closely with Jinja2: sequences and maps render with Python-style quoting, floor division and modulo follow Jinja2 semantics, division by zero is an error, `round` uses round-half-even, and `title` only starts words after whitespace and opening brackets"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "003b92f8-e5cc-4df4-88c5-6b969073eef4"
+type = "improvement"
+description = "`nyl validate` prints each warning once, with search paths relative to `nyl.toml`, and target compilation no longer logs the implicit ArgoCDInstance at INFO level on every run"
+author = "@NiklasRosenstein"
