@@ -366,8 +366,9 @@ src/
 
 ### Rendered GitOps invariants
 
-- Kubernetes control resources use `k8s.gitops.nyl/v1`; shared GitRepository
-  resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
+  (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
+  `k8s.gitops.nyl/v1`; shared GitRepository resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.

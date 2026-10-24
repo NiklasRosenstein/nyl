@@ -433,9 +433,10 @@ fn discover_document(
     let contextual_path = PathBuf::from(format!("{}#document-{}", relative_path.display(), document_index + 1));
     let identity = scanned_identity.ok_or_else(|| {
         NylError::config(format!(
-            "Document {} in {} advertises {API_VERSION_K8S_GITOPS} but has no valid static envelope",
+            "Document {} in {} advertises {} but has no valid static envelope",
             document_index + 1,
-            relative_path.display()
+            relative_path.display(),
+            top_level_value(document, "apiVersion").unwrap_or(API_VERSION_K8S_GITOPS)
         ))
     })?;
     let scanned_labels = scan_static_metadata_labels(document)?;

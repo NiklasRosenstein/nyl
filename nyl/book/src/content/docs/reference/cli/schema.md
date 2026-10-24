@@ -48,7 +48,7 @@ nyl schema annotate --check
 ```
 
 ```yaml
-# yaml-language-server: $schema=../.nyl/schemas/nyl/k8s.gitops.nyl/v1/cluster.schema.json
+# yaml-language-server: $schema=../.nyl/schemas/nyl/k8s.nyl/v1/cluster.schema.json
 apiVersion: k8s.nyl/v1
 kind: Cluster
 ---
