@@ -109,9 +109,9 @@ when <code dir="auto">strict = false</code>. Otherwise the strict schema is down
 rendered output trees (directories holding <code dir="auto">_nyl/index.json</code>), and the vendor
 directory are left untouched. When no Cluster records a <code dir="auto">kubeVersion</code>, Kubernetes
 built-ins get no comment and the command warns.</p>
-<p>The schemas Nyl generates accept a <code dir="auto">{{ … }}</code> template expression wherever a
-scalar is expected, so Helm values and structurally templated Nyl resources such
-as <code dir="auto">enabled: '{{ values.enabled }}'</code> do not raise false errors.</p>
+<p>The schemas describe rendered values, so a template expression where the schema
+expects another type, such as <code dir="auto">enabled: '{{ values.enabled }}'</code>, is reported by
+the editor, as it is in Helm templates.</p>
 <p>Every comment is a relative path from the document to a schema Nyl wrote, never
 a URL, so committed comments work offline and are identical across checkouts.</p>
 <p><code dir="auto">[editor] schemas</code> in <code dir="auto">nyl.toml</code> chooses where the generated schemas live:</p>
