@@ -583,6 +583,40 @@ spec:                                 # rendered once per (environment, resource
 - `nyl get units` lists the instances under their base unit. `nyl get unit
   team-aws` shows the `forEach` match for each instance.
 
+### Static discovery
+
+`forEach` follows the scan, render, and verify pattern that
+[discovery](../crates/nyl-render/src/gitops/discovery.rs) already uses for
+templatable control resources, and that units are specified to reuse:
+
+1. **Split.** The file is cut into YAML documents as text, at `---` and `...`
+   lines in column 0, before anything renders.
+2. **Scan.** The static envelope scanner reads `apiVersion`, `kind`,
+   `metadata.name`, and `metadata.labels`. It first parses the raw document
+   as YAML. When block-level template syntax prevents that, it falls back to
+   column-0 keys and the first indent under `metadata:`, skipping `{%` and
+   `{#` lines. It also lifts out the top-level `forEach:` key, either with its
+   indented block or as a one-line flow mapping. The block must contain no
+   template syntax and must parse as YAML on its own; otherwise discovery fails
+   and names the document, as it does for a templated name.
+3. **Expand.** The scanned entry (kind, base name, labels, `forEach`) is
+   matched against the catalog of stages 0–2, which is literal too. The
+   instance set is therefore known before any unit renders. Selection, the
+   instance-name clash check, ownership claims, and the dependency graph all
+   work on it.
+4. **Render.** The raw document renders once per (environment, instance),
+   with `resource` in the context of the structural pass.
+5. **Verify.** As `render_effective_control` does today, the result must be
+   exactly one document of the scanned kind with the scanned base name. It must
+   also carry the same `forEach` as the scan. A document that renders to
+   nothing is disabled for that instance, as for any unit.
+
+The verification catches the case the scanner cannot see. A `forEach:` wrapped
+in `{% if %}` is scanned as present, because the scanner skips the `{%` lines,
+but could disappear when the document renders. The rendered document then no
+longer matches its scan, and discovery reports the document instead of
+instantiating it differently in some environments.
+
 ## Code homes
 
 | Rule or type | Home |
