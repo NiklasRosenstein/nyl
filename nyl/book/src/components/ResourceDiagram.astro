@@ -1,8 +1,11 @@
 ---
-// How Nyl's resources relate, drawn from the reference fields that connect
-// them. Each box links to its resource reference.
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+// How the resources of one reference section relate, drawn from the fields
+// that connect them. Each box links to its resource reference.
 import { resources } from '../lib/resources.mjs';
+
+interface Props {
+  section: 'kubernetes' | 'rendered-gitops';
+}
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const route = (name: string) => {
@@ -60,8 +63,7 @@ const renderingEdges: Edge[] = [
 
 const diagrams = [
   {
-    tab: 'Rendered GitOps',
-    id: 'gitops',
+    id: 'rendered-gitops',
     nodes: gitops,
     edges: gitopsEdges,
     viewBox: '0 0 760 390',
@@ -69,8 +71,7 @@ const diagrams = [
       'A DeploymentTarget binds a Cluster, an optional ArgoCDInstance, and a publication GitRepository, and selects ApplicationGroups by label. Each ApplicationGroup reads Releases from its source directory and may share an AppProjectDefinition.',
   },
   {
-    tab: 'Kubernetes rendering',
-    id: 'rendering',
+    id: 'kubernetes',
     nodes: rendering,
     edges: renderingEdges,
     viewBox: '0 0 790 320',
@@ -78,47 +79,42 @@ const diagrams = [
       'A Release file, or any file passed to nyl render, contains Components, HelmCharts, RemoteManifests, and plain Kubernetes resources; rendering turns each into plain Kubernetes manifests.',
   },
 ];
+const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);
 ---
 
-<Tabs>
-  {
-    diagrams.map((diagram) => (
-      <TabItem label={diagram.tab}>
-        <figure class="resource-diagram">
-          <svg viewBox={diagram.viewBox} role="img" aria-label={diagram.claim}>
-            <defs>
-              <marker id={`arrow-${diagram.id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
-              </marker>
-            </defs>
-            {diagram.edges.map((edge) => (
-              <g class="edge">
-                <line x1={edge.from[0]} y1={edge.from[1]} x2={edge.to[0]} y2={edge.to[1]} marker-end={`url(#arrow-${diagram.id})`} />
-                {edge.label && edge.at && (
-                  <text x={edge.at[0]} y={edge.at[1]} text-anchor={edge.anchor ?? 'middle'}>{edge.label}</text>
-                )}
-              </g>
-            ))}
-            {diagram.nodes.map((node) => {
-              const w = node.w ?? W;
-              const h = node.h ?? H;
-              const href = node.link ? route(node.label) : undefined;
-              const box = (
-                <g class:list={['node', { linked: href }]}>
-                  <rect x={node.x} y={node.y} width={w} height={h} rx="6" />
-                  <text x={node.x + w / 2} y={node.y + (node.note ? h / 2 - 3 : h / 2 + 5)} text-anchor="middle">{node.label}</text>
-                  {node.note && <text x={node.x + w / 2} y={node.y + h / 2 + 15} text-anchor="middle">{node.note}</text>}
-                </g>
-              );
-              return href ? <a href={href}>{box}</a> : box;
-            })}
-          </svg>
-          <figcaption>{diagram.claim}</figcaption>
-        </figure>
-      </TabItem>
-    ))
-  }
-</Tabs>
+{diagram && (
+  <figure class="resource-diagram">
+    <svg viewBox={diagram.viewBox} role="img" aria-label={diagram.claim}>
+      <defs>
+        <marker id={`arrow-${diagram.id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+        </marker>
+      </defs>
+      {diagram.edges.map((edge) => (
+        <g class="edge">
+          <line x1={edge.from[0]} y1={edge.from[1]} x2={edge.to[0]} y2={edge.to[1]} marker-end={`url(#arrow-${diagram.id})`} />
+          {edge.label && edge.at && (
+            <text x={edge.at[0]} y={edge.at[1]} text-anchor={edge.anchor ?? 'middle'}>{edge.label}</text>
+          )}
+        </g>
+      ))}
+      {diagram.nodes.map((node) => {
+        const w = node.w ?? W;
+        const h = node.h ?? H;
+        const href = node.link ? route(node.label) : undefined;
+        const box = (
+          <g class:list={['node', { linked: href }]}>
+            <rect x={node.x} y={node.y} width={w} height={h} rx="6" />
+            <text x={node.x + w / 2} y={node.y + (node.note ? h / 2 - 3 : h / 2 + 5)} text-anchor="middle">{node.label}</text>
+            {node.note && <text x={node.x + w / 2} y={node.y + h / 2 + 15} text-anchor="middle">{node.note}</text>}
+          </g>
+        );
+        return href ? <a href={href}>{box}</a> : box;
+      })}
+    </svg>
+    <figcaption>{diagram.claim}</figcaption>
+  </figure>
+)}
 
 <style>
   .resource-diagram {

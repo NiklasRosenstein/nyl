@@ -1,7 +1,7 @@
 ---
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { createResourceMarkdownProcessor } from '../../../lib/resource-markdown.mjs';
-import { resources, summary } from '../../../lib/resources.mjs';
+import { resources, sectionOf, summary } from '../../../lib/resources.mjs';
 import { schemaFor } from '../../../lib/schema-documents';
 import { resourceMarkdown } from '../../../lib/schema-reference.mjs';
 
@@ -23,6 +23,6 @@ const guide = ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'].includes(resource.apiVersio
 ---
 <StarlightPage frontmatter={{ title: resource.name, description: summary(schema), editUrl: false }} headings={rendered.metadata.headings.filter((heading) => heading.depth === 2)}>
   <p class="api-version"><code>{resource.apiVersion}</code>{resource.dynamicKind && <span> · Dynamic kind</span>}</p>
-  <p><a href={`${base}/reference/resources/`}>All resources</a> · <a href={`${base}/reference/schemas/${resource.schema}`}>Download JSON Schema</a> · <a href={guide}>Usage guide</a></p>
+  <p><a href={`${base}${sectionOf(resource).route}`}>{sectionOf(resource).label}</a> · <a href={`${base}/reference/schemas/${resource.schema}`}>Download JSON Schema</a> · <a href={guide}>Usage guide</a></p>
   <Fragment set:html={rendered.code} />
 </StarlightPage>

@@ -138,10 +138,7 @@ export default defineConfig({
               },
               {
                 label: "YAML resources",
-                items: [
-                  { label: "All resources", link: "/reference/resources/" },
-                  ...resourceSidebar(),
-                ],
+                items: [{ label: "All resources", link: "/reference/resources/" }, ...resourceSidebar()],
               },
               { label: "Configuration", items: ["reference/configuration"] },
               "reference/editor-schemas",

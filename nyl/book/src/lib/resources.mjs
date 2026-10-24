@@ -23,18 +23,48 @@ export function resourceUsage(schema) {
     return { label, markdown };
   });
 }
-export function resourceGroups() {
-  return [...new Set(resources.map((resource) => resource.apiVersion))].map((apiVersion) => ({
-    apiVersion,
-    label: groupLabels[apiVersion] ?? apiVersion,
-    resources: resources.filter((resource) => resource.apiVersion === apiVersion),
-  }));
+/** The reference splits resources like the docs' header sections. */
+export const resourceSections = [
+  {
+    id: 'kubernetes',
+    label: 'Kubernetes Resources',
+    route: '/reference/resources/kubernetes/',
+    apiVersions: ['k8s.nyl/v1', 'components.k8s.nyl/v1'],
+  },
+  {
+    id: 'rendered-gitops',
+    label: 'Rendered GitOps Resources',
+    route: '/reference/resources/rendered-gitops/',
+    apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
+  },
+];
+export function sectionOf(resource) {
+  const section = resourceSections.find((candidate) => candidate.apiVersions.includes(resource.apiVersion));
+  if (!section) throw new Error(`${resource.name}: no reference section lists ${resource.apiVersion}`);
+  return section;
 }
-/** Every resource by name; each reference page states its API version. */
+/** Resources by API version, optionally only those of one section. */
+export function resourceGroups(section) {
+  return [...new Set(resources.map((resource) => resource.apiVersion))]
+    .filter((apiVersion) => !section || section.apiVersions.includes(apiVersion))
+    .map((apiVersion) => ({
+      apiVersion,
+      label: groupLabels[apiVersion] ?? apiVersion,
+      resources: resources.filter((resource) => resource.apiVersion === apiVersion),
+    }));
+}
+/** One sidebar group per section: its overview, then its resources by name. */
 export function resourceSidebar() {
-  return [...resources]
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((resource) => ({ label: resource.name, link: resource.route }));
+  return resourceSections.map((section) => ({
+    label: section.label,
+    items: [
+      { label: 'Overview', link: section.route },
+      ...resources
+        .filter((resource) => sectionOf(resource) === section)
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((resource) => ({ label: resource.name, link: resource.route })),
+    ],
+  }));
 }
 export const resourceRedirects = Object.fromEntries(resources.map((resource) => {
   const oldSlug = resource.name === 'HelmChart' ? 'helmchart' : resource.slug;
