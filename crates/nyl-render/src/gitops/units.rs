@@ -327,7 +327,11 @@ fn render_environment_units(
         let mut spec = render_unit(unit, &context)?;
         if let Some(spec) = &mut spec {
             if unit.is_publication() {
-                expand_publication_releases(inventory, unit, spec)?;
+                if spec_enabled(spec) {
+                    expand_publication_releases(inventory, unit, spec)?;
+                } else {
+                    check_disabled_publication(unit, spec)?;
+                }
             }
         }
         rendered.insert(name.clone(), spec);
@@ -432,6 +436,21 @@ fn expand_publication_releases(inventory: &GitOpsInventory, unit: &DiscoveredUni
     Ok(())
 }
 
+/// A disabled publication unit is torn down from its stored desired
+/// document, never resolved, so its target need not exist any more (it may
+/// be removed in the same change) and it gains no `releases`. Its spec is
+/// still checked for an authored `releases` and a static target name.
+fn check_disabled_publication(unit: &DiscoveredUnit, spec: &Value) -> Result<()> {
+    publication_target(unit, spec)?;
+    if spec.get("releases").is_some() {
+        return Err(unit_invalid(
+            &unit.location(),
+            "spec.releases is filled from the target's releaseInputs and must not be written by hand",
+        ));
+    }
+    Ok(())
+}
+
 /// The static DeploymentTarget `name`, or why there is none.
 fn static_target<'a>(
     inventory: &'a GitOpsInventory,
@@ -524,6 +543,11 @@ pub fn target_placements(inventory: &GitOpsInventory) -> Result<BTreeMap<String,
 ///
 /// An `artifact` reference is checked only for the unit's existence; the
 /// artifacts a kind publishes are checked when the kind's driver resolves it.
+///
+/// A target whose publication units in `environment` are all disabled has no
+/// issues: it still belongs to the environment while its teardown runs, but
+/// its bindings are never resolved again, so deselecting or disabling their
+/// producers with it is valid.
 pub fn check_unit_bindings(
     inventory: &GitOpsInventory,
     target: &str,
@@ -534,6 +558,15 @@ pub fn check_unit_bindings(
     let effective = resolve_effective_environment(inventory, environment)?;
     let units = discover_units(inventory)?;
     let rendered = render_environment_units(inventory, &units, &effective)?;
+    let placed_by_enabled_unit = rendered.iter().any(|(name, spec)| {
+        let Some(spec) = spec else { return false };
+        units[name].is_publication()
+            && spec_enabled(spec)
+            && publication_target(&units[name], spec).is_ok_and(|placed| placed == target)
+    });
+    if !placed_by_enabled_unit {
+        return Ok(Vec::new());
+    }
 
     let mut issues = Vec::new();
     for (release, bindings) in &deployment_target.spec.release_inputs {
@@ -992,6 +1025,71 @@ spec:
                 "spec.releaseInputs.\"web/web\".image.fromUnit names unit web-image, which Environment dev does not \
                  select",
             ]
+        );
+    }
+
+    #[test]
+    fn test_check_unit_bindings_accepts_a_disabled_stack() {
+        // Disabling the publication together with its producers is a normal
+        // teardown: the target stays placed, but its bindings are not checked.
+        let units = UNITS
+            .replace(
+                "  source: {path: ../infra/database}\n",
+                "  enabled: false\n  source: {path: ../infra/database}\n",
+            )
+            .replace("  mode: publish\n", "  mode: publish\n  enabled: false\n");
+        let image = IMAGE.replace("  repository:", "  enabled: false\n  repository:");
+        let worktree = project(&[
+            ("platform.yaml", PLATFORM),
+            ("units.yaml", &units),
+            ("images/web.yaml", &image),
+        ]);
+        let inventory = inventory(&worktree);
+        let environment = EnvironmentName::new("dev").unwrap();
+        assert_eq!(
+            target_placements(&inventory).unwrap(),
+            BTreeMap::from([("dev".to_owned(), environment.clone())])
+        );
+        assert_eq!(
+            check_unit_bindings(&inventory, "dev", &environment).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // With the publication enabled, a disabled producer is still an issue.
+        let units = UNITS.replace(
+            "  source: {path: ../infra/database}\n",
+            "  enabled: false\n  source: {path: ../infra/database}\n",
+        );
+        let worktree = project(&[
+            ("platform.yaml", PLATFORM),
+            ("units.yaml", &units),
+            ("images/web.yaml", IMAGE),
+        ]);
+        assert_eq!(
+            check_unit_bindings(&super::tests::inventory(&worktree), "dev", &environment).unwrap(),
+            [
+                "spec.releaseInputs.\"web/web\".databaseHost.fromUnit names unit database, which is not enabled in \
+              Environment dev"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_render_disabled_publication_tolerates_a_removed_target() {
+        let publication = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels: {dev: 'true'}\nspec:\n  target: removed\n  enabled: false\n";
+        let worktree = project(&[("platform.yaml", PLATFORM), ("publication.yaml", publication)]);
+        let source = render(&worktree, "dev").unwrap();
+        assert_eq!(
+            unit(&source, "kubernetes").spec,
+            Some(json!({"target": "removed", "enabled": false}))
+        );
+
+        let authored = publication.replace("  enabled: false\n", "  enabled: false\n  releases: {}\n");
+        let worktree = project(&[("platform.yaml", PLATFORM), ("publication.yaml", &authored)]);
+        let error = render(&worktree, "dev").unwrap_err().0;
+        assert!(
+            error.contains("spec.releases is filled from the target's releaseInputs"),
+            "{error}"
         );
     }
 

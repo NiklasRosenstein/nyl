@@ -53,6 +53,11 @@ declares and does not mark `sensitive`. An `artifact` reference is checked
 only for the unit's existence. Every problem names its binding, such as
 `spec.releaseInputs."web/web".databaseHost.fromUnit`.
 
+A publication unit with `enabled: false` still places its target, because
+the target belongs to the Environment until its teardown completes. Its
+bindings are not checked, so a stack can be disabled together, and its
+target may already be removed.
+
 A target no publication unit places compiles as `render-tree` would, so a
 `fromUnit` or `fromPromotion` binding on it fails and names the binding.
 `render-tree`, `publish-tree`, `diff-tree`, and the direct commands never
