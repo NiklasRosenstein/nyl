@@ -987,7 +987,7 @@ pub async fn vendor_schemas(
     if !check {
         store::atomic_write(
             &store::safe_path(&root, Path::new("schemas/builtins.json"))?,
-            &store::json_bytes(&index)?,
+            &store::pretty_json_bytes(&index)?,
         )?;
     }
     store::check_and_prune(&root, false)?;
@@ -1427,7 +1427,11 @@ mod tests {
             version: 1,
             schemas: BTreeMap::from([(url, hash), (dependency_url, dependency_hash.clone())]),
         };
-        store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+        store::atomic_write(
+            &root.join("schemas/builtins.json"),
+            &store::pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
         validate_partitions(
             &ValidationArgs::default(),
             &config,
@@ -1485,7 +1489,11 @@ mod tests {
                 version: 1,
                 schemas: BTreeMap::from([(url.to_string(), hash.clone())]),
             };
-            store::atomic_write(&root.join("schemas/builtins.json"), &store::json_bytes(&index).unwrap()).unwrap();
+            store::atomic_write(
+                &root.join("schemas/builtins.json"),
+                &store::pretty_json_bytes(&index).unwrap(),
+            )
+            .unwrap();
             let valid = json!({
                 "apiVersion":"apiextensions.k8s.io/v1", "kind":"CustomResourceDefinition",
                 "metadata":{"name":"widgets.example.com"},

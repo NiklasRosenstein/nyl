@@ -39,8 +39,10 @@ pub struct ClusterSchemaIndex {
     pub crds: BTreeMap<String, CapturedCrd>,
 }
 
-/// The snapshot format capture writes and rendering reads.
-pub const CLUSTER_SCHEMA_INDEX_VERSION: u32 = 2;
+/// The snapshot format capture writes and rendering reads. Version 3
+/// fingerprints capabilities over canonical JSON; earlier snapshots are
+/// recaptured, because their fingerprint cannot be compared offline.
+pub const CLUSTER_SCHEMA_INDEX_VERSION: u32 = 3;
 
 impl ClusterSchemaIndex {
     /// Parse a snapshot. Other format versions must be recaptured.
@@ -66,7 +68,7 @@ impl ClusterSchemaIndex {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        json_bytes(self)
+        pretty_json_bytes(self)
     }
 
     /// `apiVersions` entries the vendored CRDs serve: `group/version` and `group/version/Kind`.
@@ -147,8 +149,33 @@ pub struct BuiltinIndex {
     pub collections: BTreeMap<String, String>,
 }
 
+/// Bytes of a schema-store blob, cache record, or digested value: RFC 8785
+/// canonical JSON, the one form Nyl digests JSON in.
 pub fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(nyl_core::digest::canonical_json_bytes(value)?)
+}
+
+/// Bytes of a file people read: the schema inventories and JSON reports.
+/// Pretty-printed with object keys sorted recursively and a trailing newline,
+/// so committed inventories diff by line. Nothing digests these bytes.
+pub fn pretty_json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
+    fn sorted(value: Value) -> Value {
+        match value {
+            Value::Object(fields) => Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(values.into_iter().map(sorted).collect()),
+            other => other,
+        }
+    }
+    let mut bytes = serde_json::to_vec_pretty(&sorted(serde_json::to_value(value)?))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 /// Fingerprint of complete capabilities, independent of order and of which entries were vendored.
@@ -502,12 +529,39 @@ mod tests {
         })
     }
 
+    #[test]
+    fn test_a_snapshot_of_an_older_nyl_asks_for_a_recapture() {
+        let root = TempDir::new().unwrap();
+        let mut index = write_capture(root.path(), "staging");
+        index.version = 2;
+        atomic_write(
+            &cluster_index_path(root.path(), "staging").unwrap(),
+            &pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
+        for error in [
+            read_cluster_index(root.path(), "staging").unwrap_err(),
+            check_and_prune(root.path(), true).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("Cluster schema snapshot for staging uses an unsupported format; run nyl capture cluster staging --crds"),
+                "{error}"
+            );
+        }
+    }
+
     fn write_capture(root: &Path, name: &str) -> ClusterSchemaIndex {
         let (index, blobs) = prepare_capture(name, &capabilities(), &[crd()]).unwrap();
         for bytes in blobs.values() {
             write_blob(root, bytes).unwrap();
         }
-        atomic_write(&cluster_index_path(root, name).unwrap(), &index.to_bytes().unwrap()).unwrap();
+        atomic_write(
+            &cluster_index_path(root, name).unwrap(),
+            &pretty_json_bytes(&index).unwrap(),
+        )
+        .unwrap();
         index
     }
 
@@ -578,16 +632,18 @@ mod tests {
     #[test]
     fn test_snapshot_format_matches_golden_file() {
         let (index, _) = prepare_capture("staging", &capabilities(), &[crd()]).unwrap();
-        let golden = include_str!("testdata/cluster-schemas-v2.json");
+        let golden = include_str!("testdata/cluster-schemas-v3.json");
         assert_eq!(String::from_utf8(index.to_bytes().unwrap()).unwrap(), golden);
         assert_eq!(ClusterSchemaIndex::from_slice(golden.as_bytes()).unwrap(), index);
-        // Snapshots in other formats are recaptured, not read.
-        let error = ClusterSchemaIndex::from_slice(
+        // Snapshots in other formats are recaptured, not read: version 2
+        // fingerprinted pretty-printed JSON, and version 1 had no vendored CRDs.
+        for older in [
+            include_str!("testdata/cluster-schemas-v2.json").as_bytes(),
             br#"{"version":1,"cluster":"staging","capabilities_fingerprint":"","crds":{}}"#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("nyl capture cluster staging --crds"), "{error}");
+        ] {
+            let error = ClusterSchemaIndex::from_slice(older).unwrap_err().to_string();
+            assert!(error.contains("nyl capture cluster staging --crds"), "{error}");
+        }
     }
 
     #[cfg(unix)]

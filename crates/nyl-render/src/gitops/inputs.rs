@@ -129,10 +129,16 @@ impl PublicationBase {
                 PublicationBaseOrigin::Refreshed,
             ),
             // Without a refresh, a branch missing from the cache cannot be
-            // told apart from one that was never fetched.
-            PublicationRead::Cached => match git.branch_head(url, &branch, false).map_err(|e| error(e, ""))? {
-                Some(commit) => (Some(commit), PublicationBaseOrigin::Cached),
-                None => (None, PublicationBaseOrigin::Unavailable),
+            // told apart from one that was never fetched, and a repository
+            // that was never cached is a cache miss, not a failure.
+            // In both cached reads, a cache that exists but cannot be read is
+            // an error, so state is never silently replaced by defaults.
+            PublicationRead::Cached => match git.branch_head(url, &branch, false) {
+                Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::Cached),
+                Ok(None) | Err(NylError::Git(crate::git::GitError::NotCached { .. })) => {
+                    (None, PublicationBaseOrigin::Unavailable)
+                }
+                Err(cache_error) => return Err(error(cache_error, "")),
             },
             PublicationRead::FreshOrCached => match git.branch_head(url, &branch, true) {
                 Ok(commit) => (commit, PublicationBaseOrigin::Refreshed),
@@ -140,7 +146,10 @@ impl PublicationBase {
                     tracing::warn!("Cannot refresh publication branch {branch}: {refresh_error}; using cached state");
                     match git.branch_head(url, &branch, false) {
                         Ok(Some(commit)) => (Some(commit), PublicationBaseOrigin::CachedAfterFailedRefresh),
-                        Ok(None) | Err(_) => (None, PublicationBaseOrigin::Unavailable),
+                        Ok(None) | Err(NylError::Git(crate::git::GitError::NotCached { .. })) => {
+                            (None, PublicationBaseOrigin::Unavailable)
+                        }
+                        Err(cache_error) => return Err(error(cache_error, "")),
                     }
                 }
             },
@@ -1028,6 +1037,23 @@ pub fn place_state_files(
     Ok(state)
 }
 
+/// Add the `@`-prefixed digests of resolved inputs to the project file hashes.
+/// A project file whose path equals one of those keys is an error, never an
+/// overwrite, so the index cannot misattribute a digest.
+pub fn merge_input_digests(
+    hashes: &mut BTreeMap<String, String>,
+    input_digests: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (key, digest) in input_digests {
+        if hashes.insert(key.clone(), digest.clone()).is_some() {
+            return Err(NylError::config(format!(
+                "Project file {key} collides with the ownership-index key of a resolved Release input; rename or move the file"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// After rendering, a Release's `spec.inputs` must equal its static
 /// declaration: templating cannot add, remove, or change declarations.
 pub fn verify_rendered_declarations(
@@ -1087,6 +1113,52 @@ mod tests {
 
     fn declarations(value: Value) -> BTreeMap<String, InputDeclaration> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn test_merge_input_digests_rejects_a_project_file_named_like_an_input_key() {
+        let inputs = BTreeMap::from([("@input/platform/web/image".to_owned(), "b".repeat(64))]);
+        let mut hashes = BTreeMap::from([("applications/web.yaml".to_owned(), "a".repeat(64))]);
+        merge_input_digests(&mut hashes, &inputs).unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        let mut hashes = BTreeMap::from([("@input/platform/web/image".to_owned(), "a".repeat(64))]);
+        let error = merge_input_digests(&mut hashes, &inputs).unwrap_err().to_string();
+        assert!(
+            error.contains("Project file @input/platform/web/image collides with the ownership-index key"),
+            "{error}"
+        );
+    }
+
+    /// Templating may produce any spec, but never other input declarations
+    /// than the literal ones validation and binding checks were run against.
+    #[test]
+    fn test_verify_rendered_declarations_rejects_templated_changes() {
+        let declared = declarations(json!({"image": {"type": "string"}}));
+        let release = |inputs: Value| -> crate::resources::Release {
+            serde_json::from_value(json!({
+                "apiVersion": "k8s.gitops.nyl/v1",
+                "kind": "Release",
+                "metadata": {"name": "web", "namespace": "web"},
+                "spec": {"inputs": inputs},
+            }))
+            .unwrap()
+        };
+        let path = Path::new("applications/platform/web.yaml");
+        verify_rendered_declarations(path, &declared, &release(json!({"image": {"type": "string"}}))).unwrap();
+        for rendered in [
+            json!({"image": {"type": "integer"}}),
+            json!({"image": {"type": "string"}, "tag": {"type": "string"}}),
+            json!({}),
+        ] {
+            let error = verify_rendered_declarations(path, &declared, &release(rendered.clone()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Release \"web\" in applications/platform/web.yaml renders spec.inputs that differ"),
+                "{rendered}: {error}"
+            );
+        }
     }
 
     fn resolve(
@@ -1175,7 +1247,7 @@ mod tests {
         let entries = resolved.index_entries().unwrap();
         assert_eq!(
             entries["@input/platform/web/replicas"],
-            nyl_core::digest::sha256_hex(b"2\n")
+            nyl_core::digest::sha256_hex(b"2")
         );
         assert_eq!(entries.len(), 4);
     }
@@ -1474,7 +1546,10 @@ mod tests {
 
         fn branch_head(&self, _: &str, _: &str, refresh: bool) -> Result<Option<String>> {
             let outcome = if refresh { &self.refreshed } else { &self.cached };
-            outcome.clone().map_err(NylError::config)
+            outcome.clone().map_err(|reason| match reason {
+                "not cached" => NylError::Git(crate::git::GitError::NotCached { url: "u".to_owned() }),
+                reason => NylError::config(reason),
+            })
         }
     }
 
@@ -1509,6 +1584,14 @@ mod tests {
                 (None, PublicationBaseOrigin::Unavailable)
             );
         }
+        let unreadable = Heads {
+            refreshed: Err("offline"),
+            cached: Err("corrupt pack"),
+        };
+        let error = PublicationBase::resolve(&unreadable, "u", "deploy", "dev", PublicationRead::FreshOrCached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("corrupt pack"), "{error}");
         let error = PublicationBase::resolve(
             &Heads {
                 refreshed: Err("offline"),
@@ -1529,11 +1612,42 @@ mod tests {
 
     #[test]
     fn test_cached_read_of_an_empty_cache_is_unavailable() {
+        for cached in [Ok(None), Err("not cached")] {
+            let heads = Heads {
+                refreshed: Err("unused"),
+                cached,
+            };
+            let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+            assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
+        }
+    }
+
+    #[test]
+    fn test_cached_read_of_an_unreadable_cache_fails() {
         let heads = Heads {
             refreshed: Err("unused"),
-            cached: Ok(None),
+            cached: Err("corrupt pack"),
         };
-        let base = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached).unwrap();
+        let error = PublicationBase::resolve(&heads, "u", "deploy", "dev", PublicationRead::Cached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Cannot read publication branch deploy"), "{error}");
+        assert!(error.contains("corrupt pack"), "{error}");
+    }
+
+    /// `--offline` before the publication repository was ever fetched: the real
+    /// cache reports the repository as not cached, which is no failure.
+    #[test]
+    fn test_cached_read_of_a_never_fetched_repository_is_unavailable() {
+        let temp = TempDir::new().unwrap();
+        let source = CachedGitBlobSource::new(
+            Some(crate::git::GitManager::with_cache_dir(temp.path().join("cache"))),
+            temp.path(),
+            &crate::config::ProjectConfig::load_from_dir(None, Some(temp.path())).unwrap(),
+            None,
+        );
+        let url = temp.path().join("publication").to_string_lossy().into_owned();
+        let base = PublicationBase::resolve(&source, &url, "deploy", "dev", PublicationRead::Cached).unwrap();
         assert_eq!((base.commit, base.origin), (None, PublicationBaseOrigin::Unavailable));
     }
 

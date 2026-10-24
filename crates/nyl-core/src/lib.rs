@@ -30,5 +30,6 @@ pub mod local_path;
 pub mod resources;
 pub mod settings;
 pub mod template_syntax;
+pub mod template_value;
 
 pub use error::{CoreError, Result};

@@ -22,8 +22,8 @@ pub use layout::{
     ensure_managed_namespace, render_manifest_layout, resource_path, take_managed_namespace, CATALOG_DIRECTORY,
 };
 pub use reconcile::{
-    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, ReconcileOptions,
-    RenderIndex, RenderIndexPublication,
+    reconcile_rendered_tree, reconcile_rendered_tree_with_options, validate_rendered_tree_owner, DesiredFiles,
+    ReconcileOptions, RenderIndex, RenderIndexPublication,
 };
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,

@@ -88,13 +88,17 @@ impl RenderIndex {
     }
 }
 
+/// The files a target owns: output-relative path to bytes, borrowed from the
+/// compiled tree.
+pub type DesiredFiles<'a> = BTreeMap<&'a Path, &'a [u8]>;
+
 /// Reconcile a complete desired target tree while preserving unowned files.
 ///
 /// All bytes and collisions are validated in a sibling staging directory first.
 /// Each file is renamed atomically and the ownership index is installed last.
 pub fn reconcile_rendered_tree(
     output_root: &Path,
-    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    desired: &DesiredFiles<'_>,
     next_index: RenderIndex,
 ) -> Result<RenderIndex> {
     reconcile_rendered_tree_with_options(output_root, desired, next_index, ReconcileOptions::default())
@@ -117,7 +121,7 @@ pub fn validate_rendered_tree_owner(output_root: &Path, expected: &RenderIndex) 
 /// Reconcile a complete desired target tree with explicit recovery options.
 pub fn reconcile_rendered_tree_with_options(
     output_root: &Path,
-    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    desired: &DesiredFiles<'_>,
     mut next_index: RenderIndex,
     options: ReconcileOptions,
 ) -> Result<RenderIndex> {
@@ -161,10 +165,10 @@ pub fn reconcile_rendered_tree_with_options(
         let Some(existing) = existing_entry(output_root, relative)? else {
             continue;
         };
-        if !previous_files.contains_key(&path_text(&existing)?) && !options.adopt.contains(relative) {
+        if !previous_files.contains_key(&path_text(&existing)?) && !options.adopt.contains(*relative) {
             let expected = desired.get(relative).expect("iterated desired key exists");
             let actual = fs::read(&destination)?;
-            if !resumes_transaction || actual.as_slice() != expected.as_slice() {
+            if !resumes_transaction || actual.as_slice() != *expected {
                 return Err(NylError::config(format!(
                     "Refusing to overwrite unowned rendered path {}",
                     destination.display()
@@ -374,7 +378,7 @@ pub fn parse_index(bytes: &[u8], origin: &str) -> Result<RenderIndex> {
 fn verify_owned_files(
     output_root: &Path,
     index: &RenderIndex,
-    desired: &BTreeMap<PathBuf, Vec<u8>>,
+    desired: &DesiredFiles<'_>,
     resumes_transaction: bool,
     options: &ReconcileOptions,
 ) -> Result<()> {
@@ -447,7 +451,7 @@ fn reject_symlink_components(output_root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_desired_paths(desired: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+fn validate_desired_paths(desired: &DesiredFiles<'_>) -> Result<()> {
     for path in desired.keys() {
         let text = path_text(path)?;
         if matches!(
@@ -490,13 +494,13 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
         let first = BTreeMap::from([
-            (PathBuf::from("apps/a.yaml"), b"a\n".to_vec()),
-            (PathBuf::from("apps/stale.yaml"), b"stale\n".to_vec()),
+            (Path::new("apps/a.yaml"), &b"a\n"[..]),
+            (Path::new("apps/stale.yaml"), &b"stale\n"[..]),
         ]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
         fs::write(root.join("unowned.txt"), "keep\n").unwrap();
 
-        let second = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"b\n".to_vec())]);
+        let second = BTreeMap::from([(Path::new("apps/a.yaml"), &b"b\n"[..])]);
         reconcile_rendered_tree(&root, &second, index()).unwrap();
 
         assert_eq!(fs::read(root.join("apps/a.yaml")).unwrap(), b"b\n");
@@ -510,10 +514,10 @@ mod tests {
         // where both names refer to one file.
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let first = BTreeMap::from([(PathBuf::from("apps/Admin.yaml"), b"role\n".to_vec())]);
+        let first = BTreeMap::from([(Path::new("apps/Admin.yaml"), &b"role\n"[..])]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
 
-        let second = BTreeMap::from([(PathBuf::from("apps/admin.yaml"), b"role\n".to_vec())]);
+        let second = BTreeMap::from([(Path::new("apps/admin.yaml"), &b"role\n"[..])]);
         reconcile_rendered_tree(&root, &second, index()).unwrap();
         reconcile_rendered_tree(&root, &second, index()).unwrap();
 
@@ -531,10 +535,10 @@ mod tests {
         // where both names refer to one directory.
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let first = BTreeMap::from([(PathBuf::from("Web/api/a.yaml"), b"a\n".to_vec())]);
+        let first = BTreeMap::from([(Path::new("Web/api/a.yaml"), &b"a\n"[..])]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
 
-        let second = BTreeMap::from([(PathBuf::from("web/api/a.yaml"), b"a\n".to_vec())]);
+        let second = BTreeMap::from([(Path::new("web/api/a.yaml"), &b"a\n"[..])]);
         reconcile_rendered_tree(&root, &second, index()).unwrap();
         reconcile_rendered_tree(&root, &second, index()).unwrap();
 
@@ -552,14 +556,14 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
         let first = BTreeMap::from([
-            (PathBuf::from("api/configmap/api/a.yaml"), b"a\n".to_vec()),
-            (PathBuf::from("api/secret/api/b.yaml"), b"b\n".to_vec()),
-            (PathBuf::from("api/service/api/c.yaml"), b"c\n".to_vec()),
+            (Path::new("api/configmap/api/a.yaml"), &b"a\n"[..]),
+            (Path::new("api/secret/api/b.yaml"), &b"b\n"[..]),
+            (Path::new("api/service/api/c.yaml"), &b"c\n"[..]),
         ]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
         fs::write(root.join("api/secret/api/unowned.txt"), "keep\n").unwrap();
 
-        let second = BTreeMap::from([(PathBuf::from("api/service/api/c.yaml"), b"c\n".to_vec())]);
+        let second = BTreeMap::from([(Path::new("api/service/api/c.yaml"), &b"c\n"[..])]);
         reconcile_rendered_tree(&root, &second, index()).unwrap();
 
         assert!(!root.join("api/configmap").exists());
@@ -571,7 +575,7 @@ mod tests {
     fn preserves_provenance_when_semantic_inputs_and_outputs_are_unchanged() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         let mut first = index();
         first.source_commit = Some("first".to_string());
         first.dirty = false;
@@ -589,7 +593,7 @@ mod tests {
     fn unchanged_reconciliation_preserves_owned_file_mtime() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         reconcile_rendered_tree(&root, &desired, index()).unwrap();
         let before = fs::metadata(root.join("apps/a.yaml")).unwrap().modified().unwrap();
 
@@ -606,7 +610,7 @@ mod tests {
     fn rejects_modified_owned_file() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         reconcile_rendered_tree(&root, &desired, index()).unwrap();
         fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
@@ -617,7 +621,7 @@ mod tests {
     fn force_recreates_missing_and_modified_owned_files() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         reconcile_rendered_tree(&root, &desired, index()).unwrap();
 
         fs::remove_file(root.join("apps/a.yaml")).unwrap();
@@ -651,10 +655,10 @@ mod tests {
     fn rejects_owned_file_preemptively_changed_to_next_output_without_transaction() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
-        let first = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"old\n".to_vec())]);
+        let first = BTreeMap::from([(Path::new("apps/a.yaml"), &b"old\n"[..])]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
         fs::write(root.join("apps/a.yaml"), "new\n").unwrap();
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"new\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"new\n"[..])]);
 
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("modified outside Nyl"));
@@ -666,7 +670,7 @@ mod tests {
         let root = temp.path().join("production");
         fs::create_dir_all(root.join("apps")).unwrap();
         fs::write(root.join("apps/a.yaml"), "manual\n").unwrap();
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("unowned"));
     }
@@ -676,14 +680,14 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("production");
         let first = BTreeMap::from([
-            (PathBuf::from("apps/a.yaml"), b"old\n".to_vec()),
-            (PathBuf::from("apps/stale.yaml"), b"stale\n".to_vec()),
+            (Path::new("apps/a.yaml"), &b"old\n"[..]),
+            (Path::new("apps/stale.yaml"), &b"stale\n"[..]),
         ]);
         reconcile_rendered_tree(&root, &first, index()).unwrap();
 
         let desired = BTreeMap::from([
-            (PathBuf::from("apps/a.yaml"), b"new\n".to_vec()),
-            (PathBuf::from("apps/new.yaml"), b"added\n".to_vec()),
+            (Path::new("apps/a.yaml"), &b"new\n"[..]),
+            (Path::new("apps/new.yaml"), &b"added\n"[..]),
         ]);
         let mut intended = index();
         intended.files = desired
@@ -706,7 +710,7 @@ mod tests {
         let root = temp.path().join("production");
         fs::create_dir_all(root.join("apps")).unwrap();
         fs::write(root.join("apps/a.yaml"), "a\n").unwrap();
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
 
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("unowned"));
@@ -724,7 +728,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, root.join("apps")).unwrap();
 
-        let desired = BTreeMap::from([(PathBuf::from("apps/a.yaml"), b"a\n".to_vec())]);
+        let desired = BTreeMap::from([(Path::new("apps/a.yaml"), &b"a\n"[..])]);
         let error = reconcile_rendered_tree(&root, &desired, index()).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
         assert!(!outside.join("a.yaml").exists());

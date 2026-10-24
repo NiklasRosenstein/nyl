@@ -9,7 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::resources::{schema, validate_relative_path, validate_repository_choice, validate_static_required};
+use crate::resources::{
+    schema, validate_immutable_git_commit, validate_relative_path, validate_repository_choice, validate_static_required,
+};
 use crate::resources::{InlineGitRepository, LocalReference};
 use crate::{CoreError, Result};
 
@@ -178,18 +180,7 @@ impl GitInputSource {
     pub fn validate(&self, field: &str) -> Result<()> {
         validate_repository_choice(self.repository_ref.as_ref(), self.repository.as_ref(), field)?;
         validate_static_required(&format!("{field}.revision"), &self.revision)?;
-        // Rendering, staleness checks, and `@git/` index keys compare the
-        // lowercase SHA-1 form that Git reports.
-        if self.commit.len() != 40
-            || !self
-                .commit
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return Err(CoreError::config(format!(
-                "{field}.commit must be a full 40-character lowercase hexadecimal Git commit ID"
-            )));
-        }
+        validate_immutable_git_commit(&format!("{field}.commit"), &self.commit)?;
         validate_relative_path(&format!("{field}.path"), &self.path, false, false)?;
         crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)
     }

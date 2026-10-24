@@ -17,6 +17,7 @@
 //!   own rule.
 
 use minijinja::{Environment, UndefinedBehavior};
+use nyl_core::template_value::{parse, Segment};
 use serde_json::Value;
 
 use crate::{NylError, Result};
@@ -25,11 +26,6 @@ use crate::{NylError, Result};
 pub struct TemplateValueExpander {
     /// The engine environment with strict undefined handling.
     expression: Environment<'static>,
-}
-
-enum Segment<'a> {
-    Literal(&'a str),
-    Expression(&'a str),
 }
 
 impl TemplateValueExpander {
@@ -41,7 +37,8 @@ impl TemplateValueExpander {
 
     /// Expand `template` for `field` with `context`.
     pub fn expand(&self, field: &str, template: &str, context: &Value) -> Result<String> {
-        let segments = parse(field, template)?;
+        let segments =
+            parse(template).map_err(|error| NylError::config(format!("{field} has {error}: {template:?}")))?;
         let mut output = String::with_capacity(template.len());
         for segment in segments {
             match segment {
@@ -71,68 +68,6 @@ impl TemplateValueExpander {
         }
         Ok(value.to_string())
     }
-}
-
-/// Split `template` into literal text and `${ … }` expressions; `$${` becomes a literal `${`.
-fn parse<'a>(field: &str, template: &'a str) -> Result<Vec<Segment<'a>>> {
-    let mut segments = Vec::new();
-    let mut rest = template;
-    while let Some(start) = rest.find('$') {
-        let after_dollar = &rest[start + 1..];
-        if let Some(after) = after_dollar.strip_prefix("${") {
-            segments.push(Segment::Literal(&rest[..start]));
-            segments.push(Segment::Literal("${"));
-            rest = after;
-        } else if let Some(after) = after_dollar.strip_prefix('{') {
-            segments.push(Segment::Literal(&rest[..start]));
-            let end = expression_end(after).ok_or_else(|| {
-                NylError::config(format!(
-                    "{field} has an unterminated ${{ … }} template value: {template:?}"
-                ))
-            })?;
-            let expression = after[..end].trim();
-            if expression.is_empty() {
-                return Err(NylError::config(format!(
-                    "{field} has an empty ${{ … }} template value: {template:?}"
-                )));
-            }
-            segments.push(Segment::Expression(expression));
-            rest = &after[end + 1..];
-        } else {
-            segments.push(Segment::Literal(&rest[..=start]));
-            rest = after_dollar;
-        }
-    }
-    segments.push(Segment::Literal(rest));
-    Ok(segments)
-}
-
-/// Byte offset of the `}` that closes an expression, skipping braces inside
-/// string literals and nested literals such as `{'a': 1}`.
-fn expression_end(expression: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, character) in expression.char_indices() {
-        if let Some(open) = quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == open {
-                quote = None;
-            }
-            continue;
-        }
-        match character {
-            '\'' | '"' => quote = Some(character),
-            '{' => depth += 1,
-            '}' if depth == 0 => return Some(index),
-            '}' => depth -= 1,
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
