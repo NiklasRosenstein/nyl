@@ -1,0 +1,79 @@
+---
+title: 'vendor'
+---
+
+Manage the project-wide snapshot of remote inputs consumed by Nyl rendering.
+The commands require a `[vendor]` section in `nyl.toml`. `nyl init --vendor
+<MODE>` writes that section for a new project.
+
+## `nyl vendor`
+
+Discover remote inputs through the authoritative DeploymentTarget rendering
+pipeline and materialize them into the configured directory:
+
+```bash
+nyl vendor
+nyl vendor --target staging --target production
+nyl vendor --refresh
+```
+
+With no `--target`, sync replaces the lock with the artifacts required by all
+configured targets. A targeted sync updates the selected targets while
+preserving other lock entries. Normal sync prefers an existing valid vendor
+entry, then the exact source cache, then its remote origin. `--refresh` skips
+the existing vendor entry and source cache and retrieves upstream again.
+
+Progress options match the tree commands: `--progress bar`, `plain`, or `off`.
+
+## `nyl vendor --check`
+
+Verify that the snapshot completely covers the selected targets:
+
+```bash
+nyl vendor --check
+nyl vendor --check --target production
+```
+
+The check is network-free, with one exception: targets with `fromPublication`
+Release inputs refresh their publication branch when they can and otherwise use
+the cached head, so the check covers the state the next render reads. Without
+either, those inputs are unbound and fall back to their defaults. Publication
+state is never written to the snapshot. The check validates artifact digests and sizes, detects Git
+LFS pointer files that have not been materialized, and checks the generated
+`.gitattributes` file. An untargeted check also reports lock entries that are
+not referenced by any configured target; a targeted check leaves entries for
+other targets alone.
+
+When artifact or schema files are not referenced by the vendor lock or schema
+indexes, the check prints their count and suggests `nyl vendor --prune`.
+These unused files do not make the check fail and are left untouched.
+
+## `nyl vendor --prune`
+
+Delete artifact files that are not referenced by `vendor/lock.yaml`:
+
+```bash
+nyl vendor --prune
+```
+
+Prune first synchronizes every configured target, then removes artifacts that
+are absent from the resulting lock. It cannot be combined with `--target` or
+`--check`; `--refresh` may be used to retrieve every input again before pruning.
+
+See [Remote artifact vendoring](/nyl/reference/configuration/#remote-artifact-vendoring)
+for the modes and [Vendored remote inputs](/nyl/rendered-gitops/workflow/render/#vendored-remote-inputs)
+for resolution and Git LFS behavior.
+
+## Validation schemas
+
+Set `validation.kubeconform.builtin_schemas` to `"vendor-used"` to materialize
+required builtin schemas, or `"vendor-all"` to materialize complete schema
+directories for every selected workload and catalog Kubernetes version. Both
+modes require vendored builtin schemas during validation. The default `"cached"`
+mode permits validation to download builtin schemas into a disposable cache.
+
+Complete directory inventories and schema digests let `--check` verify
+`"vendor-all"` coverage without network access. `--refresh` retrieves inventories
+and schemas again. Cluster captures are read-only inputs
+whose referenced blobs survive pruning. See
+[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for the offline workflow.

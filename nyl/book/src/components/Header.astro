@@ -1,0 +1,112 @@
+---
+// Starlight's header with the documentation sections as tabs between the
+// site title and the search box. Below the desktop breakpoint the tabs move
+// into the menu, which shows the sections above each section's sidebar.
+import LanguageSelect from '@astrojs/starlight/components/LanguageSelect.astro';
+import Search from '@astrojs/starlight/components/Search.astro';
+import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
+import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
+import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+
+const { topics } = Astro.locals.starlightSidebarTopics;
+---
+
+<div class="header">
+  <div class="title-wrapper sl-flex">
+    <SiteTitle />
+  </div>
+  <div class="middle sl-flex print:hidden">
+    <nav class="sections" aria-label="Documentation sections">
+      {
+        topics.map((topic) => (
+          <a href={topic.link} aria-current={topic.isCurrent ? 'page' : undefined}>
+            {topic.label}
+          </a>
+        ))
+      }
+    </nav>
+    <Search />
+  </div>
+  <div class="sl-hidden md:sl-flex print:hidden right-group">
+    <div class="sl-flex social-icons">
+      <SocialIcons />
+    </div>
+    <ThemeSelect />
+    <LanguageSelect />
+  </div>
+</div>
+
+<style>
+  .header {
+    display: flex;
+    gap: var(--sl-nav-gap);
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+
+  .title-wrapper {
+    overflow: clip;
+    padding: 0.25rem;
+    margin: -0.25rem;
+    min-width: 0;
+  }
+
+  .middle {
+    align-items: center;
+    gap: 1.5rem;
+  }
+
+  .sections {
+    display: none;
+    gap: 1.25rem;
+  }
+
+  .sections a {
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    padding-block: 0.25rem;
+    border-bottom: 2px solid transparent;
+  }
+
+  .sections a:hover {
+    color: var(--sl-color-white);
+  }
+
+  .sections a[aria-current='page'] {
+    color: var(--sl-color-white);
+    border-bottom-color: var(--sl-color-accent);
+  }
+
+  .right-group,
+  .social-icons {
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .social-icons::after {
+    content: '';
+    height: 2rem;
+    border-inline-end: 1px solid var(--sl-color-gray-5);
+  }
+
+  @media (min-width: 50rem) {
+    .sections {
+      display: flex;
+    }
+
+    .header {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-content: center;
+    }
+
+    .middle {
+      justify-content: space-between;
+      padding-inline-start: 2rem;
+    }
+  }
+</style>

@@ -2,6 +2,8 @@
 
 Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based components, remote manifest support, cluster-aware rendering, and rendered GitOps output.
 
+Everything Nyl does is declared in Git, and every command takes the same path over those declarations: a render on a laptop while bootstrapping a cluster is the render CI publishes for Argo CD.
+
 ## Highlights
 
 - Component-oriented workflow (Helm chart-backed resources)
@@ -88,7 +90,7 @@ render:
 
 - Full docs: https://niklasrosenstein.github.io/nyl/
 - CLI and development details: [nyl/README.md](nyl/README.md)
-- Components guide: [nyl/book/src/content/docs/components/overview.md](nyl/book/src/content/docs/components/overview.md)
+- Components guide: [nyl/book/src/content/docs/rendering/components/overview.md](nyl/book/src/content/docs/rendering/components/overview.md)
 
 ## License
 

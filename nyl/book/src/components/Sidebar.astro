@@ -1,0 +1,19 @@
+---
+// The section's sidebar. On narrow screens, where the header has no room for
+// the section tabs, the sections are listed above it in the menu.
+import Default from '@astrojs/starlight/components/Sidebar.astro';
+import Topics from 'starlight-sidebar-topics/components/Sidebar.astro';
+---
+
+<div class="sections">
+  <Topics />
+</div>
+<Default><slot /></Default>
+
+<style>
+  @media (min-width: 50rem) {
+    .sections {
+      display: none;
+    }
+  }
+</style>

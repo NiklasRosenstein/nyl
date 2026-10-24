@@ -183,7 +183,7 @@ Each binding sets exactly one of these fields:
 `fromFile`:
 
 - The path follows the local path rule of the
-  [configuration](../nyl/book/src/content/docs/configuration.md#local-paths):
+  [configuration](../nyl/book/src/content/docs/reference/configuration.md#local-paths):
   relative to the directory containing `nyl.toml`, with leading `..` segments
   allowed, or from the Git worktree root with a leading `/`. Paths that leave
   the worktree or traverse a symbolic link are rejected.

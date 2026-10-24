@@ -1,0 +1,146 @@
+---
+title: 'Project Structure and Discovery'
+---
+
+Rendered GitOps resources are discovered project-wide: in the directory
+containing `nyl.toml` and beneath it. Tracked files and non-ignored untracked
+YAML files are eligible, so directory names are conventions rather than
+mandatory lookup paths. Release files may live anywhere in the Git worktree
+that an ApplicationGroup source names.
+
+## Recommended layout
+
+The smallest useful repository keeps all control resources in one file:
+
+```text
+nyl.toml
+gitops.yaml
+applications/
+components/
+```
+
+Create it with `nyl init`. GitOps resource discovery is independent of
+the file name and directory layout, so the configuration can be split as it
+grows. A conventional split layout is:
+
+```text
+nyl.toml
+config/
+  repositories/
+    deploy.yaml
+    workloads.yaml
+  clusters/
+    primary.yaml
+  argocd-instances/
+    central.yaml
+  targets/
+    production.yaml
+  projects/
+    workloads.yaml
+  application-groups/
+    workloads.yaml
+applications/
+  app1.yaml
+  workloads/
+    app2.yaml
+components/
+```
+
+## Keeping `nyl.toml` beside the configuration
+
+`nyl.toml` may also live in a `nyl/` directory at the worktree root, next to
+the control resources. Nyl finds `nyl/nyl.toml` from anywhere in the worktree,
+and the Releases can stay inside that directory or sit beside it:
+
+```text
+nyl/                          nyl/
+  nyl.toml                      nyl.toml
+  gitops.yaml                   gitops.yaml    # group source: ../applications/web
+  applications/                applications/
+    web/                         web/
+```
+
+On the left, the group derives `applications/web` beneath `nyl/` as usual. On
+the right, the group names its source as `../applications/web`: the `..`
+leaves `nyl/` on purpose, because sources may name any directory of the
+worktree. With `nyl.toml` in `nyl/`, `/applications/web` from the worktree root
+selects the same directory; the two forms differ as soon as `nyl.toml` lives
+elsewhere (see [local paths](/nyl/reference/configuration/#local-paths)). Control
+resources must stay beneath `nyl/`, because discovery covers only the
+`nyl.toml` directory. When moving an existing project there, list its earlier
+location in `[project] previous_paths` so comparisons with older revisions
+still find it.
+
+Set `project.gitops_scaffold_path` in `nyl.toml` when generated control
+resources should live somewhere other than `config/`. This setting changes only
+scaffold destinations; it does not restrict discovery.
+
+Create additional resources individually with:
+
+```bash
+nyl create repository deploy --repo-url https://git.example.com/platform/deploy.git
+nyl create cluster primary --context admin@primary
+nyl create argocd-instance central
+nyl create target production
+nyl create app-project workloads
+nyl create application-group workloads
+```
+
+## Application source paths
+
+A centrally stored
+[`ApplicationGroup`](/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/) with
+no explicit source derives `applications/<group-name>` beneath the directory
+containing `nyl.toml`. An explicit `spec.source.path` can select any other
+directory of the worktree under the [local path rule](/nyl/reference/configuration/#local-paths):
+relative to the `nyl.toml` directory, with leading `..` allowed, or from the
+worktree root with a leading `/`.
+
+An ApplicationGroup can instead be colocated with its source:
+
+```bash
+nyl create application-group workloads \
+  --source applications/workloads \
+  --colocate
+```
+
+This writes `applications/workloads/_application-group.yaml`. The group derives
+its source directory from that location, so the file does not need to repeat
+the path.
+
+## Remote sources
+
+An ApplicationGroup can select releases from another Git repository. A remote
+source records both a human-readable mutable `revision` and an authoritative
+full `commit` lock. Update locks with:
+
+```bash
+nyl update source-locks workloads
+nyl update source-locks --check
+```
+
+Central renderer mode applies the platform project's `nyl.toml` and component
+configuration to the remote source. Remote renderer mode loads configuration
+from `spec.source.rendererConfig.projectPath` in the remote repository. See the
+[ApplicationGroup reference](/nyl/rendered-gitops/resource-guides/application-group/#source-selection)
+for the complete source contract and the
+[security guide](/nyl/rendered-gitops/security/#remote-source-isolation)
+for its trust boundary.
+
+## Discovery constraints
+
+The `apiVersion`, `kind`, and `metadata.name` of every GitOps resource are a
+static discovery envelope. `ApplicationGroup.spec` and
+`AppProjectDefinition.spec` may use target-dependent structural templating, but
+the envelope cannot. A source-lock update also requires the ApplicationGroup's
+source coordinates and lock to remain statically parseable.
+
+Use `nyl validate` to detect duplicate identities, invalid references,
+overlapping publication paths, unsafe paths, and unsupported templating before
+rendering.
+
+## Next steps
+
+- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
+- [Render and validate](/nyl/rendered-gitops/workflow/render/)
+- [Rendered GitOps resource reference](/nyl/rendered-gitops/resources/)

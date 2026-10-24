@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
-import { resources, resourceGroups, resourceSidebar, resourceUsage, summary } from '../src/lib/resources.mjs';
+import { resources, resourceGroups, resourceSections, resourceSidebar, resourceUsage, summary } from '../src/lib/resources.mjs';
 import { fieldAnchor, resourceMarkdown, schemaReference } from '../src/lib/schema-reference.mjs';
 
 import { createResourceMarkdownProcessor } from '../src/lib/resource-markdown.mjs';
@@ -73,9 +73,18 @@ test('mutually exclusive fields read as labelled variants rather than a blanket 
 test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.equal(resourceGroups().flatMap((group) => group.resources).length, resources.length);
   assert.equal(new Set(resources.map((resource) => resource.route)).size, resources.length);
-  assert.deepEqual(resourceSidebar().map(({ label }) => label), resourceGroups().map(({ apiVersion }) => apiVersion));
-  const links = resourceSidebar().flatMap((group) => group.items.map((item) => item.link));
-  assert.deepEqual(links, resources.map((resource) => resource.route));
+  const sidebar = resourceSidebar();
+  assert.deepEqual(sidebar.map(({ label }) => label), resourceSections.map(({ label }) => label));
+  for (const [index, group] of sidebar.entries()) {
+    assert.equal(group.items[0].link, resourceSections[index].route, `${group.label} opens with its overview`);
+    const included = resourceSections[index].include ?? [];
+    const names = group.items.slice(1).map(({ label }) => label);
+    assert.deepEqual(names.slice(0, included.length), included, `${group.label} lists its included resources first`);
+    const rest = names.slice(included.length);
+    assert.deepEqual(rest, [...rest].sort((a, b) => a.localeCompare(b)), `${group.label} lists the rest by name`);
+  }
+  const links = sidebar.flatMap((group) => group.items.slice(1).map(({ link }) => link));
+  assert.deepEqual(links.sort(), resources.map((resource) => resource.route).sort(), 'every resource is listed once');
 });
 
 test('field references retain nested descriptions, sibling annotations, alternatives, and map values', async () => {

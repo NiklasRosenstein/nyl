@@ -1,0 +1,7 @@
+---
+import ResourceSection from '../../../components/ResourceSection.astro';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+<ResourceSection section="rendered-gitops" description="Configuration resources of the rendered manifest pattern. They are compiler inputs that render-tree reads, not objects installed in a cluster.">
+  <p>The <a href={`${base}/rendered-gitops/resources/`}>resources guide</a> explains their shared envelope, discovery, and validation.</p>
+</ResourceSection>
