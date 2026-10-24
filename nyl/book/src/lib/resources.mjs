@@ -42,9 +42,22 @@ export const resourceSections = [
     label: 'Rendered GitOps Resources',
     route: '/reference/resources/rendered-gitops/',
     apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
-    exclude: ['Release'],
+    exclude: ['Release', 'Environment', 'EnvironmentGroup'],
+  },
+  {
+    id: 'orchestration',
+    label: 'Orchestration Resources',
+    route: '/reference/resources/orchestration/',
+    apiVersions: [],
+    include: ['Environment', 'EnvironmentGroup'],
   },
 ];
+/** Each resource's usage guide: its section's guide directory, unless it lives elsewhere. */
+const guideDirectories = { kubernetes: 'kubernetes', 'rendered-gitops': 'rendered-gitops', orchestration: 'orchestration' };
+const guideOverrides = { Release: 'rendered-gitops' };
+export function guideRoute(resource) {
+  return `/${guideOverrides[resource.name] ?? guideDirectories[sectionOf(resource).id]}/resource-guides/${resource.slug}/`;
+}
 function inSection(section, resource) {
   if (section.include?.includes(resource.name)) return true;
   return section.apiVersions.includes(resource.apiVersion) && !section.exclude?.includes(resource.name);

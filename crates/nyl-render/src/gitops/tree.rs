@@ -15,9 +15,9 @@ use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
-    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
-    GitOpsResource, GitOpsResourceKind, GitPublication, InlineGitRepository, LocalReference,
-    ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
+    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DenyUnknownFields,
+    DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, GitSource, InlineGitRepository,
+    LocalReference, ManagedResourceDeletionPolicy, RendererConfig, RendererConfigMode, SharedNamespaceOwner,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -663,7 +663,11 @@ async fn compile_target_tree_inner(
                 .await?;
             if let (Some(repository), Some(revision)) = (
                 &source.repository,
-                group.spec.source.as_ref().and_then(|source| source.commit.as_deref()),
+                group
+                    .spec
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.git.commit.as_deref()),
             ) {
                 for provenance in rendered.manifest_provenance.values_mut() {
                     provenance.remote(&repository.repo_url, revision);
@@ -2526,6 +2530,8 @@ pub(super) fn render_effective_control(
             (GitOpsResourceKind::AppProjectDefinition, &resource.metadata.name)
         }
         GitOpsResource::ApplicationGroup(resource) => (GitOpsResourceKind::ApplicationGroup, &resource.metadata.name),
+        GitOpsResource::Environment(resource) => (GitOpsResourceKind::Environment, &resource.metadata.name),
+        GitOpsResource::EnvironmentGroup(resource) => (GitOpsResourceKind::EnvironmentGroup, &resource.metadata.name),
     };
     if effective_identity.0 != discovered.identity.kind || effective_identity.1 != &discovered.identity.name {
         return Err(NylError::config(format!(
@@ -2618,8 +2624,13 @@ fn resolve_remote_group_source(
     if let Some(repository_path) = repository_path {
         provenance_inputs.push(repository_path);
     }
-    let commit = source.commit.as_deref().expect("validated remote source has commit");
+    let commit = source
+        .git
+        .commit
+        .as_deref()
+        .expect("validated remote source has commit");
     let revision = source
+        .git
         .revision
         .as_deref()
         .expect("validated remote source has revision");
@@ -2701,7 +2712,7 @@ pub(super) fn local_group_source(
     let (root, source) = match &group.spec.source {
         Some(source) if source.is_remote() => return Ok(None),
         Some(source) => (
-            local_group_source_root(inventory, &group.metadata.name, &source.path)?,
+            local_group_source_root(inventory, &group.metadata.name, source.git.path())?,
             source.clone(),
         ),
         None => (
@@ -2896,7 +2907,7 @@ fn resolve_source_repository(
     inventory: &GitOpsInventory,
     source: &ApplicationGroupSource,
 ) -> Result<(InlineGitRepository, Option<PathBuf>)> {
-    inventory.resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())
+    inventory.resolve_git_repository(source.git.repository_ref.as_ref(), source.git.repository.as_ref())
 }
 
 fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
@@ -2920,15 +2931,15 @@ fn collect_checkout_yaml(root: &Path) -> Result<Vec<PathBuf>> {
 /// beneath its derived root.
 pub(super) fn default_group_source() -> ApplicationGroupSource {
     ApplicationGroupSource {
-        repository_ref: None,
-        repository: None,
-        revision: None,
-        commit: None,
-        path: String::new(),
+        git: GitSource {
+            path: Some(String::new()),
+            ..GitSource::default()
+        },
         include: vec!["*.yaml".to_string(), "*.yml".to_string()],
         exclude: Vec::new(),
         recursive: true,
         renderer_config: RendererConfig::default(),
+        unknown_fields: DenyUnknownFields,
     }
 }
 

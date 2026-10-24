@@ -1,6 +1,7 @@
 # Walkthrough "Competing runners" in design/orchestration-core.md.
 contract: design/orchestration-core.md#walkthroughs
 milestone: M3
+tiers: [1]                            # scripts fakes, faults, or pauses
 project: ../_project
 steps:
   - nyl: [state, init, -e, dev]

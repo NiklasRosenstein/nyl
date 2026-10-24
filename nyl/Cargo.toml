@@ -21,9 +21,22 @@ path = "src/main.rs"
 name = "nyl"
 path = "src/lib.rs"
 
+[features]
+# Reads the current time from NYL_TEST_NOW and turns waits into clock advances,
+# for end-to-end tests of the binary. Release builds never enable it.
+test-clock = []
+# Registers the fake kinds that stand in for built-in kinds a milestone lacks.
+test-kinds = ["nyl-drivers/test-kinds"]
+# Scenario tests through the real binary with the real tools; a missing tool fails them.
+tier2 = []
+
 [dependencies]
 nyl-core = { workspace = true }
 nyl-render = { workspace = true }
+nyl-git = { workspace = true }
+nyl-state = { workspace = true }
+nyl-orchestration = { workspace = true }
+nyl-drivers = { workspace = true }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -31,6 +44,7 @@ clap = { workspace = true }
 colored = { workspace = true }
 dialoguer = { workspace = true }
 futures = { workspace = true }
+getrandom = { workspace = true }
 git2 = { workspace = true }
 hex = { workspace = true }
 k8s-openapi = { workspace = true }
@@ -49,6 +63,7 @@ tracing-subscriber = { workspace = true }
 unicode-width = { workspace = true }
 
 [dev-dependencies]
+nyl-orchestration = { workspace = true, features = ["testing"] }
 assert_cmd = { workspace = true }
 # Paused virtual time for deterministic latency-injected apply tests.
 tokio = { workspace = true, features = ["test-util"] }

@@ -111,6 +111,18 @@ export default defineConfig({
             ],
           },
           {
+            id: "orchestration",
+            label: "Orchestration",
+            link: "/orchestration/",
+            icon: "setting",
+            badge: { text: "M3", variant: "caution" },
+            items: [
+              "orchestration",
+              "orchestration/environments-and-state",
+              { label: "Resource guides", collapsed: true, items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
+            ],
+          },
+          {
             id: "reference",
             label: "Reference",
             link: "/reference/cli/",
@@ -134,6 +146,7 @@ export default defineConfig({
                   "reference/cli/diff-tree",
                   "reference/cli/publish-tree",
                   "reference/cli/comment",
+                  "reference/cli/state",
                 ],
               },
               {

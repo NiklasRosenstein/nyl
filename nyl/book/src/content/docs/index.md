@@ -17,4 +17,5 @@ Begin with [Getting Started](/nyl/start/getting-started/) to create a project, v
 
 - **[Kubernetes](/nyl/kubernetes/pipeline/)**: render, validate, and apply manifests.
 - **[Rendered GitOps](/nyl/rendered-gitops/)**: publish rendered manifests to Git for a reconciler to sync.
+- **[Orchestration](/nyl/orchestration/)**: environments whose state lives in Git, in development.
 - **[Reference](/nyl/reference/cli/)**: every command, YAML resource, and `nyl.toml` setting.

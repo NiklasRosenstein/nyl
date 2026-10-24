@@ -4,7 +4,7 @@
 import { resources } from '../lib/resources.mjs';
 
 interface Props {
-  section: 'kubernetes' | 'rendered-gitops';
+  section: 'kubernetes' | 'rendered-gitops' | 'orchestration';
 }
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
@@ -61,6 +61,18 @@ const renderingEdges: Edge[] = [
   ...rows.map((y, index): Edge => ({ from: [460, y], to: [598, y], label: outputs[index], at: [529, y - 8] })),
 ];
 
+// Orchestration: environments, their shared defaults, and where state lives.
+const orchestration: Node[] = [
+  { label: 'EnvironmentGroup', x: 40, y: 30, link: true },
+  { label: 'Environment', x: 40, y: 170, link: true },
+  { label: 'GitRepository', x: 400, y: 100, link: true },
+];
+const orchestrationEdges: Edge[] = [
+  { from: [130, 74], to: [130, 168], label: 'selects by labels', at: [138, 125], anchor: 'start' },
+  { from: [220, 52], to: [398, 114], label: 'default state repository', at: [300, 70], anchor: 'start' },
+  { from: [220, 192], to: [398, 130], label: 'state.repositoryRef', at: [300, 182], anchor: 'start' },
+];
+
 const diagrams = [
   {
     id: 'rendered-gitops',
@@ -77,6 +89,14 @@ const diagrams = [
     viewBox: '0 0 790 320',
     claim:
       'A Release, or any file passed to nyl render, contains Components, HelmCharts, RemoteManifests, and plain Kubernetes resources; rendering turns each into plain Kubernetes manifests.',
+  },
+  {
+    id: 'orchestration',
+    nodes: orchestration,
+    edges: orchestrationEdges,
+    viewBox: '0 0 620 240',
+    claim:
+      'An EnvironmentGroup gives the Environments it selects shared defaults, including the repository their state lives in; an Environment may name its own.',
   },
 ];
 const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);

@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "Operation": {
+      "description": "The operations that write state, as the `Nyl-Operation` trailer names them.",
+      "enum": [
+        "reconcile",
+        "promote",
+        "teardown",
+        "hold",
+        "resume",
+        "recover",
+        "verify",
+        "attest",
+        "exec",
+        "ci-admit",
+        "state-init",
+        "state-move",
+        "state-delete",
+        "state-forget",
+        "state-restore"
+      ],
+      "type": "string"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "RunKind": {
+      "const": "Run"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A run ref's record, updated per phase together with the lease.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/StateV1"
+    },
+    "deadline": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "finished": {
+      "description": "Set when the run stopped without its transition commit, so the run\nref no longer counts as a held lease.",
+      "type": "boolean"
+    },
+    "kind": {
+      "$ref": "#/$defs/RunKind"
+    },
+    "operation": {
+      "$ref": "#/$defs/Operation"
+    },
+    "readDesired": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "readObserved": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "run": {
+      "$ref": "#/$defs/RunId"
+    },
+    "runner": {
+      "type": "string"
+    },
+    "sourceCommit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "units": {
+      "items": {
+        "$ref": "#/$defs/UnitName"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "run",
+    "runner",
+    "operation",
+    "deadline"
+  ],
+  "title": "Run",
+  "type": "object"
+}

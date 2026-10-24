@@ -8,7 +8,7 @@ import { resourceGroups, resourceSections, summary } from '../lib/resources.mjs'
 import { schemaFor } from '../lib/schema-documents';
 
 interface Props {
-  section: 'kubernetes' | 'rendered-gitops';
+  section: 'kubernetes' | 'rendered-gitops' | 'orchestration';
   description: string;
 }
 const { section: id, description } = Astro.props;

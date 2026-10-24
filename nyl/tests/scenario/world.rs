@@ -1,0 +1,226 @@
+//! The test world of `design/reference-scenarios.md#test-world`: one
+//! per-test temporary directory holding a bare `project.git`, a working
+//! clone, and the scenario's own temporary directory.
+//!
+//! Pull requests are branches, merges are squash commits, and a CI job is one
+//! invocation in a fresh clone at a commit, so orchestration only ever sees
+//! commits, refs, and commands. Git runs as the `git` command line with its
+//! identity passed per invocation, never through the process environment.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use tempfile::TempDir;
+
+use super::format::{BranchStep, CommitStep, SquashMergeStep};
+
+/// The registry host tier 1 substitutes for `%REGISTRY%`; nothing listens there.
+pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
+
+pub struct World {
+    root: TempDir,
+}
+
+impl World {
+    /// Create the world and commit `project` as the first commit of `main`.
+    pub fn new(project: &Path) -> Self {
+        let world = Self {
+            root: TempDir::new().expect("temporary directory"),
+        };
+        std::fs::create_dir_all(world.scenario_tmp()).unwrap();
+        git(
+            world.root.path(),
+            &["init", "--quiet", "--bare", "--initial-branch=main", "project.git"],
+        );
+        git(
+            world.root.path(),
+            &["clone", "--quiet", world.project_url().as_str(), "work"],
+        );
+        world.copy_into_work(project);
+        world.commit_and_push("main", "Initial project");
+        world
+    }
+
+    /// The scenario's own temporary directory, `%SCENARIO_TMP%`.
+    pub fn scenario_tmp(&self) -> PathBuf {
+        self.root.path().join("scenario-tmp")
+    }
+
+    /// The URL of `project.git`, `%PROJECT_URL%`.
+    pub fn project_url(&self) -> String {
+        format!("file://{}", self.root.path().join("project.git").display())
+    }
+
+    pub fn bare(&self) -> PathBuf {
+        self.root.path().join("project.git")
+    }
+
+    fn work(&self) -> PathBuf {
+        self.root.path().join("work")
+    }
+
+    /// Copy `source` over the working clone, substituting the placeholders in
+    /// text files.
+    fn copy_into_work(&self, source: &Path) {
+        for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
+            let entry = entry.unwrap();
+            let relative = entry.path().strip_prefix(source).unwrap();
+            let target = self.work().join(relative);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&target).unwrap();
+                continue;
+            }
+            let bytes = std::fs::read(entry.path()).unwrap();
+            let bytes = match String::from_utf8(bytes) {
+                Ok(text) => self.substitute(&text).into_bytes(),
+                Err(error) => error.into_bytes(),
+            };
+            std::fs::write(&target, bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(entry.path()).unwrap().permissions().mode();
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
+    }
+
+    fn substitute(&self, text: &str) -> String {
+        text.replace("%SCENARIO_TMP%", &self.scenario_tmp().display().to_string())
+            .replace("%PROJECT_URL%", &self.project_url())
+            .replace("%REGISTRY%", FAKE_REGISTRY)
+    }
+
+    fn commit_and_push(&self, branch: &str, message: &str) {
+        git(&self.work(), &["add", "--all"]);
+        git(
+            &self.work(),
+            &["commit", "--quiet", "--allow-empty", "--message", message],
+        );
+        git(
+            &self.work(),
+            &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")],
+        );
+    }
+
+    fn checkout(&self, branch: &str) {
+        git(&self.work(), &["fetch", "--quiet", "origin"]);
+        git(
+            &self.work(),
+            &["checkout", "--quiet", "-B", branch, &format!("origin/{branch}")],
+        );
+    }
+
+    /// A `commit` step: copy files over the clone, remove paths, commit, push.
+    pub fn commit(&self, step: &CommitStep, scenario_dir: &Path) {
+        self.checkout(&step.branch);
+        if let Some(apply) = &step.apply {
+            self.copy_into_work(&scenario_dir.join(apply));
+        }
+        for path in &step.delete {
+            let target = self.work().join(path);
+            if target.is_dir() {
+                std::fs::remove_dir_all(&target).unwrap();
+            } else {
+                std::fs::remove_file(&target)
+                    .unwrap_or_else(|error| panic!("commit delete {}: {error}", target.display()));
+            }
+        }
+        self.commit_and_push(&step.branch, &step.message);
+    }
+
+    /// A `branch` step.
+    pub fn branch(&self, step: &BranchStep) {
+        git(
+            &self.bare(),
+            &["branch", &step.name, &format!("refs/heads/{}", step.from)],
+        );
+    }
+
+    /// A `squash-merge` step, keeping the branch.
+    pub fn squash_merge(&self, step: &SquashMergeStep) {
+        self.checkout(&step.into);
+        git(
+            &self.work(),
+            &["merge", "--quiet", "--squash", &format!("origin/{}", step.branch)],
+        );
+        self.commit_and_push(&step.into, &format!("Squash-merge {}", step.branch));
+    }
+
+    /// A `delete-branch` step.
+    pub fn delete_branch(&self, name: &str) {
+        git(&self.bare(), &["branch", "--quiet", "--delete", "--force", name]);
+    }
+
+    /// A `ref: {delete}` step: delete any ref in the state repository.
+    pub fn delete_ref(&self, reference: &str) {
+        git(&self.bare(), &["update-ref", "-d", reference]);
+    }
+
+    /// A fresh clone at the tip of `branch`, as one CI job checks out.
+    pub fn fresh_clone(&self, branch: &str) -> PathBuf {
+        let jobs = self.root.path().join("jobs");
+        std::fs::create_dir_all(&jobs).unwrap();
+        let count = std::fs::read_dir(&jobs).unwrap().count();
+        let path = jobs.join(format!("job-{count}"));
+        git(
+            &jobs,
+            &[
+                "clone",
+                "--quiet",
+                "--branch",
+                branch,
+                self.project_url().as_str(),
+                path.to_str().unwrap(),
+            ],
+        );
+        path
+    }
+
+    /// The commit a revision of `project.git` names, such as `main~1`.
+    pub fn rev_parse(&self, revision: &str) -> String {
+        git_output(&self.bare(), &["rev-parse", revision])
+    }
+
+    /// The files of a branch in `project.git`.
+    pub fn files(&self, branch: &str) -> Vec<String> {
+        git_output(
+            &self.bare(),
+            &["ls-tree", "-r", "--name-only", &format!("refs/heads/{branch}")],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect()
+    }
+}
+
+fn git_command(directory: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(directory)
+        .args(["-c", "user.name=Scenario", "-c", "user.email=scenario@example.invalid"])
+        .args(["-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+        .args(args);
+    command
+}
+
+pub fn git(directory: &Path, args: &[&str]) {
+    let output = git_command(directory, args).output().expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        directory.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+pub fn git_output(directory: &Path, args: &[&str]) -> String {
+    let output = git_command(directory, args).output().expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        directory.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}

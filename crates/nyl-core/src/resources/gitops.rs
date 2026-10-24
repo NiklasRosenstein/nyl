@@ -11,6 +11,8 @@ use clap::ValueEnum;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
+use super::git_source::GitSource;
+use super::strict::DenyUnknownFields;
 use crate::constants::{API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
 
@@ -613,23 +615,11 @@ pub struct AppProjectResourcePattern {
 
 /// A local source when no repository is given, otherwise an immutable remote source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 #[schemars(transform = super::schema::source_constraints)]
 pub struct ApplicationGroupSource {
-    /// GitRepository name for a remote source. Mutually exclusive with inline `repository`; requires `revision` and `commit`.
-    #[serde(rename = "repositoryRef", skip_serializing_if = "Option::is_none")]
-    pub repository_ref: Option<LocalReference>,
-    /// Inline remote Git coordinates. Mutually exclusive with `repositoryRef`; requires `revision` and `commit`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository: Option<InlineGitRepository>,
-    /// Human-readable remote Git revision refreshed by `nyl update source-locks`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    /// Full 40-character lowercase commit ID that rendering reads, refreshed by `nyl update source-locks`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    /// Source directory. A local path is relative to the directory containing `nyl.toml`, may begin with `..` segments, and starts with `/` to name a path from the Git worktree root; it must stay inside the worktree. A remote path is relative to the checkout root, with an optional leading `/`.
-    pub path: String,
+    /// Where the Releases are read from. A remote source requires `revision` and its `commit` lock; a local one admits neither.
+    #[serde(flatten)]
+    pub git: GitSource,
     /// Relative candidate file globs. Only entries with a literal Release are rendered; attach other files using Release `spec.include`.
     #[serde(default = "default_source_include")]
     pub include: Vec<String>,
@@ -642,6 +632,9 @@ pub struct ApplicationGroupSource {
     /// Whether remote rendering uses central configuration or the remote project. Remote sessions cannot access secrets or the process environment.
     #[serde(rename = "rendererConfig", default)]
     pub renderer_config: RendererConfig,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown_fields: DenyUnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -819,13 +812,17 @@ pub enum GitOpsResourceKind {
     AppProjectDefinition,
     #[value(name = "ApplicationGroup", alias = "application-group", alias = "group")]
     ApplicationGroup,
+    #[value(name = "Environment", alias = "environment")]
+    Environment,
+    #[value(name = "EnvironmentGroup", alias = "environment-group")]
+    EnvironmentGroup,
 }
 
 impl GitOpsResourceKind {
     /// API version of this control resource.
     pub const fn api_version(self) -> &'static str {
         match self {
-            Self::GitRepository => API_VERSION_GITOPS,
+            Self::GitRepository | Self::Environment | Self::EnvironmentGroup => API_VERSION_GITOPS,
             _ => API_VERSION_K8S_GITOPS,
         }
     }
@@ -838,6 +835,8 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget => KIND_DEPLOYMENT_TARGET,
             Self::AppProjectDefinition => KIND_APP_PROJECT_DEFINITION,
             Self::ApplicationGroup => KIND_APPLICATION_GROUP,
+            Self::Environment => super::environment::KIND_ENVIRONMENT,
+            Self::EnvironmentGroup => super::environment::KIND_ENVIRONMENT_GROUP,
         }
     }
 
@@ -849,6 +848,8 @@ impl GitOpsResourceKind {
             KIND_DEPLOYMENT_TARGET => Some(Self::DeploymentTarget),
             KIND_APP_PROJECT_DEFINITION => Some(Self::AppProjectDefinition),
             KIND_APPLICATION_GROUP => Some(Self::ApplicationGroup),
+            super::environment::KIND_ENVIRONMENT => Some(Self::Environment),
+            super::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
             _ => None,
         }
     }
@@ -861,10 +862,12 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget => "deployment-target.schema.json",
             Self::AppProjectDefinition => "app-project-definition.schema.json",
             Self::ApplicationGroup => "application-group.schema.json",
+            Self::Environment => "environment.schema.json",
+            Self::EnvironmentGroup => "environment-group.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 8] {
         [
             Self::GitRepository,
             Self::Cluster,
@@ -872,6 +875,8 @@ impl GitOpsResourceKind {
             Self::DeploymentTarget,
             Self::AppProjectDefinition,
             Self::ApplicationGroup,
+            Self::Environment,
+            Self::EnvironmentGroup,
         ]
     }
 }
@@ -889,6 +894,8 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
+        GitOpsResourceKind::Environment => serde_json::to_value(schema_for!(super::environment::Environment)),
+        GitOpsResourceKind::EnvironmentGroup => serde_json::to_value(schema_for!(super::environment::EnvironmentGroup)),
     }
     .expect("schema serialization should never fail");
     tighten_resource_envelope(schema, kind)
@@ -929,6 +936,8 @@ pub enum GitOpsResource {
     DeploymentTarget(DeploymentTarget),
     AppProjectDefinition(AppProjectDefinition),
     ApplicationGroup(Box<ApplicationGroup>),
+    Environment(Box<super::environment::Environment>),
+    EnvironmentGroup(super::environment::EnvironmentGroup),
 }
 
 /// True when the manifest advertises the GitOps API and one of its known kinds.
@@ -994,6 +1003,12 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
         GitOpsResourceKind::ApplicationGroup => {
             GitOpsResource::ApplicationGroup(Box::new(parse_as(value, KIND_APPLICATION_GROUP)?))
         }
+        GitOpsResourceKind::Environment => {
+            GitOpsResource::Environment(Box::new(parse_as(value, super::environment::KIND_ENVIRONMENT)?))
+        }
+        GitOpsResourceKind::EnvironmentGroup => {
+            GitOpsResource::EnvironmentGroup(parse_as(value, super::environment::KIND_ENVIRONMENT_GROUP)?)
+        }
     };
     resource.validate()?;
     Ok(Some(resource))
@@ -1012,6 +1027,8 @@ impl GitOpsResource {
             Self::DeploymentTarget(resource) => resource.validate(),
             Self::AppProjectDefinition(resource) => resource.validate(),
             Self::ApplicationGroup(resource) => resource.validate(),
+            Self::Environment(resource) => resource.validate(),
+            Self::EnvironmentGroup(resource) => resource.validate(),
         }
     }
 }
@@ -1388,47 +1405,17 @@ impl AppProjectTemplate {
 
 impl ApplicationGroupSource {
     pub fn is_remote(&self) -> bool {
-        self.repository_ref.is_some() || self.repository.is_some()
+        self.git.is_remote()
     }
 
     /// The path inside the remote checkout, without the optional leading `/`.
     pub fn checkout_path(&self) -> &str {
-        self.path.strip_prefix('/').unwrap_or(&self.path)
+        self.git.checkout_path()
     }
 
     pub fn validate(&self) -> Result<()> {
         let remote = self.is_remote();
-        if remote {
-            validate_relative_path("spec.source.path", self.checkout_path(), false, false)?;
-        } else {
-            crate::local_path::validate_local_path("spec.source.path", &self.path)?;
-        }
-        match (&self.repository_ref, &self.repository) {
-            (Some(reference), None) => validate_static_required("spec.source.repositoryRef.name", &reference.name)?,
-            (None, Some(repository)) => repository.validate("spec.source.repository")?,
-            (Some(_), Some(_)) => {
-                return Err(CoreError::config(
-                    "spec.source.repositoryRef and spec.source.repository are mutually exclusive",
-                ))
-            }
-            (None, None) => {}
-        }
-        if remote {
-            let revision = self
-                .revision
-                .as_deref()
-                .ok_or_else(|| CoreError::config("spec.source.revision is required for a remote source"))?;
-            validate_static_required("spec.source.revision", revision)?;
-            let commit = self
-                .commit
-                .as_deref()
-                .ok_or_else(|| CoreError::config("spec.source.commit is required for a remote source"))?;
-            validate_immutable_git_commit("spec.source.commit", commit)?;
-        } else if self.revision.is_some() || self.commit.is_some() {
-            return Err(CoreError::config(
-                "spec.source.revision and spec.source.commit require a remote repository",
-            ));
-        }
+        self.git.validate_application_group("spec.source")?;
         for pattern in self.include.iter().chain(&self.exclude) {
             glob::Pattern::new(pattern).map_err(|error| {
                 CoreError::config(format!(
@@ -2292,6 +2279,8 @@ mod tests {
                 "deployment-target.schema.json",
                 "app-project-definition.schema.json",
                 "application-group.schema.json",
+                "environment.schema.json",
+                "environment-group.schema.json",
                 "release.schema.json"
             ]
         );

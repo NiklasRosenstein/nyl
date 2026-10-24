@@ -95,6 +95,8 @@ fn print_resources(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResou
         GitOpsResourceKind::DeploymentTarget => vec!["NAME", "CLUSTER", "PUBLICATION", "PATH-PREFIX", "FILE"],
         GitOpsResourceKind::AppProjectDefinition => vec!["NAME", "MANAGEMENT", "FILE"],
         GitOpsResourceKind::ApplicationGroup => vec!["NAME", "PROJECT", "SOURCE", "FILE"],
+        GitOpsResourceKind::Environment => vec!["NAME", "UNITS", "STATE", "FILE"],
+        GitOpsResourceKind::EnvironmentGroup => vec!["NAME", "SELECTOR", "FILE"],
     };
     let rows = resources
         .iter()
@@ -185,11 +187,48 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
                     .unwrap_or_else(|| name.clone());
                 format!("{generated} (generated)")
             });
-            let source = group.spec.source.as_ref().map_or("-", |source| source.path.as_str());
+            let source = group.spec.source.as_ref().map_or("-", |source| source.git.path());
             vec![name.clone(), project, source.to_owned(), file]
         }
+        Some(GitOpsResource::Environment(environment)) => environment_row(name, environment, file),
+        Some(GitOpsResource::EnvironmentGroup(group)) => vec![
+            name.clone(),
+            selector(&group.spec.environment_selector.match_labels),
+            file,
+        ],
         None => templated_resource_row(kind, name, file),
     }
+}
+
+fn environment_row(name: &str, environment: &crate::resources::environment::Environment, file: String) -> Vec<String> {
+    let state = &environment.spec.state;
+    let repository = state
+        .repository_ref
+        .as_ref()
+        .map(|reference| reference.name.clone())
+        .or_else(|| state.repository.as_ref().map(|repository| repository.repo_url.clone()))
+        .unwrap_or_else(|| "default".to_owned());
+    let desired = state
+        .desired_ref
+        .clone()
+        .unwrap_or_else(|| format!("nyl/{name}/desired"));
+    vec![
+        name.to_owned(),
+        selector(&environment.spec.unit_selector.match_labels),
+        format!("{repository}@{desired}"),
+        file,
+    ]
+}
+
+fn selector(labels: &std::collections::BTreeMap<String, String>) -> String {
+    if labels.is_empty() {
+        return "*".to_owned();
+    }
+    labels
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) -> Vec<String> {
@@ -205,12 +244,15 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
         }
         GitOpsResourceKind::GitRepository
         | GitOpsResourceKind::ArgoCDInstance
-        | GitOpsResourceKind::ApplicationGroup => vec![
+        | GitOpsResourceKind::ApplicationGroup
+        | GitOpsResourceKind::Environment => vec![
             name.to_owned(),
             "<templated>".to_owned(),
             "<templated>".to_owned(),
             file,
         ],
-        GitOpsResourceKind::AppProjectDefinition => vec![name.to_owned(), "<templated>".to_owned(), file],
+        GitOpsResourceKind::AppProjectDefinition | GitOpsResourceKind::EnvironmentGroup => {
+            vec![name.to_owned(), "<templated>".to_owned(), file]
+        }
     }
 }

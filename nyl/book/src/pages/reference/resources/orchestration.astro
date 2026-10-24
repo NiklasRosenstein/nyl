@@ -1,0 +1,7 @@
+---
+import ResourceSection from '../../../components/ResourceSection.astro';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+<ResourceSection section="orchestration" description="Resources that declare environments and where their orchestration state lives. Orchestration is in development.">
+  <p><a href={`${base}/orchestration/environments-and-state/`}>Environments and state</a> explains how state is stored and protected.</p>
+</ResourceSection>

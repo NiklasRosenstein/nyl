@@ -88,8 +88,11 @@ These rules keep it maintainable:
 /
 ├── Cargo.toml         # Workspace: shared version, dependencies, and profiles
 ├── crates/
-│   ├── nyl-core/      # Resource types, schemas, canonical JSON, digests (no effects)
-│   └── nyl-render/    # Kubernetes rendering and rendered GitOps
+│   ├── nyl-core/      # Resource and state types, schemas, digests, orchestration traits (no effects)
+│   ├── nyl-render/    # Kubernetes rendering and rendered GitOps
+│   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
+│   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
+│   └── nyl-drivers/   # Unit kind drivers and the process runner
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
@@ -339,8 +342,9 @@ fn test_operation() -> Result<()> {
 
 ### Module Organization
 
-`crates/nyl-core/src/` holds `resources/`, `bindings`, `constants`, `digest`, `json_pointer`,
-`local_path`, and `settings`. `crates/nyl-render/src/` holds the rest, and
+`crates/nyl-core/src/` holds `resources/`, `orchestration/` (identifiers, state
+documents, the driver interface, and ports), `bindings`, `constants`, `digest`,
+`json_pointer`, `local_path`, and `settings`. `crates/nyl-render/src/` holds the rest, and
 `nyl/src/cli/` the command line:
 
 ```

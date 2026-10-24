@@ -1,5 +1,13 @@
 [workspace]
-members = ["nyl", "crates/nyl-core", "crates/nyl-render"]
+members = [
+    "nyl",
+    "crates/nyl-core",
+    "crates/nyl-git",
+    "crates/nyl-render",
+    "crates/nyl-state",
+    "crates/nyl-orchestration",
+    "crates/nyl-drivers",
+]
 resolver = "2"
 
 [workspace.package]
@@ -13,7 +21,11 @@ publish = false
 
 [workspace.dependencies]
 nyl-core = { path = "crates/nyl-core" }
+nyl-git = { path = "crates/nyl-git" }
 nyl-render = { path = "crates/nyl-render" }
+nyl-state = { path = "crates/nyl-state" }
+nyl-orchestration = { path = "crates/nyl-orchestration" }
+nyl-drivers = { path = "crates/nyl-drivers" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
@@ -82,6 +94,7 @@ dialoguer = "0.12"
 assert_cmd = "2.0"
 predicates = "3.1"
 criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1.6"
 
 [profile.release]
 opt-level = 3

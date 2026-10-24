@@ -247,7 +247,8 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
         let inventory = discover_gitops_inventory(&args.path, None)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
         let carried = crate::gitops::inputs::carry_paths(&inventory, &target)?;
-        let (commit, dirty) = super::render_tree::source_state(&inventory.project_root, &carried)?;
+        let crate::gitops::provenance::WorktreeSourceState { commit, dirty } =
+            crate::gitops::provenance::worktree_source_state(&inventory.project_root, &carried)?;
         let repository = source_repository_url(&inventory.project_root)?;
         Ok::<_, NylError>((inventory, target, commit, dirty, repository))
     })();

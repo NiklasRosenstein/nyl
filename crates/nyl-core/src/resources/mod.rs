@@ -3,6 +3,8 @@
 /// This module provides Kubernetes-style resource definitions for Nyl
 mod argocd_application_field_catalog;
 mod component;
+pub mod environment;
+mod git_source;
 mod gitops;
 mod helmchart;
 mod kyverno;
@@ -11,6 +13,8 @@ mod release;
 pub mod release_inputs;
 mod remote_manifest;
 pub mod schema;
+mod strict;
+pub mod units;
 
 pub use argocd_application_field_catalog::{
     is_supported_application_array_field_path, is_supported_application_field_path,
@@ -19,6 +23,7 @@ pub use component::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind,
     ComponentKindParsed, NylComponent,
 };
+pub use git_source::GitSource;
 pub use gitops::*;
 pub use helmchart::{ChartRef, HelmChart, HelmChartSpec, ObjectMetadata};
 pub use kyverno::{
@@ -31,3 +36,4 @@ pub use release::{
     RELEASE_SCHEMA_FILENAME,
 };
 pub use remote_manifest::{RemoteManifest, RemoteManifestSpec};
+pub use strict::DenyUnknownFields;

@@ -2,6 +2,7 @@
 # design/orchestration-core.md, under the rules of design/promotion.md.
 contract: design/promotion.md#promotion-paths
 milestone: M6
+tiers: [1]                            # scripts fakes, faults, or pauses
 steps:
   - nyl: [state, init, -e, dev]
     exit: 0

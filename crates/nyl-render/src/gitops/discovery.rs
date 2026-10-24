@@ -470,6 +470,8 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
         GitOpsResource::DeploymentTarget(resource) => resource.metadata.labels.clone(),
         GitOpsResource::AppProjectDefinition(resource) => resource.metadata.labels.clone(),
         GitOpsResource::ApplicationGroup(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::Environment(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::EnvironmentGroup(resource) => resource.metadata.labels.clone(),
     }
 }
 

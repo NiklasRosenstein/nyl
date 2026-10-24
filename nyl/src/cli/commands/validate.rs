@@ -76,6 +76,11 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
         if Repository::discover(project_root).is_ok() {
             let inventory = crate::gitops::discover_gitops_inventory(project_root, None)?;
             crate::gitops::validate_gitops_inventory(&inventory)?;
+            for warning in crate::orchestration::project::validate_environments(&inventory)? {
+                has_warnings = true;
+                warn!("{}", warning);
+                println!("  ⚠ {}: {} ({})", warning.code, warning.message, warning.fix);
+            }
             let target_names = inventory
                 .resources
                 .values()

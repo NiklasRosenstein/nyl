@@ -372,8 +372,8 @@ fn group_source_root(
         Some(source) if source.is_remote() => Err(NylError::config(format!(
             "ApplicationGroup {name:?} reads a remote source; create the Release in that repository"
         ))),
-        Some(source) if contains_template(&source.path) => Err(templated_source(name)),
-        Some(source) => inventory.paths().resolve("spec.source.path", &source.path),
+        Some(source) if contains_template(source.git.path()) => Err(templated_source(name)),
+        Some(source) => inventory.paths().resolve("spec.source.path", source.git.path()),
         None => Ok(derived_group_source_root(
             &inventory.project_root,
             &discovered.source_path,
@@ -581,6 +581,8 @@ fn scaffold_resource(
             GitOpsResourceKind::DeploymentTarget => "targets",
             GitOpsResourceKind::AppProjectDefinition => "projects",
             GitOpsResourceKind::ApplicationGroup => "application-groups",
+            GitOpsResourceKind::Environment => "environments",
+            GitOpsResourceKind::EnvironmentGroup => "environment-groups",
         };
         config
             .get_gitops_scaffold_path()
@@ -684,6 +686,14 @@ fn render_resource_scaffold(
                 "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: {name}\nspec:\n  applicationNamespace: argocd\n{source}"
             )
         }
+        // Units labelled with the environment's name belong to it; state uses
+        // the defaults until configured: origin, nyl/<env>/desired and observed.
+        GitOpsResourceKind::Environment => format!(
+            "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: {name}\n  labels:\n    stage: {name}\nspec:\n  unitSelector:\n    matchLabels:\n      {name}: 'true'\n  values: {{}}\n"
+        ),
+        GitOpsResourceKind::EnvironmentGroup => format!(
+            "apiVersion: gitops.nyl/v1\nkind: EnvironmentGroup\nmetadata:\n  name: {name}\nspec:\n  environmentSelector:\n    matchLabels:\n      stage: {name}\n"
+        ),
     };
     format!("# yaml-language-server: $schema={schema}\n{body}")
 }

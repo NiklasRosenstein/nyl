@@ -55,9 +55,10 @@ their outputs to the units that depend on them. Kubernetes is then one kind of
 unit, published through rendered GitOps, and an environment does not need
 Kubernetes at all.
 
-Orchestration is in development; the
+Orchestration is in development: [environments and their
+state](/nyl/orchestration/) exist today, and the
 [roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
-describes its milestones.
+describes the milestones that follow.
 
 ## What Nyl provides
 

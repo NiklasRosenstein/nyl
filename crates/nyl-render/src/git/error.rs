@@ -35,12 +35,9 @@ pub enum GitError {
     #[error("{0}")]
     Other(String),
 
-    #[error("{operation} failed for {url}: {message}\nHint: Nyl runs git for remote access, with your SSH config, SSH agent, and credential helpers; check that `git ls-remote {url}` succeeds in the same environment.")]
-    RemoteFailed {
-        operation: String,
-        url: String,
-        message: String,
-    },
+    /// A remote operation through the `git` command line failed.
+    #[error(transparent)]
+    Remote(#[from] nyl_git::GitError),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

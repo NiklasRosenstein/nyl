@@ -1,12 +1,14 @@
 //! The contract walkthroughs under `tests/scenarios/walkthroughs` describe their
-//! projects with Nyl resources. The scenario harness that runs them arrives in
-//! M3; until then this test keeps the resources that exist today in step with
-//! their Rust types, so a schema change cannot silently invalidate a
-//! walkthrough. Kinds that later milestones add are listed and skipped.
+//! projects with Nyl resources. This test keeps every resource whose kind has
+//! a Rust type in step with that type, so a schema change cannot silently
+//! invalidate a walkthrough. Kinds that later milestones add are listed and
+//! skipped.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use nyl::resources::environment::Environment;
+use nyl::resources::units::{CommandSpec, UnitEnvelope, KIND_COMMAND};
 use nyl::resources::{parse_gitops_resource, Release};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -15,10 +17,8 @@ const NYL_API_VERSIONS: [&str; 3] = ["gitops.nyl/v1", "k8s.gitops.nyl/v1", "unit
 
 /// Kinds of later milestones that have no Rust type yet. Remove a kind from
 /// this list when its type lands, so its walkthrough documents are checked.
-const FUTURE_KINDS: [(&str, &str); 6] = [
-    ("gitops.nyl/v1", "Environment"),
+const FUTURE_KINDS: [(&str, &str); 4] = [
     ("gitops.nyl/v1", "PromotionPath"),
-    ("units.gitops.nyl/v1", "Command"),
     ("units.gitops.nyl/v1", "KubernetesPublication"),
     ("units.gitops.nyl/v1", "OciImage"),
     ("units.gitops.nyl/v1", "OpenTofu"),
@@ -53,10 +53,20 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
             if !NYL_API_VERSIONS.contains(&api_version.as_str()) {
                 continue;
             }
-            let result = if Release::is_release(&document) {
-                Release::from_value(&document).map(|_| ())
+            let result = if api_version == "gitops.nyl/v1" && kind == "Environment" {
+                serde_json::from_value::<Environment>(document.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|environment| environment.validate().map_err(|error| error.to_string()))
+            } else if api_version == "units.gitops.nyl/v1" && kind == KIND_COMMAND {
+                parse_command(&document)
+            } else if Release::is_release(&document) {
+                Release::from_value(&document)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             } else if nyl::resources::gitops_resource_kind(&document).is_some() {
-                parse_gitops_resource(&document).map(|_| ())
+                parse_gitops_resource(&document)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             } else {
                 skipped.insert((api_version, kind));
                 continue;
@@ -82,4 +92,14 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
         unknown.is_empty(),
         "walkthroughs use Nyl kinds that are neither implemented nor listed as future kinds: {unknown:?}"
     );
+}
+
+/// A Command document whose spec contains no template, as in the
+/// walkthroughs: its envelope and its spec as the kind's type reads them.
+fn parse_command(document: &Value) -> Result<(), String> {
+    let envelope: UnitEnvelope = serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
+    envelope.name().map_err(|error| error.to_string())?;
+    let spec: CommandSpec =
+        serde_json::from_value(document.get("spec").cloned().unwrap_or_default()).map_err(|error| error.to_string())?;
+    spec.validate().map_err(|error| error.to_string())
 }

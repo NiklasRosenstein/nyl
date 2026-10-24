@@ -1,0 +1,14 @@
+apiVersion: gitops.nyl/v1
+kind: Observation
+unit:
+  environment: dev
+  name: database
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+  apiVersion: units.gitops.nyl/v1
+  kind: OpenTofu
+type: drift
+executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+at: "2026-09-25T16:40:00Z"
+result:
+  drift: drifted
+  summary: applying would update

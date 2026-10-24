@@ -26,6 +26,8 @@ closely related pair.
   - [`publish-tree`](/nyl/reference/cli/publish-tree/) - Publish a target's tree to its branch with compare-and-swap
 - **CI integration**: report results where reviewers look.
   - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
+- **Orchestration** (in development): manage environments' state in Git.
+  - [`state and lease`](/nyl/reference/cli/state/) - Create, move, and forget an environment's state; break a lost lease
 
 ## Global Options
 
