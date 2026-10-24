@@ -2039,11 +2039,12 @@ trait Driver {
     fn api_version(&self) -> &'static str; // units.gitops.nyl/v1 for built-ins
     fn kind(&self) -> &'static str;
     fn behavior_version(&self) -> u32;
-    fn capabilities(&self) -> Capabilities;
-    fn recovery(&self) -> RecoveryPolicies; // for execution and teardown
+    fn capabilities(&self, spec: &Spec) -> Capabilities;  // a Command tears down only with a `teardown` step
+    fn recovery(&self, spec: &Spec) -> RecoveryPolicies;  // for execution and teardown; a Command converges only when idempotent
     fn spec_schema(&self) -> Schema;        // kind fields; common fields are added by Nyl
+    fn validate_spec(&self, spec: &Spec) -> Result<()>;  // kind rules beyond the schema
     fn attestations(&self, spec: &ResolvedSpec) -> Vec<AttestationName>; // names it can produce for this spec
-    fn ownership_scopes(&self, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity
+    fn ownership_scopes(&self, environment: &EnvironmentName, spec: &ResolvedSpec) -> Vec<OwnershipScope>; // see Identity; an image tag prefix names the environment
     fn execution_key_inputs(&self, ctx: &ResolutionContext, spec: &ResolvedSpec) -> Result<KeyInputs>; // selected files, excluded fields, fingerprint
 
     fn plan(&self, ctx: &ExecutionContext, unit: &DesiredUnit) -> Result<Supported<PlanReport>>;

@@ -372,8 +372,8 @@ fn group_source_root(
         Some(source) if source.is_remote() => Err(NylError::config(format!(
             "ApplicationGroup {name:?} reads a remote source; create the Release in that repository"
         ))),
-        Some(source) if contains_template(&source.path) => Err(templated_source(name)),
-        Some(source) => inventory.paths().resolve("spec.source.path", &source.path),
+        Some(source) if contains_template(source.git.path()) => Err(templated_source(name)),
+        Some(source) => inventory.paths().resolve("spec.source.path", source.git.path()),
         None => Ok(derived_group_source_root(
             &inventory.project_root,
             &discovered.source_path,

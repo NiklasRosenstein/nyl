@@ -22,6 +22,7 @@
 //! `nyl-render` and the shared resource types in `nyl-core`.
 
 pub mod cli;
+pub mod orchestration;
 
 pub use nyl_render::{
     components, config, constants, editor, error, generator, git, gitops, helm, kubernetes, postprocess, render,

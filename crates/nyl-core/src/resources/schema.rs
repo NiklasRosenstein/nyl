@@ -258,6 +258,13 @@ pub(crate) fn exclusive_fields(schema: &mut schemars::Schema, fields: &[(&str, &
     schema.insert("oneOf".into(), json!(alternatives));
 }
 
+/// Mark the [`GitSource`](super::GitSource) fields a use requires and close
+/// the flattened schema, as `deny_unknown_fields` would.
+pub(crate) fn require_git_source_fields(schema: &mut schemars::Schema, fields: &[&str]) {
+    super::git_source::require_fields(schema, fields);
+    super::strict::deny_additional_properties(schema);
+}
+
 pub(crate) fn cluster_destination_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
@@ -340,6 +347,7 @@ pub(crate) fn source_constraints(schema: &mut schemars::Schema) {
         ],
         Some("Reads Releases from this project, at the declared `path`."),
     );
+    require_git_source_fields(schema, &["path"]);
 }
 
 #[cfg(test)]

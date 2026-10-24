@@ -97,6 +97,7 @@ pub fn collect_source_locks(
                 let Some(source) = resource.spec.source.as_ref().filter(|source| source.is_remote()) else {
                     continue;
                 };
+                let source = &source.git;
                 group_found = true;
                 let repository = inventory
                     .resolve_git_repository(source.repository_ref.as_ref(), source.repository.as_ref())?
@@ -117,7 +118,7 @@ pub fn collect_source_locks(
                 target_found = true;
                 for (key, inputs) in &resource.spec.release_inputs {
                     for (input, binding) in inputs {
-                        let Some(source) = &binding.from_git else {
+                        let Some(source) = binding.from_git.as_ref().map(|source| &source.git) else {
                             continue;
                         };
                         let repository = inventory
@@ -131,8 +132,8 @@ pub fn collect_source_locks(
                             },
                             resource: discovered.clone(),
                             repository_url: repository.repo_url,
-                            revision: source.revision.clone(),
-                            commit: source.commit.clone(),
+                            revision: source.revision.clone().expect("validated fromGit source has revision"),
+                            commit: source.commit.clone().expect("validated fromGit source has commit"),
                         });
                     }
                 }

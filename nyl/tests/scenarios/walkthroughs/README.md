@@ -18,10 +18,13 @@ define. `_project/` is the project they share unless a scenario brings its own.
 | [`deletion`](deletion/scenario.yaml) | Deletion | M3 |
 | [`stale-promotion-evidence`](stale-promotion-evidence/scenario.yaml) | Promotion with stale source evidence | M6 |
 
-These files are the contract's acceptance tests. The M3 scenario harness runs
-them; until it exists, nothing executes them.
-[`walkthrough_resources_test.rs`](../../walkthrough_resources_test.rs) already
-parses and validates every project resource whose kind exists today, and lists
-the kinds later milestones add. A change to a rule that a
+These files are the contract's acceptance tests.
+[`scenario_harness_test.rs`](../../scenario_harness_test.rs) validates every
+scenario against the format, applies its Git steps in a test world, and runs
+the scenarios whose milestone it has reached; one whose commands do not exist
+yet is listed there as pending, with what it waits for.
+[`walkthrough_resources_test.rs`](../../walkthrough_resources_test.rs)
+parses and validates every project resource whose kind has a Rust type, and
+lists the kinds later milestones add. A change to a rule that a
 walkthrough uses changes the walkthrough and its scenario in the same change.
 

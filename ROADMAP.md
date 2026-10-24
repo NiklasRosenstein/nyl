@@ -29,18 +29,32 @@ about Nyl's current CLI.
 | --- | --- | --- | --- |
 | M1 | Unit, input, state, and promotion contract | Done | — |
 | M2 | Release inputs without orchestration | Done | M1 |
-| M3 | Orchestration core with a constrained command unit | Planned | M1 |
+| M3 | Orchestration core with a constrained command unit | In progress | M1 |
 | M4 | Container image and Terraform units | Planned | M3 |
 | M5 | Images and Terraform outputs into Kubernetes releases | Planned | M2, M4 |
 | M6 | Promotion paths | Planned | M5 |
 | M7 | Continuous operation and scope decision | Planned | M6 |
 | M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
 
-**Next step:** start M3 from the
+**Next step:** continue M3, delivered in four parts against the
 [orchestration core contract](design/orchestration-core.md) and its
-executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/), which
-its scenario harness runs first. M3's unit `values` and `variables` will
-resolve their references through `nyl_core::bindings`, which M2 introduced.
+executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
+
+1. Foundations, done: the business rules moved out of the `nyl` package, one
+   `GitSource`, the `nyl-state`, `nyl-orchestration`, and `nyl-drivers`
+   crates, the orchestration types and traits in `nyl-core` with golden
+   files, the scenario format and Git test world, fault points, the
+   `FakeImage` and `FakeInfra` kinds, and the `test-clock` feature. The
+   harness validates every scenario and lists the reached ones as pending
+   until the commands they use exist.
+2. The Git state store and `nyl state init`/`move`/`forget`, leases, run
+   checkpoints, `lease break`, and optional dedicated push credentials.
+3. Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`,
+   `recover`, and `get -e`, with `FakePublication`, pinned source worktrees,
+   and execution keys. Unit `values` and `variables` resolve through
+   `nyl_core::bindings`.
+4. `teardown`, `hold`, `resume`, `state delete`, multi-environment runs,
+   approvals, the tier-2 harness, and the M3 part of reference scenario 1.
 
 ## Product direction
 
@@ -744,13 +758,13 @@ implicit per-target Argo CD instances.
   refs, and content-based execution keys.
 - [ ] Prove stale-evidence blocking, competing runners, and recovery after an
   effect succeeds but receipt publication fails.
-- [ ] Move the business rules the `nyl` package still holds into the crates
+- [x] Move the business rules the `nyl` package still holds into the crates
   that own them before orchestration builds on them: ownership-index input
   hashing (`hash_inputs`), the worktree source state with its carry exclusion
   (`source_state`), and publication-base verification
   (`verify_publication_base`). The command line then only parses arguments,
   wires crates, and renders reports.
-- [ ] Replace the remote fields of `ApplicationGroupSource` and `fromGit`'s
+- [x] Replace the remote fields of `ApplicationGroupSource` and `fromGit`'s
   `GitInputSource` with the one `GitSource` type of the implementation
   architecture, which command-unit sources then use too. Both already share
   one commit-lock rule.

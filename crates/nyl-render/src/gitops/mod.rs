@@ -5,6 +5,7 @@ pub mod direct_inputs;
 pub mod discovery;
 pub mod inputs;
 pub mod layout;
+pub mod provenance;
 pub mod reconcile;
 pub mod source_locks;
 pub mod tree;

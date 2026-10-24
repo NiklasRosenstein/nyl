@@ -1,0 +1,13 @@
+apiVersion: gitops.nyl/v1
+kind: Attestation
+name: healthy
+unit:
+  environment: dev
+  name: kubernetes
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+result: pass
+at: "2026-09-25T16:40:00Z"
+source:
+  driver: verify
+reason: null

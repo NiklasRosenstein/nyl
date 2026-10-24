@@ -1,0 +1,26 @@
+[package]
+name = "nyl-drivers"
+description = "Nyl orchestration drivers: execution context, process runner, and unit kinds"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Registers the test-only fake kinds (`units.test.nyl/v1`) that stand in for
+# built-in kinds a milestone has not built yet.
+test-kinds = []
+
+[dependencies]
+nyl-core = { workspace = true }
+nyl-render = { workspace = true }
+
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+tempfile = { workspace = true }
