@@ -28,6 +28,37 @@ nyl validate --strict
 nyl validate /path/to/project
 ```
 
+## Output
+
+`validate` prints each passed check, then each warning once, then the verdict.
+Search paths appear as `nyl.toml` writes them, relative to its directory; the
+configuration file is shown relative to the current directory.
+
+```console
+$ nyl validate
+✓ Found project config: nyl.toml
+✓ Helm chart search path exists: .
+✓ GitOps configuration is valid (4 resource(s), 2 YAML file(s))
+⚠ Components search path does not exist: components
+
+✓ Validation passed with warnings
+```
+
+Warnings leave the exit status at 0. `--strict` fails the run instead:
+
+```console
+$ nyl validate --strict
+✓ Found project config: nyl.toml
+✓ Helm chart search path exists: .
+✓ GitOps configuration is valid (4 resource(s), 2 YAML file(s))
+⚠ Components search path does not exist: components
+
+✗ Validation failed in strict mode (warnings treated as errors)
+```
+
+When a check fails with an error, the checks that passed are printed before the
+error, and the command exits with a non-zero status.
+
 GitOps validation discovers all Git-visible control resources, applies
 strict per-kind validation, resolves repository and project references, and
 rejects overlapping target prefixes on the same repository revision.

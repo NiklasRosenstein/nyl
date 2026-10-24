@@ -77,15 +77,11 @@ This creates a new [local component](/nyl/kubernetes/components/authoring-local-
 
 ### 3. Validate
 
-```bash
-nyl validate
-```
-
-Output:
-```
-✓ Found project config: /path/to/platform/nyl.toml
-✓ Components search path exists: /path/to/platform/components
-✓ Helm chart search path exists: /path/to/platform
+```console
+$ nyl validate
+✓ Found project config: nyl.toml
+✓ Components search path exists: components
+✓ Helm chart search path exists: .
 
 ✓ Validation passed
 ```

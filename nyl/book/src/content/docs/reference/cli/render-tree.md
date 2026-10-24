@@ -26,6 +26,20 @@ boundaries, or permit symbolic-link traversal.
 An existing ownership index is checked against the selected target before Nyl
 renders any Releases or Helm charts.
 
+```console
+$ nyl render-tree --target production --output-dir ../deploy
+[1/1] Release applications/web (applications/web/web.yaml)
+✓ deployment target production ready at ../deploy/production (5 files, 8.4s)
+
+Render statistics
+  Cache
+    Target tree         rebuilt
+    Release renders     1 rendered
+```
+
+The `[1/1]` progress line and the statistics go to stderr; see the
+[shared options](#options-shared-by-the-tree-commands) for `--progress`.
+
 ## Options shared by the tree commands
 
 `render-tree`, [`diff-tree`](/nyl/reference/cli/diff-tree/), and

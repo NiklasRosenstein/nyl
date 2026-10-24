@@ -93,3 +93,9 @@ id = "8c3e1f7a-2d4b-4e9a-b6c5-1f0d9e8a7b32"
 type = "breaking change"
 description = "`nyl apply` orders resources like Argo CD (for example, Secrets and ConfigMaps now precede CustomResourceDefinitions and RBAC; admission webhook configurations are applied last) and records release manifests in that order; documents describing one object in different API versions are collapsed to the last in apply and diff; pruning deletes in reverse apply order and waits for each kind's resources to terminate before deleting the next kind, which can take longer than the previous unordered prune; a failed prune makes the command exit non-zero; a revision is recorded before applying, and an apply that fails or is interrupted records it as failed; and a release that renders no resources is recorded and prunes its previous resources instead of being skipped"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "003b92f8-e5cc-4df4-88c5-6b969073eef4"
+type = "improvement"
+description = "`nyl validate` prints each warning once, with search paths relative to `nyl.toml`, and target compilation no longer logs the implicit ArgoCDInstance at INFO level on every run"
+author = "@NiklasRosenstein"
