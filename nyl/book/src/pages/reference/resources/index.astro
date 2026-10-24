@@ -16,12 +16,14 @@ const groups = await Promise.all(resourceGroups().map(async (group) => ({
   })),
 })));
 ---
-<StarlightPage frontmatter={{ title: 'Resources', description: 'Nyl resource APIs and their purposes.', editUrl: false }} headings={groups.map((group) => ({ depth: 2, slug: group.apiVersion.replace('/', '-'), text: group.label }))}>
+<StarlightPage frontmatter={{ title: 'Resources', description: 'Nyl resource APIs and their purposes.', editUrl: false, tableOfContents: false }}>
   <p>Choose a resource by its purpose. Each entry explains when to declare the resource and what happens if it is omitted. These conditions concern whole resources; field requirements are documented in each reference.</p>
-  {groups.map((group) => <section>
-    <h2 id={group.apiVersion.replace('/', '-')}>{group.label}</h2>
-    <p><code>{group.apiVersion}</code></p>
-    <table><thead><tr><th>Resource</th><th>Purpose and usage</th></tr></thead><tbody>
+  <table class="resources">
+    <thead><tr><th>Resource</th><th>Purpose and usage</th></tr></thead>
+    {groups.map((group) => <tbody>
+      <tr class="group" id={group.apiVersion.replace('/', '-')}>
+        <th colspan="2" scope="rowgroup">{group.label} <code>{group.apiVersion}</code></th>
+      </tr>
       {group.resources.map((resource) => <tr>
         <td><a href={`${base}${resource.route}`}>{resource.name}</a></td>
         <td>
@@ -30,20 +32,30 @@ const groups = await Promise.all(resourceGroups().map(async (group) => ({
             <details><summary>{label}</summary><Fragment set:html={html} /></details>)}
         </td>
       </tr>)}
-    </tbody></table>
-  </section>)}
-  <p>Native Kubernetes, Argo CD, and <a href={`${base}/reference/kyverno-policies/`}>Kyverno policies</a> use their upstream API versions.</p>
+    </tbody>)}
+  </table>
+  <p>Native Kubernetes, Argo CD, and <a href={`${base}/kubernetes/validation/kyverno-policies/`}>Kyverno policies</a> use their upstream API versions.</p>
 </StarlightPage>
 
 <style>
-  table { width: 100%; }
+  /* Without a table of contents, the catalog takes the width it frees. */
+  :global(:root) { --sl-content-width: 60rem; }
+  table { width: 100%; display: table; }
   td { vertical-align: top; }
+  td:first-child { white-space: nowrap; }
   td p:first-child { margin-top: 0; }
-  td details { margin-top: 0.75rem; }
+  td details { margin-top: 0.5rem; }
+  tr.group th {
+    padding-top: 1.5rem;
+    font-size: var(--sl-text-lg);
+    background: var(--sl-color-gray-7, var(--sl-color-gray-6));
+  }
+  tr.group code { margin-inline-start: 0.5rem; font-size: var(--sl-text-sm); font-weight: 400; }
   @media (max-width: 50rem) {
-    table, tbody, tr, td { display: block; }
+    table, tbody, tr, td, th { display: block; }
     thead { display: none; }
     tr { padding-block: 1rem; border-bottom: 1px solid var(--sl-color-gray-5); }
+    tr.group { padding-block: 0; border: 0; }
     td { padding: 0; border: 0; }
     td:first-child { margin-bottom: 0.75rem; font-weight: 600; font-size: 1.125rem; }
   }
