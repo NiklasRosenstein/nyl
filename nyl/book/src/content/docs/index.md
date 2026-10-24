@@ -5,7 +5,9 @@ title: 'Nyl'
 Nyl turns configuration in Git into deployed systems. It renders Kubernetes
 manifests from Helm charts, components, and templates, and applies them
 directly or publishes them for Argo CD, Flux, or another GitOps reconciler.
-The [introduction](/nyl/start/introduction/) explains each way to use it.
+Every command acts on that declared configuration and takes the same path,
+whether you run it on a laptop or in CI. The
+[introduction](/nyl/start/introduction/) explains each way to use it.
 
 ## Start building
 

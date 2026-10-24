@@ -3,7 +3,8 @@ title: 'Rendering Pipeline'
 ---
 
 `nyl render`, `nyl diff`, `nyl apply`, and the rendered-tree commands share one
-manifest generation pipeline. Tree commands add target composition, policy,
+manifest generation pipeline, so a local render and a CI render of the same
+declaration take [one path](/nyl/start/introduction/#one-declaration-one-path). Tree commands add target composition, policy,
 layout, and whole-target caching after each Release bundle has passed through
 that pipeline.
 

@@ -5,6 +5,21 @@ title: 'Introduction'
 **Nyl** turns configuration in Git into deployed systems. It works at three
 levels, each building on the one before. Use only as much as you need.
 
+## One declaration, one path
+
+Everything Nyl does starts from configuration declared in Git: what to render,
+for which cluster, and where to publish it. Commands act on that declaration,
+and every way of running them takes the same path over the same inputs.
+`nyl render --target production` while bootstrapping a cluster from a laptop
+and `nyl render-tree` in CI run one rendering pipeline, and Argo CD syncs
+exactly the YAML it produces. What you inspect locally is what gets deployed.
+
+Nyl grew out of the opposite experience: reproducing what an Argo CD
+Application renders meant re-creating its Helm invocation by hand with the
+`helm` CLI, which never quite matched what Argo CD did. When you deliberately
+deviate, for example with `--input` overrides while experimenting, you do so
+with an explicit flag, and publication never accepts it.
+
 ## Render and apply Kubernetes manifests
 
 Nyl generates plain Kubernetes YAML from Helm charts, reusable components,

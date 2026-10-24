@@ -17,6 +17,17 @@ Nyl is a fast Kubernetes manifest generator written in Rust. It supports:
 **Task Runner:** mise  
 **Documentation:** Astro/Starlight
 
+## Core principle
+
+Everything Nyl does is driven by configuration declared in Git, and every
+invocation takes the same path over it: a local or bootstrapping run, a CI
+render, a publication, and an orchestration run. Implement shared behavior in
+the layer every entry point calls, never in one command. A command must not
+read inputs outside the declaration, such as the process environment, the
+kube context, or unrecorded local files, unless an explicit flag opts in and
+publication rejects the result. Treat a divergence between entry points as a
+bug, and document a deliberate one where users choose it.
+
 ## Roadmap and Architectural Decisions
 
 - Read [ROADMAP.md](ROADMAP.md) before work that affects Nyl's scope,
