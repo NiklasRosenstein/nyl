@@ -22,10 +22,10 @@
       "slug": "environment-group"
     },
     {
-      "apiVersion": "k8s.gitops.nyl/v1",
+      "apiVersion": "k8s.nyl/v1",
       "dynamicKind": false,
       "name": "Cluster",
-      "schema": "k8s.gitops.nyl/v1/cluster.schema.json",
+      "schema": "k8s.nyl/v1/cluster.schema.json",
       "slug": "cluster"
     },
     {
@@ -57,10 +57,10 @@
       "slug": "app-project-definition"
     },
     {
-      "apiVersion": "k8s.gitops.nyl/v1",
+      "apiVersion": "k8s.nyl/v1",
       "dynamicKind": false,
       "name": "Release",
-      "schema": "k8s.gitops.nyl/v1/release.schema.json",
+      "schema": "k8s.nyl/v1/release.schema.json",
       "slug": "release"
     },
     {
