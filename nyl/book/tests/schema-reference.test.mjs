@@ -77,8 +77,11 @@ test('catalog and sidebar cover the same version-qualified identities', () => {
   assert.deepEqual(sidebar.map(({ label }) => label), resourceSections.map(({ label }) => label));
   for (const [index, group] of sidebar.entries()) {
     assert.equal(group.items[0].link, resourceSections[index].route, `${group.label} opens with its overview`);
+    const included = resourceSections[index].include ?? [];
     const names = group.items.slice(1).map(({ label }) => label);
-    assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b)), `${group.label} lists resources by name`);
+    assert.deepEqual(names.slice(0, included.length), included, `${group.label} lists its included resources first`);
+    const rest = names.slice(included.length);
+    assert.deepEqual(rest, [...rest].sort((a, b) => a.localeCompare(b)), `${group.label} lists the rest by name`);
   }
   const links = sidebar.flatMap((group) => group.items.slice(1).map(({ link }) => link));
   assert.deepEqual(links.sort(), resources.map((resource) => resource.route).sort(), 'every resource is listed once');

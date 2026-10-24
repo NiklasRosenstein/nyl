@@ -42,7 +42,7 @@ const gitopsEdges: Edge[] = [
 
 // Kubernetes rendering: what a manifest file contains and what each kind becomes.
 const rendering: Node[] = [
-  { label: 'Release file or', note: 'nyl render input', x: 20, y: 20, h: 284 },
+  { label: 'Release', note: 'or a nyl render input', x: 20, y: 20, h: 284, link: true },
   { label: 'Component', x: 280, y: 20, link: true },
   { label: 'HelmChart', x: 280, y: 100, link: true },
   { label: 'RemoteManifest', x: 280, y: 180, link: true },
@@ -76,7 +76,7 @@ const diagrams = [
     edges: renderingEdges,
     viewBox: '0 0 790 320',
     claim:
-      'A Release file, or any file passed to nyl render, contains Components, HelmCharts, RemoteManifests, and plain Kubernetes resources; rendering turns each into plain Kubernetes manifests.',
+      'A Release, or any file passed to nyl render, contains Components, HelmCharts, RemoteManifests, and plain Kubernetes resources; rendering turns each into plain Kubernetes manifests.',
   },
 ];
 const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);

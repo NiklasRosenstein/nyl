@@ -23,48 +23,66 @@ export function resourceUsage(schema) {
     return { label, markdown };
   });
 }
-/** The reference splits resources like the docs' header sections. */
+/**
+ * The reference splits resources like the docs' header sections. A section
+ * takes the resources of its API versions plus `include`, minus `exclude`;
+ * included resources come first. The Release is the unit Nyl renders in both
+ * modes, so it opens the Kubernetes section.
+ */
 export const resourceSections = [
   {
     id: 'kubernetes',
     label: 'Kubernetes Resources',
     route: '/reference/resources/kubernetes/',
     apiVersions: ['k8s.nyl/v1', 'components.k8s.nyl/v1'],
+    include: ['Release'],
   },
   {
     id: 'rendered-gitops',
     label: 'Rendered GitOps Resources',
     route: '/reference/resources/rendered-gitops/',
     apiVersions: ['gitops.nyl/v1', 'k8s.gitops.nyl/v1'],
+    exclude: ['Release'],
   },
 ];
+function inSection(section, resource) {
+  if (section.include?.includes(resource.name)) return true;
+  return section.apiVersions.includes(resource.apiVersion) && !section.exclude?.includes(resource.name);
+}
 export function sectionOf(resource) {
-  const section = resourceSections.find((candidate) => candidate.apiVersions.includes(resource.apiVersion));
-  if (!section) throw new Error(`${resource.name}: no reference section lists ${resource.apiVersion}`);
-  return section;
+  const sections = resourceSections.filter((section) => inSection(section, resource));
+  if (sections.length !== 1) throw new Error(`${resource.name}: expected one reference section, found ${sections.length}`);
+  return sections[0];
 }
-/** Resources by API version, optionally only those of one section. */
+/** Resources by API version, optionally only those of one section, its included resources first. */
 export function resourceGroups(section) {
-  return [...new Set(resources.map((resource) => resource.apiVersion))]
-    .filter((apiVersion) => !section || section.apiVersions.includes(apiVersion))
-    .map((apiVersion) => ({
-      apiVersion,
-      label: groupLabels[apiVersion] ?? apiVersion,
-      resources: resources.filter((resource) => resource.apiVersion === apiVersion),
-    }));
-}
-/** One sidebar group per section: its overview, then its resources by name. */
-export function resourceSidebar() {
-  return resourceSections.map((section) => ({
-    label: section.label,
-    items: [
-      { label: 'Overview', link: section.route },
-      ...resources
-        .filter((resource) => sectionOf(resource) === section)
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((resource) => ({ label: resource.name, link: resource.route })),
-    ],
+  const members = section
+    ? [
+        ...resources.filter((resource) => section.include?.includes(resource.name)),
+        ...resources.filter((resource) => !section.include?.includes(resource.name) && inSection(section, resource)),
+      ]
+    : resources;
+  return [...new Set(members.map((resource) => resource.apiVersion))].map((apiVersion) => ({
+    apiVersion,
+    label: groupLabels[apiVersion] ?? apiVersion,
+    resources: members.filter((resource) => resource.apiVersion === apiVersion),
   }));
+}
+/** One sidebar group per section: its overview, its included resources, then the rest by name. */
+export function resourceSidebar() {
+  const byName = (left, right) => left.name.localeCompare(right.name);
+  return resourceSections.map((section) => {
+    const members = resources.filter((resource) => sectionOf(resource) === section);
+    const included = members.filter((resource) => section.include?.includes(resource.name));
+    const rest = members.filter((resource) => !included.includes(resource)).sort(byName);
+    return {
+      label: section.label,
+      items: [
+        { label: 'Overview', link: section.route },
+        ...[...included, ...rest].map((resource) => ({ label: resource.name, link: resource.route })),
+      ],
+    };
+  });
 }
 export const resourceRedirects = Object.fromEntries(resources.map((resource) => {
   const oldSlug = resource.name === 'HelmChart' ? 'helmchart' : resource.slug;
