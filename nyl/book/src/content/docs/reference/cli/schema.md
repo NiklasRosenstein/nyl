@@ -64,10 +64,10 @@ comment when Nyl knows its schema:
 
 - **Nyl resources** use the schemas of the running Nyl version.
 - **Custom resources** use the strict schema of a CRD vendored by
-  [`nyl capture cluster --crds`](/nyl/gitops/manifest-validation/).
+  [`nyl capture cluster --crds`](/nyl/kubernetes/validation/manifest-validation/).
 - **Kubernetes built-ins** use kubeconform's schema for the newest
   `kubeVersion` among the project's Clusters. A
-  [vendored copy](/nyl/gitops/manifest-validation/) is used when one
+  [vendored copy](/nyl/kubernetes/validation/manifest-validation/) is used when one
   exists: the strict variant, or the non-strict one that validation vendors
   when `strict = false`. Otherwise the strict schema is downloaded.
 

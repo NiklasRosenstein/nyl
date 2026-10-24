@@ -62,18 +62,18 @@ Applications use ordinary Git directory sources with recursive discovery.
 
 ## Guides
 
-- [Project structure and discovery](/nyl/gitops/project-structure/)
+- [Project structure and discovery](/nyl/rendered-gitops/project-structure/)
   explains the conventional layout, colocated groups, and remote sources.
-- [Targets and cluster variation](/nyl/gitops/targets-and-clusters/)
+- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
   covers multiple environments, clusters, publication models, values, and
   conditional rendering.
-- [Rendering, diffing, and publishing](/nyl/gitops/rendering-and-publishing/)
+- [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
   describes the generated tree and CI commands.
-- [Trust and admission boundaries](/nyl/gitops/security/)
+- [Trust and admission boundaries](/nyl/rendered-gitops/security/)
   identifies what Nyl validates and what the Git forge, Argo CD, and Kubernetes
   must enforce.
 - [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
   documents every configuration field by resource kind.
 
 For direct cluster operations and debugging, see
-[CLI-first workflows](/nyl/rendering/cli-workflows/).
+[CLI-first workflows](/nyl/kubernetes/cli-workflows/).

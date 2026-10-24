@@ -14,7 +14,7 @@ nyl apply [--target <TARGET>] [OPTIONS] <FILE>
 
 The `apply` command renders manifests, applies them with server-side apply, and tracks release state.
 For shared rendering behavior and namespace resolution details, see
-[Rendering Pipeline](/nyl/rendering/pipeline/).
+[Rendering Pipeline](/nyl/kubernetes/pipeline/).
 
 ## Arguments
 
@@ -150,10 +150,10 @@ nyl apply --target production --no-release manifest.yaml
   a release writes to, including `spec.additionalNamespaces`, need their own
   `Namespace` manifest.
 - `--no-release` disables release tracking entirely. In this mode, `nyl` cannot compute or prune resources removed from subsequent applies.
-- See [Rendering Pipeline](/nyl/rendering/pipeline/) for namespace resolution and filter semantics.
+- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for namespace resolution and filter semantics.
 
 ## Manifest validation
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/gitops/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.

@@ -122,9 +122,9 @@ nyl update source-locks --check
 Central renderer mode applies the platform project's `nyl.toml` and component
 configuration to the remote source. Remote renderer mode loads configuration
 from `spec.source.rendererConfig.projectPath` in the remote repository. See the
-[ApplicationGroup reference](/nyl/gitops/resource-guides/application-group/#source-selection)
+[ApplicationGroup reference](/nyl/rendered-gitops/resource-guides/application-group/#source-selection)
 for the complete source contract and the
-[security guide](/nyl/gitops/security/#remote-source-isolation)
+[security guide](/nyl/rendered-gitops/security/#remote-source-isolation)
 for its trust boundary.
 
 ## Discovery constraints
@@ -141,6 +141,6 @@ rendering.
 
 ## Next steps
 
-- [Targets and cluster variation](/nyl/gitops/targets-and-clusters/)
-- [Rendering, diffing, and publishing](/nyl/gitops/rendering-and-publishing/)
+- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
+- [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
 - [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)

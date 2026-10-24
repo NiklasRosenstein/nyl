@@ -61,7 +61,7 @@ are absent from the resulting lock. It cannot be combined with `--target` or
 `--check`; `--refresh` may be used to retrieve every input again before pruning.
 
 See [Remote artifact vendoring](/nyl/reference/configuration/#remote-artifact-vendoring)
-for the modes and [Rendering, Diffing, and Publishing](/nyl/gitops/rendering-and-publishing/#vendored-remote-inputs)
+for the modes and [Rendering, Diffing, and Publishing](/nyl/rendered-gitops/rendering-and-publishing/#vendored-remote-inputs)
 for resolution and Git LFS behavior.
 
 ## Validation schemas
@@ -76,4 +76,4 @@ Complete directory inventories and schema digests let `--check` verify
 `"vendor-all"` coverage without network access. `--refresh` retrieves inventories
 and schemas again. Cluster captures are read-only inputs
 whose referenced blobs survive pruning. See
-[Manifest validation](/nyl/gitops/manifest-validation/) for the offline workflow.
+[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for the offline workflow.

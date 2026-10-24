@@ -2,12 +2,17 @@
 title: 'Nyl'
 ---
 
-Nyl is a fast Kubernetes manifest generator for teams that want Helm integration, reusable components, cluster-aware configuration, and plain Kubernetes YAML as output.
+Nyl turns configuration in Git into deployed systems. It renders Kubernetes
+manifests from Helm charts, components, and templates, and applies them
+directly or publishes them for Argo CD, Flux, or another GitOps reconciler.
+The [introduction](/nyl/start/introduction/) explains each way to use it.
 
-Author your configuration with components and templates, then render it into ordinary Kubernetes manifests. The [Rendered Manifest Pattern](/nyl/gitops/) keeps rendering in CI and lets Argo CD, Flux, or another reconciler sync the published YAML.
-
-## Start Building
+## Start building
 
 Begin with [Getting Started](/nyl/start/getting-started/) to create a project, validate it, and render your first manifests.
 
-For deeper reference material, see [Configuration](/nyl/reference/configuration/), the [Component System](/nyl/rendering/components/overview/), the [Resource Reference](/nyl/reference/resources/), and the [Command Reference](/nyl/reference/cli/).
+## Find your way
+
+- **[Kubernetes](/nyl/kubernetes/pipeline/)**: render, validate, and apply manifests.
+- **[Rendered GitOps](/nyl/rendered-gitops/)**: publish rendered manifests to Git for a reconciler to sync.
+- **[Reference](/nyl/reference/cli/)**: every command, YAML resource, and `nyl.toml` setting.

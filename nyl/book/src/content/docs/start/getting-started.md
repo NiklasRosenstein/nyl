@@ -69,7 +69,7 @@ This creates:
 nyl create component v1.example.io MyApp
 ```
 
-This creates a new [local component](/nyl/rendering/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
+This creates a new [local component](/nyl/kubernetes/components/authoring-local-components/) at `components/v1.example.io/MyApp/` with:
 - `Chart.yaml` - Helm chart metadata
 - `values.yaml` - Default values
 - `values.schema.json` - JSON schema for validation
@@ -151,6 +151,6 @@ platform/
 
 ## Next Steps
 
-- Use the [rendered manifest pattern](/nyl/gitops/) when CI should produce plain YAML for ArgoCD, Flux, or another reconciler.
-- Use [CLI-first workflows](/nyl/rendering/cli-workflows/) for debugging, bootstrapping, testing, and direct cluster operations.
-- Read about [Configuration](/nyl/reference/configuration/) and the [Component System](/nyl/rendering/components/overview/).
+- Use the [rendered manifest pattern](/nyl/rendered-gitops/) when CI should produce plain YAML for ArgoCD, Flux, or another reconciler.
+- Use [CLI-first workflows](/nyl/kubernetes/cli-workflows/) for debugging, bootstrapping, testing, and direct cluster operations.
+- Read about [Configuration](/nyl/reference/configuration/) and the [Component System](/nyl/kubernetes/components/overview/).

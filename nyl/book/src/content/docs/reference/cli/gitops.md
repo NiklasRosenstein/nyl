@@ -115,7 +115,7 @@ When the baseline's target publishes to a different repository, branch, or
 path prefix, its `fromPublication` inputs read that publication, not the
 desired one, and the report carries a `publication_moved` warning. Nyl does not
 move state or clean up the old prefix; follow
-[Move a publication](/nyl/gitops/rendering-and-publishing/#move-a-publication).
+[Move a publication](/nyl/rendered-gitops/rendering-and-publishing/#move-a-publication).
 
 The command identifies the desired source commit and exact baseline repository,
 revision, resolved commit, project directory, path, selected view, and output
@@ -471,7 +471,7 @@ Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
 `NYL_GIT_AUTHOR_NAME` and `NYL_GIT_AUTHOR_EMAIL` for a Nyl-specific override.
 
-See [Rendering, diffing, and publishing](/nyl/gitops/rendering-and-publishing/)
+See [Rendering, diffing, and publishing](/nyl/rendered-gitops/rendering-and-publishing/)
 for CI patterns and rendered layout. The
 [Rendered GitOps resource reference](/nyl/reference/resources/gitops/)
 documents the configuration model.
@@ -479,5 +479,5 @@ documents the configuration model.
 ## Manifest validation
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/gitops/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.

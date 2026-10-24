@@ -14,7 +14,7 @@ nyl diff [--target <TARGET>] [OPTIONS] <FILE>
 
 The `diff` command renders manifests, compares them with live cluster state, and prints changes.
 For shared rendering behavior and namespace resolution details, see
-[Rendering Pipeline](/nyl/rendering/pipeline/).
+[Rendering Pipeline](/nyl/kubernetes/pipeline/).
 
 ## Arguments
 
@@ -106,10 +106,10 @@ The diff command shows:
 - A `Release` resource in the manifest provides release metadata automatically.
 - Normalized mode is recommended for most use cases as it matches kubectl diff behavior.
 - If no previous release state exists, diff still compares desired resources against live state but cannot determine prune candidates; a warning is shown and `to delete` remains incomplete.
-- See [Rendering Pipeline](/nyl/rendering/pipeline/) for namespace resolution and filter semantics.
+- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for namespace resolution and filter semantics.
 
 ## Manifest validation
 
 Use `--validate` to run project-configured validators. See
-[Manifest validation](/nyl/gitops/manifest-validation/) for automatic validation, captured
+[Manifest validation](/nyl/kubernetes/validation/manifest-validation/) for automatic validation, captured
 CRD schemas, inherited Cluster contracts, and offline schema vendoring.

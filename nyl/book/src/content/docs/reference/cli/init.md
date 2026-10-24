@@ -37,7 +37,7 @@ destination namespace; the generated group does not impose a
 `destinationNamespace`.
 
 No project resource is written. The group keeps its
-[implied AppProject](/nyl/gitops/resource-guides/application-group/#project-assignment):
+[implied AppProject](/nyl/rendered-gitops/resource-guides/application-group/#project-assignment):
 named after the group and admitting only what its Applications deploy. Argo
 CD receives the credential-free `GitRepository.spec.repoURL`, never the
 publication URL.

@@ -1,5 +1,7 @@
 ---
 title: 'Nyl Resource Schemas'
+sidebar:
+  label: 'Editor schemas'
 ---
 
 The [resource catalog](/nyl/reference/resources/) provides version-qualified

@@ -322,5 +322,5 @@ order:
 When the repository or branch changes, do the same across the two branches.
 
 See the [Rendered GitOps command reference](/nyl/reference/cli/gitops/) for all flags
-and the [security guide](/nyl/gitops/security/)
+and the [security guide](/nyl/rendered-gitops/security/)
 for ownership and publication boundaries.

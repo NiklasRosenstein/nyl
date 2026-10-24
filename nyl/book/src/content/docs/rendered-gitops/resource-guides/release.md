@@ -114,7 +114,7 @@ environment, from an inline value, a project file, locked Git state, or a state
 file in its own publication branch; an unbound input takes its declared
 default. A Release that declares inputs needs a literal `metadata.name` and a
 literal `spec.inputs`, so templating cannot change them. See
-[Release inputs](/nyl/gitops/release-inputs/).
+[Release inputs](/nyl/rendered-gitops/release-inputs/).
 
 ## Direct commands and release history
 

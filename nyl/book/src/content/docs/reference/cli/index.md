@@ -10,7 +10,7 @@ nyl provides several commands for managing Kubernetes manifests:
 - [`create and delete`](/nyl/reference/cli/create/) - Manage GitOps resource source files
 - [`get and update`](/nyl/reference/cli/project-resources/) - Inspect and refresh project resources
 - [`validate`](/nyl/reference/cli/validate/) - Validate project configuration
-- [`rendering-pipeline`](/nyl/rendering/pipeline/) - Shared rendering pipeline used by render/diff/apply
+- [`rendering-pipeline`](/nyl/kubernetes/pipeline/) - Shared rendering pipeline used by render/diff/apply
 - [`render`](/nyl/reference/cli/render/) - Render Kubernetes manifests
 - [`diff`](/nyl/reference/cli/diff/) - Show diff between rendered manifests and cluster state
 - [`apply`](/nyl/reference/cli/apply/) - Apply rendered manifests to the cluster

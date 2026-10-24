@@ -50,7 +50,7 @@ spec:
 
 See:
 
-- [Authoring Local Components](/nyl/rendering/components/authoring-local-components/)
-- [Resolution & Lookup Rules](/nyl/rendering/components/resolution-and-lookup/)
-- [Remote Shortcuts & Aliases](/nyl/rendering/components/remote-shortcuts-and-aliases/)
+- [Authoring Local Components](/nyl/kubernetes/components/authoring-local-components/)
+- [Resolution & Lookup Rules](/nyl/kubernetes/components/resolution-and-lookup/)
+- [Remote Shortcuts & Aliases](/nyl/kubernetes/components/remote-shortcuts-and-aliases/)
 - [Component resource reference](/nyl/reference/resources/components.k8s.nyl/v1/component/)

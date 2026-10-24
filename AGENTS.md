@@ -413,7 +413,7 @@ src/
 1. Add filter function in `crates/nyl-render/src/template/mod.rs`
 2. Register in `TemplateEngine::new()`
 3. Add unit test
-4. Document it in the Rendering section, `nyl/book/src/content/docs/rendering/`
+4. Document it in the Kubernetes section, `nyl/book/src/content/docs/kubernetes/`
 
 ### Adding a New Resource Type
 1. Define resource struct in `crates/nyl-core/src/resources/`

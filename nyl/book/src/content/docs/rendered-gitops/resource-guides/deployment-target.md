@@ -29,7 +29,7 @@ keyed by `<applicationGroup>/<release>`. Every binding sets exactly one source:
 and checks every binding of the target before rendering, and reports all
 problems together; bindings of a selected but disabled ApplicationGroup are
 ignored. `target.spec.releaseInputs` is not part of the template context. See
-[Release inputs](/nyl/gitops/release-inputs/).
+[Release inputs](/nyl/rendered-gitops/release-inputs/).
 
 ## Publication models
 
@@ -38,5 +38,5 @@ also use separate revisions or repositories. Nyl rejects overlapping prefixes
 on the same repository and normalized branch revision, including overlap
 through read or write URL aliases.
 
-See [Targets and cluster variation](/nyl/gitops/targets-and-clusters/)
+See [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
 for common deployment topologies.

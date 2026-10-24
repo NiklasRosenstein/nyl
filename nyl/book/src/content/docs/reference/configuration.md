@@ -1,5 +1,7 @@
 ---
 title: 'Configuration'
+sidebar:
+  label: 'nyl.toml'
 ---
 
 Nyl loads project settings from `nyl.toml`. It searches from the current

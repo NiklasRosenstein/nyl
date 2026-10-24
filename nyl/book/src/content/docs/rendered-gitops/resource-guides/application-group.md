@@ -189,6 +189,6 @@ source coordinates and commit locks must remain statically parseable for
 
 ## See also
 
-- [Project structure and discovery](/nyl/gitops/project-structure/)
-- [Targets and cluster variation](/nyl/gitops/targets-and-clusters/)
-- [Trust and admission boundaries](/nyl/gitops/security/)
+- [Project structure and discovery](/nyl/rendered-gitops/project-structure/)
+- [Targets and cluster variation](/nyl/rendered-gitops/targets-and-clusters/)
+- [Trust and admission boundaries](/nyl/rendered-gitops/security/)

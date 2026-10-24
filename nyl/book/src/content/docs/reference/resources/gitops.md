@@ -26,7 +26,7 @@ and name must remain static so Nyl can discover resources without evaluating
 templates.
 
 Files can live anywhere visible to Git discovery. The
-[recommended project structure](/nyl/gitops/project-structure/)
+[recommended project structure](/nyl/rendered-gitops/project-structure/)
 groups them under `config/` for readability.
 
 ## Validation and schemas
@@ -38,8 +38,8 @@ nyl validate
 ```
 
 Kind-specific JSON schemas are available from the
-[Nyl Resource Schemas](/nyl/reference/integrations/resource-schemas/). Scaffolded resources include the
+[Nyl Resource Schemas](/nyl/reference/editor-schemas/). Scaffolded resources include the
 appropriate YAML language-server schema URL.
 
-See the [Rendered Manifest Pattern](/nyl/gitops/)
+See the [Rendered Manifest Pattern](/nyl/rendered-gitops/)
 for the operational workflow.
