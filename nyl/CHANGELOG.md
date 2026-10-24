@@ -92,6 +92,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `nyl render`, `diff`, and `apply` take the path `render-tree`
+  takes, so a local run and a published tree agree:
+  - With `--target`, a Release in one of the target's ApplicationGroups is
+    taken from the compiled target. It includes the managed Namespaces of its
+    destination and `spec.additionalNamespaces`, and shared-namespace conflicts
+    across the target's Releases are reported. `--release-only` settles the
+    Release alone, faster but blind to other Releases. Without a target, a
+    Release renders its managed Namespaces by the default namespace policy.
+  - Project secrets and `NYL_*` environment variables enter templates only with
+    `--allow-secret-inputs`, as for the tree commands. Pass it where templates
+    read `secrets` or `env`.
+  - `nyl render` never connects to Kubernetes and leaves missing namespaces
+    unset; `--context` is deprecated and ignored, and `--kube-version` no
+    longer needs `--offline`.
+  - `diff` and `apply` fill missing namespaces from the Release's Application
+    destination (the group's `destinationNamespace`, else the Release
+    namespace) or `--namespace`, never from the kube context, and fail when
+    neither exists.
+  - `apply` and `release rollback` prune by each live resource's Argo CD
+    `Prune` sync option: `Prune=false` keeps a resource, and `Prune=confirm`,
+    which managed Namespaces carry by default, keeps it until
+    `--confirm-prune`. `release delete` reads `Delete` the same way, with
+    `--confirm-delete`. `diff` lists kept resources and accepts
+    `--confirm-prune`.
+
 - `render-tree` writes each non-CRD resource to its own file,
   `<kind>[.<group>]/[<namespace>/]<name>.yaml` beneath the release directory,
   instead of one `resources.yaml`. The kind is lowercased and the API version is

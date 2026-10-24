@@ -83,6 +83,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest
   after a successful rollback; `0` keeps every revision. Overrides `[release]
   history_limit` in [`nyl.toml`](/nyl/reference/configuration/#release-history).
+- `--confirm-prune` - Also prune resources whose sync option is `Prune=confirm`,
+  as with [`nyl apply`](/nyl/reference/cli/apply/#release-options).
 
 #### Examples
 
@@ -99,7 +101,8 @@ nyl release rollback my-app --namespace default --revision 2 --yes
 - Rollback always creates a new revision rather than mutating history, so the full
   audit trail is preserved and a rollback can itself be rolled back.
 - Pruning matches `nyl apply` semantics: resources present in the previously
-  deployed revision but absent from the rolled-back revision are deleted.
+  deployed revision but absent from the rolled-back revision are deleted, unless
+  their Argo CD sync options keep them.
 - A clear error is returned if the release or the requested revision does not
   exist, or if there is no previous revision to roll back to.
 
@@ -110,7 +113,14 @@ nyl release delete <NAME>... --namespace <NAMESPACE> [OPTIONS]
 ```
 
 Delete one or more releases (or a specific revision) and, by default, the
-resources they created.
+resources they created. Like an Argo CD Application deletion, purging keeps
+resources whose sync option is `Delete=false`, and those with `Delete=confirm`,
+such as managed Namespaces, unless `--confirm-delete` is passed. See
+[Pruning and deletion](/nyl/kubernetes/pipeline/#pruning-and-deletion).
+
+- `--no-purge` - Delete only the release records, not the resources
+- `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`
+- `--dry-run` - Show what would be deleted without deleting it
 
 ## See Also
 

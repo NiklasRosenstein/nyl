@@ -168,7 +168,7 @@ pub fn select_group(
 
 /// The enabled groups of `groups` whose local source renders `file`, by the
 /// same file selection as `render-tree`.
-fn groups_rendering(
+pub(super) fn groups_rendering(
     inventory: &GitOpsInventory,
     groups: &[(PathBuf, crate::resources::ApplicationGroup)],
     file: &Path,

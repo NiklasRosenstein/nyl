@@ -6,8 +6,10 @@ use crate::{
     cli::commands::apply::{prepare_desired_manifests, ObjectScopes},
     cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
     kubernetes::{
-        extract_name, DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity,
-        ReleaseStatus, ReleaseStorage, ResourceKey,
+        extract_name,
+        prune::{prune_decision, PruneDecision},
+        DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseStatus,
+        ReleaseStorage, ResourceKey,
     },
     NylError, Result,
 };
@@ -25,6 +27,7 @@ pub enum DiffMode {
 
 /// Show diff between rendered manifests and cluster state
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DiffArgs {
     #[command(flatten)]
     pub common: RenderOptions,
@@ -56,11 +59,16 @@ pub struct DiffArgs {
     #[arg(long)]
     pub append_release: bool,
 
+    /// Show resources whose Argo CD sync option is `Prune=confirm` as deleted, as `nyl apply --confirm-prune` deletes them.
+    #[arg(long)]
+    pub confirm_prune: bool,
+
     /// Exit with code 1 if changes are found, 0 if no changes (like git diff --exit-code)
     #[arg(long)]
     pub exit_code: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn execute(args: DiffArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
     let preflight = run_render_preflight(RenderPreflightOptions {
@@ -70,9 +78,6 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
-        resolve_namespaces: false,
-        release_namespace_hint: None,
-        adjust_duplicate_keys: false,
         discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
     })
     .await?;
@@ -96,8 +101,14 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     let (release_name, release_namespace) = release_identity(release.as_ref(), args.name, args.namespace)?;
 
     // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
-    let ns = Some(release_namespace.as_str());
-    let (ready, mut scopes) = prepare_desired_manifests(&kube_client, desired_manifests, &mut duplicates, ns).await?;
+    let destination_namespace = preflight.destination_namespace.as_deref().unwrap_or(&release_namespace);
+    let (ready, mut scopes) = prepare_desired_manifests(
+        &kube_client,
+        desired_manifests,
+        &mut duplicates,
+        Some(destination_namespace),
+    )
+    .await?;
 
     // Display duplicate resources warning if any
     if !duplicates.is_empty() {
@@ -153,7 +164,15 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // 7. Compute diff against LIVE cluster state
     let prev = previous_release.as_ref();
-    let diff_result = compute_diff_from_live(&kube_client, &desired_manifests, prev, args.mode, &mut scopes).await?;
+    let diff_result = compute_diff_from_live(
+        &kube_client,
+        &desired_manifests,
+        prev,
+        args.mode,
+        &mut scopes,
+        args.confirm_prune,
+    )
+    .await?;
 
     // 8. Display errors if any
     if !diff_result.errors.is_empty() {
@@ -232,6 +251,8 @@ struct DiffResult {
     added: Vec<(ResourceKey, Option<AddedNote>)>,
     modified: Vec<(ResourceKey, String, Option<String>)>, // (key, unified_diff_text, optional_error)
     deleted: Vec<ResourceKey>,
+    /// No longer desired, but kept by their Argo CD `Prune` sync option, as `nyl apply` keeps them.
+    kept: Vec<(ResourceKey, PruneDecision)>,
     unchanged: Vec<ResourceKey>,
     errors: Vec<(ResourceKey, String)>, // (key, error_message)
 }
@@ -257,6 +278,7 @@ async fn compute_diff_from_live(
     previous_state: Option<&crate::kubernetes::ReleaseState>,
     mode: DiffMode,
     scopes: &mut ObjectScopes,
+    confirm_prune: bool,
 ) -> Result<DiffResult> {
     // Build set of desired objects. Previous keys are compared by object identity,
     // as `nyl apply` prunes, so a changed apiVersion is not shown as a deletion.
@@ -392,16 +414,39 @@ async fn compute_diff_from_live(
         }
     }
 
-    // Check for deletions (in previous state but not in desired)
-    deleted.extend(removed_keys);
+    // Check for deletions (in previous state but not in desired), keeping what
+    // `nyl apply` keeps by the live resource's Prune sync option.
+    let mut kept = Vec::new();
+    for key in removed_keys {
+        let annotations = live_resources
+            .get(&key)
+            .and_then(|live| live.pointer("/metadata/annotations"))
+            .and_then(|annotations| serde_json::from_value(annotations.clone()).ok());
+        match prune_decision(annotations.as_ref(), confirm_prune) {
+            PruneDecision::Prune => deleted.push(key),
+            decision => kept.push((key, decision)),
+        }
+    }
 
     Ok(DiffResult {
         added,
         modified,
         deleted,
+        kept,
         unchanged,
         errors,
     })
+}
+
+/// Show resources kept by their Prune sync option, with what keeps them.
+fn print_kept(kept: &[(ResourceKey, PruneDecision)]) {
+    for (key, decision) in kept {
+        let reason = match decision {
+            PruneDecision::Retain => "kept: Prune=false",
+            _ => "kept: Prune=confirm needs --confirm-prune",
+        };
+        println!("{} {} {}", "!".yellow().bold(), key, format!("({reason})").yellow());
+    }
 }
 
 /// Display summary line with colored counts
@@ -415,6 +460,9 @@ fn print_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
         format!("{} to delete", diff.deleted.len().to_string().red()),
         format!("{} unchanged", diff.unchanged.len()),
     ];
+    if !diff.kept.is_empty() {
+        parts.push(format!("{} kept", diff.kept.len().to_string().yellow()));
+    }
 
     if total_duplicates_ignored > 0 {
         let plural = if total_duplicates_ignored == 1 {
@@ -478,7 +526,8 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
         println!("{} {}{}", "-".red().bold(), key, dup_annotation);
     }
-    if !diff.deleted.is_empty() {
+    print_kept(&diff.kept);
+    if !diff.deleted.is_empty() || !diff.kept.is_empty() {
         println!();
     }
 
@@ -517,8 +566,9 @@ fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) 
         let dup_annotation = get_duplicate_annotation_for_key(key, duplicates);
         println!("{} {}{}", "-".red().bold(), key, dup_annotation);
     }
+    print_kept(&diff.kept);
 
-    if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+    if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() || !diff.kept.is_empty() {
         println!();
     }
 
@@ -862,9 +912,16 @@ mod tests {
         let manifests = vec![crd, cr];
         // Only the CR's GVK is unknown; the CRD manifest type is always available.
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
-            .await
-            .unwrap();
+        let result = compute_diff_from_live(
+            &client,
+            &manifests,
+            None,
+            DiffMode::Raw,
+            &mut ObjectScopes::default(),
+            false,
+        )
+        .await
+        .unwrap();
 
         // The CR should be in `added` with a non-error note ("CRD will be installed")
         let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
@@ -884,9 +941,16 @@ mod tests {
         });
         let manifests = vec![cr];
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
-            .await
-            .unwrap();
+        let result = compute_diff_from_live(
+            &client,
+            &manifests,
+            None,
+            DiffMode::Raw,
+            &mut ObjectScopes::default(),
+            false,
+        )
+        .await
+        .unwrap();
 
         let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
         assert!(cr_entry.is_some(), "ClusterPolicy should appear in added");
@@ -917,9 +981,16 @@ mod tests {
         });
         let manifests = vec![crd, cr];
         let client = SelectiveApiResourceNotFoundClient::new([("kyverno.io", "v1", "ClusterPolicy")]);
-        let result = compute_diff_from_live(&client, &manifests, None, DiffMode::Raw, &mut ObjectScopes::default())
-            .await
-            .unwrap();
+        let result = compute_diff_from_live(
+            &client,
+            &manifests,
+            None,
+            DiffMode::Raw,
+            &mut ObjectScopes::default(),
+            false,
+        )
+        .await
+        .unwrap();
 
         let cr_entry = result.added.iter().find(|(k, _)| k.gvk.kind == "ClusterPolicy");
         assert!(cr_entry.is_some());
@@ -960,6 +1031,7 @@ mod tests {
             Some(&previous),
             DiffMode::Raw,
             &mut ObjectScopes::default(),
+            false,
         )
         .await
         .unwrap();

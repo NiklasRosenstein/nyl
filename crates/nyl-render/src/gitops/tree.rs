@@ -1294,26 +1294,8 @@ fn resolve_namespace_ownership(
 ) -> Result<()> {
     let mut consumers = BTreeMap::<String, BTreeSet<usize>>::new();
     for (index, workload) in workloads.iter().enumerate() {
-        consumers
-            .entry(workload.destination_namespace.clone())
-            .or_default()
-            .insert(index);
-        for namespace in &workload.release.spec.additional_namespaces {
-            consumers.entry(namespace.clone()).or_default().insert(index);
-        }
-        for manifest in &workload.manifests {
-            if let Some(namespace) = manifest.pointer("/metadata/namespace").and_then(Value::as_str) {
-                if !namespace.is_empty() {
-                    consumers.entry(namespace.to_owned()).or_default().insert(index);
-                }
-            }
-            if is_namespace(manifest) {
-                let namespace = manifest
-                    .pointer("/metadata/name")
-                    .and_then(Value::as_str)
-                    .expect("Namespace names were validated before ownership resolution");
-                consumers.entry(namespace.to_owned()).or_default().insert(index);
-            }
+        for namespace in namespaces_used(&workload.destination_namespace, &workload.release, &workload.manifests) {
+            consumers.entry(namespace).or_default().insert(index);
         }
     }
 
@@ -1365,6 +1347,124 @@ fn resolve_namespace_ownership(
         }
     }
     Ok(())
+}
+
+/// The namespaces a workload uses: its destination, its additional
+/// namespaces, the namespaces its resources name, and its Namespace objects.
+fn namespaces_used(
+    destination_namespace: &str,
+    release: &crate::resources::Release,
+    manifests: &[Value],
+) -> BTreeSet<String> {
+    let mut namespaces = BTreeSet::from([destination_namespace.to_owned()]);
+    namespaces.extend(release.spec.additional_namespaces.iter().cloned());
+    for manifest in manifests {
+        if let Some(namespace) = manifest.pointer("/metadata/namespace").and_then(Value::as_str) {
+            if !namespace.is_empty() {
+                namespaces.insert(namespace.to_owned());
+            }
+        }
+        if is_namespace(manifest) {
+            let namespace = manifest
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .expect("Namespace names were validated before ownership resolution");
+            namespaces.insert(namespace.to_owned());
+        }
+    }
+    namespaces
+}
+
+/// One Release's resources as its workload Application deploys them.
+#[derive(Debug)]
+pub struct StandaloneRelease {
+    /// The namespace Argo CD's destination gives resources that set none.
+    pub destination_namespace: String,
+    pub manifests: Vec<Value>,
+    pub manifest_provenance: HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+}
+
+/// Settle the namespaces of one Release without compiling the rest of its
+/// target, for direct commands that skip it.
+///
+/// It applies the per-workload rules of [`resolve_namespace_ownership`]: the
+/// destination is the group's `destinationNamespace` or the Release namespace,
+/// resources stay within the namespaces the Release may use, and each
+/// namespace it uses gets a managed Namespace by the group's `namespace`
+/// policy, unless `sharedNamespaces` gives it to another owner or it is a
+/// Kubernetes bootstrap namespace. Without a group, the default policy applies.
+/// Conflicts with other Releases of the target are not detected; `render-tree`
+/// and a direct command that compiles the target report them.
+pub fn settle_standalone_release(
+    group: Option<&ApplicationGroup>,
+    release: &crate::resources::Release,
+    mut manifests: Vec<Value>,
+    mut manifest_provenance: HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+    release_provenance: Option<&crate::render::Provenance>,
+) -> Result<StandaloneRelease> {
+    let destination_namespace = group
+        .and_then(|group| group.spec.destination_namespace.clone())
+        .unwrap_or_else(|| release.metadata.namespace.clone());
+    let issues = validate_release_namespace_scope(&manifests, release, &destination_namespace);
+    if !issues.is_empty() {
+        return Err(NylError::validation(format_namespace_scope_issues(&issues)));
+    }
+    let default_policy = crate::resources::ManagedNamespacePolicy::default();
+    let policy = group.map_or(&default_policy, |group| &group.spec.namespace);
+    for namespace in namespaces_used(&destination_namespace, release, &manifests) {
+        let owner = group.and_then(|group| group.spec.shared_namespaces.get(&namespace).map(|policy| &policy.owner));
+        let delegated = match owner {
+            None if is_kubernetes_bootstrap_namespace(&namespace) => Some("External"),
+            None => None,
+            Some(SharedNamespaceOwner::Release {
+                application_group,
+                release: owner,
+            }) if group.is_some_and(|group| &group.metadata.name == application_group)
+                && owner == &release.metadata.name =>
+            {
+                None
+            }
+            Some(SharedNamespaceOwner::Release { .. }) => Some("Release"),
+            Some(SharedNamespaceOwner::Dedicated { .. }) => Some("Dedicated"),
+            Some(SharedNamespaceOwner::External) => Some("External"),
+        };
+        let renders = |manifests: &[Value]| {
+            manifests.iter().any(|manifest| {
+                is_namespace(manifest)
+                    && manifest.pointer("/metadata/name").and_then(Value::as_str) == Some(namespace.as_str())
+            })
+        };
+        if let Some(owner_kind) = delegated {
+            if renders(&manifests) {
+                return Err(NylError::config(format!(
+                    "Release {:?} renders Namespace {namespace:?}, but its configured owner kind is {owner_kind}",
+                    release.metadata.name
+                )));
+            }
+            continue;
+        }
+        let existed = renders(&manifests);
+        ensure_managed_namespace(&mut manifests, &namespace, policy)?;
+        if !existed && renders(&manifests) {
+            let manifest = manifests
+                .iter()
+                .rev()
+                .find(|manifest| is_namespace(manifest))
+                .expect("managed Namespace was added");
+            manifest_provenance.insert(
+                crate::kubernetes::ResourceKey::from_json_value(manifest)?,
+                release_provenance.cloned().unwrap_or_default().generated(format!(
+                    "Namespace {namespace:?} for Release {:?}",
+                    release.metadata.name
+                )),
+            );
+        }
+    }
+    Ok(StandaloneRelease {
+        destination_namespace,
+        manifests,
+        manifest_provenance,
+    })
 }
 
 fn resolve_shared_namespace_owner(
@@ -3203,6 +3303,39 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_settle_standalone_release_leaves_delegated_namespaces_to_their_owner() {
+        let group: ApplicationGroup = serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.gitops.nyl/v1", "kind": "ApplicationGroup", "metadata": {"name": "web"},
+            "spec": {"applicationNamespace": "argocd", "sharedNamespaces": {
+                "shared": {"owner": {"kind": "Dedicated", "applicationGroup": "platform"}}}}
+        }))
+        .unwrap();
+        let release: crate::resources::Release = serde_json::from_value(serde_json::json!({
+            "apiVersion": "k8s.nyl/v1", "kind": "Release", "metadata": {"name": "api", "namespace": "shared"},
+            "spec": {"additionalNamespaces": ["kube-system", "jobs"]}
+        }))
+        .unwrap();
+        let settled = settle_standalone_release(Some(&group), &release, Vec::new(), HashMap::new(), None).unwrap();
+        let namespaces = settled
+            .manifests
+            .iter()
+            .filter(|manifest| is_namespace(manifest))
+            .map(|manifest| manifest["metadata"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        // The Dedicated owner and the bootstrap namespace are not this Release's.
+        assert_eq!(namespaces, ["jobs"]);
+        assert_eq!(settled.destination_namespace, "shared");
+
+        let authored =
+            vec![serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shared"}})];
+        let error = settle_standalone_release(Some(&group), &release, authored, HashMap::new(), None).unwrap_err();
+        assert!(
+            error.to_string().contains("its configured owner kind is Dedicated"),
+            "{error}"
+        );
+    }
 
     fn generated_project(spec: AppProjectTemplate) -> GeneratedProject {
         GeneratedProject {

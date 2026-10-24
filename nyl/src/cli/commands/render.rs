@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     cli::commands::cluster::{load_cluster_kube_config, resolve_target_cluster_from_inventory, ResolvedTargetCluster},
-    cli::namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces},
     config::ProjectConfig,
     gitops::{discover_gitops_inventory, resolve_deployment_target_name},
     kubernetes::{KubeRsClient, ResourceKey},
@@ -18,6 +17,7 @@ use crate::{
 
 /// Common options for manifest rendering operations (render, apply, diff)
 #[derive(Args, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct RenderOptions {
     #[command(flatten)]
     pub validation: crate::validation::ValidationArgs,
@@ -72,6 +72,15 @@ pub struct RenderOptions {
     #[arg(long)]
     pub track_parent: bool,
 
+    /// Allow project secrets and NYL_* environment variables to affect rendered output, as for the tree commands.
+    #[arg(long)]
+    pub allow_secret_inputs: bool,
+
+    /// Settle the Release alone instead of taking it from the compiled target. Faster for large targets,
+    /// but namespace conflicts with the target's other Releases go undetected.
+    #[arg(long)]
+    pub release_only: bool,
+
     #[command(flatten)]
     pub cache: cache::RenderCacheArgs,
 }
@@ -82,20 +91,20 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Offline mode: never connect to Kubernetes, resolve Git charts from cached refs, and read `fromPublication` Release inputs at the cached publication branch head
+    /// Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head
     #[arg(long)]
     pub offline: bool,
 
-    /// Kubernetes version for targetless offline Helm rendering
+    /// Kubernetes version for targetless Helm rendering
     #[arg(long)]
     pub kube_version: Option<String>,
 
-    /// Kubernetes API versions for targetless offline Helm rendering (comma-separated or repeated)
+    /// Kubernetes API versions for targetless Helm rendering (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     pub kube_api_versions: Vec<String>,
 
-    /// Kubernetes context override for live rendering
-    #[arg(long)]
+    /// Deprecated and ignored: `nyl render` never connects to Kubernetes
+    #[arg(long, hide = true)]
     pub context: Option<String>,
 }
 
@@ -107,9 +116,11 @@ enum OutputFormat {
     Json,
 }
 
+/// Whether a command connects to the target's cluster after rendering.
+/// Rendering itself never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClusterClientRequirement {
-    OnDemand,
+    Never,
     Required,
 }
 
@@ -121,9 +132,6 @@ pub struct RenderPreflightOptions<'a> {
     pub kube_api_versions: &'a [String],
     pub context_override: Option<&'a str>,
     pub cluster_client_requirement: ClusterClientRequirement,
-    pub resolve_namespaces: bool,
-    pub release_namespace_hint: Option<&'a str>,
-    pub adjust_duplicate_keys: bool,
     pub discovery_progress: DiscoveryProgress,
 }
 
@@ -143,6 +151,8 @@ pub struct RenderPreflightResult {
     pub manifests: Vec<serde_json::Value>,
     pub provenance: HashMap<ResourceKey, crate::render::Provenance>,
     pub release: Option<Release>,
+    /// The namespace Argo CD's destination gives resources that set none.
+    pub destination_namespace: Option<String>,
     pub strip_empty_metadata_labels: bool,
     pub resolved_target: Option<ResolvedTargetCluster>,
     pub duplicates: HashMap<ResourceKey, usize>,
@@ -202,14 +212,9 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         }
         _ => None,
     };
-    let missing_capabilities_error = if options.offline {
-        Some("Offline targetless Helm rendering requires --kube-version and --kube-api-versions".to_string())
-    } else {
-        Some(
-            "Rendering Helm resources online requires --target; alternatively use --offline with --kube-version and --kube-api-versions"
-                .to_string(),
-        )
-    };
+    let missing_capabilities_error = Some(
+        "Rendering Helm resources requires --target, or --kube-version and --kube-api-versions without one".to_string(),
+    );
     let mut session = RenderSession::for_cli(
         &project_root,
         &project_config,
@@ -218,6 +223,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             .map(|resolved| (&resolved.target, &resolved.cluster)),
         explicit_capabilities,
         missing_capabilities_error,
+        options.common.allow_secret_inputs,
     )?;
     let render_cache = cache::RenderCache::new(&project_root, options.common.cache.mode())?;
     let _cache_reporter = render_cache.reporter();
@@ -288,10 +294,48 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         ],
     )?;
     let strip_empty_metadata_labels = rendered.strip_empty_metadata_labels;
-    let mut manifests = rendered.manifests;
-    let mut provenance = rendered.manifest_provenance;
-    let release = rendered.release;
-    let mut duplicates = rendered.duplicates;
+    let release = rendered.release.clone();
+    let duplicates = rendered.duplicates;
+    let workload = crate::gitops::direct::resolve_direct_workload(
+        crate::gitops::direct::DirectWorkloadRequest {
+            target: inventory
+                .as_ref()
+                .zip(resolved_target.as_ref())
+                .map(|(inventory, resolved)| (inventory, &resolved.target)),
+            file: path,
+            application_group: options.common.application_group.as_deref(),
+            defaults_only: options.common.defaults_only,
+            // Overrides, a source-kind filter, and expansion options make this
+            // render differ from the target's own.
+            standalone: options.common.defaults_only
+                || options.common.inputs_file.is_some()
+                || !options.common.inputs.is_empty()
+                || options.common.only_source_kind.is_some()
+                || options.common.track_parent
+                || options.common.max_depth != RenderRequest::new(path, provenance_root).max_depth,
+            scope: if options.common.release_only {
+                crate::gitops::direct::DirectScope::Release
+            } else {
+                crate::gitops::direct::DirectScope::Target
+            },
+            cache: Some(&render_cache),
+            tree_options: crate::gitops::TreeRenderOptions {
+                allow_secret_inputs: options.common.allow_secret_inputs,
+                publication_read: crate::gitops::inputs::PublicationRead::from_offline(options.offline),
+                ..crate::gitops::TreeRenderOptions::default()
+            },
+        },
+        crate::gitops::direct::DirectRender {
+            manifests: rendered.manifests,
+            manifest_provenance: rendered.manifest_provenance,
+            release: rendered.release,
+            release_provenance: rendered.release_provenance,
+        },
+    )
+    .await?;
+    let mut manifests = workload.manifests;
+    let provenance = workload.manifest_provenance;
+    let destination_namespace = workload.destination_namespace;
 
     manifests = crate::cli::filter::filter_manifests_by_kind(
         manifests,
@@ -299,15 +343,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         &options.common.exclude_kind,
     )?;
 
-    let should_initialize_clients = should_initialize_cluster_clients(
-        options.offline,
-        options.cluster_client_requirement,
-        options.resolve_namespaces,
-        &manifests,
-        options.adjust_duplicate_keys,
-    );
-
-    let (kube_client, raw_client) = if should_initialize_clients {
+    let (kube_client, raw_client) = if options.cluster_client_requirement == ClusterClientRequirement::Required {
         let resolved = resolved_target
             .as_ref()
             .ok_or_else(|| NylError::config("This operation requires --target so Nyl can select a trusted cluster"))?;
@@ -323,45 +359,13 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         (None, None)
     };
 
-    let release_namespace_hint = options
-        .release_namespace_hint
-        .or_else(|| release.as_ref().map(|release| release.metadata.namespace.as_str()));
-
-    if options.resolve_namespaces && should_resolve_namespaces(&manifests, options.offline) {
-        let client = kube_client
-            .as_ref()
-            .expect("kube client must exist when namespace resolution is enabled");
-        let origins = manifests
-            .iter()
-            .map(|manifest| {
-                ResourceKey::from_json_value(manifest)
-                    .ok()
-                    .and_then(|key| provenance.get(&key))
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
-        resolve_manifest_namespaces(client, &mut manifests, release_namespace_hint).await?;
-        provenance.clear();
-        for (manifest, origin) in manifests.iter().zip(origins) {
-            if let Some(origin) = origin {
-                provenance.insert(ResourceKey::from_json_value(manifest)?, origin);
-            }
-        }
-    }
-
-    if options.adjust_duplicate_keys {
-        if let Some(client) = kube_client.as_ref() {
-            duplicates =
-                adjust_duplicate_keys_for_namespace_resolution(client, &duplicates, release_namespace_hint).await?;
-        }
-    }
-
     Ok(RenderPreflightResult {
         project_config,
         project_root,
         manifests,
         provenance,
         release,
+        destination_namespace,
         strip_empty_metadata_labels,
         resolved_target,
         duplicates,
@@ -371,21 +375,19 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
 }
 
 pub async fn execute(args: RenderArgs) -> Result<()> {
-    if !args.offline && (args.kube_version.is_some() || !args.kube_api_versions.is_empty()) {
-        return Err(NylError::config(
-            "--kube-version and --kube-api-versions require --offline",
-        ));
+    if args.context.is_some() {
+        crate::util::deprecation::warn_deprecated_flag(
+            "nyl render --context",
+            "nyl render never connects to Kubernetes; remove the flag",
+        );
     }
     let preflight = run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: args.offline,
         kube_version: args.kube_version.as_deref(),
         kube_api_versions: &args.kube_api_versions,
-        context_override: args.context.as_deref(),
-        cluster_client_requirement: ClusterClientRequirement::OnDemand,
-        resolve_namespaces: true,
-        release_namespace_hint: None,
-        adjust_duplicate_keys: false,
+        context_override: None,
+        cluster_client_requirement: ClusterClientRequirement::Never,
         discovery_progress: DiscoveryProgress::Quiet,
     })
     .await?;
@@ -422,34 +424,6 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
     validation
 }
 
-pub(crate) fn should_resolve_namespaces(manifests: &[serde_json::Value], offline: bool) -> bool {
-    !offline && manifests.iter().any(manifest_requires_namespace_resolution)
-}
-
-pub(crate) fn should_initialize_cluster_clients(
-    offline: bool,
-    cluster_client_requirement: ClusterClientRequirement,
-    resolve_namespaces: bool,
-    manifests: &[serde_json::Value],
-    adjust_duplicate_keys: bool,
-) -> bool {
-    !offline
-        && (cluster_client_requirement == ClusterClientRequirement::Required
-            || adjust_duplicate_keys
-            || (resolve_namespaces && should_resolve_namespaces(manifests, offline)))
-}
-
-fn manifest_requires_namespace_resolution(manifest: &serde_json::Value) -> bool {
-    let has_namespace = crate::kubernetes::extract_namespace(manifest)
-        .as_deref()
-        .is_some_and(|ns| !ns.trim().is_empty());
-    if has_namespace {
-        return false;
-    }
-
-    crate::kubernetes::extract_gvk(manifest).map_or(true, |gvk| !crate::kubernetes::is_known_cluster_scoped_gvk(&gvk))
-}
-
 // Note: parse_yaml_documents is now replaced by SourceContext::parse_yaml_documents
 /// (i.e. it is a HelmChart or Component, not a plain k8s manifest)
 fn output_manifests(
@@ -476,133 +450,4 @@ fn output_manifests(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_resolve_namespaces_online_with_missing_namespace() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa"}
-        })];
-        assert!(should_resolve_namespaces(&manifests, false));
-    }
-
-    #[test]
-    fn test_should_not_resolve_namespaces_offline() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa"}
-        })];
-        assert!(!should_resolve_namespaces(&manifests, true));
-    }
-
-    #[test]
-    fn test_should_not_resolve_namespaces_when_all_namespaces_present() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa", "namespace": "default"}
-        })];
-        assert!(!should_resolve_namespaces(&manifests, false));
-    }
-
-    #[test]
-    fn test_should_not_resolve_namespaces_for_known_cluster_scoped_resources() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {"name": "infra"}
-        })];
-        assert!(!should_resolve_namespaces(&manifests, false));
-    }
-
-    #[test]
-    fn test_should_initialize_cluster_clients_offline() {
-        assert!(!should_initialize_cluster_clients(
-            true,
-            ClusterClientRequirement::Required,
-            true,
-            &[],
-            true
-        ));
-    }
-
-    #[test]
-    fn test_should_initialize_cluster_clients_required() {
-        assert!(should_initialize_cluster_clients(
-            false,
-            ClusterClientRequirement::Required,
-            false,
-            &[],
-            false
-        ));
-    }
-
-    #[test]
-    fn test_should_initialize_cluster_clients_for_namespace_resolution() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa"}
-        })];
-
-        assert!(should_initialize_cluster_clients(
-            false,
-            ClusterClientRequirement::OnDemand,
-            true,
-            &manifests,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_should_not_initialize_cluster_clients_for_cluster_scoped_resources() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {"name": "infra"}
-        })];
-
-        assert!(!should_initialize_cluster_clients(
-            false,
-            ClusterClientRequirement::OnDemand,
-            true,
-            &manifests,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_should_not_initialize_cluster_clients_when_not_needed() {
-        let manifests = vec![serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {"name": "sa", "namespace": "default"}
-        })];
-
-        assert!(!should_initialize_cluster_clients(
-            false,
-            ClusterClientRequirement::OnDemand,
-            true,
-            &manifests,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_should_initialize_cluster_clients_for_duplicate_adjustment() {
-        assert!(should_initialize_cluster_clients(
-            false,
-            ClusterClientRequirement::OnDemand,
-            false,
-            &[],
-            true
-        ));
-    }
 }

@@ -8,9 +8,20 @@ into a checkout of its publication repository to inspect the
 
 ## Validate and render
 
+List the targets and where each one publishes:
+
+```console
+$ nyl get targets
+NAME        CLUSTER  PUBLICATION      PATH-PREFIX  FILE
+production  primary  platform@deploy  production   config/targets/production.yaml#document-1
+staging     staging  platform@deploy  staging      config/targets/staging.yaml#document-1
+```
+
+Then validate the project and render one target into a checkout of its
+publication repository:
+
 ```bash
 nyl validate
-nyl get targets
 nyl render-tree --target production --output-dir deploy-worktree
 ```
 

@@ -13,8 +13,9 @@ nyl diff [--target <TARGET>] [OPTIONS] <FILE>
 ## Description
 
 The `diff` command renders manifests, compares them with live cluster state, and prints changes.
-For shared rendering behavior and namespace resolution details, see
-[Rendering Pipeline](/nyl/kubernetes/pipeline/).
+It compares exactly what [`apply`](/nyl/reference/cli/apply/) would apply and
+prune. See [Rendering Pipeline](/nyl/kubernetes/pipeline/#the-releases-application)
+for the behavior `render`, `diff`, and `apply` share.
 
 ## Arguments
 
@@ -30,11 +31,12 @@ For shared rendering behavior and namespace resolution details, see
 - `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
+- `--release-only` and `--allow-secret-inputs` - As for [`apply`](/nyl/reference/cli/apply/#common-options).
 
 ### Release Options
 
 - `--name <NAME>` - Release name (required if no Release in file)
-- `--namespace <NAMESPACE>` - Release namespace (required if no Release in file)
+- `--namespace <NAMESPACE>` - Release namespace, and the namespace of resources that set none (required if no Release in file)
 
 ### Cluster Options
 
@@ -47,6 +49,7 @@ For shared rendering behavior and namespace resolution details, see
   - `normalized`: Uses server-side apply to filter server defaults (like kubectl diff)
   - `raw`: Compares raw manifests without server normalization
 - `--append-release` - Preview diff as if current manifests were merged with the previous deployed release
+- `--confirm-prune` - Show resources whose sync option is `Prune=confirm` as deleted, as `apply --confirm-prune` deletes them. Without it they are listed with `!` as kept, like resources with `Prune=false`
 
 ## Examples
 
@@ -95,10 +98,46 @@ nyl diff --target production --context admin@production manifest.yaml
 
 ## Output
 
-The diff command shows:
-- **Green (+)**: Lines that will be added
-- **Red (-)**: Lines that will be removed
-- **Summary**: Count of resources to create, update, or delete
+Each resource is listed with what `apply` would do to it: `+` create, `~`
+update (followed by the unified diff), `-` prune, `!` keep although no longer
+rendered, and `=` leave unchanged. The summary counts each. Here the Release
+raised its replicas and dropped its `web-jobs` namespace, whose managed
+Namespace awaits prune confirmation:
+
+```console
+$ nyl diff --target production applications/web/release.yaml
+~ Deployment web/web
+@@ -5,7 +5,7 @@   namespace: web
+ spec:
+   progressDeadlineSeconds: 600
+-  replicas: 2
++  replicas: 3
+   revisionHistoryLimit: 10
+   selector:
+     matchLabels:
+
+- ConfigMap web-jobs/cleanup-schedule
+! Namespace web-jobs (kept: Prune=confirm needs --confirm-prune)
+
+= ConfigMap web/web-config
+= Namespace web
+
+Summary: 0 to add, 1 to modify, 1 to delete, 2 unchanged, 1 kept
+```
+
+Before the first apply, every resource is new, including the managed Namespaces
+the Release's Application deploys:
+
+```console
+$ nyl diff --target production applications/web/release.yaml
++ ConfigMap web/web-config
++ ConfigMap web-jobs/cleanup-schedule
++ Deployment web/web
++ Namespace web-jobs
++ Namespace web
+
+Summary: 5 to add, 0 to modify, 0 to delete, 0 unchanged
+```
 
 ## Notes
 
@@ -106,7 +145,7 @@ The diff command shows:
 - A `Release` resource in the manifest provides release metadata automatically.
 - Normalized mode is recommended for most use cases as it matches kubectl diff behavior.
 - If no previous release state exists, diff still compares desired resources against live state but cannot determine prune candidates; a warning is shown and `to delete` remains incomplete.
-- See [Rendering Pipeline](/nyl/kubernetes/pipeline/) for namespace resolution and filter semantics.
+- See [Rendering Pipeline](/nyl/kubernetes/pipeline/#namespaces-in-diff-and-apply) for namespaces and filter semantics.
 
 ## Manifest validation
 

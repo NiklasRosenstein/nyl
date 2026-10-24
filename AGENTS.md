@@ -410,9 +410,15 @@ src/
   cluster.
 - Remote source sessions expose neither secrets nor process environment and
   reject checkout symlinks and search paths outside the remote project root.
-- Tree commands exclude project secrets and process environment unless the
-  invocation explicitly allows secret inputs. Remote source sessions remain
-  restricted when that option is enabled.
+- Tree and direct commands exclude project secrets and process environment
+  unless the invocation explicitly allows secret inputs. Remote source sessions
+  remain restricted when that option is enabled.
+- Direct commands (`render`, `diff`, `apply`) take a target's Release from the
+  compiled target (`gitops::direct`), so they work on what its Application
+  deploys; `--release-only` and standalone renders share the per-Release rules
+  of `settle_standalone_release`. `render` never connects to Kubernetes, and no
+  command takes a namespace from the kube context. Pruning and purging follow
+  each live resource's Argo CD `Prune`/`Delete` sync option.
 - Generated Argo CD Applications use ordinary recursive directory sources.
 
 ## Common Tasks

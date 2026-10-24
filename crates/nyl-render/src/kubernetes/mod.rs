@@ -7,6 +7,7 @@
 mod client;
 mod diff;
 mod ordering;
+pub mod prune;
 mod resource;
 mod state;
 

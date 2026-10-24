@@ -118,9 +118,9 @@ literal `spec.inputs`, so templating cannot change them. See
 
 ## Direct commands and release history
 
-`nyl render` removes the Release and emits the rest of its bundle. `nyl apply`
-uses its name and namespace to record revisions in Kubernetes; `nyl diff` uses
-the same identity. Direct commands can still render a file without a Release
+`nyl render` removes the Release and emits the rest of its bundle, with the
+managed Namespaces its Application would deploy. `nyl apply` uses its name and
+namespace to record revisions in Kubernetes; `nyl diff` uses the same identity. Direct commands can still render a file without a Release
 when their command-specific name and namespace inputs are supplied.
 
 See also:

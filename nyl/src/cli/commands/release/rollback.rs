@@ -49,6 +49,10 @@ pub struct RollbackArgs {
     /// history_limit` in nyl.toml.
     #[arg(long, value_name = "N", value_parser = crate::config::parse_release_history_limit)]
     pub history_limit: Option<u32>,
+
+    /// Prune resources whose Argo CD sync option is `Prune=confirm` (see `nyl apply --confirm-prune`).
+    #[arg(long)]
+    pub confirm_prune: bool,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
@@ -137,6 +141,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
             ApplySettings {
                 concurrency,
                 history_limit,
+                confirm_prune: args.confirm_prune,
             },
             &mut timings,
             &mut |event| renderer.event(event),

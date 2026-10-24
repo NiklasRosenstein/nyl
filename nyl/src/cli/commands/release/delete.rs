@@ -10,6 +10,7 @@ use crate::{
 
 /// Delete release(s)
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches compose without hidden state.
 pub struct DeleteArgs {
     /// deployment target whose cluster stores the release
     #[arg(long)]
@@ -38,6 +39,10 @@ pub struct DeleteArgs {
     #[arg(long)]
     pub no_purge: bool,
 
+    /// Also purge resources whose Argo CD sync option is `Delete=confirm`, such as managed Namespaces.
+    #[arg(long, conflicts_with = "no_purge")]
+    pub confirm_delete: bool,
+
     /// Kubernetes context to use
     #[arg(long)]
     pub context: Option<String>,
@@ -64,7 +69,7 @@ pub async fn execute(args: DeleteArgs) -> Result<()> {
             args.revision,
             args.yes,
             args.dry_run,
-            !args.no_purge,
+            (!args.no_purge).then_some(args.confirm_delete),
         )
         .await?;
     }
@@ -81,7 +86,8 @@ async fn delete_release(
     revision: Option<u32>,
     skip_confirm: bool,
     dry_run: bool,
-    purge: bool,
+    // `Some(confirm_delete)` purges the release's resources.
+    purge: Option<bool>,
 ) -> Result<()> {
     // Get revisions to delete and the relevant release state
     let (revisions, relevant_release): (Vec<u32>, Option<crate::kubernetes::ReleaseState>) = if let Some(rev) = revision
@@ -136,7 +142,7 @@ async fn delete_release(
         println!("{}", "⚠ Warning: This release is currently deployed!".yellow());
     }
 
-    if purge {
+    if purge.is_some() {
         if let Some(release) = &relevant_release {
             println!(
                 "{} This will also delete {} resource(s) from the cluster.",
@@ -178,9 +184,9 @@ async fn delete_release(
     }
 
     // Purge resources first if requested
-    if purge {
+    if let Some(confirm_delete) = purge {
         if let Some(release) = &relevant_release {
-            purge_resources(client, release).await?;
+            purge_resources(client, release, confirm_delete).await?;
         }
     }
 
@@ -203,7 +209,14 @@ async fn delete_release(
     Ok(())
 }
 
-async fn purge_resources(client: kube::Client, release: &crate::kubernetes::ReleaseState) -> Result<()> {
+/// Delete the release's resources, keeping those whose Argo CD `Delete` sync
+/// option retains them or awaits `--confirm-delete`.
+async fn purge_resources(
+    client: kube::Client,
+    release: &crate::kubernetes::ReleaseState,
+    confirm_delete: bool,
+) -> Result<()> {
+    use crate::kubernetes::prune::{delete_decision, PruneDecision};
     use crate::kubernetes::{KubeClient, KubeRsClient};
 
     println!("Purging resources from cluster...");
@@ -217,6 +230,28 @@ async fn purge_resources(client: kube::Client, release: &crate::kubernetes::Rele
     for key in &release.resource_keys {
         let namespace = key.namespace.as_deref();
         let display_ns = namespace.unwrap_or("default");
+        let live = kube_client
+            .get_resource(&key.gvk, namespace, &key.name)
+            .await
+            .ok()
+            .flatten();
+        match delete_decision(
+            live.as_ref().and_then(|object| object.metadata.annotations.as_ref()),
+            confirm_delete,
+        ) {
+            PruneDecision::Prune => {}
+            PruneDecision::Retain => {
+                println!("  {} Kept {key}: its sync option Delete=false retains it", "!".yellow());
+                continue;
+            }
+            PruneDecision::AwaitConfirmation => {
+                println!(
+                    "  {} Kept {key}: its sync option Delete=confirm needs --confirm-delete to delete it",
+                    "!".yellow()
+                );
+                continue;
+            }
+        }
 
         match kube_client.delete_resource(&key.gvk, namespace, &key.name).await {
             Ok(()) => {

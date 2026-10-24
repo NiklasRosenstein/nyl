@@ -6395,3 +6395,172 @@ fn test_render_tree_accepts_deprecated_cluster_and_release_api_versions_with_a_w
     assert!(expected.remove(&index).is_some() && actual.remove(&index).is_some());
     assert_eq!(actual, expected);
 }
+
+/// Parse a multi-document YAML stream into its documents, sorted by content.
+fn sorted_documents(yaml: &str) -> Vec<serde_json::Value> {
+    let mut documents = serde_saphyr::from_multiple::<serde_json::Value>(yaml)
+        .unwrap()
+        .into_iter()
+        .filter(|document| !document.is_null())
+        .collect::<Vec<_>>();
+    documents.sort_by_key(|document| document.to_string());
+    documents
+}
+
+fn with_namespaced_api_release(fixture: &TempDir) {
+    fs::write(
+        fixture.path().join("applications/workloads/api.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\nspec:\n  additionalNamespaces: [api-jobs]\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\ndata:\n  environment: '{{ values.environment }}'\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: jobs\n  namespace: api-jobs\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_render_with_target_renders_what_render_tree_publishes_for_the_release() {
+    let fixture = fixture();
+    with_namespaced_api_release(&fixture);
+    let output = TempDir::new().unwrap();
+    Command::cargo_bin("nyl")
+        .unwrap()
+        .current_dir(fixture.path())
+        .args(["render-tree", "--target", "production", "--output-dir"])
+        .arg(output.path())
+        .assert()
+        .success();
+    let published = sorted_documents(&read_resources(&output.path().join("production/workloads/api")));
+
+    for extra in [&[][..], &["--release-only"][..]] {
+        let mut args = vec!["--target", "production"];
+        args.extend_from_slice(extra);
+        args.push("applications/workloads/api.yaml");
+        let rendered = nyl_render(&fixture, &args).success();
+        let rendered = sorted_documents(&String::from_utf8_lossy(&rendered.get_output().stdout));
+        assert_eq!(rendered, published, "nyl render {args:?}");
+    }
+    // Both namespaces get a managed Namespace awaiting prune confirmation, and
+    // the ConfigMap without a namespace keeps none, as Argo CD's destination
+    // gives it one.
+    let namespaces = published
+        .iter()
+        .filter(|document| document["kind"] == "Namespace")
+        .map(|document| {
+            (
+                document["metadata"]["name"].as_str().unwrap().to_owned(),
+                document["metadata"]["annotations"]["argocd.argoproj.io/sync-options"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        namespaces,
+        [
+            ("api".to_owned(), "Delete=confirm,Prune=confirm".to_owned()),
+            ("api-jobs".to_owned(), "Delete=confirm,Prune=confirm".to_owned()),
+        ]
+    );
+    assert!(published
+        .iter()
+        .any(|document| document["metadata"]["name"] == "api" && document["metadata"].get("namespace").is_none()));
+}
+
+#[test]
+fn test_render_reports_shared_namespace_conflicts_unless_the_release_renders_alone() {
+    let fixture = fixture();
+    // A second Release of the same target uses namespace api without a
+    // sharedNamespaces declaration, which render-tree rejects.
+    fs::write(
+        fixture.path().join("applications/workloads/worker.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: worker\n  namespace: api\n",
+    )
+    .unwrap();
+    nyl_render(&fixture, &["--target", "production", "applications/workloads/api.yaml"])
+        .failure()
+        .stderr(predicate::str::contains(
+            "Namespace \"api\" is consumed by multiple workload Applications",
+        ));
+    nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--release-only",
+            "applications/workloads/api.yaml",
+        ],
+    )
+    .success();
+}
+
+#[test]
+fn test_render_never_connects_to_the_cluster() {
+    let fixture = fixture();
+    // The Cluster names a context that does not exist; a namespaced resource
+    // without a namespace once made render resolve it from the live cluster.
+    let cluster = fixture.path().join("config/clusters/kasoku.yaml");
+    fs::write(
+        &cluster,
+        fs::read_to_string(&cluster)
+            .unwrap()
+            .replace("spec:\n", "spec:\n  live:\n    context: missing\n"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.path().join("plain.yaml"),
+        "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: plain\n",
+    )
+    .unwrap();
+    let output = nyl_render(&fixture, &["--target", "production", "plain.yaml"]).success();
+    assert_eq!(
+        sorted_documents(&String::from_utf8_lossy(&output.get_output().stdout)),
+        [serde_json::json!({"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "plain"}})]
+    );
+}
+
+#[test]
+fn test_render_admits_secret_inputs_only_when_allowed() {
+    let fixture = fixture();
+    fs::write(
+        fixture.path().join("plain.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: plain\n  namespace: api\ndata:\n  value: '{{ env.NYL_GREETING | default(\"absent\") }}'\n",
+    )
+    .unwrap();
+    let render = |extra: &[&str]| {
+        let output = Command::cargo_bin("nyl")
+            .unwrap()
+            .current_dir(fixture.path())
+            .env("NYL_GREETING", "hello")
+            .arg("render")
+            .args(extra)
+            .arg("plain.yaml")
+            .assert()
+            .success();
+        String::from_utf8_lossy(&output.get_output().stdout).into_owned()
+    };
+    assert!(render(&[]).contains("value: absent"));
+    assert!(render(&["--allow-secret-inputs"]).contains("value: hello"));
+}
+
+#[test]
+fn test_render_with_a_source_kind_filter_renders_only_the_selected_resources() {
+    let fixture = fixture();
+    with_namespaced_api_release(&fixture);
+    // A filtered render differs from the published Release, so it keeps only
+    // what the filter selects, not the Namespaces of the compiled target.
+    let output = nyl_render(
+        &fixture,
+        &[
+            "--target",
+            "production",
+            "--only-source-kind",
+            "ConfigMap",
+            "applications/workloads/api.yaml",
+        ],
+    )
+    .success();
+    let kinds = sorted_documents(&String::from_utf8_lossy(&output.get_output().stdout))
+        .into_iter()
+        .map(|document| document["kind"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["ConfigMap", "ConfigMap"]);
+}

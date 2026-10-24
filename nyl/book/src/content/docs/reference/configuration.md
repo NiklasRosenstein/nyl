@@ -156,11 +156,11 @@ as `values`, the sanitized Cluster as `cluster`, and the target as `target`.
 `Cluster.spec.live` is local connection configuration and is never exposed to
 templates or generated output.
 
-A targetless render receives no `cluster` or `target`. In offline mode, pass
-Kubernetes capabilities explicitly when a Helm chart depends on them:
+A targetless render receives no `cluster` or `target`. Pass Kubernetes
+capabilities explicitly when a Helm chart depends on them:
 
 ```bash
-nyl render --offline \
+nyl render \
   --kube-version 1.31.0 \
   --kube-api-versions v1,apps/v1 \
   applications/example.yaml
