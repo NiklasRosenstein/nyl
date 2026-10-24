@@ -75,8 +75,10 @@
 <div class="expressive-code"><link rel="stylesheet" href="/nyl/pr-preview/pr-166/_astro/ec.hhd8r.css"><script type="module" src="/nyl/pr-preview/pr-166/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">apply</span><span style="--0:#D6DEEB;--1:#403F53"> [--target </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;TARGET>]</span><span style="--0:#D6DEEB;--1:#403F53"> [OPTIONS] &#x3C;FILE></span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl apply [--target <TARGET>] [OPTIONS] <FILE>"><div></div></button></div></figure></div>
 <div class="sl-heading-wrapper level-h2"><h2 id="description">Description</h2><a class="sl-anchor-link" href="#description"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Description”</span></a></div>
 <p>The <code dir="auto">apply</code> command renders manifests, applies them with server-side apply, and tracks release state.
-For shared rendering behavior and namespace resolution details, see
-<a href="/nyl/pr-preview/pr-166/kubernetes/pipeline/">Rendering Pipeline</a>.</p>
+It applies a Release as its Argo CD Application would deploy it from the
+<code dir="auto">render-tree</code> output, including managed Namespaces, and prunes as an Argo CD sync
+prunes. See <a href="/nyl/pr-preview/pr-166/kubernetes/pipeline/#the-releases-application">Rendering Pipeline</a>
+for the behavior <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code> share.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="arguments">Arguments</h2><a class="sl-anchor-link" href="#arguments"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Arguments”</span></a></div>
 <ul>
 <li><code dir="auto">&#x3C;FILE></code> - Path to the manifest file to apply (required)</li>
@@ -88,13 +90,18 @@ For shared rendering behavior and namespace resolution details, see
 <li><code dir="auto">--only-kind &#x3C;KIND,...></code> - Filter final rendered manifests to only include specific kinds (post-render).</li>
 <li><code dir="auto">--exclude-kind &#x3C;KIND,...></code> - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with <code dir="auto">--only-kind</code>).</li>
 <li><code dir="auto">--target &#x3C;TARGET></code> - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.</li>
+<li><code dir="auto">--release-only</code> - Settle the Release alone instead of taking it from the compiled target; see <a href="/nyl/pr-preview/pr-166/reference/cli/render/#common-options"><code dir="auto">render</code></a>.</li>
+<li><code dir="auto">--allow-secret-inputs</code> - Let the project secrets provider and <code dir="auto">NYL_*</code> environment variables affect the applied manifests.</li>
 <li><code dir="auto">--max-depth &#x3C;MAX_DEPTH></code> - Maximum evaluation depth for recursive resource expansion (default: 10)</li>
 <li><code dir="auto">--track-parent</code> - Track parent resource information in annotations</li>
 </ul>
+<p><code dir="auto">--input</code>, <code dir="auto">--inputs</code>, <code dir="auto">--application-group</code>, <code dir="auto">--defaults-only</code>, and the cache
+options work as for <a href="/nyl/pr-preview/pr-166/reference/cli/render/#common-options"><code dir="auto">render</code></a>.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="release-options">Release Options</h3><a class="sl-anchor-link" href="#release-options"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Release Options”</span></a></div>
 <ul>
 <li><code dir="auto">--name &#x3C;NAME></code> - Release name (required if no Release in file)</li>
-<li><code dir="auto">--namespace &#x3C;NAMESPACE></code> - Release namespace (required if no Release in file)</li>
+<li><code dir="auto">--namespace &#x3C;NAMESPACE></code> - Release namespace, and the namespace of resources that set none (required if no Release in file)</li>
+<li><code dir="auto">--confirm-prune</code> - Also prune resources whose Argo CD sync option is <code dir="auto">Prune=confirm</code>, such as managed Namespaces</li>
 <li><code dir="auto">--append-release</code> - Merge current resources with the previous deployed revision and skip pruning removed resources</li>
 <li><code dir="auto">--no-release</code> - Apply resources without creating release revisions, without release metadata, and without pruning</li>
 <li><code dir="auto">--history-limit &#x3C;N></code> - Keep at most <code dir="auto">N</code> release revisions, deleting the oldest after a successful apply; <code dir="auto">0</code> keeps every revision, otherwise <code dir="auto">N</code> must be at least <code dir="auto">2</code>. Overrides <code dir="auto">[release] history_limit</code> in <a href="/nyl/pr-preview/pr-166/reference/configuration/#release-history"><code dir="auto">nyl.toml</code></a></li>
@@ -146,6 +153,12 @@ was deleted) is already gone. A resource that fails to delete, including one
 behind an aggregated API that is unavailable, stays recorded in the new revision,
 so the next apply retries deleting it, and the command exits non-zero. Changing a
 resource’s apiVersion does not prune it.</p>
+<p>Like an Argo CD sync, pruning reads each live resource’s
+<code dir="auto">argocd.argoproj.io/sync-options</code>: <code dir="auto">Prune=false</code> keeps the resource and stops
+tracking it, and <code dir="auto">Prune=confirm</code> keeps it, still tracked, until an apply with
+<code dir="auto">--confirm-prune</code>. Managed Namespaces carry <code dir="auto">Prune=confirm</code> by default, so
+dropping a namespace from a Release never deletes it and its contents
+unconfirmed. See <a href="/nyl/pr-preview/pr-166/kubernetes/pipeline/#pruning-and-deletion">Pruning and deletion</a>.</p>
 <p>Each resource’s outcome (<code dir="auto">+</code> created, <code dir="auto">~</code> updated, <code dir="auto">=</code> unchanged, <code dir="auto">✗</code> failed) is
 printed as soon as it completes, in completion order. The summary is followed by
 the time spent in API discovery, validation, apply, and release bookkeeping.
@@ -171,12 +184,16 @@ and falls back to per-group discovery otherwise; the timing line names the mode.
 <li>A <code dir="auto">Release</code> resource in the manifest provides release metadata automatically.</li>
 <li>Release state is tracked in Kubernetes Secrets in the release namespace. Use <a href="/nyl/pr-preview/pr-166/reference/cli/release/"><code dir="auto">nyl release</code></a> to inspect history or <a href="/nyl/pr-preview/pr-166/reference/cli/release/#rollback">roll back</a> to a previous revision.</li>
 <li>Each release keeps its five most recent revisions unless <code dir="auto">[release] history_limit</code> says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.</li>
-<li>The release namespace is created when it is missing, before the manifests are
-applied. Nyl does not own that namespace and never prunes it. Other namespaces
-a release writes to, including <code dir="auto">spec.additionalNamespaces</code>, need their own
-<code dir="auto">Namespace</code> manifest.</li>
+<li>The destination namespace and <code dir="auto">spec.additionalNamespaces</code> are applied as
+managed Namespace objects owned by the release, by the group’s <code dir="auto">namespace</code>
+policy, as in the published tree. Nyl also creates the release namespace
+before anything else when it is missing, because the release state lives
+there.</li>
 <li><code dir="auto">--no-release</code> disables release tracking entirely. In this mode, <code dir="auto">nyl</code> cannot compute or prune resources removed from subsequent applies.</li>
-<li>See <a href="/nyl/pr-preview/pr-166/kubernetes/pipeline/">Rendering Pipeline</a> for namespace resolution and filter semantics.</li>
+<li>Resources without <code dir="auto">metadata.namespace</code> take the destination namespace of the
+Release’s Application, or <code dir="auto">--namespace</code> for a file without a Release. The kube
+context’s default namespace is never used. See
+<a href="/nyl/pr-preview/pr-166/kubernetes/pipeline/#namespaces-in-diff-and-apply">Namespaces in diff and apply</a>.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="manifest-validation">Manifest validation</h2><a class="sl-anchor-link" href="#manifest-validation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Manifest validation”</span></a></div>
 <p>Use <code dir="auto">--validate</code> to run project-configured validators. See

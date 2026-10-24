@@ -96,7 +96,13 @@ the removal release; nothing else changes when you do.</p>
 
 
 
-<table><thead><tr><th>Deprecated</th><th>Use instead</th><th>Deprecated in</th><th>Removal</th></tr></thead><tbody><tr><td><code dir="auto">Cluster</code> under <code dir="auto">apiVersion: k8s.gitops.nyl/v1</code></td><td><code dir="auto">apiVersion: k8s.nyl/v1</code></td><td>the release after 0.5.9</td><td>a future release</td></tr><tr><td><code dir="auto">Release</code> under <code dir="auto">apiVersion: k8s.gitops.nyl/v1</code></td><td><code dir="auto">apiVersion: k8s.nyl/v1</code></td><td>the release after 0.5.9</td><td>a future release</td></tr></tbody></table>
+
+
+
+
+
+
+<table><thead><tr><th>Deprecated</th><th>Use instead</th><th>Deprecated in</th><th>Removal</th></tr></thead><tbody><tr><td><code dir="auto">Cluster</code> under <code dir="auto">apiVersion: k8s.gitops.nyl/v1</code></td><td><code dir="auto">apiVersion: k8s.nyl/v1</code></td><td>the release after 0.5.9</td><td>a future release</td></tr><tr><td><code dir="auto">Release</code> under <code dir="auto">apiVersion: k8s.gitops.nyl/v1</code></td><td><code dir="auto">apiVersion: k8s.nyl/v1</code></td><td>the release after 0.5.9</td><td>a future release</td></tr><tr><td><code dir="auto">nyl render --context</code></td><td>nothing: <code dir="auto">render</code> never connects to Kubernetes</td><td>the release after 0.5.9</td><td>a future release</td></tr></tbody></table>
 <div class="sl-heading-wrapper level-h2"><h2 id="cluster-and-release-in-k8snylv1">Cluster and Release in <code dir="auto">k8s.nyl/v1</code></h2><a class="sl-anchor-link" href="#cluster-and-release-in-k8snylv1"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Cluster and Release in k8s.nyl/v1”</span></a></div>
 <p>A Cluster describes a Kubernetes cluster and a Release is the unit Nyl renders,
 whether <code dir="auto">nyl render</code> and <code dir="auto">nyl apply</code> run it or a deployment target publishes
