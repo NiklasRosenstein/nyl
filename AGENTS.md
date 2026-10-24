@@ -138,7 +138,7 @@ mise run build            # or: cargo build --release -p nyl
 mise run bench            # or: cargo bench -p nyl
 
 # Documentation
-mise run docs-serve       # Serve mdbook docs
+mise run docs-serve       # Serve the documentation site
 mise run docs-rustdoc     # Generate API docs
 ```
 
@@ -148,7 +148,8 @@ mise run docs-rustdoc     # Generate API docs
 2. **Always run `mise pre-commit` before committing** (runs fmt-check, lint, and tests)
 3. Commit at regular intervals with descriptive messages
 4. Ensure all tests pass
-5. Update documentation if changing public APIs
+5. Update the user documentation in the same change as any user-visible behavior
+   (see [Keeping the docs current](#keeping-the-docs-current))
 
 ## Testing Guidelines
 
@@ -492,7 +493,7 @@ See `BENCHMARKS.md` for detailed performance analysis.
 ### Types of Documentation
 1. **Code comments:** For implementation details
 2. **Doc comments (`///`):** For public APIs (generates rustdoc)
-3. **mdbook (`book/`):** User-facing documentation
+3. **Documentation site (`nyl/book/`):** User-facing documentation (Astro/Starlight)
 4. **README.md:** Quick start and overview
 5. **IMPLEMENTATION.md:** Development status and technical details
 
@@ -509,10 +510,55 @@ See `BENCHMARKS.md` for detailed performance analysis.
 - Link to related items with `[Item]` or `[crate::path::to::Item]`
 - Test examples with `cargo test --doc`
 
+### Keeping the docs current
+
+The documentation site is part of the product. A change to user-visible
+behavior updates the docs in the same commit: commands, flags, defaults,
+output, error codes, resources and fields, configuration, and the steps a
+workflow takes. A pull request whose behavior the docs no longer describe is
+not done. Describe what Nyl does today; mark work in progress as such, as the
+Orchestration section does.
+
+The site is split into header sections, each with its own sidebar
+(`nyl/book/astro.config.mjs`). Put content where readers look for it:
+
+| Content | Location under `nyl/book/src/content/docs/` |
+| --- | --- |
+| First steps and the core principle | `start/`, `index.md` |
+| Rendering and applying manifests directly | `kubernetes/` |
+| The rendered manifest pattern | `rendered-gitops/` |
+| Environments, state, and orchestration | `orchestration/` |
+| One page per command or closely related pair | `reference/cli/` |
+| `nyl.toml` and editor schemas | `reference/` |
+| Usage guide for a resource | the owning section's `resource-guides/` |
+
+Explain a concept once, in its guide, and link to it; command pages document
+usage, options, and exit codes. Commands that share options document them on
+one page and link to it from the others.
+
+Mechanics that are easy to miss:
+
+- Sidebars are explicit lists. Add every new page to its section in
+  `astro.config.mjs`, and list a new command in `reference/cli/index.md` under
+  its purpose group.
+- Moving or renaming a page adds its old route to `src/lib/moved-pages.mjs`, so
+  the old URL redirects, and updates every link to it, including links in Rust
+  sources.
+- A new resource joins a section in `resourceSections` (`src/lib/resources.mjs`),
+  needs a usage guide (the build fails without one), and appears in its
+  section's diagram (`src/components/ResourceDiagram.astro`) when it references
+  or is referenced by other resources there. A changed reference field updates
+  that diagram.
+- Regenerate schemas after changing a resource's Rust doc comments or fields.
+- Write links as `/nyl/...`; the build rewrites them for preview deployments
+  and fails on links to missing pages.
+
 ### Building Documentation
 ```bash
-# User documentation (mdbook)
-mise run docs-serve        # Opens in browser at http://localhost:3000
+# User documentation
+mise run docs-serve        # Serve with live reload
+mise run docs-build        # Build and check every internal link
+(cd nyl/book && npm test)  # Check schemas, examples, and navigation
 
 # API documentation (rustdoc)
 mise run docs-rustdoc      # Opens in browser
