@@ -270,7 +270,7 @@ pub fn warnings(environment: &EnvironmentName, unit: &UnitName, verification: &U
             Code::VerifyDrift,
             format!("{unit} in {environment} drifted from its receipt: {summary}"),
             format!(
-                "run `nyl plan -e {environment} --unit {unit}` to see the change, then `nyl reconcile`, or investigate the change made outside Nyl"
+                "investigate the change made outside Nyl; `nyl plan -e {environment} --unit {unit}` shows what the unit would apply (nyl reconcile does not execute a unit with a current receipt again yet)"
             ),
         )),
     }

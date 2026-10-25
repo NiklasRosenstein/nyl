@@ -67,7 +67,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 
 | Code | Meaning and fix |
 | --- | --- |
-| `NYL-VERIFY-DRIFT` | The unit's resources differ from what its receipt applied. Run `nyl plan --unit <u>` to see the change and `nyl reconcile` to apply the declared state, or investigate the change made outside Nyl. |
+| `NYL-VERIFY-DRIFT` | The unit's resources differ from what its receipt applied. Investigate the change made outside Nyl; `nyl plan --unit <u>` shows what the unit would apply. `nyl reconcile` does not yet execute a unit with a current receipt again: automatic repair of idempotent units and `nyl reconcile --reapply` are planned for the next part of M3. |
 | `NYL-ATTESTATION-FAILED` | A check the driver attests failed. References that require the attestation stay unsatisfied until a newer one passes. |
 | `NYL-VERIFY-NO-RECEIPT` | The unit has no current receipt to verify. Run `nyl reconcile`. |
 | `NYL-VERIFY-UNKNOWN` | The driver could not tell whether the unit drifted, for example because its tool failed. Fix the cause and verify again. |

@@ -124,7 +124,14 @@ part removes the walkthroughs it makes pass from the harness's pending list.
    receipt's desired document and uid as desired state, with the condition
    left in place, so consumers keep resolving from that receipt. Walkthrough:
    `deletion`, plus a walkthrough step that holds an uncertain producer and
-   reconciles a consumer against its previous outputs.
+   reconciles a consumer against its previous outputs. Drift repair:
+   `reconcile` executes units whose recovery policy is `converge` again when
+   their latest drift observation is `drifted`, by default
+   (`Environment.spec.driftRepair: converge`, `manual` to opt out), `status`
+   shows drifted units that wait, and `nyl reconcile --reapply <unit>`
+   repairs any current unit explicitly, recorded with requester and reason.
+   Walkthrough step: `verify` finds drift, `reconcile` repairs the idempotent
+   unit, and the other waits for `--reapply`.
 6. Multi-environment runs, including `verify` over several environments,
    approvals (`verified`, `asserted`, and `local` sources, `--approve` for
    remote runs, the GitHub lookup, the `[approval] lookup` hook, and
@@ -954,8 +961,9 @@ value-only path promotes each value from what its consuming Application runs.
 
 ### M7 — Continuous operation and scope decision
 
-- [ ] Evaluate a scheduled or long-running runner, observation cadence, and
-  drift-repair policy using M3–M6 evidence.
+- [ ] Evaluate a scheduled or long-running runner and its observation cadence
+  using M3–M6 evidence. The drift-repair policy is settled in M3 part 5:
+  converging units repair recorded drift automatically by default.
 - [ ] Decide which command-unit uses warrant typed drivers, and whether to add
   the plugin driver protocol.
 - [ ] Support minimum healthy durations and flapping guards over recorded
@@ -1022,7 +1030,7 @@ reasons to delay independent work.
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
 | Signed state and publication commits (GPG/SSH): Git's signing configuration or a project setting, CI keys beside `[git]` credentials, and a stable error when a required key is missing | After M3 |
-| Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
+| Continuous runner ownership and observation cadence | M7 |
 | Provider capability/configuration schema and first GitLab adapter limits | M8 |
 | Trusted dispatcher policy and normalized admission authorization evidence | M8 |
 | Shared-run CI coordinator/worker protocol, fencing, liveness, and recovery | After M8, before distributed execution |

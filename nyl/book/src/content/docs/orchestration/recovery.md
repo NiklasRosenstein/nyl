@@ -205,8 +205,10 @@ whether what its current receipt describes still holds, without executing
 anything. It records the latest drift observation, a health observation when
 the driver reports one, and the attestations the driver reports, in one
 observed commit, and writes nothing when nothing changed. It never changes a
-receipt or a condition, and drift alone does not make a reconcile execute the
-unit again; `verify` exits 3 on drift so that a pipeline can alert on it.
+receipt or a condition. Drift does not yet make a reconcile execute the unit
+again; `verify` exits 3 on drift so that a pipeline can alert on it.
+Automatic repair of idempotent units and `nyl reconcile --reapply` are planned
+for the next part of M3.
 
 ## Recovery next to local runs
 

@@ -70,6 +70,7 @@ spec:
 | `source` | Git source without `path`, or `{fromPromotion}` | the entry worktree's commit |
 | `protectedRefs` | list of ref names or globs | the group's, else each repository's default branch |
 | `allowUnprotectedSource` | boolean | the group's, else `false` |
+| `driftRepair` | `converge` or `manual` | the group's, else `converge` |
 | `attestations` | list of attestation names | `[]` |
 | `admission` (M8) | `off` or `required` | the group's, else `off` |
 
@@ -1370,7 +1371,11 @@ rules below apply unchanged.
    policy allows it: `converge` executes it again, and `inspect` runs
    `inspect` first (see [Recovery](#recovery)). Under `manual`, the unit waits
    for `recover`. A unit with a non-retryable `failed` condition is not
-   selected until `recover --retry` clears it.
+   selected until `recover --retry` clears it. A unit with a current receipt
+   is a candidate again when its latest drift observation for that receipt is
+   `drifted`; it is selected when its recovery policy is `converge` and the
+   environment's `driftRepair` is `converge`, the default, and otherwise waits
+   for `nyl reconcile --reapply` (see [Drift](#drift)).
 4. **Wave.** Execute ready units, independent units in parallel up to a
    concurrency limit, and checkpoint each result on the run ref. Each
    concurrency slot keeps one worktree for the run and resets it to the next
@@ -1755,6 +1760,37 @@ categories treat them alike across drivers:
 
 A driver may set `retryable` explicitly for a single failure; the defaults
 apply otherwise.
+
+#### Drift
+
+A receipt proves that an execution succeeded for its inputs; it does not prove
+that the resources still match, because a change made outside Nyl leaves the
+execution key unchanged. `nyl verify` asks each driver whether a current
+receipt still holds and records the answer as the unit's `drift` observation,
+tied to that receipt's execution key. Nyl does not watch for drift itself: a
+pipeline runs `nyl verify` on a schedule, followed by `nyl reconcile`, until a
+continuous runner (M7) takes over the cadence.
+
+- **Automatic repair.** With `driftRepair: converge`, the default, the next
+  `reconcile` executes again every unit whose recovery policy is `converge`
+  and whose latest drift observation for its current receipt is `drifted`, as
+  it would execute a unit whose inputs changed. Its result is `executed`, its
+  transition commit lists it under `driftRepaired`, and the new receipt
+  replaces the one the observation was about, so the observation no longer
+  selects it. Idempotent units therefore repair drift without an operator.
+- **Units that do not converge** report drift and wait: `nyl status` shows them
+  as `drifted`, without changing the exit category, and an operator repairs
+  them explicitly.
+- **`driftRepair: manual`** turns automatic repair off for an environment, such
+  as production where every repair is reviewed; drifted units then wait like
+  units that do not converge.
+- **Explicit repair.** `nyl reconcile -e <env> --reapply <unit> --reason
+  <text>` executes a unit with a current receipt again, drifted or not, and
+  records the requester and reason in its transition commit under
+  `reapplied`. A unit whose recovery policy is not `converge` also needs an
+  approval: `--approve <unit>` with the `local` source in a local run, and the
+  approval sources of [Approval](#approval) otherwise. Until remote approvals
+  exist, `--reapply` refuses such units in remote runs.
 
 #### Operator exec
 
@@ -2417,6 +2453,8 @@ spec:
 - `verify` exits 0 for clean, 2 for drift, and anything else for an error. It
   records a drift observation, never a receipt, and it receives the same
   inputs and admitted environment as `command`, with `NYL_OUTPUTS` absent.
+  Under the default `driftRepair`, drift makes an idempotent command execute
+  again in the next reconcile (see [Drift](#drift)).
 - `teardown`, when present, gives the kind the `teardown` capability and the
   default `deletionPolicy: Teardown`. `NYL_INPUTS` then holds the resolved
   `values` of the stored desired document under `values` and the last
