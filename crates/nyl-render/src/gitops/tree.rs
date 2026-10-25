@@ -393,7 +393,46 @@ pub async fn compile_target_tree_cached_with_observer_and_options(
     compile_target_tree_inner(inventory, target_name, Some(cache), observer, options).await
 }
 
-#[allow(clippy::too_many_lines)]
+/// Every input one target compile read, from its dependency recorder: file
+/// contents and directory membership, effective resources and their
+/// locations, the template context, resolved Release inputs and source
+/// identities, Kubernetes capabilities, and renderer tool fingerprints.
+///
+/// Names and digests are as the recorder holds them, so file entries name
+/// machine paths and sensitive context carries cache-local keyed
+/// fingerprints; callers that persist the record make it portable first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetDependencies {
+    pub dependencies: BTreeMap<String, crate::render::cache::RecordedDependency>,
+    /// False when some input could not be observed completely; such a
+    /// render must be treated as changed every time.
+    pub cacheable: bool,
+}
+
+/// Compile one target like [`compile_target_tree_cached_with_options`] and
+/// also return the compile's complete dependency record. The record is kept
+/// even when `cache` is disabled.
+pub async fn compile_target_tree_recorded(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: &GitOpsCache,
+    options: TreeRenderOptions,
+) -> Result<(CompiledTargetTree, TargetDependencies)> {
+    let (compiled, dependencies) = compile_target_tree_recording(
+        inventory,
+        target_name,
+        Some(cache),
+        &mut NoTreeRenderObserver,
+        options,
+        true,
+    )
+    .await?;
+    Ok((
+        compiled,
+        dependencies.expect("a recording compile returns its dependency record"),
+    ))
+}
+
 async fn compile_target_tree_inner(
     inventory: &GitOpsInventory,
     target_name: &str,
@@ -401,6 +440,20 @@ async fn compile_target_tree_inner(
     observer: &mut dyn TreeRenderObserver,
     options: TreeRenderOptions,
 ) -> Result<CompiledTargetTree> {
+    compile_target_tree_recording(inventory, target_name, cache, observer, options, false)
+        .await
+        .map(|(compiled, _)| compiled)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn compile_target_tree_recording(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: Option<&GitOpsCache>,
+    observer: &mut dyn TreeRenderObserver,
+    options: TreeRenderOptions,
+    record: bool,
+) -> Result<(CompiledTargetTree, Option<TargetDependencies>)> {
     validate_gitops_inventory_with_options(inventory, options.clone())?;
     let target_discovered = inventory
         .get(GitOpsResourceKind::DeploymentTarget, target_name)
@@ -540,6 +593,7 @@ async fn compile_target_tree_inner(
         repository_name: repository_name.as_deref(),
         repository: &repository,
         repository_source_path: repository_path.as_deref(),
+        record,
     };
     let input_digests = release_inputs.index_entries()?;
     let mut cache_probe = prepare_target_cache(
@@ -556,7 +610,20 @@ async fn compile_target_tree_inner(
     if let Some(mut compiled) = load_cached_target(cache, cache_probe.as_ref())? {
         compiled.publication_base = publication_base;
         observer.finished();
-        return Ok(compiled);
+        // A hit's probe holds exactly the stored record's inputs, re-read.
+        let dependencies = cache_probe.filter(|_| record).map(|probe| TargetDependencies {
+            dependencies: probe.recorder.dependencies().clone(),
+            cacheable: probe.cacheable,
+        });
+        return Ok((compiled, dependencies));
+    }
+    // A recording miss records what this render reads, without the previous
+    // record's replayed entries, so the record never keeps inputs a former
+    // render read and this one does not.
+    if let Some(probe) = &mut cache_probe {
+        if let Some(base) = probe.base.take() {
+            probe.recorder = base;
+        }
     }
     let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
     let mut target_cache_bypass_reasons = BTreeSet::new();
@@ -935,6 +1002,10 @@ async fn compile_target_tree_inner(
             .collect(),
         publication_base,
     };
+    let dependencies = cache_probe.as_ref().filter(|_| record).map(|probe| TargetDependencies {
+        dependencies: probe.recorder.dependencies().clone(),
+        cacheable: target_cacheable && probe.recorder.is_cacheable(),
+    });
     store_cached_target(
         cache,
         cache_probe,
@@ -945,13 +1016,16 @@ async fn compile_target_tree_inner(
         helm_render_count,
     )?;
     observer.finished();
-    Ok(compiled)
+    Ok((compiled, dependencies))
 }
 
 struct TargetCacheProbe {
     key: String,
     recorder: crate::render::cache::DependencyRecorder,
     cacheable: bool,
+    /// For a recording compile, the recorder before the previous record's
+    /// filesystem entries were replayed into it.
+    base: Option<crate::render::cache::DependencyRecorder>,
 }
 
 struct TargetCacheInputs<'a> {
@@ -964,6 +1038,9 @@ struct TargetCacheInputs<'a> {
     repository_name: Option<&'a str>,
     repository: &'a InlineGitRepository,
     repository_source_path: Option<&'a Path>,
+    /// Whether the compile returns its dependency record, which keeps a
+    /// probe even without a cache.
+    record: bool,
 }
 
 fn prepare_target_cache(
@@ -975,10 +1052,11 @@ fn prepare_target_cache(
     release_inputs: &super::inputs::ResolvedTargetInputs,
     input_digests: &BTreeMap<String, String>,
 ) -> Result<Option<TargetCacheProbe>> {
+    let record = inputs.record;
     let Some(cache) = cache else {
         return Ok(None);
     };
-    if cache.mode() == crate::gitops::CacheMode::Disabled {
+    if cache.mode() == crate::gitops::CacheMode::Disabled && !record {
         return Ok(None);
     }
     let key = format!("{}\0{}", inventory.project_root.display(), inputs.target.metadata.name);
@@ -1051,6 +1129,7 @@ fn prepare_target_cache(
         recorder.record_value("input-provenance", input_digests)?;
     }
     cache.record_renderer_tools(&mut recorder)?;
+    let base = record.then(|| recorder.clone());
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
         recorder.replay_filesystem_dependencies(previous)?;
     }
@@ -1059,6 +1138,7 @@ fn prepare_target_cache(
         key,
         recorder,
         cacheable,
+        base,
     }))
 }
 

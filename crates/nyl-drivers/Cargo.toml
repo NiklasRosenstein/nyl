@@ -33,3 +33,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[test]]
+name = "fake_publication_test"
+required-features = ["test-kinds"]
