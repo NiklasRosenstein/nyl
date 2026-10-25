@@ -171,7 +171,7 @@ impl Session {
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
             wait: options.wait,
-            local: options.local,
+            local: options.local.clone(),
         })
     }
 }

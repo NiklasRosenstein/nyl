@@ -40,9 +40,15 @@ pub enum LeaseScope {
 }
 
 /// A `--local` run's options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRun {
     pub lease: LeaseScope,
+    /// `--approve <unit>`: units whose recovery policy is not `converge` that
+    /// this local run may execute, recorded with the `local` approval
+    /// identity (the workstation's Git user). Others wait as
+    /// `awaiting-approval`.
+    /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
+    pub approve: std::collections::BTreeSet<nyl_core::orchestration::ids::UnitName>,
 }
 
 /// The state store of a `--local` run, wrapping the remote location's store.
@@ -60,7 +66,7 @@ impl<'s> LocalStore<'s> {
 
 impl StateStore for LocalStore<'_> {
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
-        let _ = (self.inner, self.run, location);
+        let _ = (self.inner, &self.run, location);
         todo!("local")
     }
 
