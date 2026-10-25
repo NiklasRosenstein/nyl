@@ -63,7 +63,7 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
         &["log", "-1", "--format=%B", "refs/heads/nyl/dev/desired"],
     );
     assert!(message.contains("Nyl-Operation: state-init"), "{message}");
-    // The commit is signed by --author, as author and committer.
+    // The commit is written by --author, as author and committer.
     let signature = git_output(
         &world.bare(),
         &[
@@ -88,7 +88,7 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
 
 /// State commits need an identity: `--author`, else the clone's Git
 /// configuration. Without either, a writing command refuses with a code
-/// whose fix names both, instead of signing with an invented identity.
+/// whose fix names both, instead of committing as an invented identity.
 #[test]
 fn test_state_commands_take_their_identity_from_author_or_git_config() {
     let world = World::new(&project());
@@ -225,7 +225,7 @@ fn test_validate_rejects_state_refs_git_cannot_hold_together() {
 }
 
 /// The tier-1 harness runs state commands in-process: the wiring's author
-/// signs the commit, and the outcome carries the typed report and exit
+/// writes the commit, and the outcome carries the typed report and exit
 /// instead of printing and exiting.
 #[test]
 fn test_state_commands_run_in_process_with_the_wiring_author() {

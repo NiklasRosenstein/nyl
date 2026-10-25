@@ -14,7 +14,7 @@ use nyl_orchestration::report::Outcome;
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
-use nyl_state::git::{CommitSigner, GitStateStore};
+use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
 use serde_json::json;
 use tempfile::TempDir;
@@ -60,7 +60,7 @@ fn worlds() -> Vec<World> {
             store: Box::new(GitStateStore::new(
                 clone.path().join(".git"),
                 GitAuth::none(),
-                CommitSigner {
+                CommitAuthor {
                     identity: "Scenario <scenario@example.invalid>".parse().unwrap(),
                     clock: std::sync::Arc::new(FakeClock::new(start())),
                 },

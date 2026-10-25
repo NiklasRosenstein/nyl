@@ -93,7 +93,7 @@ pub struct RunContext<'a> {
     /// driver. Units declaring `env.secrets` are rejected in M3
     /// (`NYL-UNIT-SECRETS-UNSUPPORTED`) because no secrets provider is wired.
     pub process_env: &'a BTreeMap<String, String>,
-    /// Who signs commits drivers write, such as publication commits, with the
+    /// Who authors commits drivers write, such as publication commits, with the
     /// clock's time: the identity the command line resolved for state
     /// commits. `None` for `plan`, which writes nothing.
     pub commit_identity: Option<&'a CommitIdentity>,

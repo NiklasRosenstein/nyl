@@ -13,7 +13,7 @@ use nyl_core::orchestration::time::Duration;
 
 use nyl_orchestration::run_report::ReportKind;
 use nyl_orchestration::shell::run::RunContext;
-use nyl_state::git::CommitSigner;
+use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
@@ -82,7 +82,7 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         source: args.source.as_deref(),
         wait: args.wait_lease,
     })?;
-    let store = session.store(Some(CommitSigner {
+    let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;

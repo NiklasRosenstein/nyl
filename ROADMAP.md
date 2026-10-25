@@ -997,6 +997,7 @@ reasons to delay independent work.
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
+| Signed state and publication commits (GPG/SSH): Git's signing configuration or a project setting, CI keys beside `[git]` credentials, and a stable error when a required key is missing | After M3 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Provider capability/configuration schema and first GitLab adapter limits | M8 |
 | Trusted dispatcher policy and normalized admission authorization evidence | M8 |

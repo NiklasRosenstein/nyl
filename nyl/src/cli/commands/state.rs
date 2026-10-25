@@ -13,7 +13,7 @@ use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
-use nyl_state::git::{CommitSigner, Endpoint};
+use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
 use crate::orchestration::project::{open_store, resolve_environment};
@@ -255,7 +255,7 @@ fn run(
     let mut store = open_store(
         &inventory,
         &resolved,
-        Some(CommitSigner {
+        Some(CommitAuthor {
             identity: identity.clone(),
             clock: wiring.clock.clone(),
         }),

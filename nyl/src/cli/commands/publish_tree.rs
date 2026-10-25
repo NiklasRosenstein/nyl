@@ -8,7 +8,7 @@ use nyl_core::orchestration::ports::CommitIdentity;
 use crate::git::{GitManager, WorktreeManager};
 use crate::gitops::inputs::verify_publication_base;
 use crate::gitops::publication::{
-    prepare_publication, target_render_index, writable_branch_name, PublicationSignature, TreePublication,
+    prepare_publication, target_render_index, writable_branch_name, PublicationAuthor, TreePublication,
 };
 use crate::gitops::{
     compile_target_tree_cached_with_observer_and_options, discover_gitops_inventory, resolve_deployment_target_name,
@@ -295,7 +295,7 @@ fn publish_compiled(
             auth: &auth,
         },
         &message,
-        || publication_signature(&author_repository),
+        || publication_author(&author_repository),
     )?;
     if !args.dry_run {
         prepared.verify_unmoved(&auth)?;
@@ -563,11 +563,11 @@ fn print_publication_result(status: &str, repository: &str, branch: &str, commit
     println!("  Commit: {commit}");
 }
 
-/// The signature of a publish-tree commit: the identity from
+/// The author and committer of a publish-tree commit: the identity from
 /// `NYL_GIT_AUTHOR_*`, `GIT_AUTHOR_*`, or the source repository's Git
 /// configuration, at the current time.
-fn publication_signature(repository: &Repository) -> Result<PublicationSignature> {
-    Ok(PublicationSignature {
+fn publication_author(repository: &Repository) -> Result<PublicationAuthor> {
+    Ok(PublicationAuthor {
         identity: configured_publication_identity(
             repository,
             std::env::var("NYL_GIT_AUTHOR_NAME").ok().as_deref(),
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn source_repository_identity_signs_without_overrides() {
+    fn source_repository_identity_authors_without_overrides() {
         let (_temporary, repository) = configured_repository();
         let identity = configured_publication_identity(&repository, None, None, None, None).unwrap();
         assert_eq!(identity.name, "Configured Author");

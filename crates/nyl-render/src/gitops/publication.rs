@@ -57,18 +57,18 @@ pub struct TargetRender<'a> {
     pub cache_dir: Option<&'a Path>,
 }
 
-/// Who signs a publication commit, and when. Orchestrated publications pass
+/// Who authors and commits a publication commit, and when. Orchestrated publications pass
 /// the identity the command line resolved for state commits and the injected
-/// clock's time; `publish-tree` passes the signature it resolves itself, so
+/// clock's time; `publish-tree` passes the author it resolves itself, so
 /// its commits stay as they are. This module reads neither the process
 /// environment, Git configuration, nor the clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicationSignature {
+pub struct PublicationAuthor {
     pub identity: CommitIdentity,
     pub time: Timestamp,
 }
 
-impl PublicationSignature {
+impl PublicationAuthor {
     /// The Git signature: this identity at this time, in UTC.
     fn git(&self) -> Result<git2::Signature<'static>> {
         Ok(git2::Signature::new(
@@ -314,7 +314,7 @@ pub struct PublishedTree {
 /// `project_dir` supplies the project's `[git]` credentials, whose
 /// variables are read only through `variable`: an orchestrated publication
 /// passes a lookup over the execution's admitted environment, `publish-tree`
-/// one over the process environment. `signature` signs the commit.
+/// one over the process environment. `author` is the commit's author and committer.
 ///
 /// Index v3 (owning environment and unit uid) is deferred to the
 /// KubernetesPublication driver (M5): the index is written as `publish-tree`
@@ -323,10 +323,10 @@ pub fn publish_target(
     rendered: &RenderedTarget,
     project_dir: &Path,
     message: &str,
-    signature: &PublicationSignature,
+    author: &PublicationAuthor,
     variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<PublishedTree> {
-    prepare_target_publication(rendered, project_dir, message, signature, variable)?.push()
+    prepare_target_publication(rendered, project_dir, message, author, variable)?.push()
 }
 
 /// [`publish_target`] in two phases: everything before the push, which has no
@@ -336,7 +336,7 @@ pub fn prepare_target_publication(
     rendered: &RenderedTarget,
     project_dir: &Path,
     message: &str,
-    signature: &PublicationSignature,
+    author: &PublicationAuthor,
     variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<PreparedTarget> {
     let auth = project_git_auth(&load_project_file(project_dir)?, variable)?;
@@ -366,7 +366,7 @@ pub fn prepare_target_publication(
             auth: &auth,
         },
         message,
-        || Ok(signature.clone()),
+        || Ok(author.clone()),
     )?;
     prepared.verify_unmoved(&auth)?;
     Ok(PreparedTarget {
@@ -465,13 +465,13 @@ pub struct PreparedPublication {
 }
 
 /// Check out `request.branch`, reconcile the tree beneath its prefix, and
-/// commit it with `message`, signed by what `sign` returns. An unchanged tree
-/// makes no commit and never calls `sign`, so publishing it needs no
+/// commit it with `message`, authored by what `author` returns. An unchanged tree
+/// makes no commit and never calls `author`, so publishing it needs no
 /// identity.
 pub fn prepare_publication(
     request: &TreePublication<'_>,
     message: &str,
-    sign: impl FnOnce() -> Result<PublicationSignature>,
+    author: impl FnOnce() -> Result<PublicationAuthor>,
 ) -> Result<PreparedPublication> {
     let checkout = tempfile::TempDir::new()?;
     let repository = clone_branch(request.push_url, request.branch, checkout.path(), request.auth)?;
@@ -493,7 +493,7 @@ pub fn prepare_publication(
         request.index.clone(),
         request.options.clone(),
     )?;
-    let commit = commit_worktree(&repository, request.branch, &output_root, message, || sign()?.git())?;
+    let commit = commit_worktree(&repository, request.branch, &output_root, message, || author()?.git())?;
     Ok(PreparedPublication {
         repository,
         push_url: request.push_url.to_owned(),
@@ -617,7 +617,7 @@ fn commit_worktree(
     branch: &str,
     output_root: &Path,
     message: &str,
-    sign: impl FnOnce() -> Result<git2::Signature<'static>>,
+    author: impl FnOnce() -> Result<git2::Signature<'static>>,
 ) -> Result<Option<Oid>> {
     let worktree = repository
         .workdir()
@@ -661,7 +661,7 @@ fn commit_worktree(
     let tree = repository.find_tree(tree_id).map_err(crate::git::GitError::from)?;
     let parent = repository.head().ok().and_then(|head| head.peel_to_commit().ok());
     let parents = parent.iter().collect::<Vec<_>>();
-    let signature = sign()?;
+    let signature = author()?;
     let oid = repository
         .commit(
             Some(&format!("refs/heads/{branch}")),
@@ -832,8 +832,8 @@ spec:
         })
     }
 
-    fn signature(seconds: i64) -> PublicationSignature {
-        PublicationSignature {
+    fn author(seconds: i64) -> PublicationAuthor {
+        PublicationAuthor {
             identity: CommitIdentity {
                 name: "Nyl Orchestration".to_owned(),
                 email: "nyl@example.invalid".to_owned(),
@@ -1058,7 +1058,7 @@ spec:
         let rendered = render(worktree.path(), &snapshot("registry.test/web:1"), None).unwrap();
 
         // The lookup is the only source of credential variables.
-        let error = publish_target(&rendered, &project_dir, "publish", &signature(1), &|_| None)
+        let error = publish_target(&rendered, &project_dir, "publish", &author(1), &|_| None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("NYL_PUBLICATION_TEST_TOKEN"), "{error}");
@@ -1069,7 +1069,7 @@ spec:
             read.borrow_mut().push(name.to_owned());
             Some("token".to_owned())
         };
-        publish_target(&rendered, &project_dir, "publish", &signature(1), &lookup).unwrap();
+        publish_target(&rendered, &project_dir, "publish", &author(1), &lookup).unwrap();
         assert_eq!(read.into_inner(), ["NYL_PUBLICATION_TEST_TOKEN"]);
     }
 
@@ -1119,7 +1119,7 @@ spec:
             &rendered,
             &project_dir,
             "nyl: publish dev/kubernetes",
-            &signature(1_700_000_000),
+            &author(1_700_000_000),
             &|_| None,
         )
         .unwrap();
@@ -1163,7 +1163,7 @@ spec:
             &rendered,
             &project_dir,
             "nyl: publish dev/kubernetes",
-            &signature(1_800_000_000),
+            &author(1_800_000_000),
             &|_| None,
         )
         .unwrap();
@@ -1177,8 +1177,8 @@ spec:
     }
 
     #[test]
-    fn test_publication_signature_is_utc_at_the_given_time() {
-        let git = signature(42).git().unwrap();
+    fn test_publication_author_is_utc_at_the_given_time() {
+        let git = author(42).git().unwrap();
         assert_eq!(git.name().unwrap(), "Nyl Orchestration");
         assert_eq!(git.when().seconds(), 42);
         assert_eq!(git.when().offset_minutes(), 0);
@@ -1248,7 +1248,7 @@ spec:
             "deploy/main",
             &checkout.path().join("deploy"),
             "Render",
-            || signature(7).git(),
+            || author(7).git(),
         )
         .unwrap()
         .unwrap();

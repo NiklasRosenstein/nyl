@@ -28,7 +28,7 @@ use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::publication::{
-    prepare_target_publication, render_target, PublicationSignature, RenderedTarget, TargetRender,
+    prepare_target_publication, render_target, PublicationAuthor, RenderedTarget, TargetRender,
 };
 use serde_json::{json, Value};
 
@@ -215,7 +215,7 @@ impl Driver for FakePublication {
         let spec = resolved_spec(unit)?;
         let rendered = Self::render(&ctx.worktree, &ctx.project_dir, &ctx.cache_dir, spec)?;
         let message = format!("nyl: publish {}/{}", unit.unit.environment, unit.unit.name);
-        let signature = PublicationSignature {
+        let author = PublicationAuthor {
             identity: identity.clone(),
             time: ctx.now,
         };
@@ -223,7 +223,7 @@ impl Driver for FakePublication {
         // environment (PATH and the unit's declared passthrough), never from
         // the process environment.
         let variable = |name: &str| ctx.env.get(name).cloned();
-        let prepared = prepare_target_publication(&rendered, &ctx.project_dir, &message, &signature, &variable)
+        let prepared = prepare_target_publication(&rendered, &ctx.project_dir, &message, &author, &variable)
             .map_err(|error| DriverError::before_effects(format!("cannot prepare the publication: {error}")))?;
         let published = prepared
             .push()

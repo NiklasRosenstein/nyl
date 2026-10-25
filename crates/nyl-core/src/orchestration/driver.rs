@@ -350,7 +350,7 @@ pub struct ExecutionContext<'a> {
     /// The unit's observed file, holding its last receipt.
     pub observed: Option<&'a ObservedUnit>,
     pub tools: &'a dyn ToolRunner,
-    /// Who signs commits a driver writes, such as a publication's commit:
+    /// Who authors commits a driver writes, such as a publication's commit:
     /// the identity the command line resolved for state commits, with
     /// `now` as the commit time. `None` for operations that write nothing
     /// (plan, verify); a driver that must commit without one fails before

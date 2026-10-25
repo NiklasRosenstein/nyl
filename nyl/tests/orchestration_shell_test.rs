@@ -29,7 +29,7 @@ use nyl_orchestration::shell::state::{self as state_ops, Requested};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use nyl_render::gitops::units::UnitSourceRenderer;
-use nyl_state::git::{CommitSigner, GitStateStore};
+use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::memory::MemoryStateStore;
 use nyl_state::source::GitSourceResolver;
 use scenario::format::{BranchStep, CommitStep};
@@ -111,7 +111,7 @@ impl Harness {
             let store = GitStateStore::new(
                 clone.join(".git"),
                 GitAuth::none(),
-                CommitSigner {
+                CommitAuthor {
                     identity: identity.clone(),
                     clock: clock.clone(),
                 },

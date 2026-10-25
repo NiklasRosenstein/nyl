@@ -10,7 +10,7 @@ use nyl_core::orchestration::state::StateLocation;
 use nyl_core::resources::environment::{Environment, EnvironmentGroup};
 use nyl_orchestration::rules::environment_groups::sharing_group;
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
-use nyl_state::git::{CommitSigner, Endpoint, GitStateStore};
+use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
 
 use crate::gitops::GitOpsInventory;
 use crate::resources::{GitOpsResource, InlineGitRepository};
@@ -123,17 +123,17 @@ pub fn resolve_environment(
 
 /// The Git state store for a resolved environment, with the project's
 /// optional dedicated credentials.
-/// Its commits are signed by `signer`; without one the store is read-only,
+/// Its commits are written by `author`; without one the store is read-only,
 /// for commands that never write (`plan`, `status`, `get`), which therefore
 /// need no commit identity.
 pub fn open_store(
     inventory: &GitOpsInventory,
     resolved: &ResolvedEnvironment,
-    signer: Option<CommitSigner>,
+    author: Option<CommitAuthor>,
 ) -> Result<GitStateStore> {
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let store = match signer {
-        Some(signer) => GitStateStore::new(&resolved.git_dir, auth, signer),
+    let store = match author {
+        Some(author) => GitStateStore::new(&resolved.git_dir, auth, author),
         None => GitStateStore::read_only(&resolved.git_dir, auth),
     };
     Ok(match &resolved.endpoint {

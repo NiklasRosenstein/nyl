@@ -12,7 +12,7 @@ use nyl_core::orchestration::state::{
     StateLocation, StateRecord, StateRecordKind, StateV1,
 };
 use nyl_git::GitAuth;
-use nyl_state::git::{CommitSigner, GitStateStore, LOCAL_REPOSITORY};
+use nyl_state::git::{CommitAuthor, GitStateStore, LOCAL_REPOSITORY};
 use nyl_state::memory::MemoryStateStore;
 use serde_json::json;
 use tempfile::TempDir;
@@ -30,8 +30,8 @@ impl nyl_core::orchestration::ports::Clock for FixedClock {
     fn wait(&self, _duration: nyl_core::orchestration::time::Duration) {}
 }
 
-fn signer() -> CommitSigner {
-    CommitSigner {
+fn author() -> CommitAuthor {
+    CommitAuthor {
         identity: "Scenario <scenario@example.invalid>".parse().unwrap(),
         clock: std::sync::Arc::new(FixedClock),
     }
@@ -66,7 +66,7 @@ fn subjects() -> Vec<Subject> {
         git2::Repository::init(clone.path()).unwrap();
         Subject {
             name: "git remote",
-            store: Box::new(GitStateStore::new(clone.path().join(".git"), GitAuth::none(), signer())),
+            store: Box::new(GitStateStore::new(clone.path().join(".git"), GitAuth::none(), author())),
             repository: format!("file://{}", bare.path().display()),
             _directories: vec![bare, clone],
         }
@@ -76,7 +76,7 @@ fn subjects() -> Vec<Subject> {
         git2::Repository::init(clone.path()).unwrap();
         Subject {
             name: "git local",
-            store: Box::new(GitStateStore::new(clone.path().join(".git"), GitAuth::none(), signer())),
+            store: Box::new(GitStateStore::new(clone.path().join(".git"), GitAuth::none(), author())),
             repository: LOCAL_REPOSITORY.to_owned(),
             _directories: vec![clone],
         }
@@ -531,7 +531,7 @@ fn test_remote_state_fast_forwards_local_branches_and_refuses_rewrites() {
     let remote = git2::Repository::init_bare(bare.path()).unwrap();
     let clone = TempDir::new().unwrap();
     let local = git2::Repository::init(clone.path()).unwrap();
-    let store = GitStateStore::new(clone.path().join(".git"), GitAuth::none(), signer());
+    let store = GitStateStore::new(clone.path().join(".git"), GitAuth::none(), author());
     let url = format!("file://{}", bare.path().display());
     let location = location(&url, "nyl/dev/desired", "nyl/dev/observed", "");
     let dev = environment("dev");

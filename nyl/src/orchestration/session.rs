@@ -15,7 +15,7 @@ use nyl_orchestration::run_report::{
 };
 use nyl_orchestration::shell::run::RunRequest;
 use nyl_orchestration::shell::{Context, Settings};
-use nyl_state::git::{CommitSigner, GitStateStore};
+use nyl_state::git::{CommitAuthor, GitStateStore};
 use nyl_state::source::GitSourceResolver;
 
 use crate::cli::commands::reconcile::RunOutput;
@@ -100,9 +100,9 @@ impl Session {
         self.inventory.project_config.config.project.previous_paths.clone()
     }
 
-    /// The state store, writing with `signer` or read-only without one.
-    pub fn store(&self, signer: Option<CommitSigner>) -> Result<GitStateStore, NylError> {
-        open_store(&self.inventory, &self.resolved, signer)
+    /// The state store, writing with `author` or read-only without one.
+    pub fn store(&self, author: Option<CommitAuthor>) -> Result<GitStateStore, NylError> {
+        open_store(&self.inventory, &self.resolved, author)
     }
 
     /// Sources in the clone, through the project's Git credentials.
