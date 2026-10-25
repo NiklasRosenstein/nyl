@@ -113,11 +113,12 @@ impl ExitCategory {
 
 impl ExitCategory {
     /// The category an error finding contributes: a held lease is
-    /// incomplete (2), a lost lease uncertain (4), anything else an error (1).
+    /// incomplete (2), a lost lease or a cancelled run uncertain (4),
+    /// anything else an error (1).
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
             Code::LeaseHeld => Self::Incomplete,
-            Code::LeaseLost => Self::Uncertain,
+            Code::LeaseLost | Code::RunCancelled => Self::Uncertain,
             _ => Self::Error,
         }
     }

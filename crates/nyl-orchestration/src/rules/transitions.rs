@@ -212,4 +212,122 @@ mod tests {
         assert_eq!(failed.receipt, Some(receipt('a')));
         assert!(matches!(failed.condition, Some(Condition::Failed { .. })));
     }
+
+    /// One generated event, with receipts drawn from a small set of keys.
+    fn event(choice: u8, key: char, checkpointed: Option<(Option<char>, u8)>) -> Event {
+        let since: Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+        match choice % 6 {
+            0 => Event::Succeeded { receipt: receipt(key) },
+            1 => Event::Failed {
+                since,
+                run: run(),
+                category: FailureCategory::ToolError,
+                retryable: key == 'a',
+                message: "exit 1".to_owned(),
+            },
+            2 => Event::Uncertain {
+                since,
+                run: run(),
+                reason: "run lost its lease".to_owned(),
+            },
+            3 => {
+                let (receipt_key, condition) = checkpointed.unwrap_or((Some(key), 0));
+                Event::Imported {
+                    checkpointed: document(receipt_key, condition),
+                }
+            }
+            4 => Event::RecoverRetry,
+            _ => Event::RecoverAccept { receipt: receipt(key) },
+        }
+    }
+
+    /// An observed document with an optional receipt and condition
+    /// (0: none, 1: failed, 2: uncertain).
+    fn document(receipt_key: Option<char>, condition: u8) -> ObservedUnit {
+        let since: Timestamp = "2026-09-24T11:00:00Z".parse().unwrap();
+        ObservedUnit {
+            api_version: StateV1,
+            kind: ObservedUnitKind,
+            unit: identity(),
+            receipt: receipt_key.map(receipt),
+            condition: match condition % 3 {
+                0 => None,
+                1 => Some(Condition::Failed {
+                    since,
+                    run: run(),
+                    category: FailureCategory::ToolError,
+                    retryable: false,
+                    message: "exit 1".to_owned(),
+                }),
+                _ => Some(Condition::Uncertain {
+                    since,
+                    run: run(),
+                    reason: "interrupted".to_owned(),
+                }),
+            },
+        }
+    }
+
+    fn key_char() -> impl proptest::strategy::Strategy<Value = char> {
+        proptest::sample::select(vec!['a', 'b', 'c'])
+    }
+
+    proptest::proptest! {
+        /// Catches a transition that loses the last receipt, clears an
+        /// uncertain condition without an execution or an operator (an
+        /// import never does), lets a retry change the receipt, or lets
+        /// `recover` act on a unit without a condition.
+        #[test]
+        fn test_apply_preserves_receipts_and_conditions_over_event_sequences(
+            start in proptest::option::of((proptest::option::of(key_char()), 0u8..3)),
+            events in proptest::collection::vec(
+                (0u8..6, key_char(), proptest::option::of((proptest::option::of(key_char()), 0u8..3))),
+                1..12,
+            ),
+        ) {
+            let mut current = start.map(|(key, condition)| document(key, condition));
+            for (choice, key, checkpointed) in events {
+                let event = event(choice, key, checkpointed);
+                let condition = current.as_ref().and_then(|unit| unit.condition.clone());
+                let was_uncertain = matches!(condition, Some(Condition::Uncertain { .. }));
+                let receipt_before = current.as_ref().and_then(|unit| unit.receipt.clone());
+                let replaces = matches!(
+                    event,
+                    Event::Succeeded { .. } | Event::RecoverAccept { .. } | Event::Imported { .. }
+                );
+                let clears = matches!(
+                    event,
+                    Event::Succeeded { .. } | Event::RecoverRetry | Event::RecoverAccept { .. }
+                );
+                let recover = matches!(event, Event::RecoverRetry | Event::RecoverAccept { .. });
+                let imported = matches!(event, Event::Imported { .. });
+                let retry = matches!(event, Event::RecoverRetry);
+                match apply(&identity(), current.as_ref(), event) {
+                    Err(Refusal::NothingToRecover) => {
+                        proptest::prop_assert!(recover && condition.is_none());
+                    }
+                    Ok(Applied::Evidence) => {
+                        proptest::prop_assert!(imported && was_uncertain);
+                    }
+                    Ok(Applied::Changed(after)) => {
+                        proptest::prop_assert!(!(recover && condition.is_none()), "recover applied without a condition");
+                        proptest::prop_assert!(!(imported && was_uncertain), "an import cleared an uncertain condition");
+                        if receipt_before.is_some() {
+                            proptest::prop_assert!(after.receipt.is_some(), "the last receipt was removed");
+                        }
+                        if !replaces {
+                            proptest::prop_assert_eq!(&after.receipt, &receipt_before);
+                        }
+                        if retry {
+                            proptest::prop_assert_eq!(&after.condition, &None);
+                        }
+                        if was_uncertain && after.condition.is_none() {
+                            proptest::prop_assert!(clears, "an uncertain condition was cleared by another event");
+                        }
+                        current = Some(*after);
+                    }
+                }
+            }
+        }
+    }
 }

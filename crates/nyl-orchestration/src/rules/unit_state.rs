@@ -13,17 +13,23 @@
 //! with approvals (part 6).
 //!
 //! A broken lease declares its holder gone, its run ref included, as in
-//! [`crate::rules::lease::decide`]: its run neither holds the environment
-//! nor runs units. When that run had not finished, status reports that it
-//! lost its lease (`NYL-LEASE-LOST`, exit 4) and shows the units it may
-//! have left half-executed as uncertain.
+//! [`crate::rules::lease::decide`], and so does a lease or run ref past its
+//! deadline: its run neither holds the environment nor runs units. When
+//! such a run had not finished, status reports that it lost its lease
+//! (`NYL-LEASE-LOST`, exit 4) and shows the units it may have left
+//! half-executed as uncertain. Uncertain conditions warn with
+//! `NYL-UNIT-UNCERTAIN`; fixes name `nyl recover --retry`, and `--accept
+//! <run>` where a run or evidence ref holds a checkpointed receipt of the
+//! unit's incarnation.
 
 use std::collections::BTreeSet;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
-use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
+use nyl_core::orchestration::state::{
+    Condition, DesiredUnit, Lease, Lifecycle, ObservedUnit, Readiness, TeardownProgress,
+};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::freshness::receipt_is_current;
@@ -77,15 +83,20 @@ pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, runnin
     }
 }
 
-/// The run whose lease `nyl lease break` broke. Like
-/// [`crate::rules::lease::decide`], a broken lease declares its holder
-/// gone, its run ref included.
-fn broken_run(coordination: &Coordination) -> Option<&RunId> {
-    coordination
+/// Whether a lease is still held at `now`: unbroken and before its deadline.
+fn lease_live(lease: &Lease, now: Timestamp) -> bool {
+    lease.broken.is_none() && lease.deadline > now
+}
+
+/// Whether an unfinished run ref is still live at `now`: before its deadline
+/// and not the run of a broken lease, which declares its holder gone.
+fn run_live(coordination: &Coordination, state: &RunState, now: Timestamp) -> bool {
+    let broken = coordination
         .lease
         .as_ref()
         .filter(|held| held.lease.broken.is_some())
-        .map(|held| &held.lease.run)
+        .map(|held| &held.lease.run);
+    !state.run.finished && state.run.deadline > now && Some(&state.run.run) != broken
 }
 
 /// The units an unfinished run ref names that it has not checkpointed yet.
@@ -98,62 +109,106 @@ fn unfinished_units(state: &RunState) -> impl Iterator<Item = &UnitName> {
     state.run.units.iter().filter(move |unit| !done.contains(unit))
 }
 
-/// The units live runs are executing: those the unbroken lease names, and
-/// those an unfinished run ref of a live run names that it has not
-/// checkpointed yet.
-fn running_units(coordination: &Coordination) -> BTreeSet<UnitName> {
+/// The units live runs are executing: those a live lease names, and those
+/// a live, unfinished run ref names that it has not checkpointed yet.
+fn running_units(coordination: &Coordination, now: Timestamp) -> BTreeSet<UnitName> {
     let mut running = BTreeSet::new();
-    if let Some(held) = &coordination.lease {
-        if held.lease.broken.is_none() {
-            running.extend(held.lease.units.iter().cloned());
-        }
+    if let Some(held) = coordination.lease.as_ref().filter(|held| lease_live(&held.lease, now)) {
+        running.extend(held.lease.units.iter().cloned());
     }
-    let broken = broken_run(coordination);
     for state in coordination
         .runs
         .iter()
-        .filter(|state| !state.run.finished && Some(&state.run.run) != broken)
+        .filter(|state| run_live(coordination, state, now))
     {
         running.extend(unfinished_units(state).cloned());
     }
     running
 }
 
-/// A run that lost its lease to `nyl lease break` before finishing, and the
-/// units it may have left half-executed: those the broken lease names and
-/// those its unfinished run ref has not checkpointed. `None` when the lease
-/// is unbroken or the broken run's ref says it finished.
-fn lost_run(coordination: &Coordination) -> Option<(&RunId, BTreeSet<UnitName>)> {
-    let held = coordination.lease.as_ref().filter(|held| held.lease.broken.is_some())?;
-    let run = &held.lease.run;
-    let state = coordination.runs.iter().find(|state| &state.run.run == run);
-    if state.is_some_and(|state| state.run.finished) {
-        return None;
-    }
-    let mut units: BTreeSet<UnitName> = held.lease.units.iter().cloned().collect();
-    if let Some(state) = state {
-        units.extend(unfinished_units(state).cloned());
-    }
-    Some((run, units))
+/// A run that stopped before finishing: the run of a broken lease, or of a
+/// lease or unfinished run ref past its deadline.
+struct DeadRun<'a> {
+    run: &'a RunId,
+    broken: bool,
+    /// The units it may have left half-executed: those its lease names and
+    /// those its run ref has not checkpointed.
+    units: BTreeSet<UnitName>,
 }
 
-/// Who holds the environment: the unbroken lease, and unfinished runs it
-/// does not name, except the run of a broken lease.
-fn holders(coordination: &Coordination) -> Vec<Holder> {
-    let mut holders = Vec::new();
-    let mut lease_run: Option<&RunId> = broken_run(coordination);
-    if let Some(held) = &coordination.lease {
-        if held.lease.broken.is_none() {
-            lease_run = Some(&held.lease.run);
-            holders.push(Holder::Lease(held.lease.clone()));
+/// The runs that lost their lease before finishing: a broken or expired
+/// lease whose run ref (if any) is not finished, and unfinished run refs
+/// past their deadline.
+fn dead_runs(coordination: &Coordination, now: Timestamp) -> Vec<DeadRun<'_>> {
+    let mut dead = Vec::new();
+    let mut lease_run = None;
+    if let Some(held) = coordination.lease.as_ref().filter(|held| !lease_live(&held.lease, now)) {
+        let run = &held.lease.run;
+        lease_run = Some(run);
+        let state = coordination.runs.iter().find(|state| &state.run.run == run);
+        if !state.is_some_and(|state| state.run.finished) {
+            let mut units: BTreeSet<UnitName> = held.lease.units.iter().cloned().collect();
+            if let Some(state) = state {
+                units.extend(unfinished_units(state).cloned());
+            }
+            dead.push(DeadRun {
+                run,
+                broken: held.lease.broken.is_some(),
+                units,
+            });
         }
     }
     for state in &coordination.runs {
-        if !state.run.finished && Some(&state.run.run) != lease_run {
+        if state.run.finished || state.run.deadline > now || Some(&state.run.run) == lease_run {
+            continue;
+        }
+        dead.push(DeadRun {
+            run: &state.run.run,
+            broken: false,
+            units: unfinished_units(state).cloned().collect(),
+        });
+    }
+    dead
+}
+
+/// Who holds the environment at `now`: a live lease, and live, unfinished
+/// runs it does not name.
+fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder> {
+    let mut holders = Vec::new();
+    let mut lease_run: Option<&RunId> = None;
+    if let Some(held) = coordination.lease.as_ref().filter(|held| lease_live(&held.lease, now)) {
+        lease_run = Some(&held.lease.run);
+        holders.push(Holder::Lease(held.lease.clone()));
+    }
+    for state in &coordination.runs {
+        if run_live(coordination, state, now) && Some(&state.run.run) != lease_run {
             holders.push(Holder::Run(state.run.clone()));
         }
     }
     holders
+}
+
+/// The runs, on run refs or evidence refs, that checkpointed a receipt of
+/// `observed`'s incarnation: what `nyl recover --accept <run>` may adopt.
+fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) -> Vec<&'c RunId> {
+    coordination
+        .runs
+        .iter()
+        .chain(&coordination.evidence)
+        .filter(|state| {
+            state.checkpoints.iter().any(|checkpoint| {
+                checkpoint.desired.unit.name == observed.unit.name
+                    && checkpoint.desired.unit.uid == observed.unit.uid
+                    && checkpoint.observed.condition.is_none()
+                    && checkpoint
+                        .observed
+                        .receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.run == state.run.run)
+            })
+        })
+        .map(|state| &state.run.run)
+        .collect()
 }
 
 /// A stored blocked reason in the report's form: `no-current-receipt` with
@@ -176,8 +231,15 @@ fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
     }
 }
 
-/// The suggested next action for a unit's condition.
-fn condition_warning(environment: &EnvironmentName, unit: &UnitName, condition: &Condition) -> Finding {
+/// The suggested next action for a unit's condition: `accept` lists the
+/// runs whose checkpointed receipt `nyl recover --accept` may adopt.
+fn condition_warning(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    condition: &Condition,
+    accept: &[&RunId],
+) -> Finding {
+    let retry = format!("`nyl recover -e {environment} --unit {unit} --retry --reason <text>`");
     match condition {
         Condition::Failed {
             retryable: true,
@@ -195,21 +257,30 @@ fn condition_warning(environment: &EnvironmentName, unit: &UnitName, condition: 
         } => Finding::new(
             Code::DriverError,
             format!("unit {unit} failed and is not retried automatically: {message}"),
-            format!(
-                "fix the cause, then start over with `nyl state init -e {environment} --fresh`, which runs every unit \
-                 again; for a Command, set idempotent: true if re-running is safe so later failures are retried \
-                 (`nyl recover --unit {unit}` arrives in a later part of M3)"
-            ),
+            format!("fix the cause, then run {retry} so that the next nyl reconcile runs it again"),
         ),
-        Condition::Uncertain { reason, .. } => Finding::new(
-            Code::DriverError,
-            format!("unit {unit} is uncertain: {reason}"),
-            format!(
-                "check what the execution did; for a Command, set idempotent: true if re-running is safe and the next \
-                 nyl reconcile runs it again, otherwise start over with `nyl state init -e {environment} --fresh` \
-                 (`nyl recover --unit {unit}` arrives in a later part of M3)"
-            ),
-        ),
+        Condition::Uncertain { reason, .. } => {
+            let accept = accept
+                .iter()
+                .map(|run| format!("`nyl recover -e {environment} --unit {unit} --accept {run} --reason <text>`"))
+                .collect::<Vec<_>>();
+            let accept = if accept.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; or, if the checkpointed result is what happened, adopt it with {}",
+                    accept.join(" or ")
+                )
+            };
+            Finding::new(
+                Code::UnitUncertain,
+                format!("unit {unit} is uncertain: {reason}"),
+                format!(
+                    "check what the execution did; a unit whose recovery policy converges runs again in the next nyl \
+                     reconcile, otherwise run {retry} once it is safe to run it again{accept}"
+                ),
+            )
+        }
     }
 }
 
@@ -224,28 +295,31 @@ pub fn status(
     coordination: &Coordination,
     now: Timestamp,
 ) -> EnvironmentRunReport {
-    let _ = now; // Package `takeover`: expired, unbroken leases and run refs.
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
-    let running = running_units(coordination);
-    let lost = lost_run(coordination);
-    if let Some((run, _)) = &lost {
+    let running = running_units(coordination, now);
+    let mut half_executed = BTreeSet::new();
+    for lost in dead_runs(coordination, now) {
+        let how = if lost.broken {
+            "lost its lease to nyl lease break"
+        } else {
+            "passed its lease deadline"
+        };
         report.errors.push(Finding::new(
             Code::LeaseLost,
-            format!("run {run} lost its lease to nyl lease break before it finished"),
+            format!("run {} {how} before it finished", lost.run),
             format!(
-                "run nyl reconcile to take over the environment and import the run's checkpoints, then check any \
-                 unit left uncertain: it runs again only when its recovery policy converges (a Command with \
-                 idempotent: true), otherwise start over with `nyl state init -e {environment} --fresh` \
-                 (`nyl recover` arrives in a later part of M3)"
+                "run nyl reconcile to take over the environment and import the run's checkpoints; a unit left \
+                 uncertain runs again when its recovery policy converges, otherwise check it and run \
+                 `nyl recover -e {environment} --unit <unit> --retry --reason <text>`"
             ),
         ));
+        half_executed.extend(lost.units);
     }
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
-        let half_executed = lost.as_ref().is_some_and(|(_, units)| units.contains(name));
-        unit.state = Some(if half_executed {
+        unit.state = Some(if half_executed.contains(name) {
             // The run may have executed it without recording the outcome.
             UnitState::Uncertain
         } else {
@@ -271,12 +345,16 @@ pub fn status(
                 Condition::Uncertain { reason, .. } => reason.clone(),
             });
             if desired.lifecycle == Lifecycle::Active {
-                unit.warnings.push(condition_warning(environment, name, condition));
+                let accept = observed
+                    .map(|observed| acceptable_runs(coordination, observed))
+                    .unwrap_or_default();
+                unit.warnings
+                    .push(condition_warning(environment, name, condition, &accept));
             }
         }
         report.units.insert(name.clone(), unit);
     }
-    for holder in holders(coordination) {
+    for holder in holders(coordination, now) {
         report.warnings.push(Finding::new(
             Code::LeaseHeld,
             format!("the environment is held by {}", holder.describe()),
@@ -454,7 +532,7 @@ mod tests {
         assert_eq!(web.state, Some(UnitState::Failed));
         assert_eq!(web.receipt, Some(ReceiptState::Current));
         assert!(
-            web.warnings[0].fix.contains("nyl state init -e dev --fresh"),
+            web.warnings[0].fix.contains("nyl recover -e dev --unit web --retry"),
             "{:?}",
             web.warnings
         );
@@ -540,5 +618,108 @@ mod tests {
         );
         assert!(report.errors.is_empty());
         assert_eq!(report.exit, ExitCategory::Ok);
+    }
+
+    /// Catches status reporting a crashed run, whose lease expired without
+    /// a break, as still holding the environment and running its units,
+    /// and fixes that do not name the `nyl recover` commands, including
+    /// `--accept` for a checkpointed receipt on an evidence ref.
+    #[test]
+    fn test_status_reports_an_expired_lease_as_lost_and_names_recover() {
+        let mut uncertain = observed_named("database", 2, Some(key('a')));
+        uncertain.condition = Some(condition(json!({
+            "state": "uncertain", "since": "2026-01-01T03:00:00Z", "run": RUN, "reason": "superseded"
+        })));
+        let snapshot = EnvironmentSnapshot {
+            desired: BTreeMap::from([
+                (
+                    UnitName::new("database").unwrap(),
+                    desired_named("database", 2, Some(key('a'))),
+                ),
+                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
+            ]),
+            observed: BTreeMap::from([
+                (UnitName::new("database").unwrap(), uncertain),
+                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
+            ]),
+            ..EnvironmentSnapshot::default()
+        };
+        let dead = "00000000-0000-7000-8000-00000000000b";
+        let lease = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": dead, "runner": "ci",
+            "operation": "reconcile", "units": ["web"],
+            "deadline": "2026-01-01T01:00:00Z", "takenAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let run = |id: &str| -> nyl_core::orchestration::state::Run {
+            serde_json::from_value(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": id, "runner": "ci",
+                "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["web"]
+            }))
+            .unwrap()
+        };
+        let checkpoint = nyl_core::orchestration::ports::Checkpoint {
+            desired: desired_named("database", 2, Some(key('a'))),
+            observed: observed_named("database", 2, Some(key('a'))),
+            artifacts: BTreeMap::new(),
+        };
+        let coordination = Coordination {
+            lease: Some(HeldLease {
+                lease,
+                version: "1".to_owned(),
+            }),
+            runs: vec![RunState {
+                run: run(dead),
+                checkpoints: Vec::new(),
+                created: Vec::new(),
+                foreign: false,
+                version: "r1".to_owned(),
+            }],
+            evidence: vec![RunState {
+                run: nyl_core::orchestration::state::Run {
+                    finished: true,
+                    ..run(RUN)
+                },
+                checkpoints: vec![checkpoint],
+                created: Vec::new(),
+                foreign: false,
+                version: "e1".to_owned(),
+            }],
+        };
+        let now = "2026-01-01T02:00:00Z".parse().unwrap();
+        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination, now);
+
+        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        assert_eq!(unit("web").state, Some(UnitState::Uncertain));
+        assert_eq!(codes(&report.errors), [Code::LeaseLost]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let warning = &unit("database").warnings[0];
+        assert_eq!(warning.code, Code::UnitUncertain);
+        assert!(
+            warning.fix.contains("nyl recover -e dev --unit database --retry"),
+            "{}",
+            warning.fix
+        );
+        assert!(
+            warning
+                .fix
+                .contains(&format!("nyl recover -e dev --unit database --accept {RUN}")),
+            "{}",
+            warning.fix
+        );
+        assert_eq!(report.exit, ExitCategory::Uncertain);
+
+        // Before the deadline the same run holds the environment and runs web.
+        let early = "2026-01-01T00:30:00Z".parse().unwrap();
+        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination, early);
+        assert_eq!(
+            report.units[&UnitName::new("web").unwrap()].state,
+            Some(UnitState::Running)
+        );
+        assert!(report.errors.is_empty());
+    }
+
+    fn codes(findings: &[Finding]) -> Vec<Code> {
+        findings.iter().map(|finding| finding.code).collect()
     }
 }
