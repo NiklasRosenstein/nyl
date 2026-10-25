@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use clap::Args;
 
 use super::reconcile::RunOutput;
+use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
+use nyl_orchestration::shell::local::LocalStore;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, Session, Stop};
@@ -44,13 +46,19 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment)?;
-    if args.local {
-        // Package `local` reads the local view through LocalStore.
-        todo!("local")
-    }
     // Status only reads: a read-only store, no commit identity, no lease.
     let store = session.store(None)?;
-    let context = session.context(&store, wiring, None);
+    // `--local`: the clone's local view, through the store a `--local` run uses.
+    let local_store = if args.local {
+        Some(LocalStore::new(&store, session.local_run(false, &[])?))
+    } else {
+        None
+    };
+    let state: &dyn StateStore = match &local_store {
+        Some(local_store) => local_store,
+        None => &store,
+    };
+    let context = session.context(state, wiring, None);
     let mut report =
         nyl_orchestration::shell::inspect::status(&context, &session.resolved.name, &session.resolved.location);
     session.add_warnings(&mut report);

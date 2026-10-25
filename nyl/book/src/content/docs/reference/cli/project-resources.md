@@ -59,6 +59,7 @@ nyl get output database/host -e dev           # resolves like {fromUnit: {unit: 
 nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
 nyl get artifact web/image -e dev --pointer /reference
 nyl get units -e dev --state-revision 41f0c2e
+nyl get units -e dev --local                  # this clone's local view
 ```
 
 - `get units -e` joins desired and observed state into one row per unit:
@@ -74,6 +75,9 @@ nyl get units -e dev --state-revision 41f0c2e
   print nothing and exit 1. `--allow-stale` prints the latest receipt's value
   with the warning `NYL-REFERENCE-STALE` instead.
 - `--state-revision <commit>` reads state as of an earlier state commit.
+- `--local` reads this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs),
+  including `nyl reconcile --local` runs, instead of the remote state. It
+  cannot be combined with `--state-revision`.
 - `-o` selects `table` (default), `wide`, `yaml`, `json`, or `name`.
 
 Every form takes the project directory, or a path beneath it, as its last

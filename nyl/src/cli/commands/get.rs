@@ -264,11 +264,20 @@ fn state_form(
     };
     let store = session.store(None)?;
     let location = &session.resolved.location;
-    if options.local {
-        // Package `local` reads the local view of the location.
-        todo!("local")
-    }
-    let snapshot = match inspect::snapshot(&store, location, None) {
+    // `--local`: the clone's local view, through the store a `--local` run uses.
+    let local_store = if options.local {
+        match session.local_run(false, &[]) {
+            Ok(local) => Some(nyl_orchestration::shell::local::LocalStore::new(&store, local)),
+            Err(finding) => return Ok(refused(&finding)),
+        }
+    } else {
+        None
+    };
+    let state: &dyn nyl_core::orchestration::ports::StateStore = match &local_store {
+        Some(local_store) => local_store,
+        None => &store,
+    };
+    let snapshot = match inspect::snapshot(state, location, None) {
         Ok(snapshot) => snapshot,
         Err(finding) => return Ok(refused(&finding)),
     };

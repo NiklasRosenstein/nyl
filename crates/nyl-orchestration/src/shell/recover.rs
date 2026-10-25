@@ -28,7 +28,6 @@ use super::state::{commit, store_error, summary, with_lease, Requested};
 use super::Context;
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::recovery::{decide, evidence, RecoverAction};
-use crate::rules::state_location::check_record;
 
 /// `nyl recover`.
 pub fn recover(
@@ -51,10 +50,10 @@ pub fn recover(
                 Ok(snapshot) => snapshot,
                 Err(error) => return report.refused(store_error(environment, &error)),
             };
-            if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
+            if let Err(finding) = super::local::check_record(context.store, snapshot.record.as_ref(), environment, location) {
                 return report.refused(finding);
             }
-            if let Err(finding) = super::local::check_remote_tips(context.store, location) {
+            if let Err(finding) = super::local::check_remote_tips(context.store, location, environment) {
                 return report.refused(finding);
             }
             let coordination = match context.store.coordination(location, environment) {

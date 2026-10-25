@@ -294,3 +294,69 @@ fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
         .code(predicate::ne(1));
     assert_eq!(tips(), before, "plan or status wrote state");
 }
+
+/// Local state through the binary, in one workstation clone: `reconcile
+/// --local` commits only to the clone's branches and warns per executed
+/// unit; `status` and `get` with `--local` show the local view, `status`
+/// warns that the local branches diverged; `state reset --local` forgets
+/// the local receipts only with `--discard-all`; `state restore` refuses a
+/// commit outside the state refs.
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_local_state_commands_through_the_binary() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
+    let remote = || git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/", "refs/nyl/"]);
+    let before = remote();
+    // Reading commands take no --author.
+    let home = world.scenario_tmp().join("reader-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let read = |args: &[&str]| bare_nyl(&checkout, &home, args);
+
+    nyl(&checkout, &["reconcile", "-e", "dev", "--approve", "network"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--local"));
+    nyl(&checkout, &["reconcile", "-e", "dev", "--local"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("NYL-LOCAL-RUN-UNRECORDED")
+                .and(predicate::str::contains("nyl reconcile -e dev --unit network")),
+        );
+    assert_eq!(remote(), before, "a --local run wrote remote state");
+    let local_tip = git_output(&checkout, &["log", "-1", "--format=%B", "nyl/dev/observed"]);
+    assert!(local_tip.contains("Nyl-Local: true"), "{local_tip}");
+
+    read(&["status", "-e", "dev", "--local"]).assert().success();
+    read(&["get", "units", "-e", "dev", "--local", "-o", "name"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("network"));
+    read(&["status", "-e", "dev"])
+        .assert()
+        .stderr(
+            predicate::str::contains("NYL-STATE-LOCAL-DIVERGED").and(predicate::str::contains(
+                "local state of dev has 1 local transition the remote does not record",
+            )),
+        );
+
+    nyl(&checkout, &["state", "reset", "-e", "dev", "--local"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("NYL-STATE-RESET-UNDISCARDED"));
+    nyl(&checkout, &["state", "reset", "-e", "dev", "--local", "--discard-all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state-reset dev: done"));
+    assert_eq!(
+        git_output(&checkout, &["rev-parse", "nyl/dev/desired"]),
+        git_output(&world.bare(), &["rev-parse", "refs/heads/nyl/dev/desired"])
+    );
+
+    nyl(&checkout, &["state", "restore", "-e", "dev", "--to", &"0".repeat(40)])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("NYL-STATE-RESTORE-INVALID"));
+}

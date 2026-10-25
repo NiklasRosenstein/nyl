@@ -8,6 +8,7 @@ use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
+use nyl_core::orchestration::ports::StateStore;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::environment::{effective_environment, Environment};
 use nyl_orchestration::run_report::{
@@ -116,10 +117,12 @@ impl Session {
         UnitSourceRenderer::new(self.entry_project_dir()).with_previous_paths(self.previous_paths())
     }
 
-    /// The shell context of one command.
+    /// The shell context of one command, working through `store`: the
+    /// environment's state store, or a [`LocalStore`](nyl_orchestration::shell::local::LocalStore)
+    /// wrapping it for `--local`.
     pub fn context<'a>(
         &self,
-        store: &'a GitStateStore,
+        store: &'a dyn StateStore,
         wiring: &'a Wiring<'_>,
         requested_by: Option<String>,
     ) -> Context<'a> {
@@ -144,22 +147,32 @@ impl Session {
         }
     }
 
+    /// The `--local` options of a run, after checking that the state has
+    /// a local view (`NYL-LOCAL-RUN-UNSUPPORTED` otherwise): remote state
+    /// whose refs are branches. `approve` are the `--approve` units.
+    pub fn local_run(
+        &self,
+        local_lease: bool,
+        approve: &[String],
+    ) -> Result<nyl_orchestration::shell::local::LocalRun, Finding> {
+        use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
+        nyl_orchestration::rules::local::view(&self.resolved.location)?;
+        Ok(LocalRun {
+            lease: if local_lease {
+                LeaseScope::Local
+            } else {
+                LeaseScope::Remote
+            },
+            approve: unit_names("--approve", approve)?,
+        })
+    }
+
     /// The request of one `plan` or `reconcile`.
     pub fn request(&self, options: &RunOptions<'_>) -> Result<RunRequest, Finding> {
         let units = if options.units.is_empty() {
             None
         } else {
-            let mut names = BTreeSet::new();
-            for unit in options.units {
-                names.insert(UnitName::new(unit).map_err(|error| {
-                    Finding::new(
-                        Code::UnitUnknown,
-                        format!("--unit {unit:?} is not a unit name: {error}"),
-                        "name units as `nyl get units -e <env>` lists them",
-                    )
-                })?);
-            }
-            Some(names)
+            Some(unit_names("--unit", options.units)?)
         };
         Ok(RunRequest {
             environment: self.resolved.name.clone(),
@@ -175,6 +188,22 @@ impl Session {
             cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         })
     }
+}
+
+/// Unit names as an option names them; `flag` names the option in the finding.
+fn unit_names(flag: &str, units: &[String]) -> Result<BTreeSet<UnitName>, Finding> {
+    units
+        .iter()
+        .map(|unit| {
+            UnitName::new(unit).map_err(|error| {
+                Finding::new(
+                    Code::UnitUnknown,
+                    format!("{flag} {unit:?} is not a unit name: {error}"),
+                    "name units as `nyl get units -e <env>` lists them",
+                )
+            })
+        })
+        .collect()
 }
 
 /// The worktree-rooted directory of the inventory's `nyl.toml`, such as
@@ -203,7 +232,7 @@ pub struct RunOptions<'a> {
     pub concurrency: usize,
     pub source: Option<&'a str>,
     pub wait: Option<Duration>,
-    /// `--local` and `--local-lease` of `reconcile`; `None` elsewhere.
+    /// `--local`, `--local-lease`, and `--approve` of `reconcile`; `None` elsewhere.
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
 }
 

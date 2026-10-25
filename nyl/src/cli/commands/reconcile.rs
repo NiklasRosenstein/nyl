@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
 
+use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
+use nyl_orchestration::shell::local::LocalStore;
 use nyl_orchestration::shell::run::RunContext;
 use nyl_state::git::CommitAuthor;
 
@@ -63,6 +65,12 @@ pub struct ReconcileArgs {
     #[arg(long, requires = "local")]
     pub local_lease: bool,
 
+    /// With --local, execute this unit although its recovery policy is not
+    /// converge, recorded with the local approval identity (repeatable, or
+    /// comma-separated). Other such units wait for approval.
+    #[arg(long = "approve", value_name = "UNIT", requires = "local", value_delimiter = ',')]
+    pub approve: Vec<String>,
+
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
@@ -86,26 +94,32 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
     let session = Session::open(&args.path, &args.environment)?;
     // Reconcile writes state, so it alone of the run commands needs an identity.
     let identity = wiring.commit_identity(&session.resolved.git_dir, args.author.as_deref())?;
+    let local = if args.local {
+        Some(session.local_run(args.local_lease, &args.approve)?)
+    } else {
+        None
+    };
     let request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,
         source: args.source.as_deref(),
         wait: args.wait_lease,
-        local: None,
+        local: local.clone(),
     })?;
-    if args.local {
-        // Package `local` wires LocalRun into the request and wraps the store in LocalStore.
-        let _ = args.local_lease;
-        todo!("local")
-    }
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;
+    // A `--local` run works on the clone's local branches through the same shell.
+    let local_store = local.map(|local| LocalStore::new(&store, local));
+    let state: &dyn StateStore = match &local_store {
+        Some(local_store) => local_store,
+        None => &store,
+    };
     let sources = session.sources()?;
     let renderer = session.renderer();
     let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
-    let base = session.context(&store, wiring, Some(identity.to_string()));
+    let base = session.context(state, wiring, Some(identity.to_string()));
     let context = RunContext {
         base: &base,
         sources: &sources,

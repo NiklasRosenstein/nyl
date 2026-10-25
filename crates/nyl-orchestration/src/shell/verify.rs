@@ -46,7 +46,6 @@ use super::run::{admitted_env, project_path, unit_timeout, RunContext, RunReques
 use super::state::store_error;
 use super::Settings;
 use crate::rules::sources::effective_commit;
-use crate::rules::state_location::check_record;
 use crate::rules::unit_state::receipt_state;
 use crate::rules::verification::{records, targets, warnings, Records, Target};
 use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitVerification, VerifyResult};
@@ -156,7 +155,7 @@ fn holding(
     let base = context.base;
     let environment = &request.environment;
     let location = &request.location;
-    super::local::check_remote_tips(base.store, location)?;
+    super::local::check_remote_tips(base.store, location, environment)?;
     let snapshot = read(context, environment, location, request)?;
     let planned = targets(&snapshot, request.units.as_ref());
     let results = verify_units(context, request, held, &snapshot, &planned)?;
@@ -228,7 +227,7 @@ fn read(
         .store
         .snapshot(location)
         .map_err(|error| store_error(environment, &error))?;
-    check_record(snapshot.record.as_ref(), environment, location)?;
+    super::local::check_record(context.base.store, snapshot.record.as_ref(), environment, location)?;
     if let Some(unknown) = request
         .units
         .iter()

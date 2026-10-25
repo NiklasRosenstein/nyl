@@ -720,6 +720,7 @@ impl Harness {
             source_override: None,
             wait: None,
             local: None,
+            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         };
         let base = Context {
             store: &store,
