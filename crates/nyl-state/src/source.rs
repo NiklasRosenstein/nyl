@@ -20,6 +20,14 @@
 //!   followed by a detached checkout. Nothing is registered in the entry
 //!   clone, so removing the directory ([`GitSourceResolver::remove_worktree`])
 //!   is the whole cleanup.
+//! - [`SourceResolver::reset_worktree`] reuses such a checkout for another
+//!   commit, as a run's concurrency slots do: it moves the detached HEAD,
+//!   rewrites every tracked file, removes untracked and ignored files and
+//!   empty directories, and starts over from a fresh checkout when anything
+//!   is left, so each unit still sees exactly a fresh checkout. Contract:
+//!   [Execution](../../../design/orchestration-core.md#execution).
+//! - Symbolic links are checked once per tree and resolver, whichever of
+//!   the two creates the checkout; a rejected tree stays rejected.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +54,9 @@ pub struct GitSourceResolver {
     endpoints: BTreeMap<String, String>,
     /// Repositories already fetched by this resolver, by identity.
     fetched: Mutex<BTreeSet<String>>,
+    /// The symbolic-link check of each tree this resolver checked out, so
+    /// a slot reused for many units walks each tree once.
+    symlinks: Mutex<BTreeMap<Oid, Result<(), String>>>,
 }
 
 fn error(message: impl Into<String>) -> SourceError {
@@ -113,6 +124,7 @@ impl GitSourceResolver {
             auth,
             endpoints: BTreeMap::new(),
             fetched: Mutex::new(BTreeSet::new()),
+            symlinks: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -218,6 +230,113 @@ impl GitSourceResolver {
         );
     }
 
+    /// The entry clone and `commit`, fetched when missing, after checking
+    /// its tree's symbolic links (once per tree and resolver).
+    fn checked_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<(Repository, Oid)> {
+        let source = self.open()?;
+        let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
+        if !Self::commit_exists(&source, oid) {
+            self.ensure_fetched(&source, repository)?;
+            self.fetch_one(&source, repository, commit.as_str(), None);
+        }
+        let checked = {
+            let found = source.find_commit(oid).map_err(|_| {
+                error(format!(
+                    "commit {commit} does not exist in {}",
+                    Self::describe(repository)
+                ))
+            })?;
+            let tree = found
+                .tree()
+                .map_err(|cause| git_error(&format!("cannot read the tree of {commit}"), &cause))?;
+            let mut cache = self.symlinks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache
+                .entry(tree.id())
+                .or_insert_with(|| check_symlinks(&source, &tree).map_err(|cause| cause.0))
+                .clone()
+        };
+        checked.map_err(SourceError)?;
+        Ok((source, oid))
+    }
+
+    /// The canonical objects directory of the entry clone, which every
+    /// checkout this resolver makes borrows through its alternates file.
+    fn objects_dir(source: &Repository) -> SourceResult<PathBuf> {
+        let objects = source.commondir().join("objects");
+        objects
+            .canonicalize()
+            .map_err(|cause| error(format!("cannot resolve {}: {cause}", objects.display())))
+    }
+
+    /// Create a detached checkout of `oid` at the missing or empty `path`.
+    fn create_checkout(source: &Repository, oid: Oid, path: &Path) -> SourceResult<()> {
+        let objects = Self::objects_dir(source)?;
+        let created = Repository::init(path)
+            .map_err(|cause| git_error(&format!("cannot create worktree {}", path.display()), &cause))?;
+        let alternates = created.path().join("objects/info/alternates");
+        drop(created);
+        std::fs::create_dir_all(alternates.parent().expect("alternates has a parent"))
+            .and_then(|()| std::fs::write(&alternates, format!("{}\n", objects.display())))
+            .map_err(|cause| error(format!("cannot write {}: {cause}", alternates.display())))?;
+        let checkout = Repository::open(path)
+            .map_err(|cause| git_error(&format!("cannot open worktree {}", path.display()), &cause))?;
+        checkout
+            .set_head_detached(oid)
+            .map_err(|cause| git_error(&format!("cannot detach the worktree at {oid}"), &cause))?;
+        checkout
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .map_err(|cause| git_error(&format!("cannot check out {oid}"), &cause))?;
+        Ok(())
+    }
+
+    /// Whether `path` holds a checkout this resolver made: its
+    /// `.git/objects/info/alternates` names the entry clone's objects.
+    fn made_here(source: &Repository, path: &Path) -> SourceResult<bool> {
+        let alternates = path.join(".git/objects/info/alternates");
+        let Ok(content) = std::fs::read_to_string(&alternates) else {
+            return Ok(false);
+        };
+        let objects = Self::objects_dir(source)?;
+        Ok(content.trim_end_matches(['\n', '\r']) == objects.display().to_string())
+    }
+
+    /// Reset a checkout this resolver made to `oid`. Returns whether the
+    /// working tree is exactly a fresh checkout afterwards; `false` asks
+    /// the caller to start over.
+    fn reset_checkout(path: &Path, oid: Oid) -> Result<bool, Box<dyn std::error::Error>> {
+        // No symbolic link a unit left may redirect the checkout's writes,
+        // and without the index every tracked file is rewritten, so a file
+        // changed within the index's timestamp granularity cannot pass as
+        // unchanged.
+        remove_symlinks(path)?;
+        match std::fs::remove_file(path.join(".git/index")) {
+            Ok(()) => {}
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cause) => return Err(cause.into()),
+        }
+        let checkout = Repository::open(path)?;
+        if checkout.workdir().map(Path::canonicalize).transpose()? != Some(path.canonicalize()?) {
+            return Ok(false);
+        }
+        checkout.set_head_detached(oid)?;
+        checkout.checkout_head(Some(
+            git2::build::CheckoutBuilder::new()
+                .force()
+                .remove_untracked(true)
+                .remove_ignored(true),
+        ))?;
+        remove_empty_directories(path, true)?;
+        let mut options = git2::StatusOptions::new();
+        options
+            .include_untracked(true)
+            .include_ignored(true)
+            .recurse_untracked_dirs(true)
+            .recurse_ignored_dirs(true)
+            .include_unmodified(false);
+        let clean = checkout.statuses(Some(&mut options))?.is_empty();
+        Ok(clean)
+    }
+
     fn commit_exists(repository: &Repository, oid: Oid) -> bool {
         repository.find_commit(oid).is_ok()
     }
@@ -262,6 +381,54 @@ fn is_full_commit(revision: &str) -> bool {
 
 fn commit_id(oid: Oid) -> SourceResult<CommitId> {
     CommitId::new(oid.to_string()).map_err(|cause| error(cause.to_string()))
+}
+
+/// Whether `path` is missing or an empty directory.
+fn is_missing_or_empty(path: &Path) -> SourceResult<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    let mut entries =
+        std::fs::read_dir(path).map_err(|cause| error(format!("cannot read {}: {cause}", path.display())))?;
+    Ok(entries.next().is_none())
+}
+
+/// Remove every symbolic link in a working tree, outside `.git`, without
+/// following any.
+fn remove_symlinks(directory: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            std::fs::remove_file(&path)?;
+        } else if kind.is_dir() && entry.file_name() != ".git" {
+            remove_symlinks(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove the empty directories beneath `directory` (and `directory` itself
+/// unless it is the root), outside the root's `.git`. Returns whether it is
+/// empty.
+fn remove_empty_directories(directory: &Path, root: bool) -> std::io::Result<bool> {
+    let mut empty = true;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() && !(root && entry.file_name() == ".git") {
+            if !remove_empty_directories(&entry.path(), false)? {
+                empty = false;
+            }
+        } else {
+            empty = false;
+        }
+    }
+    if empty && !root {
+        std::fs::remove_dir(directory)?;
+    }
+    Ok(empty)
 }
 
 /// Reject a symbolic link whose target leaves the tree: absolute, or with
@@ -391,50 +558,31 @@ impl SourceResolver for GitSourceResolver {
     }
 
     fn worktree(&self, repository: &SourceRepository, commit: &CommitId, path: &Path) -> SourceResult<()> {
-        let source = self.open()?;
-        let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
-        if !Self::commit_exists(&source, oid) {
-            self.ensure_fetched(&source, repository)?;
-            self.fetch_one(&source, repository, commit.as_str(), None);
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if !is_missing_or_empty(path)? {
+            return Err(error(format!("worktree path {} is not empty", path.display())));
         }
-        let found = source.find_commit(oid).map_err(|_| {
-            error(format!(
-                "commit {commit} does not exist in {}",
-                Self::describe(repository)
-            ))
-        })?;
-        let tree = found
-            .tree()
-            .map_err(|cause| git_error(&format!("cannot read the tree of {commit}"), &cause))?;
-        check_symlinks(&source, &tree)?;
+        Self::create_checkout(&source, oid, path)
+    }
 
-        if path.exists() {
-            let mut entries =
-                std::fs::read_dir(path).map_err(|cause| error(format!("cannot read {}: {cause}", path.display())))?;
-            if entries.next().is_some() {
-                return Err(error(format!("worktree path {} is not empty", path.display())));
-            }
+    fn reset_worktree(&self, repository: &SourceRepository, commit: &CommitId, path: &Path) -> SourceResult<()> {
+        let (source, oid) = self.checked_commit(repository, commit)?;
+        if is_missing_or_empty(path)? {
+            return Self::create_checkout(&source, oid, path);
         }
-        let objects = source.commondir().join("objects");
-        let objects = objects
-            .canonicalize()
-            .map_err(|cause| error(format!("cannot resolve {}: {cause}", objects.display())))?;
-        let created = Repository::init(path)
-            .map_err(|cause| git_error(&format!("cannot create worktree {}", path.display()), &cause))?;
-        let alternates = created.path().join("objects/info/alternates");
-        drop(created);
-        std::fs::create_dir_all(alternates.parent().expect("alternates has a parent"))
-            .and_then(|()| std::fs::write(&alternates, format!("{}\n", objects.display())))
-            .map_err(|cause| error(format!("cannot write {}: {cause}", alternates.display())))?;
-        let checkout = Repository::open(path)
-            .map_err(|cause| git_error(&format!("cannot open worktree {}", path.display()), &cause))?;
-        checkout
-            .set_head_detached(oid)
-            .map_err(|cause| git_error(&format!("cannot detach the worktree at {commit}"), &cause))?;
-        checkout
-            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
-            .map_err(|cause| git_error(&format!("cannot check out {commit}"), &cause))?;
-        Ok(())
+        if !Self::made_here(&source, path)? {
+            return Err(error(format!(
+                "worktree path {} is not empty and is not a checkout Nyl made",
+                path.display()
+            )));
+        }
+        if Self::reset_checkout(path, oid).unwrap_or(false) {
+            return Ok(());
+        }
+        // Something survived the reset, such as a nested repository or a
+        // changed file mode: start over from a fresh checkout.
+        Self::remove_worktree(path)?;
+        Self::create_checkout(&source, oid, path)
     }
 
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {
