@@ -10,21 +10,21 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, StateSide, Transition, TransitionChanges};
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, TransitionChanges};
 use nyl_core::orchestration::state::{
     Lease, LeaseKind, Lifecycle, Operation, Request, StateEvent, StateLocation, StateRecord, StateRecordKind, StateV1,
     TeardownProgress,
 };
 use serde_json::{json, Value};
 
-use super::lease::{self, HeldLease, LeaseError};
-use super::local::{check_remote_tips, TIP_HISTORY};
-use super::Context;
+use super::lease::{self, HeldLease};
+use super::local::{check_record, check_remote_tips, sides, TIP_HISTORY};
+use super::{store_error, Context};
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::lease::{self as lease_rule, Holder, LeaseDecision};
 use crate::rules::local as local_rule;
-use crate::rules::state_location::{check_record, describe};
-use crate::transition::{self, Trailers, TransitionSummary};
+use crate::rules::state_location::describe;
+use crate::transition::{Trailers, TransitionSummary};
 
 /// Who asked for an operator action and why.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,114 +36,117 @@ pub struct Requested {
     pub cancellation: super::run::Cancellation,
 }
 
-/// The finding for a state store failure of `environment`.
-pub(crate) fn store_error(environment: &EnvironmentName, error: &StateError) -> Finding {
-    match error {
-        StateError::LeaseLost => lease::lost(environment),
-        StateError::NotFastForward { reference } => Finding::new(
-            Code::StateNotFastForward,
-            format!("state ref {reference} of {environment} was rewritten outside Nyl"),
-            "restore the ref to a descendant of what Nyl last wrote; Nyl never force-pushes state",
-        ),
-        StateError::Conflict { reference, actual } => Finding::new(
-            Code::StateConflict,
-            format!("{reference} of {environment} moved to {actual} while this operation ran, changing its state"),
-            "run the command again; it reads the new state. Changes outside Nyl, such as a merged pull request, also cause this",
-        ),
-        other => Finding::new(
-            Code::StateUnavailable,
-            format!("state of {environment} is unavailable: {other}"),
-            "check access to the state repository and retry",
-        ),
+/// Run `body` on `report`, refusing it with the finding `body` fails with.
+fn refusing(
+    mut report: StateOperationReport,
+    body: impl FnOnce(&mut StateOperationReport) -> Result<(), Finding>,
+) -> StateOperationReport {
+    match body(&mut report) {
+        Ok(()) => report,
+        Err(finding) => report.refused(finding),
     }
 }
 
-/// Run `body` holding the lease, and release it afterwards whatever happened.
-pub(crate) fn with_lease(
+/// Take the lease for `operation`, as [`lease::acquire`] does for every
+/// operator action: with the resolution timeout and the request's wait.
+fn acquire(
     context: &Context<'_>,
-    report: StateOperationReport,
-    operation: Operation,
     location: &StateLocation,
+    environment: &EnvironmentName,
+    operation: Operation,
     requested: &Requested,
-    body: impl FnOnce(&mut HeldLease, StateOperationReport) -> StateOperationReport,
-) -> StateOperationReport {
-    let environment = report.environment.clone();
-    let run = context.ids.run_id();
-    let mut held = match lease::acquire(
+) -> Result<HeldLease, Finding> {
+    lease::acquire(
         context,
         location,
-        &environment,
-        &run,
+        environment,
+        &context.ids.run_id(),
         operation,
         context.settings.resolution_timeout,
         requested.wait,
         &requested.cancellation,
-    ) {
+    )
+}
+
+/// Run `body` holding the lease for `operation`, and release it afterwards
+/// whatever happened; a finding `body` fails with refuses the operation.
+pub(crate) fn with_lease(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    operation: Operation,
+    location: &StateLocation,
+    requested: &Requested,
+    body: impl FnOnce(&mut HeldLease, &mut StateOperationReport) -> Result<(), Finding>,
+) -> StateOperationReport {
+    let report = StateOperationReport::new(environment.clone(), operation.as_str());
+    let mut held = match acquire(context, location, environment, operation, requested) {
         Ok(held) => held,
-        Err(LeaseError::Held(finding)) => return report.refused(finding),
-        Err(LeaseError::Store(error)) => return report.refused(store_error(&environment, &error)),
+        Err(finding) => return report.refused(finding),
     };
-    let report = body(&mut held, report);
+    let mut report = refusing(report, |report| body(&mut held, report));
     if let Err(error) = lease::release(context, &held) {
-        let mut report = report;
-        report.warnings.push(store_error(&environment, &error));
-        return report;
+        report.warnings.push(store_error(environment, &error));
     }
     report
 }
 
-/// Write one transition and record it in the report. The fenced push moves
-/// the lease, so `held` carries its new version afterwards.
-#[allow(clippy::too_many_arguments)] // The transition, where it goes, and the lease fencing it.
+/// Write one transition with the request's trailers and record its commits
+/// in the report, which is done once any commit was written. The fenced
+/// push moves the lease, so `held` carries its new version afterwards.
+#[allow(clippy::too_many_arguments)] // The transition, where it goes, the lease fencing it, and the request.
 pub(crate) fn commit(
     context: &Context<'_>,
     location: &StateLocation,
     held: &mut HeldLease,
     snapshot: &EnvironmentSnapshot,
-    summary: &TransitionSummary,
+    summary: TransitionSummary,
     changes: TransitionChanges,
-    reason: Option<&String>,
-    mut report: StateOperationReport,
-) -> StateOperationReport {
+    requested: &Requested,
+    report: &mut StateOperationReport,
+) -> Result<(), Finding> {
     let trailers = Trailers {
-        run: held.lease.run.clone(),
-        source_commit: None,
-        read_desired: snapshot.tips.desired.clone(),
-        read_observed: snapshot.tips.observed.clone(),
-        runner: context.runner.clone(),
-        evaluated_at: held.lease.taken_at,
-        version: context.version.clone(),
         requested_by: Some(context.requested_by.clone()),
-        reason: reason.cloned(),
-        local: false,
+        reason: requested.reason.clone(),
+        ..super::trailers(context, held, &snapshot.tips)
     };
-    let mut summary = summary.clone();
-    summary.lease_broken.clone_from(&held.broken);
-    let transition = Transition {
-        message: transition::message(&summary, &trailers),
-        changes,
-    };
-    match context
+    let commits = super::commit_transition(context, location, held, &snapshot.tips, summary, changes, &trailers)
+        .map_err(|error| store_error(&report.environment, &error))?;
+    report.commits.extend(commits);
+    if !report.commits.is_empty() {
+        report.outcome = Outcome::Done;
+    }
+    Ok(())
+}
+
+/// The snapshot of `location`, or the finding for the store failure.
+pub(crate) fn read(
+    context: &Context<'_>,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+) -> Result<EnvironmentSnapshot, Finding> {
+    context
         .store
-        .commit(location, &held.environment, &snapshot.tips, &transition, &held.version)
-    {
-        Ok(committed) => {
-            held.version = committed.lease_version;
-            if let Some(desired) = committed.desired {
-                report.commits.insert("desired", desired);
-            }
-            if let Some(observed) = committed.observed {
-                report.commits.insert("observed", observed);
-            }
-            if report.commits.is_empty() {
-                report
-            } else {
-                report.done()
-            }
-        }
-        Err(error) => {
-            let environment = report.environment.clone();
-            report.refused(store_error(&environment, &error))
+        .snapshot(location)
+        .map_err(|error| store_error(environment, &error))
+}
+
+/// Every key of `map`, mapped to `None`: the change dropping each document.
+fn dropped<V>(map: &BTreeMap<UnitName, V>) -> BTreeMap<UnitName, Option<V>> {
+    map.keys().map(|unit| (unit.clone(), None)).collect()
+}
+
+/// Every document of `map`, as changes writing it.
+fn written<V: Clone>(map: &BTreeMap<UnitName, V>) -> BTreeMap<UnitName, Option<V>> {
+    map.iter()
+        .map(|(unit, document)| (unit.clone(), Some(document.clone())))
+        .collect()
+}
+
+/// Append the commits of `more` that `into` does not list yet.
+fn extend_unique<T: PartialEq>(into: &mut Vec<T>, more: Vec<T>) {
+    for item in more {
+        if !into.contains(&item) {
+            into.push(item);
         }
     }
 }
@@ -171,21 +174,16 @@ pub fn init(
     fresh: bool,
     requested: &Requested,
 ) -> StateOperationReport {
-    let report = StateOperationReport::new(environment.clone(), Operation::StateInit.as_str());
     with_lease(
         context,
-        report,
+        environment,
         Operation::StateInit,
         location,
         requested,
         |held, report| {
-            let snapshot = match context.store.snapshot(location) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
-            let now = held.lease.taken_at;
+            let snapshot = read(context, location, environment)?;
             let event = StateEvent::StateInitialized {
-                at: now,
+                at: held.lease.taken_at,
                 by: context.requested_by.clone(),
                 reason: requested.reason.clone(),
                 fresh,
@@ -203,26 +201,18 @@ pub fn init(
                     events: vec![event],
                 },
                 Some(existing) => {
-                    if let Err(finding) = check_record(Some(existing), environment, location) {
-                        if finding.code != Code::StateMissing {
-                            return report.refused(finding);
-                        }
-                    }
+                    check_record(context.store, Some(existing), environment, location)?;
                     if !fresh {
-                        let mut report = report;
-                        report.outcome = Outcome::Unchanged;
                         report
                             .details
                             .insert("note".to_owned(), json!("state already exists at this location"));
-                        return report;
+                        return Ok(());
                     }
-                    if let Err(finding) = check_remote_tips(context.store, location, environment) {
-                        return report.refused(finding);
-                    }
+                    check_remote_tips(context.store, location, environment)?;
                     // A fresh start drops every unit's documents.
-                    changes.desired = snapshot.desired.keys().map(|unit| (unit.clone(), None)).collect();
-                    changes.observed = snapshot.observed.keys().map(|unit| (unit.clone(), None)).collect();
-                    changes.artifacts = snapshot.artifacts.keys().map(|unit| (unit.clone(), None)).collect();
+                    changes.desired = dropped(&snapshot.desired);
+                    changes.observed = dropped(&snapshot.observed);
+                    changes.artifacts = dropped(&snapshot.artifacts);
                     let mut record = existing.clone();
                     record.events.push(event);
                     record
@@ -231,23 +221,13 @@ pub fn init(
             changes.record = Some(record);
             let mut summary = summary(Operation::StateInit, environment, if fresh { "fresh" } else { "" });
             summary.details.insert("location".to_owned(), json!(describe(location)));
-            let mut report = report;
             if fresh {
                 report.details.insert(
                     "fresh".to_owned(),
                     json!("every unit becomes a new incarnation and executes again at the next reconcile"),
                 );
             }
-            commit(
-                context,
-                location,
-                held,
-                &snapshot,
-                &summary,
-                changes,
-                requested.reason.as_ref(),
-                report,
-            )
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )
 }
@@ -262,26 +242,18 @@ pub fn forget(
     unit: &UnitName,
     requested: &Requested,
 ) -> StateOperationReport {
-    let report = StateOperationReport::new(environment.clone(), Operation::StateForget.as_str());
     with_lease(
         context,
-        report,
+        environment,
         Operation::StateForget,
         location,
         requested,
         |held, report| {
-            let snapshot = match context.store.snapshot(location) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
-            if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
-                return report.refused(finding);
-            }
-            if let Err(finding) = check_remote_tips(context.store, location, environment) {
-                return report.refused(finding);
-            }
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
             let Some(desired) = snapshot.desired.get(unit) else {
-                return report.refused(Finding::new(
+                return Err(Finding::new(
                     Code::UnitUnknown,
                     format!("{environment} has no unit {unit} in its state"),
                     format!("list the units with `nyl get units -e {environment}`"),
@@ -293,7 +265,7 @@ pub fn forget(
                 Lifecycle::Active | Lifecycle::Held { .. } => false,
             };
             if !forgettable {
-                return report.refused(Finding::new(
+                return Err(Finding::new(
                 Code::StateForgetRefused,
                 format!("{unit} in {environment} is neither retained nor pending teardown"),
                 format!(
@@ -311,16 +283,7 @@ pub fn forget(
             summary
                 .units
                 .insert(unit.clone(), json!({"result": "forgotten", "resourcesKept": true}));
-            commit(
-                context,
-                location,
-                held,
-                &snapshot,
-                &summary,
-                changes,
-                requested.reason.as_ref(),
-                report,
-            )
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )
 }
@@ -341,9 +304,8 @@ pub fn relocate(
     from: &StateLocation,
     requested: &Requested,
 ) -> StateOperationReport {
-    let report = StateOperationReport::new(environment.clone(), Operation::StateMove.as_str());
     if from == to {
-        return report.refused(Finding::new(
+        return StateOperationReport::new(environment.clone(), Operation::StateMove.as_str()).refused(Finding::new(
             Code::StateLocationMismatch,
             format!("the state of {environment} is already at {}", describe(to)),
             "pass the old location's options: --from, --desired-ref, --observed-ref, --path, --coordination-refs",
@@ -353,7 +315,7 @@ pub fn relocate(
         from.repository == to.repository && from.coordination_ref_prefix == to.coordination_ref_prefix;
     with_lease(
         context,
-        report,
+        environment,
         Operation::StateMove,
         to,
         requested,
@@ -362,23 +324,9 @@ pub fn relocate(
             let mut old_lease = if same_coordination {
                 None
             } else {
-                let run = context.ids.run_id();
-                match lease::acquire(
-                    context,
-                    from,
-                    environment,
-                    &run,
-                    Operation::StateMove,
-                    context.settings.resolution_timeout,
-                    requested.wait,
-                    &requested.cancellation,
-                ) {
-                    Ok(held) => Some(held),
-                    Err(LeaseError::Held(finding)) => return report.refused(finding),
-                    Err(LeaseError::Store(error)) => return report.refused(store_error(environment, &error)),
-                }
+                Some(acquire(context, from, environment, Operation::StateMove, requested)?)
             };
-            let report = move_holding(
+            let moved = move_holding(
                 context,
                 environment,
                 to,
@@ -391,7 +339,7 @@ pub fn relocate(
             if let Some(old) = &old_lease {
                 let _ = lease::release(context, old);
             }
-            report
+            moved
         },
     )
 }
@@ -405,46 +353,35 @@ fn move_holding(
     held_to: &mut HeldLease,
     held_from: Option<&mut HeldLease>,
     requested: &Requested,
-    mut report: StateOperationReport,
-) -> StateOperationReport {
-    let target = match context.store.snapshot(to) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
+    report: &mut StateOperationReport,
+) -> Result<(), Finding> {
+    let target = read(context, to, environment)?;
     // Already moved: the new location records the move from `from`.
     if let Some(record) = &target.record {
         if record.location == *to
             && matches!(record.events.last(), Some(StateEvent::StateMoved { from: moved_from, .. }) if moved_from.as_ref() == from)
         {
-            report.outcome = Outcome::Unchanged;
             report
                 .details
                 .insert("note".to_owned(), json!("the move already completed"));
-            return report;
+            return Ok(());
         }
     }
-    let source = match context.store.snapshot(from) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
+    let source = read(context, from, environment)?;
     // Neither location may carry pushed local transitions at its tip.
-    if let Err(finding) = check_remote_tips(context.store, from, environment) {
-        return report.refused(finding);
-    }
+    check_remote_tips(context.store, from, environment)?;
     if target.record.is_some() {
-        if let Err(finding) = check_remote_tips(context.store, to, environment) {
-            return report.refused(finding);
-        }
+        check_remote_tips(context.store, to, environment)?;
     }
     let Some(source_record) = source.record.clone() else {
-        return report.refused(Finding::new(
+        return Err(Finding::new(
             Code::StateMissing,
             format!("{environment} has no state at {}", describe(from)),
             "name the location the state is at with --from and the ref options",
         ));
     };
     if source_record.environment != *environment {
-        return report.refused(Finding::new(
+        return Err(Finding::new(
             Code::StateEnvironmentMismatch,
             format!(
                 "the state at {} belongs to {}",
@@ -460,16 +397,16 @@ fn move_holding(
         && from.observed_ref == to.observed_ref
         && from.path == to.path;
     if only_prefix {
-        match context.store.coordination(from, environment) {
-            Ok(coordination) if !coordination.runs.is_empty() => {
-                return report.refused(Finding::new(
-                    Code::LeaseHeld,
-                    format!("{environment} has run refs at {}", from.coordination_ref_prefix),
-                    "let the next run at the old prefix import them, then move the coordination refs",
-                ))
-            }
-            Ok(_) => {}
-            Err(error) => return report.refused(store_error(environment, &error)),
+        let coordination = context
+            .store
+            .coordination(from, environment)
+            .map_err(|error| store_error(environment, &error))?;
+        if !coordination.runs.is_empty() {
+            return Err(Finding::new(
+                Code::LeaseHeld,
+                format!("{environment} has run refs at {}", from.coordination_ref_prefix),
+                "let the next run at the old prefix import them, then move the coordination refs",
+            ));
         }
     }
     let event = StateEvent::StateMoved {
@@ -488,7 +425,7 @@ fn move_holding(
     // A copy from an interrupted move is the source record itself; any other
     // record at the new location is someone else's state.
     if !already_marked && target.record.as_ref().is_some_and(|record| *record != source_record) {
-        return report.refused(Finding::new(
+        return Err(Finding::new(
             Code::StateLocationMismatch,
             format!("{} already holds other state", describe(to)),
             "point the Environment at a location without state, or remove that state first",
@@ -501,7 +438,7 @@ fn move_holding(
         let same_layout = (from.desired_ref == from.observed_ref) == (to.desired_ref == to.observed_ref);
         if from.path.is_empty() && to.path.is_empty() && same_layout {
             if let Err(error) = context.store.import_history(from, to) {
-                return report.refused(Finding::new(
+                return Err(Finding::new(
                     Code::StateLocationMismatch,
                     format!("cannot move the state of {environment} to {}: {error}", describe(to)),
                     "the target refs must not exist yet, or hold exactly the history of the old location",
@@ -511,45 +448,23 @@ fn move_holding(
             let changes = TransitionChanges {
                 record: Some(source_record.clone()),
                 environment: source.environment.clone(),
-                desired: source
-                    .desired
-                    .iter()
-                    .map(|(unit, document)| (unit.clone(), Some(document.clone())))
-                    .collect(),
-                observed: source
-                    .observed
-                    .iter()
-                    .map(|(unit, document)| (unit.clone(), Some(document.clone())))
-                    .collect(),
-                artifacts: source
-                    .artifacts
-                    .iter()
-                    .map(|(unit, set)| (unit.clone(), Some(set.clone())))
-                    .collect(),
-                observations: source
-                    .observations
-                    .iter()
-                    .map(|(unit, set)| (unit.clone(), Some(set.clone())))
-                    .collect(),
-                attestations: source
-                    .attestations
-                    .iter()
-                    .map(|(unit, set)| (unit.clone(), Some(set.clone())))
-                    .collect(),
+                desired: written(&source.desired),
+                observed: written(&source.observed),
+                artifacts: written(&source.artifacts),
+                observations: written(&source.observations),
+                attestations: written(&source.attestations),
             };
-            let copied = commit(
+            // The copy's commits are not the move's: step 3 writes its tip.
+            commit(
                 context,
                 to,
                 held_to,
                 &target,
-                &summary,
+                summary.clone(),
                 changes,
-                requested.reason.as_ref(),
-                report.clone(),
-            );
-            if copied.outcome == Outcome::Refused {
-                return copied;
-            }
+                requested,
+                &mut report.clone(),
+            )?;
         }
         // 2. The marker at the old location, unless both share one history.
         if !from.is_local() {
@@ -560,33 +475,25 @@ fn move_holding(
             };
             let mut marked_record = source_record.clone();
             marked_record.events.push(event.clone());
-            let old_marker = commit(
+            let changes = TransitionChanges {
+                record: Some(marked_record),
+                ..TransitionChanges::default()
+            };
+            let mut marker = StateOperationReport::new(environment.clone(), Operation::StateMove.as_str());
+            commit(
                 context,
                 from,
                 held_from,
                 &source,
-                &summary,
-                TransitionChanges {
-                    record: Some(marked_record),
-                    ..TransitionChanges::default()
-                },
-                requested.reason.as_ref(),
-                StateOperationReport::new(environment.clone(), Operation::StateMove.as_str()),
-            );
-            if old_marker.outcome == Outcome::Refused {
-                let mut report = report;
-                report.errors.extend(old_marker.errors);
-                report.exit = old_marker.exit;
-                report.outcome = Outcome::Refused;
-                return report;
-            }
+                summary.clone(),
+                changes,
+                requested,
+                &mut marker,
+            )?;
         }
     }
     // 3. The new location records itself and the move, as its tip.
-    let target = match context.store.snapshot(to) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
+    let target = read(context, to, environment)?;
     let mut record = target.record.clone().unwrap_or(source_record);
     record.location = to.clone();
     record.events.push(event);
@@ -594,26 +501,15 @@ fn move_holding(
         record: Some(record),
         ..TransitionChanges::default()
     };
-    let report = commit(
-        context,
-        to,
-        held_to,
-        &target,
-        &summary,
-        changes,
-        requested.reason.as_ref(),
-        report,
-    );
+    commit(context, to, held_to, &target, summary, changes, requested, report)?;
     // A move from the clone's own branches leaves them following the
     // remote: reading it fast-forwards them to the move's tip.
     if from.is_local() && report.outcome == Outcome::Done {
         if let Err(error) = context.store.snapshot(to) {
-            let mut report = report;
             report.warnings.push(store_error(environment, &error));
-            return report;
         }
     }
-    report
+    Ok(())
 }
 
 /// `nyl lease break -e <env> --reason <text>`: declare the lease holder gone.
@@ -626,63 +522,68 @@ pub fn break_lease(
     location: &StateLocation,
     reason: Option<String>,
 ) -> StateOperationReport {
-    let mut report = StateOperationReport::new(environment.clone(), "lease-break");
-    let coordination = match context.store.coordination(location, environment) {
-        Ok(coordination) => coordination,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
-    let now = context.clock.now();
-    // Break whatever holds the environment: its lease, or a live run whose
-    // lease ref is already gone.
-    let mut lease = match lease_rule::decide(&coordination, now) {
-        LeaseDecision::Take { .. } => {
-            report.details.insert(
-                "note".to_owned(),
-                json!(format!("nothing holds the lease of {environment}")),
-            );
-            return report;
-        }
-        LeaseDecision::Held(Holder::Lease(lease)) => lease,
-        LeaseDecision::Held(Holder::Run(run)) => Lease {
-            api_version: StateV1,
-            kind: LeaseKind,
-            run: run.run,
-            runner: run.runner,
-            operation: run.operation,
-            units: run.units,
-            deadline: run.deadline,
-            taken_at: now,
-            broken: None,
+    refusing(
+        StateOperationReport::new(environment.clone(), "lease-break"),
+        |report| {
+            let coordination = context
+                .store
+                .coordination(location, environment)
+                .map_err(|error| store_error(environment, &error))?;
+            let now = context.clock.now();
+            // Break whatever holds the environment: its lease, or a live run whose
+            // lease ref is already gone.
+            let mut lease = match lease_rule::decide(&coordination, now) {
+                LeaseDecision::Take { .. } => {
+                    report.details.insert(
+                        "note".to_owned(),
+                        json!(format!("nothing holds the lease of {environment}")),
+                    );
+                    return Ok(());
+                }
+                LeaseDecision::Held(Holder::Lease(lease)) => lease,
+                LeaseDecision::Held(Holder::Run(run)) => Lease {
+                    api_version: StateV1,
+                    kind: LeaseKind,
+                    run: run.run,
+                    runner: run.runner,
+                    operation: run.operation,
+                    units: run.units,
+                    deadline: run.deadline,
+                    taken_at: now,
+                    broken: None,
+                },
+            };
+            lease.broken = Some(Request {
+                by: context.requested_by.clone(),
+                at: now,
+                reason,
+            });
+            let expected = coordination.lease.as_ref().map(|held| held.version.as_str());
+            match context.store.take_lease(location, environment, &lease, expected) {
+                Ok(_) => {
+                    report
+                        .details
+                        .insert("broken".to_owned(), Value::String(format!("run {}", lease.run)));
+                    report.warnings.push(Finding::new(
+                    Code::LeaseHeld,
+                    format!(
+                        "the lease of run {} by {} was broken; if that run is still alive it may still cause effects, but it can no longer write state",
+                        lease.run, lease.runner
+                    ),
+                    "make sure the runner is gone; units it was executing become uncertain at the next run",
+                ));
+                    report.outcome = Outcome::Done;
+                    Ok(())
+                }
+                Err(StateError::LeaseRace) => Err(Finding::new(
+                    Code::LeaseHeld,
+                    format!("the lease of {environment} changed while it was being broken"),
+                    "check `nyl status` and run `nyl lease break` again if the holder is still gone",
+                )),
+                Err(error) => Err(store_error(environment, &error)),
+            }
         },
-    };
-    lease.broken = Some(Request {
-        by: context.requested_by.clone(),
-        at: now,
-        reason,
-    });
-    let expected = coordination.lease.as_ref().map(|held| held.version.as_str());
-    match context.store.take_lease(location, environment, &lease, expected) {
-        Ok(_) => {
-            report
-                .details
-                .insert("broken".to_owned(), Value::String(format!("run {}", lease.run)));
-            report.warnings.push(Finding::new(
-                Code::LeaseHeld,
-                format!(
-                    "the lease of run {} by {} was broken; if that run is still alive it may still cause effects, but it can no longer write state",
-                    lease.run, lease.runner
-                ),
-                "make sure the runner is gone; units it was executing become uncertain at the next run",
-            ));
-            report.done()
-        }
-        Err(StateError::LeaseRace) => report.refused(Finding::new(
-            Code::LeaseHeld,
-            format!("the lease of {environment} changed while it was being broken"),
-            "check `nyl status` and run `nyl lease break` again if the holder is still gone",
-        )),
-        Err(error) => report.refused(store_error(environment, &error)),
-    }
+    )
 }
 
 /// `nyl state reset -e <env> --local`: drop the clone's local transitions
@@ -700,71 +601,51 @@ pub fn reset(
     location: &StateLocation,
     discard: Option<&local_rule::Discard>,
 ) -> StateOperationReport {
-    let mut report = StateOperationReport::new(environment.clone(), "state-reset");
-    if location.is_local() {
-        return report.refused(Finding::new(
-            Code::StateResetUnsupported,
-            format!(
-                "the state of {environment} lives on this clone's own branches, so there is no remote state to follow"
-            ),
-            format!(
-                "configure a state repository and move the state there with `nyl state move -e {environment} --from local`"
-            ),
-        ));
-    }
-    let view = match local_rule::view(location) {
-        Ok(view) => view,
-        Err(finding) => return report.refused(finding),
-    };
-    // The remote first: it fetches, and fast-forwards branches that follow it.
-    let remote = match context.store.snapshot(location) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
-    let local = match context.store.snapshot(&view) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return report.refused(store_error(environment, &error)),
-    };
-    if local.tips == remote.tips {
-        report
-            .details
-            .insert("note".to_owned(), json!("the local state branches follow the remote"));
-        return report;
-    }
-    let unreflected = local_rule::unreflected(&local, &remote);
-    if let Err(finding) = local_rule::check_discard(environment, &unreflected, discard) {
-        return report.refused(finding);
-    }
-    let mut dropped = Vec::new();
-    for side in sides(location) {
-        match context.store.log(&view, *side, TIP_HISTORY) {
-            Ok(log) => {
-                for commit in local_rule::rejected(&log) {
-                    if !dropped.contains(&commit) {
-                        dropped.push(commit);
-                    }
+    refusing(
+        StateOperationReport::new(environment.clone(), "state-reset"),
+        |report| {
+            if location.is_local() {
+                return Err(Finding::new(
+                Code::StateResetUnsupported,
+                format!(
+                    "the state of {environment} lives on this clone's own branches, so there is no remote state to follow"
+                ),
+                format!(
+                    "configure a state repository and move the state there with `nyl state move -e {environment} --from local`"
+                ),
+            ));
+            }
+            let view = local_rule::view(location)?;
+            // The remote first: it fetches, and fast-forwards branches that follow it.
+            let remote = read(context, location, environment)?;
+            let local = read(context, &view, environment)?;
+            if local.tips == remote.tips {
+                report
+                    .details
+                    .insert("note".to_owned(), json!("the local state branches follow the remote"));
+                return Ok(());
+            }
+            let unreflected = local_rule::unreflected(&local, &remote);
+            local_rule::check_discard(environment, &unreflected, discard)?;
+            let mut dropped = Vec::new();
+            for side in sides(location) {
+                match context.store.log(&view, *side, TIP_HISTORY) {
+                    Ok(log) => extend_unique(&mut dropped, local_rule::rejected(&log)),
+                    // Without history the dropped commits are not listed.
+                    Err(StateError::Unavailable(_)) => {}
+                    Err(error) => return Err(store_error(environment, &error)),
                 }
             }
-            // Without history the dropped commits are not listed.
-            Err(StateError::Unavailable(_)) => {}
-            Err(error) => return report.refused(store_error(environment, &error)),
-        }
-    }
-    if let Err(error) = context.store.reset_local(location, &local.tips) {
-        return report.refused(store_error(environment, &error));
-    }
-    report.details.insert("discarded".to_owned(), json!(unreflected));
-    report.details.insert("dropped".to_owned(), json!(dropped));
-    report.done()
-}
-
-/// The state refs of a location, one when both are the same ref.
-fn sides(location: &StateLocation) -> &'static [StateSide] {
-    if location.desired_ref == location.observed_ref {
-        &[StateSide::Desired]
-    } else {
-        &StateSide::ALL
-    }
+            context
+                .store
+                .reset_local(location, &local.tips)
+                .map_err(|error| store_error(environment, &error))?;
+            report.details.insert("discarded".to_owned(), json!(unreflected));
+            report.details.insert("dropped".to_owned(), json!(dropped));
+            report.outcome = Outcome::Done;
+            Ok(())
+        },
+    )
 }
 
 /// How far back `state restore` looks for the commit it restores.
@@ -785,54 +666,44 @@ pub fn restore(
     to: &nyl_core::orchestration::ids::CommitId,
     requested: &Requested,
 ) -> StateOperationReport {
-    let report = StateOperationReport::new(environment.clone(), Operation::StateRestore.as_str());
     with_lease(
         context,
-        report,
+        environment,
         Operation::StateRestore,
         location,
         requested,
         |held, report| {
-            let snapshot = match context.store.snapshot(location) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
-            if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
-                return report.refused(finding);
-            }
+            let snapshot = read(context, location, environment)?;
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
             let shared = location.desired_ref == location.observed_ref;
             let mut logs = Vec::new();
             for side in sides(location) {
-                match context.store.log(location, *side, RESTORE_HISTORY) {
-                    Ok(log) => logs.push(log),
-                    Err(error) => return report.refused(store_error(environment, &error)),
-                }
+                let log = context
+                    .store
+                    .log(location, *side, RESTORE_HISTORY)
+                    .map_err(|error| store_error(environment, &error))?;
+                logs.push(log);
             }
             let (desired_log, observed_log) = (&logs[0], logs.last().expect("one log per side"));
-            let tips = match local_rule::restore_tips(environment, to, desired_log, observed_log, shared) {
-                Ok(tips) => tips,
-                Err(finding) => return report.refused(finding),
-            };
-            let target = match context.store.snapshot_at(location, &tips) {
-                Ok(target) => target,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
+            let tips = local_rule::restore_tips(environment, to, desired_log, observed_log, shared)?;
+            let target = context
+                .store
+                .snapshot_at(location, &tips)
+                .map_err(|error| store_error(environment, &error))?;
             let mut changes = local_rule::restore_changes(&snapshot, &target);
             // Only the environment's own local transitions are rejected:
             // others sharing the refs through `path` keep theirs.
             let mut rejected = local_rule::rejected(&local_rule::environment_log(environment, desired_log));
-            for commit in local_rule::rejected(&local_rule::environment_log(environment, observed_log)) {
-                if !rejected.contains(&commit) {
-                    rejected.push(commit);
-                }
-            }
-            let mut report = report;
+            extend_unique(
+                &mut rejected,
+                local_rule::rejected(&local_rule::environment_log(environment, observed_log)),
+            );
             if changes.is_empty() && rejected.is_empty() {
                 report.details.insert(
                     "note".to_owned(),
                     json!(format!("the state already holds the content of {to}")),
                 );
-                return report;
+                return Ok(());
             }
             let mut record = snapshot.record.clone().expect("check_record found state.yaml");
             record.events.push(StateEvent::StateRestored {
@@ -847,16 +718,7 @@ pub fn restore(
             summary.details.insert("rejected".to_owned(), json!(rejected));
             report.details.insert("to".to_owned(), json!(to));
             report.details.insert("rejected".to_owned(), json!(rejected));
-            commit(
-                context,
-                location,
-                held,
-                &snapshot,
-                &summary,
-                changes,
-                requested.reason.as_ref(),
-                report,
-            )
+            commit(context, location, held, &snapshot, summary, changes, requested, report)
         },
     )
 }

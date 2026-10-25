@@ -3,13 +3,13 @@
 //! Contract: [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases).
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::ids::{EnvironmentName, RunId};
+use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::StateError;
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Request, StateLocation, StateV1};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
 use super::run::Cancellation;
-use super::Context;
+use super::{store_error, Context, Settings};
 use crate::fault::FaultPoint;
 use crate::rules::lease::{decide, LeaseDecision};
 
@@ -28,25 +28,12 @@ pub struct HeldLease {
     pub replaced: Option<Lease>,
 }
 
-/// Why a run did not get the lease.
-#[derive(Debug)]
-pub enum LeaseError {
-    /// Another run holds it: `NYL-LEASE-HELD`, exit 2.
-    Held(Finding),
-    Store(StateError),
-}
-
-impl From<StateError> for LeaseError {
-    fn from(error: StateError) -> Self {
-        Self::Store(error)
-    }
-}
-
 /// Take the lease of `environment` at `location` for `operation`, with the
 /// deadline `phase` from now plus the grace period. With `wait`, a held
 /// lease is read again until it is released or `wait` has passed; a
 /// `cancellation` set meanwhile (SIGINT or SIGTERM, "Runs and leases" item 7)
-/// stops waiting with `NYL-RUN-CANCELLED`, having written nothing.
+/// stops waiting with `NYL-RUN-CANCELLED`, having written nothing. Another
+/// run holding it is `NYL-LEASE-HELD`, exit 2.
 #[allow(clippy::too_many_arguments)] // Each is one aspect of the request; a struct would only rename them.
 pub fn acquire(
     context: &Context<'_>,
@@ -57,11 +44,14 @@ pub fn acquire(
     phase: Duration,
     wait: Option<Duration>,
     cancellation: &Cancellation,
-) -> Result<HeldLease, LeaseError> {
+) -> Result<HeldLease, Finding> {
     let started = context.clock.now();
     loop {
         let now = context.clock.now();
-        let coordination = context.store.coordination(location, environment)?;
+        let coordination = context
+            .store
+            .coordination(location, environment)
+            .map_err(|error| store_error(environment, &error))?;
         let replaced = coordination.lease.as_ref().map(|held| held.lease.clone());
         match decide(&coordination, now) {
             LeaseDecision::Take { expected, broken } => {
@@ -93,26 +83,26 @@ pub fn acquire(
                     // Another run took it between the read and the swap:
                     // read again.
                     Err(StateError::LeaseRace) => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(store_error(environment, &error)),
                 }
             }
             LeaseDecision::Held(holder) => {
                 let waited_out = wait.is_none_or(|wait| now >= wait.after(started));
                 if waited_out {
-                    return Err(LeaseError::Held(Finding::new(
+                    return Err(Finding::new(
                         Code::LeaseHeld,
                         format!("{environment} is held by {}", holder.describe()),
                         "wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone",
-                    )));
+                    ));
                 }
                 if let Some(signal) = cancellation.signal() {
-                    return Err(LeaseError::Held(cancelled_waiting(environment, signal)));
+                    return Err(cancelled_waiting(environment, signal));
                 }
                 // A pause point: the scenario harness holds a waiting run here.
                 let _ = context.faults.at(FaultPoint::WaitingLease, None);
                 context.clock.wait(context.settings.lease_poll);
                 if let Some(signal) = cancellation.signal() {
-                    return Err(LeaseError::Held(cancelled_waiting(environment, signal)));
+                    return Err(cancelled_waiting(environment, signal));
                 }
             }
         }
@@ -122,6 +112,33 @@ pub fn acquire(
 /// `now` plus a phase and the grace period: no phase runs without a deadline.
 pub fn deadline(context: &Context<'_>, now: Timestamp, phase: Duration) -> Timestamp {
     phase.saturating_add(context.settings.lease_grace).after(now)
+}
+
+/// The latest deadline of work done under a lease with deadline `lease`:
+/// the lease's deadline less the grace period, after which another runner
+/// may take the lease over.
+pub fn bound(settings: &Settings, lease: Timestamp) -> Timestamp {
+    lease
+        .checked_sub_signed(settings.lease_grace.to_chrono())
+        .unwrap_or(lease)
+}
+
+/// Move the held lease to `units` and `deadline` by compare-and-swap; on
+/// success `held` carries the new lease and version.
+pub fn update(
+    context: &Context<'_>,
+    held: &mut HeldLease,
+    units: Vec<UnitName>,
+    deadline: Timestamp,
+) -> Result<(), StateError> {
+    let mut lease = held.lease.clone();
+    lease.units = units;
+    lease.deadline = deadline;
+    held.version = context
+        .store
+        .update_lease(&held.location, &held.environment, &lease, &held.version)?;
+    held.lease = lease;
+    Ok(())
 }
 
 /// Release a lease this run holds. A lease that was taken over meanwhile is

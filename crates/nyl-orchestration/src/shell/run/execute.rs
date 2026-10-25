@@ -86,7 +86,7 @@ pub(super) fn execute_batch(
         slots: &session.slots,
         environment: session.environment(),
         project_dir: &prepared.rendered.project_dir,
-        cache_dir: session.cache_dir(),
+        cache_dir: session.context.cache_dir(),
         run,
         read_desired: snapshot.tips.desired.as_ref(),
         cancellation: &session.request.cancellation,
@@ -99,13 +99,7 @@ pub(super) fn execute_batch(
                 scope.spawn(move || execute(shared, job))
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|handle| match handle.join() {
-                Ok(execution) => execution,
-                Err(panic) => std::panic::resume_unwind(panic),
-            })
-            .collect()
+        handles.into_iter().map(join).collect()
     })
 }
 

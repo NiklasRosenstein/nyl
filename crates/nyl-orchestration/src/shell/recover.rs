@@ -19,28 +19,16 @@
 
 use std::collections::BTreeMap;
 
-use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, RunState, TransitionChanges};
+use nyl_core::orchestration::ports::{RunState, TransitionChanges};
 use nyl_core::orchestration::state::{Condition, Operation, StateLocation};
 use serde_json::json;
 
-use super::state::{commit, store_error, summary, with_lease, Requested};
-use super::Context;
+use super::local::{check_record, check_remote_tips};
+use super::state::{commit, read, summary, with_lease, Requested};
+use super::{store_error, Context};
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::recovery::{decide, evidence, RecoverAction};
-
-/// The state record matches the environment, and remote state carries no
-/// local tip.
-fn check_state(
-    context: &Context<'_>,
-    snapshot: &EnvironmentSnapshot,
-    environment: &EnvironmentName,
-    location: &StateLocation,
-) -> Result<(), Finding> {
-    super::local::check_record(context.store, snapshot.record.as_ref(), environment, location)?;
-    super::local::check_remote_tips(context.store, location, environment)
-}
 
 /// `nyl recover`.
 pub fn recover(
@@ -51,25 +39,22 @@ pub fn recover(
     action: &RecoverAction,
     requested: &Requested,
 ) -> StateOperationReport {
-    let report = StateOperationReport::new(environment.clone(), Operation::Recover.as_str());
     with_lease(
         context,
-        report,
+        environment,
         Operation::Recover,
         location,
         requested,
-        |held, mut report| {
-            let snapshot = match context.store.snapshot(location) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
-            if let Err(finding) = check_state(context, &snapshot, environment, location) {
-                return report.refused(finding);
-            }
-            let coordination = match context.store.coordination(location, environment) {
-                Ok(coordination) => coordination,
-                Err(error) => return report.refused(store_error(environment, &error)),
-            };
+        |held, report| {
+            let snapshot = read(context, location, environment)?;
+            // The state record matches the environment, and remote state
+            // carries no local tip.
+            check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+            check_remote_tips(context.store, location, environment)?;
+            let coordination = context
+                .store
+                .coordination(location, environment)
+                .map_err(|error| store_error(environment, &error))?;
             // Evidence refs first: a run ref of the same run that a late
             // runner wrote after the takeover retired it is newer.
             let runs: Vec<RunState> = coordination
@@ -91,10 +76,7 @@ pub fn recover(
                 "evidence".to_owned(),
                 serde_json::to_value(evidence(unit, desired, &runs)).expect("evidence serializes"),
             );
-            let recovery = match decide(environment, unit, desired, observed, action, &runs) {
-                Ok(recovery) => recovery,
-                Err(finding) => return report.refused(finding),
-            };
+            let recovery = decide(environment, unit, desired, observed, action, &runs)?;
 
             let mut changes = TransitionChanges {
                 observed: BTreeMap::from([(unit.clone(), Some(recovery.observed.clone()))]),
@@ -115,18 +97,9 @@ pub fn recover(
             let mut summary = summary(Operation::Recover, environment, &headline);
             summary.units.insert(unit.clone(), entry);
             summary.recovered.push(unit.clone());
-            let report = commit(
-                context,
-                location,
-                held,
-                &snapshot,
-                &summary,
-                changes,
-                requested.reason.as_ref(),
-                report,
-            );
+            commit(context, location, held, &snapshot, summary, changes, requested, report)?;
             if report.outcome != Outcome::Done {
-                return report;
+                return Ok(());
             }
 
             // Evidence refs no uncertain unit needs any more.
@@ -137,7 +110,6 @@ pub fn recover(
                     .get(name)
                     .is_some_and(|observed| matches!(observed.condition, Some(Condition::Uncertain { .. })))
             };
-            let mut report = report;
             for retired in &coordination.evidence {
                 if retired
                     .checkpoints
@@ -150,7 +122,7 @@ pub fn recover(
                     report.warnings.push(store_error(environment, &error));
                 }
             }
-            report
+            Ok(())
         },
     )
 }

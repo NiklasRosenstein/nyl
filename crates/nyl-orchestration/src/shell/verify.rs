@@ -36,25 +36,29 @@
 //! verifies where it reconciled.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{DriverOperation, ExecutionContext, Supported};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, Transition, TransitionChanges};
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, TransitionChanges};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
-use super::lease::{self, HeldLease, LeaseError};
+use super::lease::{self, HeldLease};
 use super::run::slots::Slots;
-use super::run::{admitted_env, project_path, unit_timeout, RunContext, RunRequest};
-use super::state::store_error;
-use super::Settings;
+use super::run::{
+    admitted_env, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
+    RunRequest,
+};
+use super::{store_error, Settings};
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;
 use crate::rules::verification::{records, targets, warnings, Records, Target};
-use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitVerification, VerifyResult};
-use crate::transition::{self, Trailers, TransitionSummary};
+use crate::run_report::{
+    headline, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitVerification, VerifyResult,
+};
+use crate::transition::{Trailers, TransitionSummary};
 
 /// The verdicts a verify commit's headline counts, in order.
 const HEADLINE: [&str; 5] = ["clean", "drifted", "unknown", "unsupported", "no-receipt"];
@@ -62,12 +66,7 @@ const HEADLINE: [&str; 5] = ["clean", "drifted", "unknown", "unsupported", "no-r
 /// `nyl verify -e <env>`; `request.units` limits the units verified.
 pub fn verify(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     // Drivers may block on runtimes of their own: run outside any caller's.
-    let environment = std::thread::scope(
-        |scope| match scope.spawn(|| verify_environment(context, request)).join() {
-            Ok(report) => report,
-            Err(panic) => std::panic::resume_unwind(panic),
-        },
-    );
+    let environment = off_runtime(|| verify_environment(context, request));
     let mut report = RunReport::new(ReportKind::VerifyReport);
     report.environments.push(environment);
     report
@@ -114,11 +113,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
 
     let run = base.ids.run_id();
     report.run = Some(run.clone());
-    let longest = verified
-        .iter()
-        .map(|name| unit_timeout(&snapshot.desired[*name]))
-        .max()
-        .unwrap_or_default();
+    let longest = longest_timeout(verified.iter().map(|name| &snapshot.desired[*name]));
     let mut held = match lease::acquire(
         base,
         location,
@@ -130,12 +125,8 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         &request.cancellation,
     ) {
         Ok(held) => held,
-        Err(LeaseError::Held(finding)) => {
+        Err(finding) => {
             report.errors.push(finding);
-            return finish(report);
-        }
-        Err(LeaseError::Store(error)) => {
-            report.errors.push(store_error(environment, &error));
             return finish(report);
         }
     };
@@ -184,40 +175,22 @@ fn holding(
     if changes.is_empty() {
         return Ok(());
     }
-    let summary = summary(report, held.broken.as_ref());
     let trailers = Trailers {
-        run: held.lease.run.clone(),
-        source_commit: None,
-        read_desired: snapshot.tips.desired.clone(),
-        read_observed: snapshot.tips.observed.clone(),
-        runner: base.runner.clone(),
-        evaluated_at: held.lease.taken_at,
-        version: base.version.clone(),
-        requested_by: None,
-        reason: None,
         local: request.local.is_some(),
+        ..super::trailers(base, held, &snapshot.tips)
     };
-    let transition = Transition {
-        message: transition::message(&summary, &trailers),
+    let commits = super::commit_transition(
+        base,
+        location,
+        held,
+        &snapshot.tips,
+        summary(report),
         changes,
-    };
-    match base
-        .store
-        .commit(location, environment, &snapshot.tips, &transition, &held.version)
-    {
-        Ok(committed) => {
-            held.version = committed.lease_version;
-            if let Some(commit) = committed.desired {
-                report.commits.insert("desired", commit);
-            }
-            if let Some(commit) = committed.observed {
-                report.commits.insert("observed", commit);
-            }
-            Ok(())
-        }
-        Err(StateError::LeaseLost) => Err(lease::lost(environment)),
-        Err(error) => Err(store_error(environment, &error)),
-    }
+        &trailers,
+    )
+    .map_err(|error| store_error(environment, &error))?;
+    report.commits.extend(commits);
+    Ok(())
 }
 
 /// The snapshot, refused like a reconcile's when state is missing or
@@ -260,7 +233,7 @@ fn verify_units(
     snapshot: &EnvironmentSnapshot,
     planned: &BTreeMap<UnitName, Target>,
 ) -> Result<Vec<Verified>, Finding> {
-    let directory = session_directory(context.workspace);
+    let directory = fresh_directory(context.workspace, "verify");
     let slots = Slots::new(&directory);
     let names: Vec<&UnitName> = planned
         .iter()
@@ -275,13 +248,11 @@ fn verify_units(
             outcome = Err(cancelled(&request.environment, signal));
             break;
         }
-        let longest = batch
-            .iter()
-            .map(|name| unit_timeout(&snapshot.desired[*name]))
-            .max()
-            .unwrap_or_default();
-        if let Err(finding) = extend_lease(context, request, held, longest) {
-            outcome = Err(finding);
+        let longest = longest_timeout(batch.iter().map(|name| &snapshot.desired[*name]));
+        // Move the lease's deadline to cover the batch about to start.
+        let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
+        if let Err(error) = lease::update(context.base, held, held.lease.units.clone(), deadline) {
+            outcome = Err(store_error(&request.environment, &error));
             break;
         }
         let lease_deadline = held.lease.deadline;
@@ -304,13 +275,7 @@ fn verify_units(
                     })
                 })
                 .collect();
-            handles
-                .into_iter()
-                .map(|handle| match handle.join() {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                })
-                .collect()
+            handles.into_iter().map(join).collect()
         });
         results.extend(batch_results);
     }
@@ -334,40 +299,11 @@ fn cancelled(environment: &EnvironmentName, signal: i32) -> Finding {
     )
 }
 
-/// Move the held lease's deadline to `phase` from now plus the grace
-/// period, so it covers the batch about to start.
-fn extend_lease(
-    context: &RunContext<'_>,
-    request: &RunRequest,
-    held: &mut HeldLease,
-    phase: Duration,
-) -> Result<(), Finding> {
-    let base = context.base;
-    let environment = &request.environment;
-    let mut lease = held.lease.clone();
-    lease.deadline = lease::deadline(base, base.clock.now(), phase);
-    match base
-        .store
-        .update_lease(&request.location, environment, &lease, &held.version)
-    {
-        Ok(version) => {
-            held.lease = lease;
-            held.version = version;
-            Ok(())
-        }
-        Err(StateError::LeaseLost) => Err(lease::lost(environment)),
-        Err(error) => Err(store_error(environment, &error)),
-    }
-}
-
 /// A unit's deadline: its timeout from `now`, but never past the lease's
 /// deadline less the grace period, so no verify runs once another runner
 /// may take the lease over.
 fn unit_deadline(settings: &Settings, now: Timestamp, timeout: Duration, lease: Timestamp) -> Timestamp {
-    let bound = lease
-        .checked_sub_signed(settings.lease_grace.to_chrono())
-        .unwrap_or(lease);
-    timeout.after(now).min(bound)
+    timeout.after(now).min(lease::bound(settings, lease))
 }
 
 /// The worktree-rooted project directory at each target's source revision
@@ -410,30 +346,16 @@ struct UnitJob<'a> {
     lease_deadline: Timestamp,
 }
 
-/// A directory of this verify's own beneath the workspace.
-fn session_directory(workspace: &Path) -> PathBuf {
-    let mut index = 0usize;
-    loop {
-        let candidate = workspace.join(format!("verify-{index}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
 /// A unit whose verification could not run or did not finish: an error
 /// finding (`NYL-DRIVER-ERROR`) and nothing to record.
 fn driver_failure(name: &UnitName, message: String, fix: &str) -> Verified {
     Verified {
         name: name.clone(),
         records: None,
-        verification: UnitVerification {
-            result: VerifyResult::Unknown {
-                reason: format!("driver error: {message}"),
-            },
-            attestations: BTreeMap::new(),
-        },
+        verification: VerifyResult::Unknown {
+            reason: format!("driver error: {message}"),
+        }
+        .into(),
         error: Some(Finding::new(Code::DriverError, format!("unit {name}: {message}"), fix)),
         message: Some(message),
     }
@@ -497,7 +419,7 @@ fn verify_unit(
         observed,
         tools: context.tools,
         commit_identity: context.commit_identity,
-        cache_dir: context.workspace.join("cache"),
+        cache_dir: context.cache_dir(),
     };
     let outcome = driver.verify(&ctx, unit, receipt);
     drop(ctx);
@@ -541,10 +463,7 @@ fn verify_unit(
         Ok(Supported::Unsupported) => Verified {
             name: name.clone(),
             records: None,
-            verification: UnitVerification {
-                result: VerifyResult::Unsupported,
-                attestations: BTreeMap::new(),
-            },
+            verification: VerifyResult::Unsupported.into(),
             message: Some(format!("kind {} cannot verify", unit.unit.kind)),
             error: None,
         },
@@ -577,10 +496,7 @@ fn report_units(
                 report.errors.extend(result.error);
                 result.verification
             }
-            None => UnitVerification {
-                result: VerifyResult::NoReceipt,
-                attestations: BTreeMap::new(),
-            },
+            None => VerifyResult::NoReceipt.into(),
         };
         entry.warnings = warnings(&report.name, name, &verification);
         entry.verification = Some(verification);
@@ -591,47 +507,27 @@ fn report_units(
 /// The transition summary of a verify: each unit's verification as the
 /// report holds it, such as `{"verification":"drifted","summary":"…"}`
 /// with its attestation results, and a headline such as `2 clean, 1 drifted`.
-fn summary(
-    report: &EnvironmentRunReport,
-    broken: Option<&nyl_core::orchestration::state::Request>,
-) -> TransitionSummary {
-    let verdicts: BTreeMap<&UnitName, &'static str> = report
-        .units
-        .iter()
-        .filter_map(|(name, unit)| {
-            unit.verification
-                .as_ref()
-                .map(|verification| (name, verification.result.name()))
-        })
-        .collect();
-    let headline = HEADLINE
-        .iter()
-        .filter_map(|counted| {
-            let count = verdicts.values().filter(|verdict| *verdict == counted).count();
-            (count > 0).then(|| format!("{count} {counted}"))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    TransitionSummary {
-        operation: Operation::Verify,
-        environment: report.name.clone(),
-        headline,
-        units: report
+fn summary(report: &EnvironmentRunReport) -> TransitionSummary {
+    let verifications = || {
+        report
             .units
             .iter()
-            .filter_map(|(name, unit)| {
-                let verification = unit.verification.as_ref()?;
-                Some((
-                    name.clone(),
-                    serde_json::to_value(verification).expect("verifications serialize"),
-                ))
-            })
-            .collect(),
-        recovered: Vec::new(),
-        imported: Vec::new(),
-        lease_broken: broken.cloned(),
-        details: BTreeMap::new(),
-    }
+            .filter_map(|(name, unit)| Some((name, unit.verification.as_ref()?)))
+    };
+    let headline = headline(
+        verifications().map(|(_, verification)| verification.result.name()),
+        &HEADLINE,
+    );
+    let mut summary = super::state::summary(Operation::Verify, &report.name, &headline);
+    summary.units = verifications()
+        .map(|(name, verification)| {
+            (
+                name.clone(),
+                serde_json::to_value(verification).expect("verifications serialize"),
+            )
+        })
+        .collect();
+    summary
 }
 
 #[cfg(test)]

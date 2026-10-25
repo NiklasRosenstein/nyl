@@ -605,6 +605,10 @@ fn test_state_without_a_remote_moves_to_one_with_its_history() {
     );
 
     let context = harness.context(&harness.store, &NoFaults);
+    // So do the state operations.
+    let network = UnitName::new("network").unwrap();
+    let forget = state_ops::forget(&context, &dev(), &harness.remote, &network, &Requested::default());
+    assert_eq!(forget.errors[0].fix, missing.errors[0].fix, "{forget:?}");
     let moved = state_ops::relocate(&context, &dev(), &harness.remote, &local, &Requested::default());
     assert_eq!(moved.outcome, Outcome::Done, "{moved:?}");
     let remote_tip = harness.remote_ref(DESIRED).unwrap();
