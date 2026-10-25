@@ -12,8 +12,7 @@ and [`nyl status`](/nyl/reference/cli/status/), and recovery with
 [`nyl recover`](/nyl/reference/cli/recover/) and
 [`nyl verify`](/nyl/reference/cli/verify/) exist today. Teardown, holds,
 approvals, and runs over several environments follow. The
-[roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
-describes the milestones.
+[roadmap](/nyl/orchestration/roadmap/) tracks the milestones.
 :::
 
 Orchestration makes Nyl a Git-driven reconciler for whole environments. Units

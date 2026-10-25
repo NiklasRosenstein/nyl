@@ -1,54 +1,68 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { domainResourcesRoadmap, roadmapProgress, sliceStatus, statusLabels } from '../src/lib/roadmaps/domain-resources.mjs';
+import { findStage, inlineParts, roadmapProgress, roadmaps, stageStatus } from '../src/lib/roadmaps/index.mjs';
 
-const roadmapMarkdown = readFileSync(new URL('../../../ROADMAP.md', import.meta.url), 'utf8');
+const allStages = roadmaps.flatMap((roadmap) => roadmap.stages.map((stage) => ({ roadmap, stage })));
+const texts = (stage) => [stage.summary, stage.exitCriterion, ...(stage.items ?? []).map((item) => item.text)].filter(Boolean);
 
-// The milestone table of ROADMAP.md: ID to status, as `done`, `in-progress`, or `planned`.
-function milestoneStatuses() {
-  const statuses = new Map();
-  for (const line of roadmapMarkdown.split('\n')) {
-    const cells = line.split('|').map((cell) => cell.trim());
-    if (/^M\d+$/.test(cells[1] ?? '')) statuses.set(cells[1], cells[3].toLowerCase().replace(' ', '-'));
-  }
-  return statuses;
-}
+test('roadmap stage IDs are unique across roadmaps', () => {
+  const ids = allStages.map(({ stage }) => stage.id);
+  assert.deepEqual(ids, [...new Set(ids)]);
+});
 
-test('the domain resources roadmap is well formed', () => {
-  const ids = domainResourcesRoadmap.slices.map((slice) => slice.id);
-  assert.deepEqual(ids, ids.map((_, index) => `R${index + 1}`), 'slices are numbered R1, R2, … in order');
-  const prerequisites = new Set(domainResourcesRoadmap.prerequisites.map((prerequisite) => prerequisite.id));
-  for (const [index, slice] of domainResourcesRoadmap.slices.entries()) {
-    assert.ok(slice.deliverables.length, `${slice.id} has deliverables`);
-    for (const need of slice.needs) {
-      if (need.startsWith('R')) {
-        assert.ok(ids.indexOf(need) >= 0 && ids.indexOf(need) < index, `${slice.id} needs an earlier slice, not ${need}`);
-      } else {
-        assert.ok(prerequisites.has(need), `${slice.id} needs ${need}, which is not a listed prerequisite`);
+test('every dependency names a known stage, and an earlier one within its roadmap', () => {
+  for (const { roadmap, stage } of allStages) {
+    const order = roadmap.stages.map((candidate) => candidate.id);
+    for (const need of [...stage.needs, ...(roadmap.prerequisites ?? [])]) {
+      const found = findStage(need);
+      assert.ok(found, `${stage.id} needs unknown stage ${need}`);
+      if (found.roadmap === roadmap && stage.needs.includes(need)) {
+        assert.ok(order.indexOf(need) < order.indexOf(stage.id), `${stage.id} needs a later stage, ${need}`);
       }
     }
-    for (const { text } of slice.deliverables) {
-      assert.equal(text.split('`').length % 2, 1, `${slice.id}: unbalanced code span in "${text}"`);
+  }
+});
+
+test('a stage marked done has every item done', () => {
+  for (const { stage } of allStages.filter(({ stage }) => stage.done)) {
+    assert.ok(stage.items.length, `${stage.id} has items`);
+    assert.ok(stage.items.every((item) => item.done), `${stage.id} is done with unticked items`);
+  }
+});
+
+test('a delegating stage points at a roadmap and has no items of its own', () => {
+  for (const { stage } of allStages.filter(({ stage }) => stage.delegate)) {
+    assert.ok(roadmaps.some((roadmap) => roadmap.id === stage.delegate), `${stage.id} delegates to ${stage.delegate}`);
+    assert.equal(stage.items, undefined, `${stage.id} tracks its items in ${stage.delegate}`);
+  }
+});
+
+test('roadmap text uses only code spans and links that resolve on the site', () => {
+  for (const { stage } of allStages) {
+    for (const text of texts(stage)) {
+      assert.equal(text.replace(/\[[^\]]+\]\([^)]+\)/g, '').split('`').length % 2, 1, `${stage.id}: unbalanced code span in "${text}"`);
+      for (const part of inlineParts(text).filter((part) => part.kind === 'link')) {
+        assert.match(part.href, /^(https:\/\/|\/nyl\/)/, `${stage.id}: relative link ${part.href} does not resolve on the site`);
+      }
     }
   }
-  for (const prerequisite of domainResourcesRoadmap.prerequisites) {
-    assert.ok(prerequisite.status in statusLabels, `${prerequisite.id} status ${prerequisite.status}`);
-  }
 });
 
-test('prerequisite statuses match the ROADMAP.md milestone table', () => {
-  const statuses = milestoneStatuses();
-  for (const prerequisite of domainResourcesRoadmap.prerequisites) {
-    assert.equal(prerequisite.status, statuses.get(prerequisite.id), `${prerequisite.id} in ROADMAP.md`);
-  }
-  assert.ok(statuses.has(domainResourcesRoadmap.milestone), `${domainResourcesRoadmap.milestone} is listed in ROADMAP.md`);
+test('status and progress follow the items, and done stays explicit', () => {
+  const stage = (done, ...items) => ({ done, items: items.map((value) => ({ text: 'x', done: value })) });
+  assert.equal(stageStatus(stage(false, false, false)), 'planned');
+  assert.equal(stageStatus(stage(false, true, false)), 'in-progress');
+  assert.equal(stageStatus(stage(false, true, true)), 'in-progress');
+  assert.equal(stageStatus(stage(true, true, true)), 'done');
+  assert.deepEqual(roadmapProgress({ stages: [stage(false, true, false), stage(true, true)] }), { done: 2, total: 3 });
 });
 
-test('slice status and overall progress follow the deliverables', () => {
-  const slice = (...done) => ({ deliverables: done.map((value) => ({ text: 'x', done: value })) });
-  assert.equal(sliceStatus(slice(false, false)), 'planned');
-  assert.equal(sliceStatus(slice(true, false)), 'in-progress');
-  assert.equal(sliceStatus(slice(true, true)), 'done');
-  assert.deepEqual(roadmapProgress({ slices: [slice(true, false), slice(true)] }), { done: 2, total: 3 });
+test('inline text splits into text, code, and links', () => {
+  assert.deepEqual(inlineParts('Run `nyl plan` per [guide](/nyl/x/).'), [
+    { kind: 'text', value: 'Run ' },
+    { kind: 'code', value: 'nyl plan' },
+    { kind: 'text', value: ' per ' },
+    { kind: 'link', value: 'guide', href: '/nyl/x/', children: [{ kind: 'text', value: 'guide' }] },
+    { kind: 'text', value: '.' },
+  ]);
 });

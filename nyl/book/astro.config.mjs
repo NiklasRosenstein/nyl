@@ -152,6 +152,7 @@ export default defineConfig({
               "orchestration/runs",
               "orchestration/recovery",
               { label: "Resources", items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
+              "orchestration/roadmap",
             ],
           },
           {

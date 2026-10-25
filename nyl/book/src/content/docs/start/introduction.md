@@ -57,7 +57,7 @@ Kubernetes at all.
 
 Orchestration is in development: [environments and their
 state](/nyl/orchestration/) exist today, and the
-[roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
+[roadmap](/nyl/orchestration/roadmap/)
 describes the milestones that follow.
 
 ## Declare domain resources

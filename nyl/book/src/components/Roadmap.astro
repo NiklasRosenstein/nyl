@@ -1,123 +1,189 @@
 ---
-// A feature roadmap's progress, prerequisites, and slices, rendered from its
-// data module so the page and the tracked state cannot disagree.
-import { roadmapProgress, sliceStatus, statusLabels } from '../lib/roadmaps/domain-resources.mjs';
+// A roadmap rendered from its data module, so the page and the tracked state
+// cannot disagree. The page renders one part at a time and writes its own
+// headings between them, so they reach the page outline.
+//
+// The stages hang on a vertical rail: each stage's node shows its status, and
+// the rail below it fills with the share of the stage's items that are done.
+import RoadmapText from './RoadmapText.astro';
+import {
+  delegateRoadmap,
+  findStage,
+  roadmapProgress,
+  stageProgress,
+  stageStatus,
+  statusLabels,
+} from '../lib/roadmaps/index.mjs';
 
-interface Deliverable {
-  text: string;
-  done: boolean;
-}
-interface Slice {
-  id: string;
-  title: string;
-  summary: string;
-  needs: string[];
-  deliverables: Deliverable[];
-}
-interface Prerequisite {
-  id: string;
-  title: string;
-  status: string;
-}
 interface Props {
-  roadmap: { milestone: string; prerequisites: Prerequisite[]; slices: Slice[] };
-  // The part to render, so the page can put its own headings, which reach the
-  // page outline, between them.
-  part: 'progress' | 'prerequisites' | 'slices';
+  // The data modules are plain JavaScript; their shape is checked by tests.
+  roadmap: any;
+  part: 'progress' | 'next' | 'prerequisites' | 'stages';
 }
 
 const { roadmap, part } = Astro.props;
-const progress = roadmapProgress(roadmap);
-const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
-const sliceIds = new Set(roadmap.slices.map((slice) => slice.id));
-const milestones = 'https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md#milestones-and-acceptance-criteria';
-
-// Inline `code` spans are the only markup deliverables use.
-const parts = (text: string) => text.split('`').map((value, index) => ({ value, code: index % 2 === 1 }));
-const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : milestones);
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const anchor = (id: string) => id.toLowerCase();
+const stageHref = (id: string) => {
+  const found = findStage(id);
+  if (!found) return undefined;
+  return found.roadmap.id === roadmap.id ? `#${anchor(id)}` : `${base}/${found.roadmap.page}#${anchor(id)}`;
+};
+const percent = ({ done, total }: { done: number; total: number }) => (total ? Math.round((done / total) * 100) : 0);
+const overall = roadmapProgress(roadmap);
+const stages = roadmap.stages.map((stage: any) => {
+  const status = stageStatus(stage);
+  const progress = stageProgress(stage);
+  const delegate = stage.delegate ? delegateRoadmap(stage) : undefined;
+  // A done stage fills its rail even when items were dropped from scope.
+  const fill = status === 'done' ? 100 : percent(progress);
+  return { stage, status, progress, delegate, fill };
+});
+const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
+  const found = findStage(id);
+  return { id, title: found?.stage.title ?? id, status: found ? stageStatus(found.stage) : 'planned' };
+});
 ---
 
 <div class="roadmap not-content">
-  {part === 'progress' && (
-  <div class="overall">
-    <div class="overall-label">
-      <strong>{roadmap.milestone}</strong>
-      <span>{progress.done} of {progress.total} deliverables shipped</span>
-    </div>
-    <div
-      class="bar"
-      role="progressbar"
-      aria-label={`${roadmap.milestone} progress`}
-      aria-valuemin="0"
-      aria-valuemax={progress.total}
-      aria-valuenow={progress.done}
-    >
-      <div class="fill" style={`width: ${percent}%`}></div>
-    </div>
-  </div>
-  )}
+  {
+    part === 'progress' && (
+      <div class="overall">
+        <div class="overall-label">
+          <strong>{roadmap.milestone ?? roadmap.title}</strong>
+          <span>
+            {overall.done} of {overall.total} {roadmap.itemNoun} done
+          </span>
+        </div>
+        <div
+          class="bar"
+          role="progressbar"
+          aria-label={`${roadmap.milestone ?? roadmap.title} progress`}
+          aria-valuemin="0"
+          aria-valuemax={overall.total}
+          aria-valuenow={overall.done}
+        >
+          <div class="bar-fill" style={`width: ${percent(overall)}%`} />
+        </div>
+      </div>
+    )
+  }
 
-  {part === 'prerequisites' && (
-  <ul class="prerequisites">
-    {
-      roadmap.prerequisites.map((prerequisite) => (
-        <li>
-          <a href={milestones}>{prerequisite.id}</a>
-          <span class="prerequisite-title">{prerequisite.title}</span>
-          <span class={`status ${prerequisite.status}`}>{statusLabels[prerequisite.status as keyof typeof statusLabels]}</span>
-        </li>
-      ))
-    }
-  </ul>
-  )}
-
-  {part === 'slices' && (
-  <div class="slices">
-    {
-      roadmap.slices.map((slice) => {
-        const status = sliceStatus(slice);
-        const done = slice.deliverables.filter((deliverable) => deliverable.done).length;
-        return (
-          <section class="slice" id={slice.id.toLowerCase()} aria-labelledby={`${slice.id.toLowerCase()}-title`}>
-            <header>
-              <span class="slice-id">{slice.id}</span>
-              <h3 id={`${slice.id.toLowerCase()}-title`}>{slice.title}</h3>
-              <span class={`status ${status}`}>{statusLabels[status]}</span>
-            </header>
-            <p class="summary">
-              {parts(slice.summary).map((part) => (part.code ? <code>{part.value}</code> : part.value))}
-            </p>
-            <ul class="deliverables">
-              {slice.deliverables.map((deliverable) => (
-                <li class={deliverable.done ? 'done' : undefined}>
-                  <span class="check" aria-hidden="true">{deliverable.done ? '✓' : ''}</span>
-                  <span class="sr-only">{deliverable.done ? 'Shipped: ' : 'Not shipped: '}</span>
-                  <span>{parts(deliverable.text).map((part) => (part.code ? <code>{part.value}</code> : part.value))}</span>
-                </li>
-              ))}
-            </ul>
-            <footer>
+  {
+    part === 'next' && roadmap.nextStep && (
+      <div class="next">
+        <p>
+          <RoadmapText text={roadmap.nextStep.intro} />
+        </p>
+        <ol class="checklist">
+          {roadmap.nextStep.steps.map((step: any) => (
+            <li class={step.done ? 'done' : undefined}>
+              <span class="check" aria-hidden="true">
+                {step.done ? '✓' : ''}
+              </span>
+              <span class="sr-only">{step.done ? 'Done: ' : 'Not done: '}</span>
               <span>
-                {done} of {slice.deliverables.length} shipped
+                <RoadmapText text={step.text} />
               </span>
-              <span class="needs">
-                Needs
-                {slice.needs.map((need) => (
-                  <a href={needHref(need)}>{need}</a>
-                ))}
+            </li>
+          ))}
+        </ol>
+      </div>
+    )
+  }
+
+  {
+    part === 'prerequisites' && (
+      <ul class="prerequisites">
+        {prerequisites.map((prerequisite: any) => (
+          <li>
+            <a href={stageHref(prerequisite.id)}>{prerequisite.id}</a>
+            <span class="prerequisite-title">{prerequisite.title}</span>
+            <span class={`status ${prerequisite.status}`}>{statusLabels[prerequisite.status as keyof typeof statusLabels]}</span>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  {
+    part === 'stages' && (
+      <ol class="timeline">
+        {stages.map(({ stage, status, progress, delegate, fill }: any) => (
+          <li class={`stage ${status}`} id={anchor(stage.id)} style={`--fill: ${fill}%`}>
+            <div class="rail" aria-hidden="true">
+              <span class="node">{status === 'done' ? '✓' : ''}</span>
+              <span class="line">
+                <span class="line-fill" />
               </span>
-            </footer>
-          </section>
-        );
-      })
-    }
-  </div>
-  )}
+            </div>
+            <section class="card" aria-labelledby={`${anchor(stage.id)}-title`}>
+              <header>
+                <span class="stage-id">{stage.id}</span>
+                <h3 id={`${anchor(stage.id)}-title`}>{stage.title}</h3>
+                <span class={`status ${status}`}>{statusLabels[status as keyof typeof statusLabels]}</span>
+              </header>
+              <p class="summary">
+                <RoadmapText text={stage.summary} />
+              </p>
+              {delegate ? (
+                <p class="delegate">
+                  <a href={`${base}/${delegate.page}`}>Open the {delegate.milestone} roadmap</a>, which tracks its{' '}
+                  {delegate.stages.length} slices.
+                </p>
+              ) : (
+                <details open={status === 'in-progress'}>
+                  <summary>
+                    {stage.items.length} {roadmap.itemNoun}
+                  </summary>
+                  <ul class="checklist">
+                    {stage.items.map((item: any) => (
+                      <li class={item.done ? 'done' : undefined}>
+                        <span class="check" aria-hidden="true">
+                          {item.done ? '✓' : ''}
+                        </span>
+                        <span class="sr-only">{item.done ? 'Done: ' : 'Not done: '}</span>
+                        <span>
+                          <RoadmapText text={item.text} />
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {stage.exitCriterion && (
+                <p class="exit">
+                  <strong>Done when:</strong> <RoadmapText text={stage.exitCriterion} />
+                </p>
+              )}
+              <footer>
+                <span>
+                  {progress.done} of {progress.total} done
+                </span>
+                {stage.needs.length > 0 && (
+                  <span class="needs">
+                    Needs
+                    {stage.needs.map((need: string) => (
+                      <a href={stageHref(need)}>{need}</a>
+                    ))}
+                  </span>
+                )}
+              </footer>
+            </section>
+          </li>
+        ))}
+      </ol>
+    )
+  }
 </div>
 
 <style>
   .roadmap {
-    margin-top: 1.5rem;
+    --node: 1.5rem;
+    --node-top: 1.125rem;
+    --gap: 1rem;
+    --rail-off: var(--sl-color-gray-5);
+    margin-top: 1rem;
   }
   .overall {
     display: grid;
@@ -136,12 +202,15 @@ const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : mi
   .bar {
     height: 0.5rem;
     border-radius: 999px;
-    background: var(--sl-color-gray-6);
+    background: var(--rail-off);
     overflow: hidden;
   }
-  .fill {
+  .bar-fill {
     height: 100%;
     background: var(--sl-color-accent);
+  }
+  .next p {
+    margin: 0 0 0.75rem;
   }
   .prerequisites {
     list-style: none;
@@ -167,28 +236,88 @@ const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : mi
     flex: 1;
     color: var(--sl-color-gray-2);
   }
-  .slices {
+
+  /* The rail: a node per stage, joined by a line that fills with progress. */
+  .timeline {
+    list-style: none;
+    padding: 0;
+    margin: 0;
     display: grid;
-    gap: 1rem;
+    gap: var(--gap);
   }
-  .slice {
+  .stage {
+    display: grid;
+    grid-template-columns: var(--node) minmax(0, 1fr);
+    column-gap: 1rem;
+    scroll-margin-top: calc(var(--sl-nav-height) + 1rem);
+  }
+  .rail {
+    position: relative;
+  }
+  .node {
+    position: absolute;
+    top: var(--node-top);
+    left: 0;
+    z-index: 1;
+    box-sizing: border-box;
+    width: var(--node);
+    height: var(--node);
+    border-radius: 50%;
+    border: 2px solid var(--rail-off);
+    background: var(--sl-color-bg);
+    display: grid;
+    place-items: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--sl-color-black);
+  }
+  .stage.done .node {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-accent);
+  }
+  .stage.in-progress .node {
+    border-color: var(--sl-color-accent);
+    background: conic-gradient(var(--sl-color-accent) var(--fill), var(--sl-color-bg) 0);
+  }
+  .line {
+    position: absolute;
+    left: calc(var(--node) / 2 - 1.5px);
+    width: 3px;
+    top: calc(var(--node-top) + var(--node) / 2);
+    bottom: calc(-1 * (var(--gap) + var(--node-top) + var(--node) / 2));
+    background: var(--rail-off);
+  }
+  .stage:last-child .line {
+    display: none;
+  }
+  .line-fill {
+    display: block;
+    width: 100%;
+    height: var(--fill);
+    background: var(--sl-color-accent);
+  }
+
+  .card {
     border: 1px solid var(--sl-color-hairline);
     border-radius: 0.5rem;
     padding: 1rem;
-    scroll-margin-top: calc(var(--sl-nav-height) + 1rem);
+    min-width: 0;
   }
-  .slice header {
+  .stage.in-progress .card {
+    border-color: var(--sl-color-accent);
+  }
+  .card header {
     display: flex;
     gap: 0.75rem;
     align-items: center;
   }
-  .slice h3 {
+  .card h3 {
     flex: 1;
     margin: 0;
     font-size: var(--sl-text-lg);
     color: var(--sl-color-white);
   }
-  .slice-id {
+  .stage-id {
     font-family: var(--sl-font-mono);
     font-size: var(--sl-text-sm);
     color: var(--sl-color-gray-3);
@@ -197,20 +326,40 @@ const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : mi
     margin: 0.5rem 0 0.75rem;
     color: var(--sl-color-gray-2);
   }
-  .deliverables {
+  .delegate {
+    margin: 0;
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+  }
+  details[open] summary {
+    margin-bottom: 0.5rem;
+  }
+  .exit {
+    margin: 0.75rem 0 0;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+  .exit strong {
+    color: var(--sl-color-white);
+  }
+  .checklist {
     list-style: none;
     padding: 0;
     margin: 0;
     display: grid;
     gap: 0.375rem;
   }
-  .deliverables li {
+  .checklist li {
     display: flex;
     gap: 0.625rem;
     align-items: baseline;
   }
   .check {
     flex: none;
+    box-sizing: border-box;
     width: 1rem;
     height: 1rem;
     border: 1px solid var(--sl-color-gray-4);
@@ -220,12 +369,12 @@ const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : mi
     text-align: center;
     transform: translateY(0.15rem);
   }
-  .deliverables li.done .check {
+  .checklist li.done .check {
     border-color: var(--sl-color-green);
     background: var(--sl-color-green-low);
     color: var(--sl-color-green-high);
   }
-  .slice footer {
+  .card footer {
     display: flex;
     flex-wrap: wrap;
     justify-content: space-between;
@@ -238,6 +387,7 @@ const needHref = (id: string) => (sliceIds.has(id) ? `#${id.toLowerCase()}` : mi
   }
   .needs {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
   .status {

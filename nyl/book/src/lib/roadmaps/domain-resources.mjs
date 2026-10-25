@@ -1,29 +1,27 @@
-// The roadmap of domain resource collections (milestone M9), rendered on the
-// Domain resources roadmap page. ROADMAP.md lists only the milestone row; the
-// slices and their deliverables live here. Tick a deliverable when it ships;
-// a slice's status follows from its deliverables.
+// The roadmap of domain resource collections, milestone M9, rendered on the
+// Domain resources roadmap page and summarized as M9 on the Orchestration
+// roadmap. Tick a deliverable in the change that ships it, and set `done` on a
+// slice only when all of it has shipped.
 
 export const domainResourcesRoadmap = {
+  id: 'domain-resources',
   milestone: 'M9',
   title: 'Domain resource collections as unit inputs',
+  page: 'domain-resources/roadmap/',
+  itemNoun: 'deliverables',
   issue: 'https://github.com/NiklasRosenstein/nyl/issues/173',
   design: 'https://github.com/NiklasRosenstein/nyl/blob/develop/design/domain-resources.md',
   exitCriterion:
     'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. The guide runs end to end.',
-  // Orchestration milestones the slices build on, with their status in ROADMAP.md.
-  prerequisites: [
-    { id: 'M2', title: 'Release inputs without orchestration', status: 'done' },
-    { id: 'M3', title: 'Orchestration core with a constrained command unit', status: 'in-progress' },
-    { id: 'M4', title: 'Container image and Terraform units', status: 'planned' },
-    { id: 'M8', title: 'Provider-neutral CI execution and first GitLab adapter', status: 'planned' },
-  ],
-  slices: [
+  // Orchestration milestones the slices build on.
+  prerequisites: ['M2', 'M3', 'M4', 'M8'],
+  stages: [
     {
       id: 'R1',
       title: 'Definitions and the catalog',
       summary: 'Teams can declare typed resources and validate them, without orchestration.',
       needs: ['M2'],
-      deliverables: [
+      items: [
         { text: '`ResourceDefinition` loaded only from the `[resources]` paths of `nyl.toml`', done: false },
         { text: 'Discovery of literal domain resources with project-wide identity and Git provenance', done: false },
         { text: 'Schema validation with defaults, and `x-nyl-reference` checks', done: false },
@@ -36,7 +34,7 @@ export const domainResourcesRoadmap = {
       title: 'Collections and the bundle',
       summary: 'Units collect declarations and receive them as one tool-neutral bundle.',
       needs: ['M3', 'R1'],
-      deliverables: [
+      items: [
         { text: 'The `collections` unit field with membership, ordering, and `allowEmpty`', done: false },
         { text: 'Ownership claims with `access: own` and `access: read`', done: false },
         { text: '`fromUnit` references inside declarations', done: false },
@@ -51,7 +49,7 @@ export const domainResourcesRoadmap = {
       title: 'Policy admission',
       summary: 'Policies restrict what each folder may declare.',
       needs: ['R1'],
-      deliverables: [
+      items: [
         { text: 'Kyverno validating policies loaded from `[resources] policies`', done: false },
         { text: 'Trusted source-path annotations and a CRD derived from each definition', done: false },
         { text: 'Rejection of mutating policies', done: false },
@@ -62,7 +60,7 @@ export const domainResourcesRoadmap = {
       title: 'Native adaptation',
       summary: 'OpenTofu and Terraform consume bundles, and removals wait for approval.',
       needs: ['M4', 'M8', 'R2'],
-      deliverables: [
+      items: [
         { text: 'The driver `prepare` capability and `nyl prepare --native`', done: false },
         { text: 'OpenTofu and Terraform adaptation, checked by the driver conformance suite', done: false },
         { text: 'Approval before collection members are removed', done: false },
@@ -74,7 +72,7 @@ export const domainResourcesRoadmap = {
       title: 'One unit per resource',
       summary: 'A unit instantiates once per matching declaration with `forEach`.',
       needs: ['R2'],
-      deliverables: [
+      items: [
         { text: '`forEach` scanned statically and expanded from the catalog', done: false },
         { text: '`resource` in the structural pass, with YAML-escaped values', done: false },
         { text: 'Instance names with the clash check', done: false },
@@ -86,25 +84,10 @@ export const domainResourcesRoadmap = {
       title: 'The worked guide',
       summary: 'The AWS, GitHub, and Bao walkthrough becomes runnable.',
       needs: ['R2', 'R3', 'R4', 'R5'],
-      deliverables: [
+      items: [
         { text: 'The development, testing, and breakglass guide for AWS accounts and access grants', done: false },
         { text: 'The guide validated as a tier-2 reference scenario', done: false },
       ],
     },
   ],
 };
-
-/** A slice's status, derived from its deliverables. */
-export function sliceStatus(slice) {
-  const done = slice.deliverables.filter((deliverable) => deliverable.done).length;
-  if (done === slice.deliverables.length) return 'done';
-  return done > 0 ? 'in-progress' : 'planned';
-}
-
-/** Delivered and total deliverables across every slice. */
-export function roadmapProgress(roadmap) {
-  const deliverables = roadmap.slices.flatMap((slice) => slice.deliverables);
-  return { done: deliverables.filter((deliverable) => deliverable.done).length, total: deliverables.length };
-}
-
-export const statusLabels = { done: 'Done', 'in-progress': 'In progress', planned: 'Planned' };
