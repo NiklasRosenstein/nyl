@@ -55,15 +55,16 @@ part removes the walkthroughs it makes pass from the harness's pending list.
    Custom refs and atomic leased pushes are verified on GitHub, GitLab,
    Forgejo, and plain Git with both coordination prefixes
    ([Git host compatibility](nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility)).
-3. One environment's run: the Command unit and its driver, unit selection
+3. Done: one environment's run: the Command unit and its driver, unit selection
    and templating, desired documents, `fromUnit` references through
    `nyl_core::bindings`, the versioned dependency graph and waves,
    content-based execution keys, pinned source worktrees with reachability
    checks, `FakePublication`, `plan`, `reconcile` (with `--unit`), `status`,
    `get -e`, `nyl validate` of targets whose bindings orchestration resolves,
    and state commits whose author and time the command line passes in.
-   Walkthroughs: `dependency-wave`, `unit-jobs`,
-   `unavailable-upstream-output`. Part 3 deliberately leaves out:
+   Walkthroughs `dependency-wave`, `unit-jobs`, and
+   `unavailable-upstream-output` run in the tier-1 harness. Part 3
+   deliberately leaves out:
    - A KubernetesPublication unit's `releases` holds only the bindings
      orchestration resolves, `fromUnit` and `fromPromotion`; the other inputs
      enter its key through the render's input record until the real driver

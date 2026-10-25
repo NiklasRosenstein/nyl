@@ -21,8 +21,11 @@ define. `_project/` is the project they share unless a scenario brings its own.
 These files are the contract's acceptance tests.
 [`scenario_harness_test.rs`](../../scenario_harness_test.rs) validates every
 scenario against the format, applies its Git steps in a test world, and runs
-the scenarios whose milestone it has reached; one whose commands do not exist
-yet is listed there as pending, with what it waits for.
+the scenarios whose milestone it has reached in tier 1 through
+[`scenario/runner.rs`](../../scenario/runner.rs): each `nyl` step runs the
+real command line in-process in a fresh clone, with a fake clock, sequential
+identifiers, and the fake kinds. A reached scenario runs, or is listed there
+as pending with what it waits for.
 [`walkthrough_resources_test.rs`](../../walkthrough_resources_test.rs)
 parses and validates every project resource whose kind has a Rust type, and
 lists the kinds later milestones add. A change to a rule that a

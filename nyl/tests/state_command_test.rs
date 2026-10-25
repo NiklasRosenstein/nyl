@@ -261,3 +261,36 @@ fn test_state_commands_run_in_process_with_the_wiring_author() {
     assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
     assert!(outcome.stdout.contains("dev"), "{}", outcome.stdout);
 }
+
+/// Only writing commands need a commit identity: reconcile refuses without
+/// one before writing anything, while plan and status read state with none.
+/// The fake kinds stand in for the shared project's OpenTofu and image units.
+#[cfg(feature = "test-kinds")]
+#[test]
+fn test_reconcile_needs_an_identity_and_plan_and_status_do_not() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    nyl(&checkout, &["state", "init", "-e", "dev"]).assert().success();
+    let tips = || git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/"]);
+    let before = tips();
+    let home = world.scenario_tmp().join("empty-home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    bare_nyl(&checkout, &home, &["reconcile", "-e", "dev"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("NYL-COMMIT-IDENTITY-MISSING").and(predicate::str::contains("--author")));
+    assert_eq!(tips(), before, "reconcile without an identity wrote state");
+    assert!(git_output(&world.bare(), &["for-each-ref", "refs/nyl/"]).is_empty());
+
+    // The plan is incomplete (exit 2): database and kubernetes wait for receipts.
+    bare_nyl(&checkout, &home, &["plan", "-e", "dev"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("NYL-COMMIT-IDENTITY-MISSING").not());
+    bare_nyl(&checkout, &home, &["status", "-e", "dev"])
+        .assert()
+        .stderr(predicate::str::contains("NYL-COMMIT-IDENTITY-MISSING").not())
+        .code(predicate::ne(1));
+    assert_eq!(tips(), before, "plan or status wrote state");
+}
