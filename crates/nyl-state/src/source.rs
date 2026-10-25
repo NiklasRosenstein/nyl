@@ -303,17 +303,38 @@ impl GitSourceResolver {
     /// Reset a checkout this resolver made to `oid`. Returns whether the
     /// working tree is exactly a fresh checkout afterwards; `false` asks
     /// the caller to start over.
+    ///
+    /// Only the working tree and the objects directory (whose alternates
+    /// [`Self::made_here`] verified) are reused. A unit may have changed
+    /// anything else in `.git` (`config` with `core.autocrlf`,
+    /// `core.symlinks`, `core.filemode` or `core.worktree`; `info/attributes`;
+    /// `info/sparse-checkout`; `commondir`), and libgit2 would apply it to
+    /// the checkout while the status check still reports a clean tree. So
+    /// the rest of `.git` is removed and initialized again, exactly as
+    /// [`Self::create_checkout`] initializes it.
     fn reset_checkout(path: &Path, oid: Oid) -> Result<bool, Box<dyn std::error::Error>> {
-        // No symbolic link a unit left may redirect the checkout's writes,
-        // and without the index every tracked file is rewritten, so a file
+        // No symbolic link a unit left may redirect the checkout's writes.
+        remove_symlinks(path)?;
+        let git_dir = path.join(".git");
+        let objects = git_dir.join("objects");
+        if !is_real_directory(&git_dir)? || !is_real_directory(&objects)? {
+            return Ok(false);
+        }
+        // Without the index every tracked file is rewritten, so a file
         // changed within the index's timestamp granularity cannot pass as
         // unchanged.
-        remove_symlinks(path)?;
-        match std::fs::remove_file(path.join(".git/index")) {
-            Ok(()) => {}
-            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(cause.into()),
+        for entry in std::fs::read_dir(&git_dir)? {
+            let entry = entry?;
+            if entry.file_name() == "objects" {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())?;
+            } else {
+                std::fs::remove_file(entry.path())?;
+            }
         }
+        drop(Repository::init(path)?);
         let checkout = Repository::open(path)?;
         if checkout.workdir().map(Path::canonicalize).transpose()? != Some(path.canonicalize()?) {
             return Ok(false);
@@ -391,6 +412,15 @@ fn is_missing_or_empty(path: &Path) -> SourceResult<bool> {
     let mut entries =
         std::fs::read_dir(path).map_err(|cause| error(format!("cannot read {}: {cause}", path.display())))?;
     Ok(entries.next().is_none())
+}
+
+/// Whether `path` is a directory itself, not a symbolic link to one.
+fn is_real_directory(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(cause) => Err(cause),
+    }
 }
 
 /// Remove every symbolic link in a working tree, outside `.git`, without

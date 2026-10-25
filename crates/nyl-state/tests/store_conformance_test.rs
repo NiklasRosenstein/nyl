@@ -969,3 +969,154 @@ fn test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap() {
         assert!(store.coordination(&location, &dev).unwrap().lease.is_none());
     }
 }
+
+/// The guards of the local writes, which each store implements on its own:
+/// catches a stale `base` moving the lease before it is refused, a full
+/// `refs/…` state ref (which has no local branch) being reset or committed
+/// to, and a reset leaving a local branch whose remote ref is gone.
+#[test]
+fn test_local_writes_refuse_a_stale_base_and_full_refs_and_drop_branches_without_remote() {
+    for subject in subjects() {
+        if subject.repository == LOCAL_REPOSITORY {
+            // Local writes are refused outright for this subject (see
+            // `test_local_commits_stay_local_diverge_and_reset_by_compare_and_swap`).
+            continue;
+        }
+        let store = subject.store.as_ref();
+
+        // (a) A stale base is a conflict, and the lease does not move.
+        let dev_location = separate(&subject);
+        let dev_local = view(&dev_location);
+        let dev = environment("dev");
+        let version = store.take_lease(&dev_location, &dev, &lease(RUN_A), None).unwrap();
+        let first = store
+            .commit(
+                &dev_location,
+                &dev,
+                &StateTips::default(),
+                &init(&dev_location, "dev"),
+                &version,
+            )
+            .unwrap();
+        store.snapshot(&dev_location).unwrap();
+        let local_tips = store.snapshot(&dev_local).unwrap().tips;
+        assert!(local_tips.desired.is_some(), "{}", subject.name);
+        let mut local_transition = transition(seed_changes("seed"));
+        local_transition.message = "nyl: local\n\nNyl-Local: true\n".to_owned();
+        assert!(
+            matches!(
+                store.commit_local(
+                    &dev_location,
+                    &dev,
+                    &StateTips::default(),
+                    &local_transition,
+                    &dev_location,
+                    &first.lease_version
+                ),
+                Err(StateError::Conflict { .. })
+            ),
+            "{}: a base that is not the local tip",
+            subject.name
+        );
+        assert_eq!(
+            store.coordination(&dev_location, &dev).unwrap().lease.unwrap().version,
+            first.lease_version,
+            "{}: the lease moved before the stale base was refused",
+            subject.name
+        );
+        assert_eq!(store.snapshot(&dev_local).unwrap().tips, local_tips, "{}", subject.name);
+
+        // (b) A full `refs/…` state ref outside refs/heads/ has no local branch.
+        let full = location(&subject.repository, "refs/state/full/desired", "nyl/full/observed", "");
+        let full_env = environment("full");
+        let version = store.take_lease(&full, &full_env, &lease(RUN_A), None).unwrap();
+        let mut both_sides = init(&full, "full");
+        both_sides.changes = TransitionChanges {
+            record: both_sides.changes.record,
+            ..seed_changes("seed")
+        };
+        let committed = store
+            .commit(&full, &full_env, &StateTips::default(), &both_sides, &version)
+            .unwrap();
+        let remote = store.snapshot(&full).unwrap().tips;
+        assert!(remote.observed.is_some(), "{}", subject.name);
+        assert_eq!(
+            store.local_divergence(&full).unwrap(),
+            LocalDivergence {
+                desired: None,
+                observed: Some(Divergence { ahead: 0, behind: 0 }),
+            },
+            "{}",
+            subject.name
+        );
+        assert!(
+            matches!(store.reset_local(&full, &remote), Err(StateError::Unavailable(_))),
+            "{}: reset of a full ref",
+            subject.name
+        );
+        assert!(
+            matches!(
+                store.commit_local(
+                    &full,
+                    &full_env,
+                    &remote,
+                    &local_transition,
+                    &full,
+                    &committed.lease_version
+                ),
+                Err(StateError::Unavailable(_))
+            ),
+            "{}: local commit to a full ref",
+            subject.name
+        );
+        assert_eq!(
+            store.coordination(&full, &full_env).unwrap().lease.unwrap().version,
+            committed.lease_version,
+            "{}: a refused local commit moved the lease",
+            subject.name
+        );
+
+        // (c) A reset removes a local branch whose remote ref is missing.
+        let fresh = location(&subject.repository, "nyl/fresh/desired", "nyl/fresh/observed", "");
+        let fresh_local = view(&fresh);
+        let fresh_env = environment("fresh");
+        let version = store.take_lease(&fresh, &fresh_env, &lease(RUN_A), None).unwrap();
+        let committed = store
+            .commit_local(
+                &fresh,
+                &fresh_env,
+                &StateTips::default(),
+                &init(&fresh, "fresh"),
+                &fresh,
+                &version,
+            )
+            .unwrap();
+        let tips = store.snapshot(&fresh_local).unwrap().tips;
+        assert!(tips.desired.is_some(), "{}", subject.name);
+        assert_eq!(tips.desired, committed.desired, "{}", subject.name);
+        assert_eq!(
+            store.snapshot(&fresh).unwrap().tips,
+            StateTips::default(),
+            "{}: remote state was written",
+            subject.name
+        );
+        assert_eq!(
+            store.local_divergence(&fresh).unwrap(),
+            LocalDivergence::default(),
+            "{}: no divergence without a remote ref",
+            subject.name
+        );
+        assert_eq!(
+            store.reset_local(&fresh, &tips).unwrap(),
+            StateTips::default(),
+            "{}",
+            subject.name
+        );
+        assert_eq!(
+            store.snapshot(&fresh_local).unwrap().tips,
+            StateTips::default(),
+            "{}: the local branches survived the reset",
+            subject.name
+        );
+    }
+}
