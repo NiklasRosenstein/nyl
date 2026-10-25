@@ -23,6 +23,11 @@
 //! less its grace period. A verify that passes its unit's deadline fails
 //! with a `timeout` error and records nothing for the unit.
 //!
+//! Once its cancellation is set (SIGINT or SIGTERM), verify starts no
+//! further batch, its running tools receive the signal through the process
+//! runner, and it releases the lease without writing an observed commit
+//! (`NYL-RUN-CANCELLED`, exit 4).
+//!
 //! A driver sees the project directory reconcile gave it for the same
 //! commit: the project located at the unit's source revision S through the
 //! [`SourceRenderer`](nyl_core::orchestration::ports::SourceRenderer)
@@ -122,6 +127,7 @@ fn verify_environment(context: &RunContext<'_>, request: &RunRequest) -> Environ
         Operation::Verify,
         longest,
         request.wait,
+        &request.cancellation,
     ) {
         Ok(held) => held,
         Err(LeaseError::Held(finding)) => {
@@ -265,6 +271,10 @@ fn verify_units(
     let mut results = Vec::new();
     let mut outcome = Ok(());
     for batch in names.chunks(request.concurrency.max(1)) {
+        if let Some(signal) = request.cancellation.signal() {
+            outcome = Err(cancelled(&request.environment, signal));
+            break;
+        }
         let longest = batch
             .iter()
             .map(|name| unit_timeout(&snapshot.desired[*name]))
@@ -304,8 +314,24 @@ fn verify_units(
         });
         results.extend(batch_results);
     }
+    if let (Ok(()), Some(signal)) = (&outcome, request.cancellation.signal()) {
+        outcome = Err(cancelled(&request.environment, signal));
+    }
     let _ = std::fs::remove_dir_all(&directory);
     outcome.map(|()| results)
+}
+
+/// `NYL-RUN-CANCELLED` for a verify cancelled by `signal`
+/// ([Runs and leases](../../../../design/orchestration-core.md#runs-and-leases),
+/// item 7): it starts no further batch, its running tools received the
+/// signal, and it releases the lease without writing an observed commit.
+/// Verify has no effects, so nothing is left to import.
+fn cancelled(environment: &EnvironmentName, signal: i32) -> Finding {
+    Finding::new(
+        Code::RunCancelled,
+        format!("verify of {environment} was cancelled by signal {signal}; it recorded no observation"),
+        format!("run `nyl verify -e {environment}` again"),
+    )
 }
 
 /// Move the held lease's deadline to `phase` from now plus the grace

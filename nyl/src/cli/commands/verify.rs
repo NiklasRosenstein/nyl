@@ -7,7 +7,8 @@
 //! Exit categories: 0 every verified unit clean and its attestations pass;
 //! 2 a unit could not be verified (no current receipt, a kind that cannot
 //! verify, or unknown drift) or the lease is held; 3 drift or a failing
-//! attestation; 1 error; the most severe wins.
+//! attestation; 4 cancelled by SIGINT or SIGTERM (`NYL-RUN-CANCELLED`,
+//! nothing recorded); 1 error; the most severe wins.
 
 use std::path::PathBuf;
 
@@ -66,6 +67,7 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         source: None,
         wait: args.wait_lease,
         local: None,
+        cancellation: wiring.cancellation.clone(),
     })?;
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),

@@ -4,6 +4,7 @@ pub mod filter;
 pub mod git_auth;
 pub(crate) mod namespace_resolution;
 pub(crate) mod resource_file;
+mod signals;
 pub(crate) mod table;
 pub(crate) mod tree_progress;
 
@@ -143,18 +144,35 @@ impl Cli {
             | Commands::Status(_)
             | Commands::Verify(_)
             | Commands::Recover(_) => {
+                let cancellation = nyl_orchestration::shell::run::Cancellation::new();
+                // reconcile, verify, and recover end cleanly on SIGINT or
+                // SIGTERM instead of dying with the lease held.
+                let handler = self
+                    .cancels_on_signal()
+                    .then(|| tokio::spawn(signals::cancel_on_signal(cancellation.clone())));
                 // Drivers may block on runtimes of their own, so orchestration
-                // runs on a thread outside this command line's async runtime.
-                let outcome = std::thread::scope(|scope| {
-                    scope
-                        .spawn(move || -> Result<crate::orchestration::run::CommandOutcome> {
-                            let owned = crate::orchestration::run::ProcessWiring::new();
-                            let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
-                            self.execute_in_process(&wiring)
-                        })
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })?;
+                // runs on a thread outside this command line's async runtime,
+                // which keeps handling signals meanwhile.
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let worker = std::thread::spawn(move || {
+                    let outcome = (|| -> Result<crate::orchestration::run::CommandOutcome> {
+                        let owned = crate::orchestration::run::ProcessWiring::cancelled_by(cancellation);
+                        let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
+                        self.execute_in_process(&wiring)
+                    })();
+                    let _ = sender.send(outcome);
+                });
+                let Ok(outcome) = receiver.await else {
+                    // The worker dropped the sender without sending: it panicked.
+                    match worker.join() {
+                        Err(panic) => std::panic::resume_unwind(panic),
+                        Ok(()) => unreachable!("the worker sends its outcome before it returns"),
+                    }
+                };
+                if let Some(handler) = handler {
+                    handler.abort();
+                }
+                let outcome = outcome?;
                 print!("{}", outcome.stdout);
                 eprint!("{}", outcome.stderr);
                 if outcome.exit != 0 {
@@ -163,6 +181,16 @@ impl Cli {
                 Ok(())
             }
         }
+    }
+
+    /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
+    /// item 7): the commands that take the lease to execute, verify, or
+    /// recover units. Other commands keep the default disposition.
+    fn cancels_on_signal(&self) -> bool {
+        matches!(
+            self.command,
+            Commands::Reconcile(_) | Commands::Verify(_) | Commands::Recover(_)
+        )
     }
 
     /// Run an orchestration command (`plan`, `reconcile`, `status`,

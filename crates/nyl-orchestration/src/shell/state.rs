@@ -32,6 +32,8 @@ pub struct Requested {
     pub reason: Option<String>,
     /// `--wait-lease`: how long to wait for a held lease.
     pub wait: Option<nyl_core::orchestration::time::Duration>,
+    /// Set on SIGINT or SIGTERM: stops waiting for a held lease.
+    pub cancellation: super::run::Cancellation,
 }
 
 /// The finding for a state store failure of `environment`.
@@ -62,7 +64,7 @@ pub(crate) fn with_lease(
     report: StateOperationReport,
     operation: Operation,
     location: &StateLocation,
-    wait: Option<nyl_core::orchestration::time::Duration>,
+    requested: &Requested,
     body: impl FnOnce(&mut HeldLease, StateOperationReport) -> StateOperationReport,
 ) -> StateOperationReport {
     let environment = report.environment.clone();
@@ -74,7 +76,8 @@ pub(crate) fn with_lease(
         &run,
         operation,
         context.settings.resolution_timeout,
-        wait,
+        requested.wait,
+        &requested.cancellation,
     ) {
         Ok(held) => held,
         Err(LeaseError::Held(finding)) => return report.refused(finding),
@@ -174,7 +177,7 @@ pub fn init(
         report,
         Operation::StateInit,
         location,
-        requested.wait,
+        requested,
         |held, report| {
             let snapshot = match context.store.snapshot(location) {
                 Ok(snapshot) => snapshot,
@@ -265,7 +268,7 @@ pub fn forget(
         report,
         Operation::StateForget,
         location,
-        requested.wait,
+        requested,
         |held, report| {
             let snapshot = match context.store.snapshot(location) {
                 Ok(snapshot) => snapshot,
@@ -353,7 +356,7 @@ pub fn relocate(
         report,
         Operation::StateMove,
         to,
-        requested.wait,
+        requested,
         |held_to, report| {
             // The lease at the old location too, unless both are one lease.
             let mut old_lease = if same_coordination {
@@ -368,6 +371,7 @@ pub fn relocate(
                     Operation::StateMove,
                     context.settings.resolution_timeout,
                     requested.wait,
+                    &requested.cancellation,
                 ) {
                     Ok(held) => Some(held),
                     Err(LeaseError::Held(finding)) => return report.refused(finding),
@@ -787,7 +791,7 @@ pub fn restore(
         report,
         Operation::StateRestore,
         location,
-        requested.wait,
+        requested,
         |held, report| {
             let snapshot = match context.store.snapshot(location) {
                 Ok(snapshot) => snapshot,

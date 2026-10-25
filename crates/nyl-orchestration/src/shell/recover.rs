@@ -57,7 +57,7 @@ pub fn recover(
         report,
         Operation::Recover,
         location,
-        requested.wait,
+        requested,
         |held, mut report| {
             let snapshot = match context.store.snapshot(location) {
                 Ok(snapshot) => snapshot,

@@ -8,6 +8,7 @@ use nyl_core::orchestration::ports::StateError;
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Request, StateLocation, StateV1};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
+use super::run::Cancellation;
 use super::Context;
 use crate::fault::FaultPoint;
 use crate::rules::lease::{decide, LeaseDecision};
@@ -43,7 +44,10 @@ impl From<StateError> for LeaseError {
 
 /// Take the lease of `environment` at `location` for `operation`, with the
 /// deadline `phase` from now plus the grace period. With `wait`, a held
-/// lease is read again until it is released or `wait` has passed.
+/// lease is read again until it is released or `wait` has passed; a
+/// `cancellation` set meanwhile (SIGINT or SIGTERM, "Runs and leases" item 7)
+/// stops waiting with `NYL-RUN-CANCELLED`, having written nothing.
+#[allow(clippy::too_many_arguments)] // Each is one aspect of the request; a struct would only rename them.
 pub fn acquire(
     context: &Context<'_>,
     location: &StateLocation,
@@ -52,6 +56,7 @@ pub fn acquire(
     operation: Operation,
     phase: Duration,
     wait: Option<Duration>,
+    cancellation: &Cancellation,
 ) -> Result<HeldLease, LeaseError> {
     let started = context.clock.now();
     loop {
@@ -100,9 +105,15 @@ pub fn acquire(
                         "wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone",
                     )));
                 }
+                if let Some(signal) = cancellation.signal() {
+                    return Err(LeaseError::Held(cancelled_waiting(environment, signal)));
+                }
                 // A pause point: the scenario harness holds a waiting run here.
                 let _ = context.faults.at(FaultPoint::WaitingLease, None);
                 context.clock.wait(context.settings.lease_poll);
+                if let Some(signal) = cancellation.signal() {
+                    return Err(LeaseError::Held(cancelled_waiting(environment, signal)));
+                }
             }
         }
     }
@@ -123,6 +134,16 @@ pub fn release(context: &Context<'_>, held: &HeldLease) -> Result<(), StateError
         Ok(()) | Err(StateError::LeaseLost) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// `NYL-RUN-CANCELLED` for an operation cancelled by `signal` while it
+/// waited for the lease: it held nothing and wrote nothing.
+pub fn cancelled_waiting(environment: &EnvironmentName, signal: i32) -> Finding {
+    Finding::new(
+        Code::RunCancelled,
+        format!("cancelled by signal {signal} while waiting for the lease of {environment}; nothing was written"),
+        "run the command again once the run holding the lease has finished",
+    )
 }
 
 /// `NYL-LEASE-LOST`: the run pushed nothing.

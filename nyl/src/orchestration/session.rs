@@ -185,7 +185,7 @@ impl Session {
             source_override: options.source.map(str::to_owned),
             wait: options.wait,
             local: options.local.clone(),
-            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+            cancellation: options.cancellation.clone(),
         })
     }
 }
@@ -234,6 +234,8 @@ pub struct RunOptions<'a> {
     pub wait: Option<Duration>,
     /// `--local`, `--local-lease`, and `--approve` of `reconcile`; `None` elsewhere.
     pub local: Option<nyl_orchestration::shell::local::LocalRun>,
+    /// The wiring's cancellation for `reconcile` and `verify`; never set for `plan`.
+    pub cancellation: nyl_orchestration::shell::run::Cancellation,
 }
 
 /// A report of `kind` for `environment` that holds only `finding`, for a

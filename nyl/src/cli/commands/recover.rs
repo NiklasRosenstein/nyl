@@ -4,7 +4,9 @@
 //!
 //! Contract: [Recovery](../../../../design/orchestration-core.md#recovery).
 //! It never executes: the unit becomes ready for the next `reconcile`.
-//! Exit: 0 done, 1 error or refusal, 2 the lease is held.
+//! Exit: 0 done, 1 error or refusal (including `NYL-RUN-CANCELLED` when a
+//! signal stops `--wait-lease`), 2 the lease is held. Once it holds the
+//! lease, recover finishes its one commit despite a first signal.
 
 use clap::Args;
 
@@ -59,6 +61,7 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     let requested = Requested {
         reason: args.common.reason.clone(),
         wait: args.common.wait_lease,
+        cancellation: wiring.cancellation.clone(),
     };
     super::state::run(
         &args.common,

@@ -274,6 +274,7 @@ fn requested(common: &Common) -> Requested {
     Requested {
         reason: common.reason.clone(),
         wait: common.wait_lease,
+        cancellation: nyl_orchestration::shell::run::Cancellation::default(),
     }
 }
 
