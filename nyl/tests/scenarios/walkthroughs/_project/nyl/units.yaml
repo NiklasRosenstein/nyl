@@ -8,6 +8,7 @@ spec:
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-network.tfstate'}
   outputs:
     vpcId: {type: string}
+  timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
@@ -21,6 +22,7 @@ spec:
     vpc_id: {fromUnit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
+  timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
 kind: OciImage
@@ -30,6 +32,7 @@ metadata:
 spec:
   context: {path: ../services/web}
   repository: '%REGISTRY%/web'
+  timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
@@ -39,3 +42,4 @@ metadata:
 spec:
   target: '{{ values.target }}'
   mode: publish
+  timeout: 10m

@@ -12,13 +12,17 @@ use scenario::REACHED;
 /// Scenarios the harness has reached that cannot run yet, with what they
 /// wait for. A scenario leaves this list in the change that makes it run, so
 /// none is skipped silently: every reached scenario runs, or is pending.
-const PENDING: [(&str, &str); 3] = [
-    (
-        "walkthroughs/competing-runners",
-        "paused invocations and run takeover (M3)",
-    ),
+const PENDING: [(&str, &str); 7] = [
+    ("recovery/after-effect", "run takeover (M3 part 4)"),
+    ("recovery/before-checkpoint", "run takeover (M3 part 4)"),
+    ("recovery/before-lease-update", "run takeover (M3 part 4)"),
+    ("recovery/before-push", "run takeover (M3 part 4)"),
+    ("walkthroughs/competing-runners", "run takeover (M3 part 4)"),
     ("walkthroughs/deletion", "deletion and teardown (M3)"),
-    ("walkthroughs/effects-without-receipt", "run takeover and recovery (M3)"),
+    (
+        "walkthroughs/effects-without-receipt",
+        "run takeover and recovery (M3 part 4)",
+    ),
 ];
 
 /// Every reached scenario that is not pending runs in tier 1 and passes its
@@ -150,4 +154,271 @@ fn nyl_toml_or_resources(files: &[String]) -> String {
         .or_else(|| files.iter().find(|file| file.ends_with("nyl.toml")))
         .cloned()
         .unwrap()
+}
+
+/// A scenario parsed from `text` whose relative paths resolve in an existing
+/// walkthrough directory, so it can use their shared project.
+fn inline_scenario(name: &str, text: &str) -> scenario::Loaded {
+    scenario::Loaded {
+        name: name.to_owned(),
+        directory: scenario::scenarios_root().join("walkthroughs/dependency-wave"),
+        scenario: serde_saphyr::from_str(text).unwrap(),
+    }
+}
+
+/// Run a valid inline scenario whose relative paths resolve in the scenario
+/// directory `directory`, so it can use that directory's patches.
+fn run_inline(directory: &str, name: &str, text: &str) -> Result<(), String> {
+    let loaded = scenario::Loaded {
+        name: name.to_owned(),
+        directory: scenario::scenarios_root().join(directory),
+        scenario: serde_saphyr::from_str(text).unwrap(),
+    };
+    scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+        .unwrap_or_else(|error| panic!("{name} is invalid: {error}"));
+    scenario::runner::run(&loaded)
+}
+
+fn validation_error(steps: &str) -> String {
+    let text = format!(
+        "contract: design/orchestration-core.md#walkthroughs\nmilestone: M3\ntiers: [1]\nproject: ../_project\nsteps:\n{steps}"
+    );
+    let loaded = inline_scenario("inline/validation", &text);
+    scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root()).unwrap_err()
+}
+
+/// A fault names the unit it concerns exactly where the shell consults the
+/// point with one; a fault that could never fire is rejected up front.
+#[test]
+fn test_validate_fault_unit_rules() {
+    let fault = |fault: &str| format!("  - fault: {fault}\n  - nyl: [reconcile, -e, dev]\n    killed: true\n");
+    let valid = |fault_step: &str| {
+        let text = format!(
+            "contract: design/orchestration-core.md#walkthroughs\nmilestone: M3\ntiers: [1]\nproject: ../_project\nsteps:\n{}",
+            fault(fault_step)
+        );
+        let loaded = inline_scenario("inline/valid", &text);
+        scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+    };
+    assert_eq!(valid("{point: before-lease-update}"), Ok(()));
+    assert_eq!(valid("{point: before-lease-update, unit: database}"), Ok(()));
+    assert_eq!(valid("{point: before-push}"), Ok(()));
+    assert_eq!(valid("{point: after-effect, unit: network}"), Ok(()));
+    assert!(validation_error(&fault("{point: after-effect}")).contains("needs the unit"));
+    assert!(validation_error(&fault("{point: before-checkpoint}")).contains("needs the unit"));
+    assert!(validation_error(&fault("{point: before-push, unit: network}")).contains("takes no unit"));
+    assert!(validation_error(&fault("{point: executing, unit: network}")).contains("only pause"));
+    assert!(validation_error(&fault("{point: waiting-lease}")).contains("only pause"));
+}
+
+/// A resume names an earlier paused step, once, and every paused step is resumed.
+#[test]
+fn test_validate_resume_ids() {
+    let unknown = validation_error("  - resume: first\n    exit: 0\n");
+    assert!(unknown.contains("no earlier nyl step has that id"), "{unknown}");
+    let paused = "  - nyl: [reconcile, -e, dev]\n    id: first\n    pause: {point: executing, unit: database}\n";
+    let twice = validation_error(&format!(
+        "{paused}  - resume: first\n    exit: 0\n  - resume: first\n    exit: 0\n"
+    ));
+    assert!(twice.contains("already resumed"), "{twice}");
+    let never = validation_error(paused);
+    assert!(never.contains("never resumed"), "{never}");
+}
+
+/// A paused invocation that ends without reaching its pause point fails
+/// the scenario with the point it missed, instead of hanging it.
+#[test]
+fn test_paused_invocation_that_never_reaches_its_point_fails() {
+    let loaded = inline_scenario(
+        "inline/never-reached",
+        "contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [plan, -e, dev]
+    id: plan
+    pause: {point: executing, unit: database}
+  - resume: plan
+    exit: 0
+",
+    );
+    let error = scenario::runner::run(&loaded).unwrap_err();
+    assert!(
+        error.contains("step 2: plan never reached its pause point executing for database"),
+        "{error}"
+    );
+}
+
+/// A paused invocation left without a resume step is let go and reported,
+/// so the scenario neither hangs nor passes.
+#[test]
+fn test_paused_invocation_never_resumed_fails() {
+    let loaded = inline_scenario(
+        "inline/never-resumed",
+        "contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: first
+    pause: {point: executing, unit: database}
+",
+    );
+    let error = scenario::runner::run(&loaded).unwrap_err();
+    assert!(error.contains("first was paused and never resumed"), "{error}");
+}
+
+/// Concurrent invocations pause and resume where a scenario says: a run
+/// paused mid-wave holds the lease, a run waiting for it pauses inside the
+/// wait, the first finishes when resumed, and the waiting run then finds
+/// nothing to do. Each resumed step counts only its own commits, not those
+/// another step wrote while it was paused. A run whose lease ref was deleted
+/// while it was paused loses its lease and pushes nothing.
+///
+/// These are the steps of `walkthroughs/competing-runners` that need no run
+/// takeover, so they run while that scenario is pending.
+#[test]
+fn test_paused_invocations_resume_concurrently() {
+    run_inline(
+        "walkthroughs/competing-runners",
+        "inline/competing-runners",
+        r#"contract: design/orchestration-core.md#walkthroughs
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: first
+    pause: {point: executing, unit: database}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - nyl: [reconcile, -e, dev, --wait-lease, 30m]
+    id: waiting
+    pause: {point: waiting-lease}
+  - resume: first
+    exit: 0
+    expect:
+      executed: [network, web-image, database, kubernetes]
+      commits: {desired: 1, observed: 1}
+  - resume: waiting
+    exit: 0
+    expect:
+      executed: []
+      commits: {desired: 0, observed: 0}
+  - commit: {branch: main, message: "Change the web page", apply: patches/web-page}
+  - nyl: [reconcile, -e, dev]
+    id: third
+    pause: {point: executing, unit: web-image}
+  - ref: {delete: refs/nyl/dev/lease}
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-LEASE-HELD]
+      executed: []
+  - resume: third
+    exit: 4
+    expect:
+      codes: [NYL-LEASE-LOST]
+      commits: {desired: 0, observed: 0}
+"#,
+    )
+    .unwrap();
+}
+
+/// A fault naming a unit kills only where the shell consults the point with
+/// that unit: a `before-lease-update` fault for `database` passes the lease
+/// updates consulted without a unit and wave 1's, so the run reaches its
+/// pause in wave 1, and dies at database's phase once resumed. The dead run
+/// leaves the lease held and wrote no state commit.
+#[test]
+fn test_fault_for_a_unit_kills_at_that_units_point() {
+    run_inline(
+        "walkthroughs/dependency-wave",
+        "inline/unit-fault",
+        r#"contract: design/orchestration-core.md#runs-and-leases
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - fault: {point: before-lease-update, unit: database}
+  - nyl: [reconcile, -e, dev]
+    id: first
+    pause: {point: executing, unit: web-image}
+  - resume: first
+    killed: true
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+"#,
+    )
+    .unwrap();
+}
+
+/// A fault without a unit kills where the shell consults the point without
+/// one: `before-push` ends the run before it pushes anything, and the lease
+/// stays held.
+#[test]
+fn test_fault_without_a_unit_kills_before_push() {
+    run_inline(
+        "walkthroughs/dependency-wave",
+        "inline/push-fault",
+        r#"contract: design/orchestration-core.md#runs-and-leases
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - fault: {point: before-push}
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - nyl: [reconcile, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+"#,
+    )
+    .unwrap();
+}
+
+/// A `killed: true` step whose fault never fired fails the scenario, so a
+/// crash-injection scenario cannot pass without crashing: the second
+/// reconcile has nothing to execute, so `database` has no effect to die after.
+#[test]
+fn test_killed_step_whose_fault_never_fired_fails() {
+    let error = run_inline(
+        "walkthroughs/dependency-wave",
+        "inline/fault-never-fired",
+        r#"contract: design/orchestration-core.md#runs-and-leases
+milestone: M3
+tiers: [1]
+project: ../_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+  - fault: {point: after-effect, unit: database}
+  - nyl: [reconcile, -e, dev]
+    killed: true
+"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("step 4: the armed fault never fired"), "{error}");
 }

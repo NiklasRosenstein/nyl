@@ -1,0 +1,30 @@
+# Crash injection: killed before the lease update that starts database's phase.
+contract: design/orchestration-core.md#runs-and-leases
+milestone: M3
+tiers: [1]                            # scripts faults
+project: ../../walkthroughs/_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - fault: {point: before-lease-update, unit: database}   # wave 1 checkpointed, database never started
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - clock: {advance: 39m}             # one minute before the deadline of the resolution before database's phase: 30m plus 10m grace
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the dead run's lease and run ref are still within their deadline
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - clock: {advance: 2m}              # past the deadline
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      imported: [network, web-image]  # checkpointed by the dead run
+      recovered: []                   # database never started
+      executed: [database, kubernetes]
+      commits: {desired: 1, observed: 1}
+      units:
+        network: {condition: null, receipt: current}
+        web-image: {condition: null, receipt: current}
+        database: {condition: null, receipt: current}
+        kubernetes: {condition: null, receipt: current}

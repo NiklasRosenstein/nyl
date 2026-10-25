@@ -5,6 +5,10 @@ Each directory is one walkthrough from the
 written in the scenario format that the
 [reference scenarios](../../../../design/reference-scenarios.md#scenario-files)
 define. `_project/` is the project they share unless a scenario brings its own.
+Its units declare the `timeout` of the real kinds the fake kinds stand in for
+(60m for OpenTofu and OciImage, 10m for KubernetesPublication), so lease
+deadlines match the walkthroughs' prose. The
+[crash-injection scenarios](../recovery/README.md) in `recovery/` use it too.
 
 | Scenario | Walkthrough | Runs from |
 | --- | --- | --- |
@@ -24,7 +28,10 @@ scenario against the format, applies its Git steps in a test world, and runs
 the scenarios whose milestone it has reached in tier 1 through
 [`scenario/runner.rs`](../../scenario/runner.rs): each `nyl` step runs the
 real command line in-process in a fresh clone, with a fake clock, sequential
-identifiers, and the fake kinds. A reached scenario runs, or is listed there
+identifiers, and the fake kinds. A `nyl` step with `pause` runs on a thread
+of its own and blocks at its pause point until its `resume` step, so later
+steps run while it waits; a paused step that never reaches its point, or is
+never resumed, fails the scenario. A reached scenario runs, or is listed there
 as pending with what it waits for.
 [`walkthrough_resources_test.rs`](../../walkthrough_resources_test.rs)
 parses and validates every project resource whose kind has a Rust type, and

@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
@@ -19,6 +20,8 @@ pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
 
 pub struct World {
     root: TempDir,
+    /// Numbers fresh clones, so concurrent invocations never share one.
+    clones: AtomicUsize,
 }
 
 impl World {
@@ -26,6 +29,7 @@ impl World {
     pub fn new(project: &Path) -> Self {
         let world = Self {
             root: TempDir::new().expect("temporary directory"),
+            clones: AtomicUsize::new(0),
         };
         std::fs::create_dir_all(world.scenario_tmp()).unwrap();
         git(
@@ -161,7 +165,7 @@ impl World {
     pub fn fresh_clone(&self, branch: &str) -> PathBuf {
         let jobs = self.root.path().join("jobs");
         std::fs::create_dir_all(&jobs).unwrap();
-        let count = std::fs::read_dir(&jobs).unwrap().count();
+        let count = self.clones.fetch_add(1, Ordering::Relaxed);
         let path = jobs.join(format!("job-{count}"));
         git(
             &jobs,
