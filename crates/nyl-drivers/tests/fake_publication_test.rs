@@ -192,7 +192,11 @@ fn key(driver: &FakePublication, world: &World) -> ExecutionKey {
             &spec(),
         )
         .unwrap();
-    assert!(inputs.files.contains_key("/nyl/platform.yaml"), "{:?}", inputs.files);
+    assert!(
+        inputs.files.contains_key("@resource:DeploymentTarget/dev"),
+        "{:?}",
+        inputs.files
+    );
     assert!(inputs.files.contains_key("/applications/web/release.yaml"));
     ExecutionKey::from_digest_of(serde_json::to_string(&inputs.files).unwrap().as_bytes())
 }
