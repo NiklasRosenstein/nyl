@@ -49,7 +49,8 @@ fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
     let world = World::new(&project());
     let checkout = checkout(&world);
     let units = checkout.join("nyl/units.yaml");
-    let contents = std::fs::read_to_string(&units).unwrap();
+    // Windows checkouts may convert line endings.
+    let contents = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
     let (kept, publication) = contents
         .split_once("---\napiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\n")
         .expect("the shared project declares a publication unit");
