@@ -3,20 +3,22 @@
 
 use std::path::PathBuf;
 
+use std::fmt::Write as _;
+
 use clap::{Args, Subcommand, ValueEnum};
-use colored::Colorize;
-use nyl_core::orchestration::ids::UnitName;
-use nyl_core::orchestration::state::StateLocation;
+use nyl_core::orchestration::codes::Finding;
+use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
-use nyl_state::git::Endpoint;
+use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
-use crate::orchestration::clock::process_clock;
-use crate::orchestration::ids::UuidV7;
-use crate::orchestration::project::{finding_error, open_store, requested_by, resolve_environment, runner};
+use crate::orchestration::project::{open_store, resolve_environment};
+use crate::orchestration::run::{CommandOutcome, Wiring};
+use crate::orchestration::session::write_finding;
 use crate::{NylError, Result};
 
 /// Output format of state commands.
@@ -43,6 +45,10 @@ pub struct Common {
     /// Wait up to this long for another run's lease, such as 10m.
     #[arg(long)]
     pub wait_lease: Option<Duration>,
+
+    /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
+    #[arg(long)]
+    pub author: Option<String>,
 
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
@@ -117,15 +123,16 @@ pub enum LeaseCommand {
     },
 }
 
-pub fn execute_state(args: StateArgs) -> Result<()> {
-    match args.command {
-        StateCommand::Init { common, fresh } => run(&common, None, |context, location, resolved| {
-            state::init(context, &resolved.name, location, fresh, &requested(&common))
+/// Run a `nyl state` command in-process with `wiring`.
+pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
+    match &args.command {
+        StateCommand::Init { common, fresh } => run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
+            state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested(common))
         }),
         StateCommand::Forget { common, unit } => {
-            let unit = UnitName::new(&unit).map_err(|error| NylError::config(error.to_string()))?;
-            run(&common, None, |context, location, resolved| {
-                state::forget(context, &resolved.name, location, &unit, &requested(&common))
+            let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
+            run(common, wiring, Operation::StateForget.as_str(), None, |ctx| {
+                state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested(common))
             })
         }
         StateCommand::Move {
@@ -139,9 +146,10 @@ pub fn execute_state(args: StateArgs) -> Result<()> {
             let inventory = discover_gitops_inventory(&common.path, None)?;
             // The old repository and, unless it is this clone's branches, how to reach it.
             let from = from
+                .as_ref()
                 .map(|from| -> Result<_> {
                     Ok(match from.as_str() {
-                        StateLocation::LOCAL_REPOSITORY => (from, None),
+                        StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
                         name if !name.contains(':') && !name.contains('/') => {
                             let (repository, _) = inventory.resolve_git_repository(
                                 Some(&crate::resources::LocalReference { name: name.to_owned() }),
@@ -168,33 +176,35 @@ pub fn execute_state(args: StateArgs) -> Result<()> {
             let extra = from
                 .as_ref()
                 .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
-            run(&common, extra, |context, location, resolved| {
+            run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
+                let location = ctx.location;
                 let mut old = location.clone();
                 if let Some((repository, _)) = &from {
                     old.repository.clone_from(repository);
                 }
-                if let Some(desired) = &desired_ref {
+                if let Some(desired) = desired_ref {
                     old.desired_ref.clone_from(desired);
                 }
-                if let Some(observed) = &observed_ref {
+                if let Some(observed) = observed_ref {
                     old.observed_ref.clone_from(observed);
                 }
-                if let Some(path) = &state_path {
+                if let Some(path) = state_path {
                     path.trim_matches('/').clone_into(&mut old.path);
                 }
-                if let Some(prefix) = &coordination_refs {
+                if let Some(prefix) = coordination_refs {
                     old.coordination_ref_prefix.clone_from(prefix);
                 }
-                state::relocate(context, &resolved.name, location, &old, &requested(&common))
+                state::relocate(ctx.context, &ctx.environment, location, &old, &requested(common))
             })
         }
     }
 }
 
-pub fn execute_lease(args: LeaseArgs) -> Result<()> {
-    match args.command {
-        LeaseCommand::Break { common } => run(&common, None, |context, location, resolved| {
-            state::break_lease(context, &resolved.name, location, common.reason.clone())
+/// Run a `nyl lease` command in-process with `wiring`.
+pub fn run_lease(args: &LeaseArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
+    match &args.command {
+        LeaseCommand::Break { common } => run(common, wiring, "lease-break", None, |ctx| {
+            state::break_lease(ctx.context, &ctx.environment, ctx.location, common.reason.clone())
         }),
     }
 }
@@ -206,83 +216,112 @@ fn requested(common: &Common) -> Requested {
     }
 }
 
-/// Resolve the environment, run one state operation, print its report, and
-/// exit with its category.
+/// What one state operation runs against.
+struct OperationContext<'a> {
+    context: &'a Context<'a>,
+    environment: EnvironmentName,
+    location: &'a StateLocation,
+}
+
+/// Resolve the environment and the commit identity, run one state
+/// operation, and render its report. Findings before the operation, such as
+/// an unknown environment or a missing identity, are refusals in the same
+/// report.
 fn run(
     common: &Common,
+    wiring: &Wiring<'_>,
+    operation_name: &'static str,
     extra_endpoint: Option<(String, Endpoint)>,
-    operation: impl FnOnce(
-        &Context<'_>,
-        &StateLocation,
-        &crate::orchestration::project::ResolvedEnvironment,
-    ) -> StateOperationReport,
-) -> Result<()> {
+    operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
+) -> Result<CommandOutcome> {
+    let refused = |finding: Finding| {
+        let environment = EnvironmentName::new(&common.environment)
+            .or_else(|_| EnvironmentName::new("unknown"))
+            .expect("a valid placeholder name");
+        render(
+            &StateOperationReport::new(environment, operation_name).refused(finding),
+            common.output,
+        )
+    };
     let inventory = discover_gitops_inventory(&common.path, None)?;
-    let resolved = resolve_environment(&inventory, &common.environment).map_err(|finding| finding_error(&finding))?;
-    let mut store = open_store(&inventory, &resolved)?;
-    if let Some((identity, endpoint)) = extra_endpoint {
+    let resolved = match resolve_environment(&inventory, &common.environment) {
+        Ok(resolved) => resolved,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let identity = match wiring.commit_identity(&resolved.git_dir, common.author.as_deref()) {
+        Ok(identity) => identity,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let mut store = open_store(
+        &inventory,
+        &resolved,
+        Some(CommitAuthor {
+            identity: identity.clone(),
+            clock: wiring.clock.clone(),
+        }),
+    )?;
+    if let Some((repository, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
-        if identity != resolved.location.repository {
-            store = store.with_endpoint(identity, endpoint);
+        if repository != resolved.location.repository {
+            store = store.with_endpoint(repository, endpoint);
         }
     }
-    let clock = process_clock().map_err(NylError::config)?;
     let context = Context {
         store: &store,
-        clock: clock.as_ref(),
-        ids: &UuidV7,
-        runner: runner(),
-        requested_by: requested_by(&resolved.git_dir),
+        clock: wiring.clock.as_ref(),
+        ids: wiring.ids,
+        runner: wiring.runner.clone(),
+        requested_by: identity.to_string(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         settings: Settings::default(),
     };
-    let mut report = operation(&context, &resolved.location, &resolved);
+    let mut report = operation(&OperationContext {
+        context: &context,
+        environment: resolved.name.clone(),
+        location: &resolved.location,
+    });
     let mut warnings = resolved.warnings.clone();
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
-    print_report(&report, common.output)?;
-    if report.exit != 0 {
-        std::process::exit(i32::from(report.exit));
-    }
-    Ok(())
+    Ok(render(&report, common.output))
 }
 
-fn print_report(report: &StateOperationReport, output: Output) -> Result<()> {
+/// Render a state operation's report as the command's outcome.
+fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
+    let json = serde_json::to_value(report).expect("reports serialize");
+    let mut stdout = String::new();
+    let mut stderr = String::new();
     match output {
-        Output::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        Output::Json => {
+            stdout = format!("{}\n", serde_json::to_string_pretty(&json).expect("JSON prints"));
+        }
         Output::Text => {
             let status = match report.outcome {
-                Outcome::Done => "done".green().to_string(),
-                Outcome::Unchanged => "unchanged".to_owned(),
-                Outcome::Refused => "refused".red().to_string(),
+                Outcome::Done => "done",
+                Outcome::Unchanged => "unchanged",
+                Outcome::Refused => "refused",
             };
-            println!("{} {}: {status}", report.operation, report.environment);
+            let _ = writeln!(stdout, "{} {}: {status}", report.operation, report.environment);
             for (side, commit) in &report.commits {
-                println!("  {side}: {commit}");
+                let _ = writeln!(stdout, "  {side}: {commit}");
             }
             for (key, value) in &report.details {
                 let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
-                println!("  {key}: {value}");
-            }
-            for finding in &report.warnings {
-                eprintln!(
-                    "{} {}: {}\n  fix: {}",
-                    "warning".yellow(),
-                    finding.code,
-                    finding.message,
-                    finding.fix
-                );
-            }
-            for finding in &report.errors {
-                eprintln!(
-                    "{} {}: {}\n  fix: {}",
-                    "error".red(),
-                    finding.code,
-                    finding.message,
-                    finding.fix
-                );
+                let _ = writeln!(stdout, "  {key}: {value}");
             }
         }
     }
-    Ok(())
+    // Diagnostics go to stderr in both formats.
+    for finding in &report.warnings {
+        write_finding(&mut stderr, "warning", None, finding);
+    }
+    for finding in &report.errors {
+        write_finding(&mut stderr, "error", None, finding);
+    }
+    CommandOutcome {
+        exit: report.exit,
+        report: json,
+        stdout,
+        stderr,
+    }
 }

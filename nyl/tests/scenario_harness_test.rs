@@ -9,17 +9,59 @@ use scenario::format::StepKind;
 use scenario::world::World;
 use scenario::REACHED;
 
-/// Scenarios the harness has reached that cannot run until the commands they
-/// use exist, with what they wait for. A scenario leaves this list in the
-/// change that makes it run, so none is skipped silently.
-const PENDING: [(&str, &str); 6] = [
-    ("walkthroughs/competing-runners", "leases and reconcile (M3)"),
-    ("walkthroughs/deletion", "reconcile, plan, and deletion (M3)"),
-    ("walkthroughs/dependency-wave", "state init, plan, and reconcile (M3)"),
+/// Scenarios the harness has reached that cannot run yet, with what they
+/// wait for. A scenario leaves this list in the change that makes it run, so
+/// none is skipped silently: every reached scenario runs, or is pending.
+const PENDING: [(&str, &str); 3] = [
+    (
+        "walkthroughs/competing-runners",
+        "paused invocations and run takeover (M3)",
+    ),
+    ("walkthroughs/deletion", "deletion and teardown (M3)"),
     ("walkthroughs/effects-without-receipt", "run takeover and recovery (M3)"),
-    ("walkthroughs/unavailable-upstream-output", "reconcile and plan (M3)"),
-    ("walkthroughs/unit-jobs", "unit-scoped reconcile (M3)"),
 ];
+
+/// Every reached scenario that is not pending runs in tier 1 and passes its
+/// checks.
+#[test]
+fn test_reached_scenarios_pass_in_tier_one() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let pending = PENDING.into_iter().collect::<BTreeMap<_, _>>();
+    let runnable = loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.milestone <= REACHED)
+        .filter(|loaded| loaded.scenario.tiers.contains(&1))
+        .filter(|loaded| !pending.contains_key(loaded.name.as_str()))
+        .collect::<Vec<_>>();
+    assert!(!runnable.is_empty(), "no scenario runs in tier 1");
+    let failures = std::thread::scope(|scope| {
+        let handles = runnable
+            .iter()
+            .map(|loaded| scope.spawn(|| scenario::runner::run(loaded)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
+                    .err()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
+}
+
+#[test]
+fn test_deploy_globs_match_by_segment() {
+    use scenario::runner::glob_matches;
+    assert!(glob_matches("dev/web/**", "dev/web/a/b.yaml"));
+    assert!(glob_matches("dev/_nyl/index.json", "dev/_nyl/index.json"));
+    assert!(glob_matches("dev/*.yaml", "dev/a.yaml"));
+    assert!(!glob_matches("dev/*.yaml", "dev/a/b.yaml"));
+    assert!(!glob_matches("dev/web/**", "prod/web/a"));
+}
 
 #[test]
 fn test_every_scenario_follows_the_format() {
@@ -37,10 +79,13 @@ fn test_reached_scenarios_run_or_are_listed_as_pending() {
         .filter(|loaded| loaded.scenario.milestone <= REACHED)
         .map(|loaded| loaded.name.as_str())
         .collect::<Vec<_>>();
-    for name in &reached {
+    // Every reached scenario runs in tier 1 (test_reached_scenarios_pass_in_tier_one)
+    // or is pending; a pending one must still be reached.
+    for loaded in loaded.iter().filter(|loaded| loaded.scenario.milestone <= REACHED) {
         assert!(
-            pending.contains_key(name),
-            "{name} is reached at {REACHED} but neither runs nor is listed as pending"
+            pending.contains_key(loaded.name.as_str()) || loaded.scenario.tiers.contains(&1),
+            "{} is reached at {REACHED} but neither runs in tier 1 nor is listed as pending",
+            loaded.name
         );
     }
     for name in pending.keys() {

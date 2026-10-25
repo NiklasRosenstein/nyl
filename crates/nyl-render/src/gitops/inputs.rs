@@ -251,6 +251,48 @@ pub struct InputSources<'a> {
     /// of the worktree, so a comparison baseline sees the desired render's
     /// carried state.
     pub pinned_state: Option<&'a BTreeMap<PathBuf, Vec<u8>>>,
+    /// Values for bindings only orchestration resolves (`fromUnit`,
+    /// `fromPromotion`); `None` rejects them, as tree and direct commands do.
+    pub orchestrated: Option<&'a OrchestratedInputs>,
+}
+
+/// Release input values resolved by orchestration, keyed by
+/// `<group>/<release>` and then by input name.
+pub type InputSnapshot = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
+
+/// How a render treats bindings that only orchestration resolves.
+///
+/// Contract: [Release inputs](../../../../design/release-inputs.md) and the
+/// orchestration core's [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit):
+/// orchestrated execution passes resolved values to rendering as an explicit,
+/// pinned input snapshot; render-tree, publish-tree, diff-tree, and direct
+/// commands never resolve them.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratedInputs {
+    /// An orchestrated publication: the values orchestration resolved. They
+    /// take an override's precedence over the binding.
+    Pinned(InputSnapshot),
+    /// `nyl validate` of a target an environment's publication unit owns:
+    /// each `fromUnit`/`fromPromotion` binding takes a placeholder of its
+    /// declared type, so the target compiles; the references themselves are
+    /// checked against the owning environment's units separately.
+    Placeholders,
+}
+
+impl OrchestratedInputs {
+    /// Overrides for one Release's declared inputs.
+    fn overrides(
+        &self,
+        release: &str,
+        declarations: &BTreeMap<String, InputDeclaration>,
+        bindings: Option<&BTreeMap<String, InputBinding>>,
+    ) -> BTreeMap<String, serde_json::Value> {
+        match self {
+            Self::Pinned(snapshot) => snapshot.get(release).cloned().unwrap_or_default(),
+            Self::Placeholders => super::units::placeholder_overrides(declarations, bindings),
+        }
+    }
 }
 
 /// Resolves a GitRepository name to the repository and its source file.
@@ -617,12 +659,16 @@ pub fn resolve_target_inputs(
             continue;
         }
         let bindings = bound.get(key).copied();
+        let overrides = sources
+            .orchestrated
+            .map(|orchestrated| orchestrated.overrides(&key.to_string(), release.declarations, bindings))
+            .unwrap_or_default();
         let inputs = resolve_release_inputs(
             &format!("spec.releaseInputs.{:?}", key.to_string()),
             &key.to_string(),
             release.declarations,
             bindings,
-            &BTreeMap::new(),
+            &overrides,
             sources,
             &mut issues,
         );
@@ -1246,6 +1292,7 @@ mod tests {
                 git: &NoGit,
                 publication: None,
                 pinned_state: None,
+                orchestrated: None,
                 visible_files: &visible_files,
             },
         )
@@ -1418,6 +1465,7 @@ mod tests {
             git: &git,
             publication: None,
             pinned_state: None,
+            orchestrated: None,
         };
         let error = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources)
             .unwrap_err()
@@ -1568,6 +1616,7 @@ mod tests {
                 git: &NoGit,
                 publication: Some(&base),
                 pinned_state: None,
+                orchestrated: None,
                 visible_files: &BTreeSet::new(),
             },
         )
@@ -1731,6 +1780,7 @@ mod tests {
                 git: &NoGit,
                 publication: None,
                 pinned_state: Some(&pinned),
+                orchestrated: None,
                 visible_files: &BTreeSet::new(),
             },
         )

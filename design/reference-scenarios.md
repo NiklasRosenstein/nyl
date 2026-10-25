@@ -152,7 +152,7 @@ and to the harness's validation, together with the first scenario using them.
 
 | Key | Checks |
 | --- | --- |
-| `executed`, `current`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed` | Exactly the units with that result in the operation's report and transition commit summary, so `executed: []` asserts that nothing executed; a key that is not given is not checked |
+| `executed`, `current`, `blocked`, `failed`, `uncertain`, `awaiting-approval`, `pending-teardown`, `tearing-down`, `retained`, `removed` | Exactly the units with that outcome in the operation's report, so `executed: []` asserts that nothing executed; a key that is not given is not checked. The outcome is each unit's `result` in a reconcile report and its `state` in a plan or status report (`UnitReport::outcome_name`). For a reconcile that wrote a transition commit, the commit summary's `units:` block must list the same sets |
 | `recovered`, `imported` | The summary's lists of the same name |
 | `commits` | New commits per state ref, such as `{desired: 1, observed: 1}`; `{desired: 0, observed: 0}` for an operation that writes nothing |
 | `units` | Per unit, from `nyl get unit <u> -e <env> -o json`: `lifecycle`, `condition`, `receipt` (`current`, `stale`, `none`), and `uid` (`same` or `new`, relative to the previous step that saw the unit) |

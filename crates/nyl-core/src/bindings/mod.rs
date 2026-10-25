@@ -24,6 +24,7 @@
 
 mod binding;
 mod declaration;
+mod references;
 
 use std::collections::BTreeMap;
 
@@ -35,6 +36,7 @@ pub use binding::{
     UnitInputSource,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
+pub use references::{unit_references, UnitReference};
 
 /// An effective value and where it came from.
 #[derive(Debug, Clone, PartialEq)]

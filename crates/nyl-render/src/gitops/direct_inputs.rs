@@ -385,6 +385,8 @@ fn resolve_with(
         git: sources.git.as_ref(),
         publication: sources.publication_base.as_ref(),
         pinned_state: None,
+        // Direct commands never resolve orchestration's bindings.
+        orchestrated: None,
     };
     let (label, bindings, field_prefix) = match bound {
         Some((key, bindings)) => (

@@ -17,7 +17,8 @@ spec:
     server: https://kubernetes.default.svc
   kubernetes:
     kubeVersion: 1.31.4
-    apiVersions: [v1, apps/v1]
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget

@@ -587,6 +587,19 @@ pub struct ArtifactDocument {
     pub spec: Value,
 }
 
+impl ArtifactDocument {
+    /// The digest a receipt lists for this document, and the one reference
+    /// resolution checks before reading it: `sha256:<hex>` over the RFC 8785
+    /// canonical JSON of the whole document, including `metadata.unit` and
+    /// `executionKey`. The shell computes it after filling those fields.
+    ///
+    /// Contract: [Artifacts](../../../../design/orchestration-core.md#artifacts).
+    pub fn digest(&self) -> String {
+        let bytes = crate::digest::canonical_json_bytes(self).expect("artifact documents serialize to JSON");
+        format!("sha256:{}", crate::digest::sha256_hex(&bytes))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactMetadata {

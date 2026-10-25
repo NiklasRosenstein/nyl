@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ids::{ChangeDigest, EnvironmentName, UnitAddress};
+use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
 use super::time::Timestamp;
 
@@ -190,7 +191,9 @@ pub struct AttestationOutcome {
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
     Succeeded {
-        /// Declared, non-sensitive outputs; Nyl validates and filters them.
+        /// Every non-sensitive output the tool reported, declared or not. Nyl
+        /// validates them against the declarations, warns about undeclared ones
+        /// (`NYL-OUTPUT-UNDECLARED`), and records only declared ones.
         outputs: Value,
         /// Artifact documents without `metadata.unit` and `executionKey`, which Nyl fills in.
         artifacts: Vec<ArtifactDocument>,
@@ -284,6 +287,15 @@ pub struct ToolInvocation {
     pub env: BTreeMap<String, String>,
     /// Bytes on stdin; none closes it.
     pub stdin: Option<Vec<u8>>,
+    /// How long the tool may run: the driver computes it as the context's
+    /// `deadline - now`, so no runner reads a clock to decide it. At expiry
+    /// the runner sends SIGTERM to the process group and SIGKILL 30 seconds
+    /// later, and reports [`ToolExit::DeadlineExceeded`]. `None` falls back
+    /// to the runner's default, if it has one.
+    pub timeout: Option<std::time::Duration>,
+    /// Values the transcript replaces with `***`: the admitted secrets of
+    /// this execution, in addition to any the runner masks by default.
+    pub masked: Vec<String>,
 }
 
 /// How a tool invocation ended. Its stdout and stderr went to the masked
@@ -332,22 +344,52 @@ pub struct ExecutionContext<'a> {
     /// The approved change digest of a `bind: plan` unit.
     pub approved_digest: Option<ChangeDigest>,
     pub deadline: Timestamp,
+    /// The injected clock's time when the execution starts; a driver's tool
+    /// timeout is `deadline - now`. Drivers never read a clock.
+    pub now: Timestamp,
     /// The unit's observed file, holding its last receipt.
     pub observed: Option<&'a ObservedUnit>,
     pub tools: &'a dyn ToolRunner,
+    /// Who authors commits a driver writes, such as a publication's commit:
+    /// the identity the command line resolved for state commits, with
+    /// `now` as the commit time. `None` for operations that write nothing
+    /// (plan, verify); a driver that must commit without one fails before
+    /// effects.
+    pub commit_identity: Option<&'a CommitIdentity>,
+    /// A cache directory of this invocation's workspace, for render caches;
+    /// never the user's default cache, so parallel runs stay isolated.
+    pub cache_dir: PathBuf,
 }
 
 /// What resolution provides to compute execution-key inputs.
 pub struct ResolutionContext<'a> {
     pub environment: EnvironmentName,
-    /// A checkout of the source commit S.
+    /// A Git worktree of the unit's effective commit: the commit resolution
+    /// writes into its Git source fields (S for a unit without `revision`).
+    /// Execution-key inputs are read from these bytes.
     pub worktree: PathBuf,
     /// The directory containing `nyl.toml` inside `worktree`.
     pub project_dir: PathBuf,
     /// Passthrough variables, without secrets, for fingerprint steps.
     pub env: BTreeMap<String, String>,
     pub deadline: Timestamp,
+    /// The injected clock's time; a fingerprint's timeout is `deadline - now`.
+    pub now: Timestamp,
     pub tools: &'a dyn ToolRunner,
+    /// A cache directory of this invocation's workspace, as for executions.
+    pub cache_dir: PathBuf,
+}
+
+/// A spec field holding a local path, or an array of local path globs, by
+/// the local path rule: relative to the `nyl.toml` directory, or `/`-rooted
+/// at the Git worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPathField {
+    /// JSON Pointer of the field, such as `/workingDir` or `/files`.
+    pub pointer: String,
+    /// Whether an absent field means the `nyl.toml` directory, which
+    /// resolution then records explicitly.
+    pub defaults_to_project_dir: bool,
 }
 
 /// One unit kind. Built-in drivers implement it in Rust; methods for
@@ -370,6 +412,28 @@ pub trait Driver: Send + Sync {
     fn attestations(&self, spec: &Value) -> Vec<String>;
     /// The native resources a spec claims in an environment; an image tag prefix names the environment.
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope>;
+    /// JSON Pointers of the spec's Git source fields (the `GitSource` shape:
+    /// `path`, `revision`, `commit`, `repositoryRef`/`repository`), such as
+    /// `/source` or `/context`. Resolution writes the resolved commit and the
+    /// worktree-rooted path into each; the key excludes their `commit`.
+    ///
+    /// Contract: [Units](../../../../design/orchestration-core.md#units),
+    /// "Git source shape", and [Pinned commits](../../../../design/orchestration-core.md#pinned-commits).
+    fn source_fields(&self, spec: &Value) -> Vec<String> {
+        let _ = spec;
+        Vec::new()
+    }
+    /// The spec's local path fields other than Git source fields, such as
+    /// a Command's `files` globs and `workingDir`. Resolution rewrites each
+    /// into its worktree-rooted form, so the desired document and the
+    /// execution key mean the same wherever `nyl.toml` lives.
+    ///
+    /// Contract: [Units](../../../../design/orchestration-core.md#units),
+    /// the local path rule.
+    fn local_path_fields(&self, spec: &Value) -> Vec<LocalPathField> {
+        let _ = spec;
+        Vec::new()
+    }
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs>;
 
     /// Plan an execution; for a `deleting` unit with teardown intent, its teardown, whose digest approvals bind.
@@ -395,4 +459,50 @@ pub trait Driver: Send + Sync {
         unit: &DesiredUnit,
         args: &[OsString],
     ) -> DriverResult<Supported<ExecStatus>>;
+}
+
+/// The drivers of one invocation, by the `apiVersion` and `kind` a unit's
+/// envelope names. A fake kind registers under the built-in kind it stands in
+/// for, so state documents keep the real kind and only dispatch differs.
+#[derive(Clone, Default)]
+pub struct DriverSet {
+    drivers: BTreeMap<(String, String), std::sync::Arc<dyn Driver>>,
+}
+
+impl DriverSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a driver under its own `apiVersion` and `kind`.
+    pub fn register(&mut self, driver: std::sync::Arc<dyn Driver>) {
+        let key = (driver.api_version().to_owned(), driver.kind().to_owned());
+        self.drivers.insert(key, driver);
+    }
+
+    /// Register a driver for another `apiVersion` and `kind`, as a fake kind
+    /// stands in for a built-in one.
+    pub fn register_as(&mut self, api_version: &str, kind: &str, driver: std::sync::Arc<dyn Driver>) {
+        self.drivers.insert((api_version.to_owned(), kind.to_owned()), driver);
+    }
+
+    /// The driver serving a unit's `apiVersion` and `kind`.
+    pub fn get(&self, api_version: &str, kind: &str) -> Option<&dyn Driver> {
+        self.drivers
+            .get(&(api_version.to_owned(), kind.to_owned()))
+            .map(std::convert::AsRef::as_ref)
+    }
+
+    /// Every registered `(apiVersion, kind)`.
+    pub fn kinds(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.drivers
+            .keys()
+            .map(|(api_version, kind)| (api_version.as_str(), kind.as_str()))
+    }
+}
+
+impl std::fmt::Debug for DriverSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_list().entries(self.drivers.keys()).finish()
+    }
 }

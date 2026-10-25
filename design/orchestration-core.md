@@ -108,7 +108,7 @@ spec:
   a branch prefix such as `refs/heads/nyl-run/` suits hosts that reject custom
   refs. Changing it goes through `nyl state move` (see
   [Initialization and moves](#initialization-and-moves)). Hosts verified with
-  both prefixes are listed in [Git host compatibility](../nyl/book/src/content/docs/commands/state.md#git-host-compatibility).
+  both prefixes are listed in [Git host compatibility](../nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility).
 - Validation checks every configured state ref, and the coordination refs each
   environment implies, for names that Git cannot hold together, such as a
   shared state branch `nyl/previews` and an environment named `previews` whose
@@ -308,7 +308,7 @@ spec:
   | `dependsOn` | list of unit names or `{environment?, unit, evidence?, attestations?}` | `[]` | Ordering without a data reference |
   | `approval` | `auto`, `manual`, or `{mode, bind, requireDigest}` | `auto` | See [Approval](#approval) |
   | `deletionPolicy` | `Teardown` \| `Retain` | `Teardown` where the kind supports teardown, else `Retain` | See [Deletion](#deletion) |
-  | `timeout` | duration | per kind (see [Defaults](#defaults)) | Deadline for one execution, teardown, or verification |
+  | `timeout` | duration | per kind (see [Defaults](#defaults)) | Deadline for one execution, teardown, or verification; at most `7d`, since a run holds its lease for it |
   | `env` | `{passthrough: [name], secrets: {name: key}}` | `{}` | See [Credentials](#credentials) |
   | `attestations` | list of `{name, from: external}` | `[]` | Attestations only external sources supply (see [Attestations](#attestations)); kinds that attest themselves add their own names |
 
@@ -562,6 +562,12 @@ spec:
   `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
   an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
   commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
+  - Implementation status (M3): `releases` holds the bindings orchestration
+    resolves, `fromUnit` and `fromPromotion`; `value`, `fromFile`, `fromGit`,
+    and `fromPublication` inputs still enter the key through the render's
+    input record, and join `releases` with the KubernetesPublication driver
+    (M5) and PromotionPath selectors (M6). The renderer owns `releases`: an
+    authored `spec.releases` is rejected.
 - `fromPublication` is resolved like every other binding. Resolution reads the
   state file from the publication branch head B, or the carried file from the
   runner's working tree. The value enters the resolved spec and the execution
@@ -1149,7 +1155,11 @@ readiness: {state: ready}
   receipt produced earlier in the same run cites the run ID instead, which
   identifies the transition commit through its `Nyl-Run-Id` trailer; run refs
   are disposable, so provenance never points at a checkpoint. Provenance never
-  names the commit it is written in.
+  names the commit it is written in. A citation is stable: when a reference
+  resolves to the same receipt (unit, uid, execution key) that the stored
+  document already cites at that pointer, the stored citation, run or observed
+  commit, is kept. Re-resolving against unchanged receipts therefore changes
+  nothing, and a run that executes nothing writes no commit.
 - `executionKey` is a digest of the unit's `apiVersion`, `kind`, and driver
   behavior version, `resolvedSpec` without the common fields that do not affect
   what runs (`enabled`, `dependsOn`, `approval`, `deletionPolicy`, `timeout`),

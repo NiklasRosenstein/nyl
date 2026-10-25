@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Orchestration runs one environment (M3 part 3). `nyl reconcile -e <env>`
+  renders the environment's units at its source commit, resolves `fromUnit`
+  references, executes ready units in dependency waves (`--unit`,
+  `--concurrency`, `--source`), and records receipts in one transition commit
+  per state ref; a run that changes nothing writes no commit. `nyl plan`
+  shows what a run would do, listing units leaving the ownership set first
+  (`--fail-on-leaving`), and `nyl status` reports each unit's state. Both only
+  read state. `nyl get` gains `environments`, `units`, and the state forms
+  with `-e`: `units`, `unit`, `output`, `artifacts`, `artifact`
+  (`--pointer`, `--allow-stale`, `--state-revision`). The Command unit kind
+  runs a program from the source commit with content-based execution keys,
+  and source commits and pins are checked for reachability from the
+  Environment's `protectedRefs`. Unit `env.secrets` is rejected with
+  `NYL-UNIT-SECRETS-UNSUPPORTED` for now, and references or `dependsOn`
+  entries requiring attestations with `NYL-ATTESTATIONS-UNSUPPORTED`.
+  `nyl validate` runs the unit checks `plan` runs before reading state. A
+  unit's `timeout` is at most `7d`.
+
+- State-writing commands (`nyl reconcile`, `nyl state …`, `nyl lease break`)
+  take `--author "Name <email>"` for their state commits and otherwise use
+  Git's `user.name` and `user.email`; without either they exit 1 with
+  `NYL-COMMIT-IDENTITY-MISSING`.
+
 - `nyl render`, `diff`, and `apply` resolve Release inputs like `render-tree`:
   `--input <name>=<json>` and `--inputs <file>` override, then the binding of
   the target's ApplicationGroup whose source contains the Release file, then

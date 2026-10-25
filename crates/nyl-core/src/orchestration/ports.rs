@@ -34,6 +34,42 @@ pub trait IdGenerator: Send + Sync {
     fn run_id(&self) -> RunId;
 }
 
+/// Who writes state commits: their author and committer. The command line
+/// resolves it once, from `--author` or Git's `user.name` and `user.email`,
+/// and fails with [`Code::CommitIdentityMissing`](super::codes::Code::CommitIdentityMissing)
+/// when neither names one; `nyl-state` never reads Git configuration and
+/// takes each commit's time from the injected [`Clock`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+impl std::str::FromStr for CommitIdentity {
+    type Err = String;
+
+    /// Parse `Name <email>`, as `--author` takes it.
+    fn from_str(value: &str) -> std::result::Result<Self, String> {
+        let invalid = || format!("{value:?} is not an identity of the form \"Name <email>\"");
+        let (name, rest) = value.split_once('<').ok_or_else(invalid)?;
+        let email = rest.strip_suffix('>').ok_or_else(invalid)?.trim();
+        let name = name.trim();
+        if name.is_empty() || email.is_empty() || email.contains(['<', '>']) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            email: email.to_owned(),
+        })
+    }
+}
+
+impl std::fmt::Display for CommitIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} <{}>", self.name, self.email)
+    }
+}
+
 /// A failure of the state store.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -161,6 +197,15 @@ pub trait StateStore: Send + Sync {
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
+    /// Read the state as of `tips` instead of the refs' current tips, for
+    /// `nyl get --state-revision`. A tip of `None` reads that side as empty.
+    fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
+        let _ = (location, tips);
+        Err(StateError::Unavailable(
+            "this state store cannot read past state revisions".to_owned(),
+        ))
+    }
+
     /// Read the lease and every run ref.
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination>;
 
@@ -284,6 +329,10 @@ pub struct RenderedUnit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedSource {
     pub source_commit: CommitId,
+    /// Worktree-rooted directory containing `nyl.toml` at the source commit,
+    /// such as `/nyl`, or `/` at the worktree root. Drivers resolve local
+    /// paths against it; resolved specs record paths worktree-rooted.
+    pub project_dir: String,
     /// The Environment with group defaults applied.
     pub environment: Environment,
     pub units: BTreeMap<UnitName, RenderedUnit>,
@@ -311,4 +360,20 @@ pub enum ApplicationsObservation {
 /// Reads Argo CD for teardown waits and health evidence.
 pub trait ArgoObserver: Send + Sync {
     fn workload_applications(&self, target: &str) -> ApplicationsObservation;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_commit_identity_parses_the_author_form_and_rejects_others() {
+        let identity: CommitIdentity = "Jane Doe <jane@example.com>".parse().unwrap();
+        assert_eq!(identity.name, "Jane Doe");
+        assert_eq!(identity.email, "jane@example.com");
+        assert_eq!(identity.to_string(), "Jane Doe <jane@example.com>");
+        for invalid in ["Jane Doe", "<jane@example.com>", "Jane <>", "Jane <a<b>"] {
+            assert!(invalid.parse::<CommitIdentity>().is_err(), "{invalid}");
+        }
+    }
 }

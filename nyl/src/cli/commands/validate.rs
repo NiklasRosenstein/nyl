@@ -66,6 +66,7 @@ enum SearchPathKind {
 #[derive(Debug, PartialEq, Eq)]
 struct GitOpsSummary {
     resources: usize,
+    units: usize,
     yaml_files: usize,
 }
 
@@ -95,8 +96,8 @@ impl ValidationReport {
         if let Some(gitops) = &self.gitops {
             let _ = writeln!(
                 out,
-                "✓ GitOps configuration is valid ({} resource(s), {} YAML file(s))",
-                gitops.resources, gitops.yaml_files
+                "✓ GitOps configuration is valid ({} resource(s), {} unit(s), {} YAML file(s))",
+                gitops.resources, gitops.units, gitops.yaml_files
             );
         }
         for warning in &self.warnings {
@@ -162,26 +163,14 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
             .into_iter()
             .map(ValidationWarning::Environment),
     );
-    let target_names = inventory
-        .resources
-        .values()
-        .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
-        .map(|resource| resource.identity.name.clone())
-        .collect::<Vec<_>>();
-    // Like `vendor --check`, validation reads fromPublication state at
-    // the refreshed branch head and falls back to the cached head, so
-    // it also works offline.
-    let options = crate::gitops::TreeRenderOptions {
-        publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
-        ..crate::gitops::TreeRenderOptions::default()
-    };
-    let mut compiled = Vec::with_capacity(target_names.len());
-    for target in target_names {
-        compiled.push(crate::gitops::compile_target_tree_with_options(&inventory, &target, options.clone()).await?);
-    }
-    crate::gitops::validate_compiled_argocd_names(&inventory, &compiled)?;
+    let units = crate::gitops::units::discover_units(&inventory)?;
+    // Target bindings first: their findings name the DeploymentTarget field a
+    // publication unit's reference comes from.
+    validate_targets(&inventory).await?;
+    validate_environment_units(&inventory)?;
     report.gitops = Some(GitOpsSummary {
         resources: inventory.resources.len(),
+        units: units.len(),
         yaml_files: inventory.yaml_files.len(),
     });
     Ok(())
@@ -199,6 +188,88 @@ fn display_project_path(project_root: Option<&Path>, path: &Path) -> String {
 
 fn slash_path(path: &Path) -> String {
     path.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+/// Render every Environment's units from the worktree and run the state-free
+/// unit checks `nyl plan` and `nyl reconcile` run
+/// ([`nyl_orchestration::rules::desired::check_units`]), with the drivers
+/// they use: specs, `env.secrets`, ownership scopes, unknown dependencies,
+/// cycles, and references to undeclared or sensitive outputs.
+fn validate_environment_units(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
+    use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
+    use nyl_core::orchestration::ports::SourceRenderer;
+
+    let wiring = crate::orchestration::run::ProcessWiring::new();
+    let renderer = crate::gitops::units::UnitSourceRenderer::new(crate::orchestration::session::project_dir(inventory));
+    // The worktree is rendered as it is, committed or not; the commit only labels it.
+    let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
+    let (environments, _) = crate::orchestration::project::declared(inventory);
+    let mut issues = Vec::new();
+    for environment in &environments {
+        let name =
+            EnvironmentName::new(&environment.metadata.name).map_err(|error| NylError::config(error.to_string()))?;
+        let source = renderer
+            .render(&inventory.worktree_root, &name, &commit)
+            .map_err(|error| NylError::config(error.to_string()))?;
+        for finding in nyl_orchestration::rules::desired::check_units(&source, &wiring.drivers) {
+            issues.push(format!("{name}: {finding}"));
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(NylError::config(format!(
+            "units are invalid:\n{}",
+            issues
+                .iter()
+                .map(|issue| format!("  - {issue}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )))
+    }
+}
+
+/// Compile every DeploymentTarget and check generated Argo CD names across them.
+///
+/// A target an environment's publication unit places compiles with
+/// placeholders for the bindings orchestration resolves, and its `fromUnit`
+/// references are checked against that environment's units instead. Other
+/// targets compile as `render-tree` does, so those bindings stay rejected.
+async fn validate_targets(inventory: &crate::gitops::GitOpsInventory) -> Result<()> {
+    let target_names = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == crate::resources::GitOpsResourceKind::DeploymentTarget)
+        .map(|resource| resource.identity.name.clone())
+        .collect::<Vec<_>>();
+    // Like `vendor --check`, validation reads fromPublication state at
+    // the refreshed branch head and falls back to the cached head, so
+    // it also works offline.
+    let options = crate::gitops::TreeRenderOptions {
+        publication_read: crate::gitops::inputs::PublicationRead::FreshOrCached,
+        ..crate::gitops::TreeRenderOptions::default()
+    };
+    let placements = crate::gitops::units::target_placements(inventory)?;
+    let mut compiled = Vec::with_capacity(target_names.len());
+    for target in target_names {
+        let mut target_options = options.clone();
+        if let Some(environment) = placements.get(&target) {
+            let issues = crate::gitops::units::check_unit_bindings(inventory, &target, environment)?;
+            if !issues.is_empty() {
+                return Err(NylError::config(format!(
+                    "DeploymentTarget {target:?} of Environment {environment} has invalid unit references:\n{}",
+                    issues
+                        .iter()
+                        .map(|issue| format!("  - {issue}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )));
+            }
+            target_options.orchestrated_inputs = Some(crate::gitops::inputs::OrchestratedInputs::Placeholders);
+        }
+        compiled.push(crate::gitops::compile_target_tree_with_options(inventory, &target, target_options).await?);
+    }
+    crate::gitops::validate_compiled_argocd_names(inventory, &compiled)
 }
 
 #[cfg(test)]

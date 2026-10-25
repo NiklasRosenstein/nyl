@@ -17,7 +17,9 @@
 //!
 //! [`git::GitStateStore`] keeps state in Git repositories, remote or the
 //! clone itself; [`memory::MemoryStateStore`] is the in-memory store the
-//! contract walkthroughs run against.
+//! contract walkthroughs run against. [`source::GitSourceResolver`]
+//! implements the source port: revisions, reachability, and pinned worktrees.
 
 pub mod git;
 pub mod memory;
+pub mod source;

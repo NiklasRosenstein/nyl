@@ -17,12 +17,13 @@ mod tree;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use git2::{Oid, Repository};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError, StateResult, StateStore,
-    StateTips, Transition, TransitionChanges,
+    Checkpoint, Clock, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError,
+    StateResult, StateStore, StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Lease, ObservedUnit, Run, Signal, StateLocation};
 use nyl_git::GitAuth;
@@ -44,7 +45,28 @@ const REBASE_ATTEMPTS: usize = 5;
 pub struct GitStateStore {
     git_dir: PathBuf,
     auth: GitAuth,
+    /// `None` for a read-only store: every write is refused.
+    author: Option<CommitAuthor>,
     endpoints: BTreeMap<String, Endpoint>,
+}
+
+/// Who authors and commits every commit this store writes, and when: transition commits,
+/// leases, run checkpoints, and signals. The command line resolves the
+/// identity once and passes its injected clock, so the store reads neither
+/// Git configuration nor the system clock.
+#[derive(Clone)]
+pub struct CommitAuthor {
+    pub identity: CommitIdentity,
+    pub clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for CommitAuthor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommitAuthor")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How to reach a repository that state locations name by identity: the
@@ -62,10 +84,23 @@ impl GitStateStore {
     /// checkout's clone, whose own branches are the state when a location
     /// names [`LOCAL_REPOSITORY`], and which keeps the fetched objects and
     /// the fast-forwarded local state branches otherwise.
-    pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
+    pub fn new(git_dir: impl Into<PathBuf>, auth: GitAuth, author: CommitAuthor) -> Self {
         Self {
             git_dir: git_dir.into(),
             auth,
+            author: Some(author),
+            endpoints: BTreeMap::new(),
+        }
+    }
+
+    /// A store for commands that only read state (`plan`, `status`, `get`):
+    /// they need no commit identity, and every write fails with
+    /// [`StateError::Unavailable`](nyl_core::orchestration::ports::StateError::Unavailable).
+    pub fn read_only(git_dir: impl Into<PathBuf>, auth: GitAuth) -> Self {
+        Self {
+            git_dir: git_dir.into(),
+            auth,
+            author: None,
             endpoints: BTreeMap::new(),
         }
     }
@@ -223,6 +258,25 @@ fn replace_beneath(all: &Files, directory: &str, inner: &Files) -> Files {
     files
 }
 
+/// A snapshot from the files beneath a location's directory on each side.
+fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResult<EnvironmentSnapshot> {
+    let record = match desired.get(STATE_FILE).or_else(|| observed.get(STATE_FILE)) {
+        Some(bytes) => Some(from_yaml(STATE_FILE, bytes)?),
+        None => None,
+    };
+    Ok(EnvironmentSnapshot {
+        tips,
+        record,
+        environment: desired
+            .get(ENVIRONMENT_FILE)
+            .map(|bytes| from_yaml(ENVIRONMENT_FILE, bytes))
+            .transpose()?,
+        desired: units(desired, "desired/units/")?,
+        observed: units(observed, "observed/units/")?,
+        artifacts: artifacts(observed)?,
+    })
+}
+
 impl StateStore for GitStateStore {
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot> {
         let repository = self.open()?;
@@ -244,24 +298,40 @@ impl StateStore for GitStateStore {
             &tree::read(&repository, observed_tip.and_then(|_| refs.local(&observed_name)))?,
             &location.path,
         );
-        let record = match desired.get(STATE_FILE).or_else(|| observed.get(STATE_FILE)) {
-            Some(bytes) => Some(from_yaml(STATE_FILE, bytes)?),
-            None => None,
-        };
-        Ok(EnvironmentSnapshot {
-            tips: StateTips {
+        snapshot_of(
+            StateTips {
                 desired: desired_tip.map(commit_id),
                 observed: observed_tip.map(commit_id),
             },
-            record,
-            environment: desired
-                .get(ENVIRONMENT_FILE)
-                .map(|bytes| from_yaml(ENVIRONMENT_FILE, bytes))
-                .transpose()?,
-            desired: units(&desired, "desired/units/")?,
-            observed: units(&observed, "observed/units/")?,
-            artifacts: artifacts(&observed)?,
-        })
+            &desired,
+            &observed,
+        )
+    }
+
+    /// Read the state as of `tips`, for `nyl get --state-revision`: the
+    /// state refs' history is fetched, and each tip must be a commit of it.
+    fn snapshot_at(&self, location: &StateLocation, tips: &StateTips) -> StateResult<EnvironmentSnapshot> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let names = [full_name(&location.desired_ref), full_name(&location.observed_ref)];
+        let heads = refs.heads(&names)?;
+        refs.fetch(&heads, true)?;
+        let read = |tip: Option<&CommitId>| -> StateResult<Files> {
+            let Some(tip) = tip else {
+                return Ok(Files::new());
+            };
+            let commit = oid(tip)?;
+            if repository.find_commit(commit).is_err() {
+                return Err(StateError::Unavailable(format!(
+                    "state revision {tip} is not a commit of {} or {}",
+                    location.desired_ref, location.observed_ref
+                )));
+            }
+            Ok(tree::beneath(&tree::read(&repository, Some(commit))?, &location.path))
+        };
+        let desired = read(tips.desired.as_ref())?;
+        let observed = read(tips.observed.as_ref())?;
+        snapshot_of(tips.clone(), &desired, &observed)
     }
 
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {
@@ -306,7 +376,15 @@ impl StateStore for GitStateStore {
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = expected.map(Oid::from_str).transpose().map_err(unavailable)?;
-        write_lease(&repository, &refs, &name, lease, expected, StateError::LeaseRace)
+        write_lease(
+            &repository,
+            self.author.as_ref(),
+            &refs,
+            &name,
+            lease,
+            expected,
+            StateError::LeaseRace,
+        )
     }
 
     fn update_lease(
@@ -320,7 +398,15 @@ impl StateStore for GitStateStore {
         let refs = self.refs(&repository, location);
         let name = lease_ref(location, environment);
         let expected = Oid::from_str(expected).map_err(unavailable)?;
-        write_lease(&repository, &refs, &name, lease, Some(expected), StateError::LeaseLost)
+        write_lease(
+            &repository,
+            self.author.as_ref(),
+            &refs,
+            &name,
+            lease,
+            Some(expected),
+            StateError::LeaseLost,
+        )
     }
 
     fn release_lease(
@@ -389,7 +475,7 @@ impl StateStore for GitStateStore {
         }
         let parents = tip.into_iter().collect::<Vec<_>>();
         let message = format!("nyl: run {} of {environment}", run.run);
-        let Some(commit) = tree::commit(&repository, &files, &message, &parents, true)? else {
+        let Some(commit) = tree::commit(&repository, self.author.as_ref(), &files, &message, &parents, true)? else {
             return Ok(());
         };
         match refs.update(&[Update {
@@ -465,7 +551,8 @@ impl StateStore for GitStateStore {
         let index = files.len();
         files.insert(format!("signals/{index:04}.yaml"), to_yaml(signal)?);
         let parents = tip.into_iter().collect::<Vec<_>>();
-        let commit = tree::commit(&repository, &files, "nyl: signal", &parents, true)?.expect("allow_empty commits");
+        let commit = tree::commit(&repository, self.author.as_ref(), &files, "nyl: signal", &parents, true)?
+            .expect("allow_empty commits");
         match refs.update(&[Update {
             name: name.clone(),
             new: Some(commit),
@@ -489,6 +576,7 @@ impl StateStore for GitStateStore {
         lease_version: &str,
     ) -> StateResult<Committed> {
         let repository = self.open()?;
+        let author = self.author.as_ref();
         let refs = self.refs(&repository, location);
         let desired_name = full_name(&location.desired_ref);
         let observed_name = full_name(&location.observed_ref);
@@ -503,13 +591,13 @@ impl StateStore for GitStateStore {
             apply_changes(&mut inner, &transition.changes, desired, observed)?;
             let files = replace_beneath(&all, &location.path, &inner);
             let parents = tip.into_iter().collect::<Vec<_>>();
-            tree::commit(&repository, &files, &transition.message, &parents, false)
+            tree::commit(&repository, author, &files, &transition.message, &parents, false)
         };
         // The lease moves to a new commit with the same document, so that
         // the push checks it: git never compares an unchanged ref.
         let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
-        let renewed =
-            tree::commit(&repository, &lease_files, "nyl: lease", &[lease_oid], true)?.expect("allow_empty commits");
+        let renewed = tree::commit(&repository, author, &lease_files, "nyl: lease", &[lease_oid], true)?
+            .expect("allow_empty commits");
 
         // Each attempt builds on the tips the last one lost to.
         let (mut tip_desired, mut tip_observed) = (base_desired, base_observed);
@@ -693,6 +781,7 @@ fn directory_unchanged(
 
 fn write_lease(
     repository: &Repository,
+    author: Option<&CommitAuthor>,
     refs: &Refs<'_>,
     name: &str,
     lease: &Lease,
@@ -705,7 +794,7 @@ fn write_lease(
         .filter(|oid| repository.find_commit(*oid).is_ok())
         .into_iter()
         .collect::<Vec<_>>();
-    let commit = tree::commit(repository, &files, &message, &parents, true)?.expect("allow_empty commits");
+    let commit = tree::commit(repository, author, &files, &message, &parents, true)?.expect("allow_empty commits");
     match refs.update(&[Update {
         name: name.to_owned(),
         new: Some(commit),

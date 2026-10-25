@@ -7,9 +7,11 @@ pub mod discovery;
 pub mod inputs;
 pub mod layout;
 pub mod provenance;
+pub mod publication;
 pub mod reconcile;
 pub mod source_locks;
 pub mod tree;
+pub mod units;
 
 pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
 pub use crate::render::{RenderSession, RenderedBundle};
@@ -31,8 +33,9 @@ pub use reconcile::{
 pub use tree::{
     compile_target_tree, compile_target_tree_cached, compile_target_tree_cached_with_observer,
     compile_target_tree_cached_with_observer_and_options, compile_target_tree_cached_with_options,
-    compile_target_tree_with_options, validate_compiled_argocd_names, validate_gitops_inventory, CompiledTargetTree,
-    ReleaseProgress, TreeRenderObserver, TreeRenderOptions,
+    compile_target_tree_recorded, compile_target_tree_with_options, validate_compiled_argocd_names,
+    validate_gitops_inventory, CompiledTargetTree, ReleaseProgress, TargetDependencies, TreeRenderObserver,
+    TreeRenderOptions,
 };
 pub use tree::{namespace_matches_any, source_matches};
 mod cluster;

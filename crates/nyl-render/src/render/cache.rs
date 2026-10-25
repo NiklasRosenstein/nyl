@@ -585,6 +585,11 @@ impl DependencyRecorder {
         self.cacheable
     }
 
+    /// The dependencies recorded so far, by name.
+    pub fn dependencies(&self) -> &BTreeMap<String, RecordedDependency> {
+        &self.dependencies
+    }
+
     /// Close the recording into the dependency record stored beside the artifact with `artifact_digest`.
     pub fn finish(self, action: impl Into<String>, artifact_digest: String) -> DependencyRecord {
         DependencyRecord {
@@ -604,6 +609,8 @@ pub struct RenderCache {
     secret_key: [u8; 32],
     renderer_tools: Arc<OnceLock<BTreeMap<String, RecordedDependency>>>,
     source_cache: Option<Arc<tempfile::TempDir>>,
+    /// Explicit source checkout root, from [`Self::with_source_cache_root`].
+    source_root: Option<PathBuf>,
     stats: Arc<Mutex<CacheStats>>,
     observed_artifacts: Arc<Mutex<BTreeMap<super::artifact::ArtifactRequest, super::artifact::ResolvedArtifact>>>,
     vendor_population: bool,
@@ -650,6 +657,7 @@ impl RenderCache {
             secret_key,
             renderer_tools: Arc::new(OnceLock::new()),
             source_cache,
+            source_root: None,
             stats: Arc::new(Mutex::new(CacheStats::default())),
             observed_artifacts: Arc::new(Mutex::new(BTreeMap::new())),
             vendor_population: false,
@@ -668,7 +676,18 @@ impl RenderCache {
 
     /// Explicit source cache root used to keep --no-cache checkouts ephemeral.
     pub fn external_cache_root(&self) -> Option<&Path> {
-        self.source_cache.as_deref().map(tempfile::TempDir::path)
+        self.source_root
+            .as_deref()
+            .or_else(|| self.source_cache.as_deref().map(tempfile::TempDir::path))
+    }
+
+    /// Keep source checkouts beneath `root` instead of the user's default Git
+    /// cache, so an invocation with its own workspace never reads or writes
+    /// host cache state.
+    #[must_use]
+    pub fn with_source_cache_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.source_root = Some(root.into());
+        self
     }
 
     pub fn recorder(&self) -> DependencyRecorder {

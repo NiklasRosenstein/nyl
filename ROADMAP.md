@@ -36,9 +36,10 @@ about Nyl's current CLI.
 | M7 | Continuous operation and scope decision | Planned | M6 |
 | M8 | Provider-neutral CI execution and first GitLab adapter | Planned | M3, M4 |
 
-**Next step:** continue M3, delivered in four parts against the
+**Next step:** continue M3, delivered in six parts against the
 [orchestration core contract](design/orchestration-core.md) and its
-executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
+executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/). Each
+part removes the walkthroughs it makes pass from the harness's pending list.
 
 1. Foundations, done: the business rules moved out of the `nyl` package, one
    `GitSource`, the `nyl-state`, `nyl-orchestration`, and `nyl-drivers`
@@ -53,14 +54,63 @@ executable [walkthrough scenarios](nyl/tests/scenarios/walkthroughs/):
    dedicated credentials, and the Environment and EnvironmentGroup resources.
    Custom refs and atomic leased pushes are verified on GitHub, GitLab,
    Forgejo, and plain Git with both coordination prefixes
-   ([Git host compatibility](nyl/book/src/content/docs/commands/state.md#git-host-compatibility)).
-3. Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`,
-   `recover`, and `get -e`, with `FakePublication`, pinned source worktrees,
-   execution keys, `--local` runs, and `nyl validate` of targets whose
-   bindings orchestration resolves. Unit `values` and `variables` resolve
-   through `nyl_core::bindings`.
-4. `teardown`, `hold`, `resume`, `state delete`, multi-environment runs,
-   approvals, the tier-2 harness, and the M3 part of reference scenario 1.
+   ([Git host compatibility](nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility)).
+3. Done: one environment's run: the Command unit and its driver, unit selection
+   and templating, desired documents, `fromUnit` references through
+   `nyl_core::bindings`, the versioned dependency graph and waves,
+   content-based execution keys, pinned source worktrees with reachability
+   checks, `FakePublication`, `plan`, `reconcile` (with `--unit`), `status`,
+   `get -e`, `nyl validate` of targets whose bindings orchestration resolves,
+   and state commits whose author and time the command line passes in.
+   Walkthroughs `dependency-wave`, `unit-jobs`, and
+   `unavailable-upstream-output` run in the tier-1 harness. Part 3
+   deliberately leaves out:
+   - A KubernetesPublication unit's `releases` holds only the bindings
+     orchestration resolves, `fromUnit` and `fromPromotion`; the other inputs
+     enter its key through the render's input record until the real driver
+     (M5) and PromotionPath selectors (M6) add them.
+   - Orchestrated publications keep ownership index version 2; version 3,
+     which records the owning environment and unit, arrives with the
+     KubernetesPublication driver in M5.
+   - Unit source fields that name another repository wait for M4, the first
+     kinds that build from one.
+   - Unit `env.secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until
+     the common credential admission of part 6; `env.passthrough` works.
+   - References and `dependsOn` entries requiring `evidence: attested` or
+     naming `attestations` are rejected with `NYL-ATTESTATIONS-UNSUPPORTED`
+     until receipts record attestation results (M5/M6), so a bare receipt
+     never satisfies a stronger requirement.
+   - `nyl recover` follows in part 4. Until then a non-retryable failure is
+     left only by `nyl state init --fresh`, and status findings say so.
+   - Each unit has one effective commit, and a unit whose source fields pin
+     different commits is rejected. Per-field worktrees wait for M4.
+   - `nyl validate` checks a `fromUnit` artifact reference only for the
+     producer's existence and declared non-sensitive outputs; artifact names
+     are checked once kinds declare them, in M5.
+4. Recovery and concurrency: `verify`, `recover` (including `--accept`),
+   run takeover from checkpoints, uncertain completion, competing runners
+   with `--wait-lease`, `--local` runs, state without a remote,
+   `state move --from local`, `state reset` and `restore`, crash injection
+   at every fault point, and property tests of the transition table.
+   Runs also stop paying a full checkout of the repository per unit: each
+   concurrency slot keeps one worktree and resets it between units to the
+   unit's commit, removing untracked and ignored files, so a unit sees
+   exactly what a fresh checkout holds; the symbolic-link check of a commit's
+   tree runs once per commit. Walkthroughs: `effects-without-receipt`,
+   `competing-runners`.
+5. Lifecycle: `teardown` (including `--hold`, `--all`, and
+   `--confirm-removed`), `hold`, `resume`, `state delete` with
+   decommissioning, teardown order, and `--allow-teardown` /
+   `--allow-dependents`. Walkthrough: `deletion`.
+6. Multi-environment runs, approvals (`verified`, `asserted`, and `local`
+   sources, the GitHub lookup, the `[approval] lookup` hook, and `bind: plan`
+   with destroy digests), the tier-2 harness, and the M3 part of reference
+   scenario 1.
+
+M3 uses `FakePublication` for Kubernetes publication; the real
+`KubernetesPublication` driver arrives in M5. `nyl exec` belongs to M4 with
+the first drivers that wrap a native tool, `nyl build` to M4, attestations to
+M5 and M6, and `nyl promote` to M6.
 
 ## Product direction
 
@@ -802,6 +852,12 @@ recovery path; the M3 part of the
 - [ ] Support a local-module Terraform configuration pinned to a source commit
   and path.
 - [ ] Demonstrate Terraform-to-Terraform output references.
+- [ ] Check out only what a unit reads when its kind declares its inputs:
+  `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their
+  source paths and the `nyl.toml` directory, so their cost in a large
+  monorepo follows the unit, not the repository. A Command unit can read
+  anything in the repository, so it keeps a full worktree unless it declares
+  the paths it reads.
 
 **Exit criterion:** a network configuration's outputs feed a dependent
 configuration; an image build records a digest; unchanged inputs plan no change;
@@ -941,6 +997,7 @@ reasons to delay independent work.
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
 | Additional image build backends and registry-specific image deletion | After M4 |
+| Signed state and publication commits (GPG/SSH): Git's signing configuration or a project setting, CI keys beside `[git]` credentials, and a stable error when a required key is missing | After M3 |
 | Continuous runner ownership, observation cadence, and drift-repair policy | M7 |
 | Provider capability/configuration schema and first GitLab adapter limits | M8 |
 | Trusted dispatcher policy and normalized admission authorization evidence | M8 |

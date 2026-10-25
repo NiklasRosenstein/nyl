@@ -19,6 +19,7 @@
 pub mod fault;
 pub mod report;
 pub mod rules;
+pub mod run_report;
 pub mod shell;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

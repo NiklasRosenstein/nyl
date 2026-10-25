@@ -9,6 +9,7 @@
 #![allow(dead_code)] // Each test binary uses part of the harness.
 
 pub mod format;
+pub mod runner;
 pub mod world;
 
 use std::path::{Path, PathBuf};

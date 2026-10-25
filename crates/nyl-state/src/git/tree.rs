@@ -75,6 +75,7 @@ pub fn prefix(directory: &str) -> String {
 /// nothing writes nothing.
 pub fn commit(
     repository: &Repository,
+    author: Option<&super::CommitAuthor>,
     files: &Files,
     message: &str,
     parents: &[Oid],
@@ -90,7 +91,7 @@ pub fn commit(
         }
     }
     let tree = repository.find_tree(tree).map_err(unavailable)?;
-    let signature = signature(repository)?;
+    let signature = signature(author)?;
     let parents = parents
         .iter()
         .map(|parent| repository.find_commit(*parent).map_err(unavailable))
@@ -102,10 +103,16 @@ pub fn commit(
         .map_err(unavailable)
 }
 
-fn signature(repository: &Repository) -> StateResult<Signature<'static>> {
-    repository
-        .signature()
-        .or_else(|_| Signature::now("Nyl", "nyl@localhost"))
+/// The author's identity at the injected clock's time, in UTC. A read-only
+/// store has no author and refuses to commit.
+fn signature(author: Option<&super::CommitAuthor>) -> StateResult<Signature<'static>> {
+    let Some(author) = author else {
+        return Err(nyl_core::orchestration::ports::StateError::Unavailable(
+            "the state store was opened read-only, without a commit identity".to_owned(),
+        ));
+    };
+    let time = git2::Time::new(author.clock.now().timestamp(), 0);
+    Signature::new(&author.identity.name, &author.identity.email, &time)
         .map(|signature| signature.to_owned())
         .map_err(unavailable)
 }

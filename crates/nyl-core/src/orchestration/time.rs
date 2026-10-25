@@ -37,9 +37,20 @@ impl Duration {
         self.seconds
     }
 
-    /// The same length as a chrono duration, for timestamp arithmetic.
+    /// The same length as a chrono duration, for timestamp arithmetic,
+    /// saturating at chrono's largest duration.
     pub fn to_chrono(self) -> chrono::Duration {
-        chrono::Duration::seconds(i64::try_from(self.seconds).unwrap_or(i64::MAX))
+        i64::try_from(self.seconds)
+            .ok()
+            .and_then(chrono::TimeDelta::try_seconds)
+            .unwrap_or(chrono::TimeDelta::MAX)
+    }
+
+    /// `at` plus this duration, saturating at the latest representable
+    /// time, so no deadline computation can panic.
+    pub fn after(self, at: Timestamp) -> Timestamp {
+        at.checked_add_signed(self.to_chrono())
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
     }
 
     /// Saturating sum.
@@ -151,6 +162,19 @@ mod tests {
         for invalid in ["", "30", "m", "30m1h", "1h1h", "1.5h", "-1m"] {
             assert!(invalid.parse::<Duration>().is_err(), "{invalid}");
         }
+    }
+
+    /// Catches a huge authored duration panicking deadline arithmetic.
+    #[test]
+    fn test_duration_after_saturates_instead_of_panicking() {
+        let now = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        assert_eq!(
+            Duration::from_secs(u64::MAX).after(now),
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+        );
+        let huge: Duration = "100000000d".parse().unwrap();
+        assert_eq!(huge.after(now), chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        assert_eq!(Duration::from_mins(1).after(now), now + chrono::Duration::minutes(1));
     }
 
     proptest::proptest! {

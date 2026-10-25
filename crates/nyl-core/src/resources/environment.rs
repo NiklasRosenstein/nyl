@@ -14,6 +14,7 @@ use super::gitops::{validate_repository_choice, validate_static_required, GitOps
 use super::strict::DenyUnknownFields;
 use super::{GitSource, InlineGitRepository, LabelSelector, LocalReference};
 use crate::constants::API_VERSION_GITOPS;
+use crate::orchestration::codes::{Code, Finding};
 use crate::orchestration::ids::EnvironmentName;
 use crate::{CoreError, Result};
 
@@ -343,6 +344,99 @@ impl EnvironmentGroup {
     }
 }
 
+/// The group whose shared fields apply to `environment`, if any.
+///
+/// Contract: [Environment groups](../../../../design/orchestration-core.md#environment-groups).
+/// Groups that only select may overlap. An environment selected by more
+/// than one group that carries shared fields is an error naming the groups
+/// ([`Code::EnvironmentGroupOverlap`]), because the order of their defaults
+/// would be arbitrary.
+pub fn sharing_group<'a>(
+    environment: &Environment,
+    groups: &'a [EnvironmentGroup],
+) -> std::result::Result<Option<&'a EnvironmentGroup>, Finding> {
+    let sharing = groups
+        .iter()
+        .filter(|group| group.has_shared_fields() && group.selects(&environment.metadata.labels))
+        .collect::<Vec<_>>();
+    match sharing.as_slice() {
+        [] => Ok(None),
+        [group] => Ok(Some(group)),
+        several => Err(Finding::new(
+            Code::EnvironmentGroupOverlap,
+            format!(
+                "Environment {} is selected by EnvironmentGroups {} that all carry shared fields",
+                environment.metadata.name,
+                several
+                    .iter()
+                    .map(|group| group.metadata.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "narrow the groups' environmentSelector, or keep shared fields in one of them",
+        )),
+    }
+}
+
+/// `environment` with the defaults of the group sharing it applied: the one
+/// owner of the group-defaults rule, called by every entry point (unit
+/// rendering at S, and the shell's entry fields).
+///
+/// Contract: [Environment](../../../../design/orchestration-core.md#environment)
+/// and [Environment groups](../../../../design/orchestration-core.md#environment-groups).
+/// - `values` merge recursively: the group's beneath the Environment's, and
+///   the Environment wins; arrays and scalars are replaced, objects merge.
+/// - `protectedRefs`, `allowUnprotectedSource`, and `admission` take the
+///   group's value when the Environment omits them.
+/// - `state` is left as written: the state location rule
+///   (`nyl_orchestration::rules::state_location`) applies the group's
+///   repository itself.
+pub fn effective_environment(
+    environment: &Environment,
+    groups: &[EnvironmentGroup],
+) -> std::result::Result<Environment, Finding> {
+    let mut effective = environment.clone();
+    let Some(group) = sharing_group(environment, groups)? else {
+        return Ok(effective);
+    };
+    let mut values = serde_json::Value::Object(group.spec.values.clone().into_iter().collect());
+    merge_values(
+        &mut values,
+        serde_json::Value::Object(environment.spec.values.clone().into_iter().collect()),
+    );
+    if let serde_json::Value::Object(map) = values {
+        effective.spec.values = map.into_iter().collect();
+    }
+    let spec = &mut effective.spec;
+    if spec.protected_refs.is_none() {
+        spec.protected_refs.clone_from(&group.spec.protected_refs);
+    }
+    if spec.allow_unprotected_source.is_none() {
+        spec.allow_unprotected_source = group.spec.allow_unprotected_source;
+    }
+    if spec.admission.is_none() {
+        spec.admission = group.spec.admission;
+    }
+    Ok(effective)
+}
+
+/// Merge `overlay` into `base`: objects merge key by key, anything else is replaced.
+fn merge_values(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_values(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
 fn validate_envelope(api_version: &str, kind: &str, expected: &str) -> Result<()> {
     if api_version != API_VERSION_GITOPS {
         return Err(CoreError::config(format!(
@@ -369,6 +463,63 @@ mod tests {
         }))?;
         environment.validate()?;
         Ok(environment)
+    }
+
+    fn group(name: &str, spec: &serde_json::Value) -> EnvironmentGroup {
+        serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "EnvironmentGroup", "metadata": {"name": name}, "spec": spec
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_only_one_sharing_group_may_select_an_environment() {
+        let environment = environment(json!({})).unwrap();
+        let selecting = group(
+            "all-production",
+            &json!({"environmentSelector": {"matchLabels": {"stage": "production"}}}),
+        );
+        let sharing = group(
+            "production",
+            &json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "values": {"tier": "prod"}}),
+        );
+        let groups = [selecting.clone(), sharing.clone()];
+        assert_eq!(
+            sharing_group(&environment, &groups).unwrap().unwrap().metadata.name,
+            "production"
+        );
+        let other = group(
+            "prod-1",
+            &json!({"environmentSelector": {"matchLabels": {"stage": "production"}}, "protectedRefs": ["main"]}),
+        );
+        let finding = sharing_group(&environment, &[selecting, sharing, other]).unwrap_err();
+        assert_eq!(finding.code, Code::EnvironmentGroupOverlap);
+        assert!(finding.message.contains("production, prod-1"), "{finding}");
+    }
+
+    #[test]
+    fn test_group_defaults_sit_beneath_the_environment() {
+        let environment = environment(json!({
+            "values": {"db": {"size": "large"}, "replicas": 3},
+            "protectedRefs": ["release/*"]
+        }))
+        .unwrap();
+        let shared = group(
+            "production",
+            &json!({
+                "environmentSelector": {"matchLabels": {"stage": "production"}},
+                "values": {"db": {"size": "small", "engine": "postgres"}, "region": "eu"},
+                "protectedRefs": ["main"],
+                "allowUnprotectedSource": true
+            }),
+        );
+        let effective = effective_environment(&environment, &[shared]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&effective.spec.values).unwrap(),
+            json!({"db": {"size": "large", "engine": "postgres"}, "replicas": 3, "region": "eu"})
+        );
+        assert_eq!(effective.spec.protected_refs, Some(vec!["release/*".to_owned()]));
+        assert_eq!(effective.spec.allow_unprotected_source, Some(true));
     }
 
     #[test]

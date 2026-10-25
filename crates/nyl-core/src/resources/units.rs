@@ -63,6 +63,9 @@ impl UnitEnvelope {
     }
 }
 
+/// The longest `spec.timeout` a unit may declare.
+pub const MAX_UNIT_TIMEOUT: Duration = Duration::from_secs(7 * 86_400);
+
 /// Fields every unit kind shares.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CommonUnitFields {
@@ -81,7 +84,7 @@ pub struct CommonUnitFields {
     /// What happens to the unit's resources when it leaves the ownership set. Default `Teardown` where the kind supports teardown, else `Retain`.
     #[serde(rename = "deletionPolicy", default, skip_serializing_if = "Option::is_none")]
     pub deletion_policy: Option<DeletionPolicy>,
-    /// Deadline for one execution, teardown, or verification. Default per kind.
+    /// Deadline for one execution, teardown, or verification, at most `7d`. Default per kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<Duration>,
     /// Variables and secrets admitted into the unit's otherwise empty tool environment.
@@ -127,6 +130,11 @@ impl CommonUnitFields {
             return Err(CoreError::config(
                 "spec.deletionPolicy Teardown is not allowed: this kind cannot tear down its resources",
             ));
+        }
+        if self.timeout.is_some_and(|timeout| timeout > MAX_UNIT_TIMEOUT) {
+            return Err(CoreError::config(format!(
+                "spec.timeout may be at most {MAX_UNIT_TIMEOUT}: a run holds its lease for the whole timeout"
+            )));
         }
         self.env.validate()?;
         for (index, attestation) in self.attestations.iter().enumerate() {
@@ -188,7 +196,7 @@ pub struct DependsOnEntry {
 }
 
 /// Evidence a consumer requires from its producer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Evidence {
     /// A current receipt.
@@ -531,6 +539,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot tear down"), "{error}");
+    }
+
+    /// Catches a timeout so large that deadline arithmetic overflows.
+    #[test]
+    fn test_command_rejects_a_timeout_above_seven_days() {
+        assert!(command(json!({"command": ["./run.sh"], "timeout": "7d"})).is_ok());
+        let error = command(json!({"command": ["./run.sh"], "timeout": "100000000d"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("spec.timeout may be at most 7d"), "{error}");
     }
 
     #[test]

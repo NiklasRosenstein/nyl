@@ -12,6 +12,7 @@
 
 mod image;
 mod infra;
+mod publication;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -24,6 +25,7 @@ use serde_json::Value;
 
 pub use image::FakeImage;
 pub use infra::FakeInfra;
+pub use publication::FakePublication;
 
 /// API version of the fake kinds.
 pub const API_VERSION_TEST_UNITS: &str = "units.test.nyl/v1";
@@ -37,6 +39,7 @@ pub fn stand_in_for(api_version: &str, kind: &str) -> Option<&'static str> {
     match kind {
         "OciImage" => Some(image::KIND),
         "OpenTofu" | "Terraform" => Some(infra::KIND),
+        "KubernetesPublication" => Some(publication::KIND),
         _ => None,
     }
 }
@@ -224,8 +227,11 @@ mod tests {
             env: BTreeMap::new(),
             approved_digest: approved,
             deadline: chrono::Utc::now(),
+            now: chrono::Utc::now(),
             observed: None,
             tools,
+            commit_identity: None,
+            cache_dir: directory.path().join("cache"),
         }
     }
 
@@ -347,6 +353,10 @@ mod tests {
     fn test_stand_ins_cover_the_kinds_m3_lacks() {
         assert_eq!(stand_in_for("units.gitops.nyl/v1", "OciImage"), Some("FakeImage"));
         assert_eq!(stand_in_for("units.gitops.nyl/v1", "OpenTofu"), Some("FakeInfra"));
+        assert_eq!(
+            stand_in_for("units.gitops.nyl/v1", "KubernetesPublication"),
+            Some("FakePublication")
+        );
         assert_eq!(stand_in_for("units.gitops.nyl/v1", "Command"), None);
     }
 }

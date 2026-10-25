@@ -1988,12 +1988,17 @@ name = "nyl-drivers"
 version = "0.5.9"
 dependencies = [
  "chrono",
+ "glob",
+ "hex",
+ "libc",
  "nyl-core",
  "nyl-render",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
