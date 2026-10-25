@@ -16,20 +16,11 @@ fn project() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs/_project")
 }
 
-/// A fresh clone of the shared project. Its Cluster gains the kind scopes
-/// `nyl capture cluster` would record, so the target's generated AppProject
+/// A fresh clone of the shared project, whose Cluster records the kind
+/// scopes `nyl capture cluster` would, so the target's generated AppProject
 /// can be derived.
 fn checkout(world: &World) -> std::path::PathBuf {
-    let checkout = world.fresh_clone("main");
-    let platform = checkout.join("nyl/platform.yaml");
-    let contents = std::fs::read_to_string(&platform).unwrap();
-    let patched = contents.replace(
-        "    apiVersions: [v1, apps/v1]\n",
-        "    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]\n    clusterScopedKinds: [core/Namespace]\n",
-    );
-    assert_ne!(patched, contents, "the shared project's Cluster lists its API versions");
-    std::fs::write(&platform, patched).unwrap();
-    checkout
+    world.fresh_clone("main")
 }
 
 fn nyl_validate(world: &World, checkout: &Path) -> Command {
