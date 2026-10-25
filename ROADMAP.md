@@ -92,7 +92,12 @@ part removes the walkthroughs it makes pass from the harness's pending list.
    with `--wait-lease`, `--local` runs, state without a remote,
    `state move --from local`, `state reset` and `restore`, crash injection
    at every fault point, and property tests of the transition table.
-   Walkthroughs: `effects-without-receipt`, `competing-runners`.
+   Runs also stop paying a full checkout of the repository per unit: each
+   concurrency slot keeps one worktree and resets it between units to the
+   unit's commit, removing untracked and ignored files, so a unit sees
+   exactly what a fresh checkout holds; the symbolic-link check of a commit's
+   tree runs once per commit. Walkthroughs: `effects-without-receipt`,
+   `competing-runners`.
 5. Lifecycle: `teardown` (including `--hold`, `--all`, and
    `--confirm-removed`), `hold`, `resume`, `state delete` with
    decommissioning, teardown order, and `--allow-teardown` /
@@ -847,6 +852,12 @@ recovery path; the M3 part of the
 - [ ] Support a local-module Terraform configuration pinned to a source commit
   and path.
 - [ ] Demonstrate Terraform-to-Terraform output references.
+- [ ] Check out only what a unit reads when its kind declares its inputs:
+  `OciImage` and `Terraform`/`OpenTofu` units get a sparse worktree of their
+  source paths and the `nyl.toml` directory, so their cost in a large
+  monorepo follows the unit, not the repository. A Command unit can read
+  anything in the repository, so it keeps a full worktree unless it declares
+  the paths it reads.
 
 **Exit criterion:** a network configuration's outputs feed a dependent
 configuration; an image build records a digest; unchanged inputs plan no change;
