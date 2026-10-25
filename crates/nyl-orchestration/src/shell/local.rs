@@ -201,13 +201,27 @@ impl StateStore for LocalStore<'_> {
             .write_run_created(&Self::view(location)?, environment, run, created)
     }
 
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
-        self.inner.delete_run(&Self::view(location)?, environment, run)
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        self.inner
+            .delete_run(&Self::view(location)?, environment, run, expected)
     }
 
     /// Retires the view's run ref; never a remote one.
-    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
-        self.inner.retire_run(&Self::view(location)?, environment, run)
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        self.inner
+            .retire_run(&Self::view(location)?, environment, run, expected)
     }
 
     fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
@@ -533,11 +547,23 @@ mod tests {
             self.record("write_run", location);
             Ok(())
         }
-        fn delete_run(&self, location: &StateLocation, _: &EnvironmentName, _: &RunId) -> StateResult<()> {
+        fn delete_run(
+            &self,
+            location: &StateLocation,
+            _: &EnvironmentName,
+            _: &RunId,
+            _: Option<&str>,
+        ) -> StateResult<()> {
             self.record("delete_run", location);
             Ok(())
         }
-        fn retire_run(&self, location: &StateLocation, _: &EnvironmentName, _: &RunId) -> StateResult<()> {
+        fn retire_run(
+            &self,
+            location: &StateLocation,
+            _: &EnvironmentName,
+            _: &RunId,
+            _: Option<&str>,
+        ) -> StateResult<()> {
             self.record("retire_run", location);
             Ok(())
         }
@@ -637,10 +663,10 @@ mod tests {
             )
             .unwrap();
         store
-            .delete_run(&location, &dev(), &RunId::new(RUN_A).unwrap())
+            .delete_run(&location, &dev(), &RunId::new(RUN_A).unwrap(), None)
             .unwrap();
         store
-            .retire_run(&location, &dev(), &RunId::new(RUN_A).unwrap())
+            .retire_run(&location, &dev(), &RunId::new(RUN_A).unwrap(), None)
             .unwrap();
         store.release_lease(&location, &dev(), "v3").unwrap();
         store.snapshot(&location).unwrap();

@@ -324,16 +324,32 @@ pub trait StateStore: Send + Sync {
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()>;
 
-    /// Delete a run ref and its signal ref.
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
+    /// Delete a run ref and its signal ref. With `expected` (a
+    /// [`RunState::version`]), only while the run ref is still at that
+    /// version; otherwise [`StateError::Conflict`], so a checkpoint written
+    /// after the caller read the ref is never lost.
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()>;
 
     /// Retire a run ref a takeover imported: move its record, checkpoints,
     /// and created units to the run's evidence ref (`<prefix><env>/evidence/<run>`),
     /// appending its checkpoints when that ref exists already, then delete
     /// the run ref and its signal ref. Read back in
-    /// [`Coordination::evidence`]. Contract:
+    /// [`Coordination::evidence`]. With `expected`, only while the run ref is
+    /// still at that version, as for [`StateStore::delete_run`]. Contract:
     /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 4.
-    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()>;
 
     /// Delete a run's evidence ref, once no unit's condition needs it.
     fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()>;

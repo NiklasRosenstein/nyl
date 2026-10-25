@@ -469,7 +469,7 @@ fn test_run_refs_carry_checkpoints_and_signals_until_deleted() {
         store.send_signal(&location, &dev, &signal).unwrap();
         assert_eq!(store.signals(&location, &dev, &run.run).unwrap(), vec![signal]);
 
-        store.delete_run(&location, &dev, &run.run).unwrap();
+        store.delete_run(&location, &dev, &run.run, None).unwrap();
         assert!(
             store.coordination(&location, &dev).unwrap().runs.is_empty(),
             "{}",
@@ -689,8 +689,24 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
         assert_eq!(coordination.runs[0].created, vec![desired.clone()], "{}", subject.name);
         assert!(coordination.evidence.is_empty(), "{}", subject.name);
 
+        // A run ref that moved since it was read is neither retired nor deleted.
+        let read = coordination.runs[0].version.clone();
+        let mut moved = run.clone();
+        moved.units.clear();
+        store.write_run(&location, &dev, &moved, None).unwrap();
+        for consumed in [
+            store.retire_run(&location, &dev, &run.run, Some(&read)),
+            store.delete_run(&location, &dev, &run.run, Some(&read)),
+        ] {
+            assert!(matches!(consumed, Err(StateError::Conflict { .. })), "{}", subject.name);
+        }
+        let coordination = store.coordination(&location, &dev).unwrap();
+        assert_eq!(coordination.runs.len(), 1, "{}", subject.name);
+        assert!(coordination.evidence.is_empty(), "{}", subject.name);
+
         // Retiring moves the run ref to evidence, which no longer counts as a run.
-        store.retire_run(&location, &dev, &run.run).unwrap();
+        let current = coordination.runs[0].version.clone();
+        store.retire_run(&location, &dev, &run.run, Some(&current)).unwrap();
         let coordination = store.coordination(&location, &dev).unwrap();
         assert!(coordination.runs.is_empty(), "{}", subject.name);
         assert_eq!(coordination.evidence.len(), 1, "{}", subject.name);
@@ -706,7 +722,7 @@ fn test_created_units_ride_on_run_refs_and_retired_runs_become_evidence() {
         let mut late = run.clone();
         late.finished = true;
         store.write_run(&location, &dev, &late, Some(&checkpoint)).unwrap();
-        store.retire_run(&location, &dev, &run.run).unwrap();
+        store.retire_run(&location, &dev, &run.run, None).unwrap();
         let coordination = store.coordination(&location, &dev).unwrap();
         assert!(coordination.runs.is_empty(), "{}", subject.name);
         assert_eq!(coordination.evidence[0].checkpoints.len(), 2, "{}", subject.name);

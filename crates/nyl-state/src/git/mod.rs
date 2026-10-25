@@ -592,7 +592,13 @@ impl StateStore for GitStateStore {
         })
     }
 
-    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let run_name = run_ref(location, environment, run);
@@ -603,6 +609,7 @@ impl StateStore for GitStateStore {
         let Some(run_oid) = heads.get(&run_name).copied() else {
             return Ok(());
         };
+        stale_run(&run_name, run_oid, expected)?;
         let run_files = tree::read(&repository, refs.local(&run_name).or(Some(run_oid)))?;
         let evidence_tip = heads.get(&evidence_name).and_then(|_| refs.local(&evidence_name));
         let mut files = tree::read(&repository, evidence_tip)?;
@@ -672,7 +679,13 @@ impl StateStore for GitStateStore {
         }
     }
 
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let repository = self.open()?;
         let refs = self.refs(&repository, location);
         let names = [
@@ -680,6 +693,9 @@ impl StateStore for GitStateStore {
             signal_ref(location, environment, run),
         ];
         let heads = refs.heads(&names)?;
+        if let Some(oid) = heads.get(&names[0]) {
+            stale_run(&names[0], *oid, expected)?;
+        }
         let updates = heads
             .iter()
             .map(|(name, oid)| Update {
@@ -1254,6 +1270,17 @@ fn write_lease(
 }
 
 /// How many checkpoints a run ref's files hold.
+/// Refuse to consume a run ref that moved since the caller read it at `expected`.
+fn stale_run(name: &str, current: git2::Oid, expected: Option<&str>) -> StateResult<()> {
+    match expected {
+        Some(expected) if current.to_string() != expected => Err(StateError::Conflict {
+            reference: name.to_owned(),
+            actual: current.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn checkpoint_count(files: &Files) -> usize {
     files
         .keys()

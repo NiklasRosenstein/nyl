@@ -472,19 +472,33 @@ impl StateStore for MemoryStateStore {
         Ok(())
     }
 
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let mut inner = self.lock();
         let key = coordination_key(location, environment);
         if let Some(runs) = inner.runs.get_mut(&key) {
+            stale_run(runs.get(run), run, expected)?;
             runs.remove(run);
         }
         inner.signals.remove(&(key.0, key.1, key.2, run.clone()));
         Ok(())
     }
 
-    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let mut inner = self.lock();
         let key = coordination_key(location, environment);
+        stale_run(inner.runs.get(&key).and_then(|runs| runs.get(run)), run, expected)?;
         let Some(retired) = inner.runs.get_mut(&key).and_then(|runs| runs.remove(run)) else {
             return Ok(());
         };
@@ -815,6 +829,17 @@ fn apply_map<V: Clone>(target: &mut BTreeMap<UnitName, V>, changes: &BTreeMap<Un
                 target.remove(unit);
             }
         }
+    }
+}
+
+/// Refuse to consume a run ref that moved since the caller read it at `expected`.
+fn stale_run(current: Option<&RunState>, run: &RunId, expected: Option<&str>) -> StateResult<()> {
+    match (current, expected) {
+        (Some(current), Some(expected)) if current.version != expected => Err(StateError::Conflict {
+            reference: format!("runs/{run}"),
+            actual: current.version.clone(),
+        }),
+        _ => Ok(()),
     }
 }
 

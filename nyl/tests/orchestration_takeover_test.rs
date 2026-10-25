@@ -427,7 +427,13 @@ impl StateStore for FailingDeleteStore {
         }
         self.inner.write_run(location, environment, run, checkpoint)
     }
-    fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
+    fn delete_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
         let failing = self
             .failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
@@ -435,10 +441,16 @@ impl StateStore for FailingDeleteStore {
         if failing {
             return Err(StateError::Unavailable("push failed: connection reset".to_owned()));
         }
-        self.inner.delete_run(location, environment, run)
+        self.inner.delete_run(location, environment, run, expected)
     }
-    fn retire_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
-        self.inner.retire_run(location, environment, run)
+    fn retire_run(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &RunId,
+        expected: Option<&str>,
+    ) -> StateResult<()> {
+        self.inner.retire_run(location, environment, run, expected)
     }
     fn delete_evidence(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
         self.inner.delete_evidence(location, environment, run)
@@ -887,8 +899,8 @@ fn test_inspect_policy_unknown_leaves_the_condition() {
     assert_eq!(uncertain_run(snapshot.observed.get(&unit("network"))), first.run);
 }
 
-/// A run cancelled during a wave starts nothing more, checkpoints the unit
-/// that finished, gives the unit still running an uncertain condition after
+/// A run cancelled while a unit runs starts nothing more, keeps the
+/// checkpoint of the unit that finished, gives the unit still running an uncertain condition after
 /// its tool got the signal, keeps its run ref marked finished, releases the
 /// lease, writes no transition commit, and exits 4 with
 /// `NYL-RUN-CANCELLED`; the next run imports the run ref as after a crash.
@@ -901,7 +913,11 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
         ("nyl/nyl.toml", "[project]\n".to_owned()),
         ("nyl/environment.yaml", ENVIRONMENT.to_owned()),
         ("nyl/quick.yaml", command("quick", "true", "")),
-        ("nyl/slow.yaml", command("slow", &slow, "  idempotent: true\n")),
+        // After quick, so quick's checkpoint never races the signal.
+        (
+            "nyl/slow.yaml",
+            command("slow", &slow, "  idempotent: true\n  dependsOn: [quick]\n"),
+        ),
     ];
     let files: Vec<(&str, &str)> = files.iter().map(|(path, content)| (*path, content.as_str())).collect();
     let project = project(&files);

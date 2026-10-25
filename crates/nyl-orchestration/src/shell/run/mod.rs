@@ -1641,13 +1641,23 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return;
             }
         };
+        // Consume each run ref only at the version the takeover imported; a
+        // ref that moved in between is left for the next run.
+        let version = |run: &RunId| {
+            leftovers
+                .runs
+                .iter()
+                .find(|state| &state.run.run == run)
+                .map(|state| state.version.as_str())
+        };
         let mut failures = Vec::new();
         for run in &consumption.delete {
-            failures.extend(store.delete_run(location, environment, run).err());
+            failures.extend(store.delete_run(location, environment, run, version(run)).err());
         }
         for run in &consumption.retire {
-            failures.extend(store.retire_run(location, environment, run).err());
+            failures.extend(store.retire_run(location, environment, run, version(run)).err());
         }
+        failures.retain(|error| !matches!(error, StateError::Conflict { .. }));
         for run in &consumption.delete_evidence {
             failures.extend(store.delete_evidence(location, environment, run).err());
         }
@@ -1684,7 +1694,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         };
         if delete {
-            if let Err(error) = base.store.delete_run(self.location(), self.environment(), &self.run) {
+            if let Err(error) = base
+                .store
+                .delete_run(self.location(), self.environment(), &self.run, None)
+            {
                 let finding = store_error(self.environment(), &error);
                 self.report.warnings.push(finding);
             }

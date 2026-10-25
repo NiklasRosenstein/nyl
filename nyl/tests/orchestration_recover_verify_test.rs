@@ -420,7 +420,7 @@ fn test_accept_adopts_a_late_checkpoint_and_deletes_its_evidence_ref() {
         artifacts: BTreeMap::new(),
     };
     store.write_run(&location, &dev(), &record, Some(&checkpoint)).unwrap();
-    store.retire_run(&location, &dev(), &late).unwrap();
+    store.retire_run(&location, &dev(), &late, None).unwrap();
     store
         .release_lease(&location, &dev(), &committed.lease_version)
         .unwrap();
