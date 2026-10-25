@@ -65,9 +65,17 @@ pub struct DiscoveredUnit {
     pub envelope: UnitEnvelope,
 }
 
+/// A project-relative path as messages name it, with `/` on every platform.
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl DiscoveredUnit {
     fn location(&self) -> String {
-        format!("{} document {}", self.source_path.display(), self.document_index)
+        format!("{} document {}", slash_path(&self.source_path), self.document_index)
     }
 
     fn is_publication(&self) -> bool {
@@ -92,7 +100,7 @@ pub fn discover_units(inventory: &GitOpsInventory) -> Result<BTreeMap<UnitName, 
             if !UnitEnvelope::is_unit_api_version(api_version) {
                 continue;
             }
-            let location = format!("{} document {}", relative_path.display(), index + 1);
+            let location = format!("{} document {}", slash_path(relative_path), index + 1);
             let envelope = scan_unit_envelope(document, &location)?;
             let name = envelope
                 .name()
@@ -359,7 +367,7 @@ fn unit_template_context(environment: &Environment) -> Value {
 fn render_unit(unit: &DiscoveredUnit, context: &Value) -> Result<Option<Value>> {
     let location = unit.location();
     let rendered = TemplateEngine::new()
-        .render_named(&unit.source_path.display().to_string(), &unit.raw_document, context)
+        .render_named(&slash_path(&unit.source_path), &unit.raw_document, context)
         .map_err(|error| unit_invalid(&location, &format!("rendering failed: {error}")))?;
     let mut documents = SourceContext::new(unit.source_path.clone())
         .parse_yaml_documents(&rendered)
