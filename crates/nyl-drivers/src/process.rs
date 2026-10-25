@@ -482,13 +482,18 @@ mod tests {
         assert!(started.elapsed() < StdDuration::from_secs(10));
     }
 
+    /// A 30-second sleep in a new session, outside the tool's process group.
+    const ESCAPED_SLEEP: &str = "perl -MPOSIX -e 'POSIX::setsid(); sleep 30'";
+
     #[test]
     fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_after_the_tool_exits() {
         let (mut runner, _) = quiet();
         runner.kill_grace = StdDuration::from_millis(200);
-        // `setsid` moves `sleep` out of the tool's process group, so no group
-        // signal reaches it, and it holds stdout and stderr open.
-        let mut invocation = sh("setsid sleep 30 & exit 0");
+        // `setsid()` moves the sleeping child out of the tool's process group,
+        // so no group signal reaches it, and it holds stdout and stderr open.
+        // Perl's POSIX module provides it on Linux and macOS alike, which has
+        // no `setsid` command.
+        let mut invocation = sh(&format!("{ESCAPED_SLEEP} & exit 0"));
         invocation.timeout = Some(StdDuration::from_millis(300));
         let started = Instant::now();
         assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
@@ -499,7 +504,7 @@ mod tests {
     fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_while_the_tool_runs() {
         let (mut runner, _) = quiet();
         runner.kill_grace = StdDuration::from_millis(200);
-        let mut invocation = sh("setsid sleep 30 & wait");
+        let mut invocation = sh(&format!("{ESCAPED_SLEEP} & wait"));
         invocation.timeout = Some(StdDuration::from_millis(300));
         let started = Instant::now();
         assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
