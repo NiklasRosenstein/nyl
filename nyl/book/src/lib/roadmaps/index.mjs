@@ -5,6 +5,8 @@ import { orchestrationRoadmap } from './orchestration.mjs';
 
 export const roadmaps = [orchestrationRoadmap, domainResourcesRoadmap];
 
+export const issueUrl = (number) => `https://github.com/NiklasRosenstein/nyl/issues/${number}`;
+
 export const statusLabels = { done: 'Done', 'in-progress': 'In progress', planned: 'Planned' };
 
 const byId = (id) => roadmaps.find((roadmap) => roadmap.id === id);

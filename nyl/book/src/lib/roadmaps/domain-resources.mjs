@@ -14,6 +14,8 @@ export const domainResourcesRoadmap = {
     'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. The guide runs end to end.',
   // Set when the exit criterion is met, which completes M9.
   done: false,
+  // GitHub issues this roadmap delivers; close them when `done` is set.
+  issues: [173],
   stages: [
     {
       id: 'R1',

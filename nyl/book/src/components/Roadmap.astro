@@ -9,6 +9,7 @@ import RoadmapText from './RoadmapText.astro';
 import {
   delegateRoadmap,
   findStage,
+  issueUrl,
   prerequisites,
   roadmapProgress,
   stageNeeds,
@@ -65,6 +66,9 @@ const required = prerequisites(roadmap).map((id: string) => {
           <span>
             {overall.done} of {overall.total} {roadmap.itemNoun} done
           </span>
+          {(roadmap.issues ?? []).map((number: number) => (
+            <a href={issueUrl(number)}>#{number}</a>
+          ))}
         </div>
         <div
           class="bar"
@@ -171,6 +175,12 @@ const required = prerequisites(roadmap).map((id: string) => {
               <footer>
                 <span>
                   {progress.done} of {progress.total} done
+                  {(stage.issues ?? []).map((number: number) => (
+                    <>
+                      {' · '}
+                      <a href={issueUrl(number)}>#{number}</a>
+                    </>
+                  ))}
                 </span>
                 {needs.length > 0 && (
                   <span class="needs">

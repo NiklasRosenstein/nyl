@@ -54,10 +54,16 @@ test('done is set only where every item and stage beneath it is done', () => {
   }
 });
 
+test('linked issues are GitHub issue numbers, each tracked in one place', () => {
+  const issues = [...roadmaps, ...allStages.map(({ stage }) => stage)].flatMap((tracker) => tracker.issues ?? []);
+  for (const number of issues) assert.ok(Number.isInteger(number) && number > 0, `issue ${number}`);
+  assert.deepEqual(issues, [...new Set(issues)]);
+});
+
 test('a delegating stage takes its title, needs, and items from its roadmap', () => {
   for (const { stage } of allStages.filter(({ stage }) => stage.delegate)) {
     assert.ok(roadmaps.some((roadmap) => roadmap.id === stage.delegate), `${stage.id} delegates to ${stage.delegate}`);
-    for (const field of ['title', 'needs', 'items', 'done']) {
+    for (const field of ['title', 'needs', 'items', 'done', 'issues']) {
       assert.equal(stage[field], undefined, `${stage.id}.${field} belongs to ${stage.delegate}`);
     }
   }

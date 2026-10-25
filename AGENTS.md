@@ -54,6 +54,11 @@ bug, and document a deliberate one where users choose it.
   from implemented capabilities, and preserve milestone identifiers for
   references from issues and pull requests. ROADMAP.md keeps the direction and
   the list of milestone identifiers.
+- A roadmap or stage lists the GitHub issues it delivers in `issues`. The
+  change that sets its `done` closes them: its pull request says
+  `Closes #<number>` for each, or they are closed with a comment linking the
+  roadmap page once it merges. A pull request that only advances a stage says
+  `Refs #<number>` instead, so the issue stays open until the stage is done.
 - Describe the current direction directly. Do not add "previously planned",
   superseded alternatives, or a chronological decision log to ROADMAP.md.
   Historical reasoning belongs in commit messages, pull requests, or dedicated
