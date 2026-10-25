@@ -1,0 +1,30 @@
+# Crash injection: killed after network's effect, before its checkpoint.
+contract: design/orchestration-core.md#runs-and-leases
+milestone: M3
+tiers: [1]                            # scripts faults
+project: ../../walkthroughs/_project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - fault: {point: after-effect, unit: network}   # applied, never checkpointed
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - clock: {advance: 69m}             # one minute before wave 1's deadline: 60m timeout plus 10m grace
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the dead run's lease and run ref are still within their deadline
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - clock: {advance: 2m}              # past the deadline
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      imported: []                    # the run stopped at network's result: no wave-1 unit was checkpointed
+      recovered: [network, web-image] # started by the dead run without a checkpoint: converged
+      executed: [database, kubernetes]
+      commits: {desired: 1, observed: 1}
+      units:
+        network: {condition: null, receipt: current}
+        web-image: {condition: null, receipt: current}
+        database: {condition: null, receipt: current}
+        kubernetes: {condition: null, receipt: current}
