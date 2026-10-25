@@ -908,7 +908,9 @@ fn test_inspect_policy_unknown_leaves_the_condition() {
 fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_commit() {
     let markers = TempDir::new().unwrap();
     let started = markers.path().join("started");
-    let slow = format!("[ -e {0} ] && exit 0; touch {0}; sleep 30", started.display());
+    // Forward slashes: `sh` on Windows reads backslashes as escapes.
+    let marker = started.display().to_string().replace('\\', "/");
+    let slow = format!("[ -e \"{marker}\" ] && exit 0; touch \"{marker}\"; sleep 30");
     let files = [
         ("nyl/nyl.toml", "[project]\n".to_owned()),
         ("nyl/environment.yaml", ENVIRONMENT.to_owned()),
