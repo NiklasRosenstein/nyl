@@ -7,98 +7,62 @@ mod scenario;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::Parser as _;
-use nyl::cli::Cli;
 use nyl::orchestration::run::{CommandOutcome, Wiring};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
-    Capabilities, Driver, DriverOperation, DriverResult, DriverSet, ExecStatus, ExecutionContext, Inspection,
-    KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported,
-    Verification,
+    Capabilities, Driver, DriverOperation, DriverResult, ExecStatus, ExecutionContext, Inspection, KeyInputs,
+    LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported, Verification,
 };
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
-use nyl_core::orchestration::ports::{
-    Checkpoint, Clock as _, CommitIdentity, SourceRenderer as _, StateStore, Transition, TransitionChanges,
-};
+use nyl_core::orchestration::ids::{EnvironmentName, RunId};
+use nyl_core::orchestration::ports::{Checkpoint, Clock as _, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{
     ArtifactDocument, Condition, DesiredUnit, FailureCategory, Lease, LeaseKind, ObservedUnit, Operation, Receipt, Run,
-    RunKind, StateLocation, StateV1,
+    RunKind, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
-use nyl_drivers::fake::{FakeImage, FakeInfra, FakePublication, Script, Scripted};
+use nyl_drivers::fake::{FakeImage, FakeInfra, FakePublication, Scripted};
 use nyl_drivers::process::ProcessRunner;
-use nyl_git::GitAuth;
-use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint, NoFaults};
+use nyl_orchestration::fault::{FaultInjector, FaultPoint, NoFaults};
 use nyl_orchestration::run_report::EnvironmentRunReport;
-use nyl_orchestration::shell::run::{Cancellation, RunContext, RunRequest};
+use nyl_orchestration::shell::run::Cancellation;
 use nyl_orchestration::shell::verify;
-use nyl_orchestration::shell::{Context, Settings};
-use nyl_orchestration::testing::{FakeClock, SequentialIds};
-use nyl_render::gitops::units::UnitSourceRenderer;
-use nyl_state::git::{CommitAuthor, GitStateStore};
-use nyl_state::source::GitSourceResolver;
-use scenario::world::{git, git_output, World};
+use nyl_orchestration::shell::Settings;
+use nyl_orchestration::testing::FakeClock;
+use scenario::runner::{invoke_in, FaultSlot, AUTHOR};
+use scenario::shell::{self, dev, shared_project, unit};
+use scenario::world::{git, git_output, lease};
 use serde_json::Value;
 
-const AUTHOR: &str = "Scenario <scenario@example.invalid>";
 const OBSERVED: &str = "refs/heads/nyl/dev/observed";
 const DESIRED: &str = "refs/heads/nyl/dev/desired";
 
-fn project() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs/_project")
+/// One test world: the shared project, a Git state store to stage state
+/// with, a clock tests advance, and the fake kinds.
+struct Harness {
+    shell: shell::Harness,
 }
 
-fn unit(name: &str) -> UnitName {
-    UnitName::new(name).unwrap()
-}
+impl std::ops::Deref for Harness {
+    type Target = shell::Harness;
 
-fn dev() -> EnvironmentName {
-    EnvironmentName::new("dev").unwrap()
-}
-
-/// Kills a run at one fault point, for one unit or for the unit-less call.
-struct KillAt {
-    point: FaultPoint,
-    unit: Option<&'static str>,
-}
-
-impl FaultInjector for KillAt {
-    fn at(&self, point: FaultPoint, unit: Option<&UnitName>) -> FaultAction {
-        if point == self.point && unit.map(UnitName::as_str) == self.unit {
-            FaultAction::Kill
-        } else {
-            FaultAction::Continue
-        }
+    fn deref(&self) -> &shell::Harness {
+        &self.shell
     }
 }
 
-/// One test world: the project, a clock tests advance, and the fake kinds.
-struct Harness {
-    world: World,
-    clock: Arc<FakeClock>,
-    ids: SequentialIds,
-    script: Script,
-    drivers: DriverSet,
-    tools: ProcessRunner,
+impl std::ops::DerefMut for Harness {
+    fn deref_mut(&mut self) -> &mut shell::Harness {
+        &mut self.shell
+    }
 }
 
 impl Harness {
     fn new() -> Self {
-        let start = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
-            .unwrap()
-            .to_utc();
-        let script = Script::new();
-        let drivers = nyl_drivers::registry::with_test_kinds(&script);
         Self {
-            world: World::new(&project()),
-            clock: Arc::new(FakeClock::new(start)),
-            ids: SequentialIds::new(),
-            script,
-            drivers,
-            tools: ProcessRunner::new(),
+            shell: shell::Harness::new(&shared_project(), true),
         }
     }
 
@@ -109,25 +73,20 @@ impl Harness {
 
     /// `nyl <args>` in-process in `directory` of a fresh clone of `main`.
     fn invoke_in(&self, args: &[&str], directory: &str, faults: &dyn FaultInjector) -> CommandOutcome {
-        let clone = self.world.fresh_clone("main").join(directory);
-        let process_env = std::env::var("PATH")
-            .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
-            .unwrap_or_default();
+        let tools = ProcessRunner::new();
         let wiring = Wiring {
             clock: self.clock.clone(),
             ids: &self.ids,
             drivers: &self.drivers,
-            tools: &self.tools,
+            tools: &tools,
             faults,
             runner: "test-runner".to_owned(),
             author: Some(AUTHOR.parse().unwrap()),
-            process_env,
-            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+            process_env: self.process_env.clone(),
+            cancellation: Cancellation::default(),
         };
-        let argv = std::iter::once("nyl".to_owned())
-            .chain(args.iter().map(|arg| (*arg).to_owned()))
-            .chain(std::iter::once(clone.display().to_string()));
-        Cli::try_parse_from(argv).unwrap().execute_in_process(&wiring).unwrap()
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        invoke_in(&self.world, &wiring, &args, "main", directory).unwrap()
     }
 
     fn invoke(&self, args: &[&str]) -> CommandOutcome {
@@ -163,29 +122,6 @@ impl Harness {
 
     fn show(&self, reference: &str, path: &str) -> String {
         git_output(&self.world.bare(), &["show", &format!("{reference}:{path}")])
-    }
-
-    /// A state store of its own on a fresh clone, to stage state the
-    /// commands then work on.
-    fn store(&self) -> (GitStateStore, StateLocation) {
-        let clone = self.world.fresh_clone("main");
-        let identity: CommitIdentity = AUTHOR.parse().unwrap();
-        let store = GitStateStore::new(
-            clone.join(".git"),
-            GitAuth::none(),
-            CommitAuthor {
-                identity,
-                clock: self.clock.clone(),
-            },
-        );
-        let location = StateLocation {
-            repository: self.world.project_url(),
-            desired_ref: "nyl/dev/desired".to_owned(),
-            observed_ref: "nyl/dev/observed".to_owned(),
-            path: String::new(),
-            coordination_ref_prefix: "refs/nyl/".to_owned(),
-        };
-        (store, location)
     }
 }
 
@@ -268,10 +204,7 @@ fn test_recover_exits_2_while_another_run_holds_the_lease() {
     harness.init();
     let killed = harness.invoke_with(
         &["reconcile", "-e", "dev"],
-        &KillAt {
-            point: FaultPoint::BeforePush,
-            unit: None,
-        },
+        &FaultSlot::kill_once(FaultPoint::BeforePush, None),
     );
     assert_ne!(killed.exit, 0);
     let observed = harness.tip(OBSERVED);
@@ -296,10 +229,7 @@ fn crash_after_effect(harness: &Harness) {
     assert_eq!(harness.reconcile(&["--unit", "web-image"]).exit, 3);
     let killed = harness.invoke_with(
         &["reconcile", "-e", "dev", "--unit", "network"],
-        &KillAt {
-            point: FaultPoint::AfterEffect,
-            unit: Some("network"),
-        },
+        &FaultSlot::kill_once(FaultPoint::AfterEffect, Some("network")),
     );
     assert_ne!(killed.exit, 0);
     assert!(
@@ -353,7 +283,7 @@ fn test_accept_adopts_a_late_checkpoint_and_deletes_its_evidence_ref() {
 
     // Stage what a takeover leaves: network uncertain, and the late run's
     // checkpoint of it on an evidence ref.
-    let (store, location) = harness.store();
+    let (store, location) = (harness.store.as_ref(), harness.location.clone());
     let snapshot = store.snapshot(&location).unwrap();
     let network = unit("network");
     let late = RunId::new("00000000-0000-7000-9000-0000000000ff").unwrap();
@@ -564,20 +494,6 @@ struct Recorder {
     cancel: Mutex<Option<Cancellation>>,
 }
 
-impl Recorder {
-    fn lease_deadline(&self) -> Option<Timestamp> {
-        let output = std::process::Command::new("git")
-            .current_dir(&self.bare)
-            .args(["show", "refs/nyl/dev/lease:lease.yaml"])
-            .output()
-            .unwrap();
-        let text = String::from_utf8(output.stdout).unwrap();
-        text.lines()
-            .find_map(|line| line.strip_prefix("deadline:"))
-            .map(|value| value.trim().trim_matches(['\'', '"']).parse().unwrap())
-    }
-}
-
 /// A fake kind that records what its `verify` calls see and lets time pass
 /// during them, delegating everything to the fake it wraps.
 struct Recording {
@@ -641,7 +557,7 @@ impl Driver for Recording {
             deadline: ctx.deadline,
             project_dir: ctx.project_dir.clone(),
             project_found: ctx.project_dir.join("nyl.toml").is_file(),
-            lease_deadline: self.recorder.lease_deadline(),
+            lease_deadline: lease(&self.recorder.bare).map(|lease| lease.deadline),
         });
         let advance = self.recorder.advance.lock().unwrap().get(&name).copied();
         if let Some(advance) = advance {
@@ -715,49 +631,9 @@ impl Harness {
 
     /// [`Self::verify_with_concurrency`] with `cancellation`.
     fn verify_cancelled_by(&self, concurrency: usize, cancellation: Cancellation) -> EnvironmentRunReport {
-        let clone = self.world.fresh_clone("main");
-        let (store, location) = self.store();
-        let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
-        let sources = GitSourceResolver::new(clone.join(".git"), GitAuth::none());
-        let renderer = UnitSourceRenderer::new("/nyl");
-        let entry = renderer.render(&clone, &dev(), &entry_commit).unwrap().environment;
-        let request = RunRequest {
-            environment: dev(),
-            entry,
-            location,
-            entry_commit,
-            entry_project_dir: "/nyl".to_owned(),
-            units: None,
-            concurrency,
-            source_override: None,
-            wait: None,
-            local: None,
-            cancellation,
-        };
-        let base = Context {
-            store: &store,
-            clock: self.clock.as_ref(),
-            ids: &self.ids,
-            faults: &NoFaults,
-            runner: "test-runner".to_owned(),
-            requested_by: "test".to_owned(),
-            version: "0.0.0-test".to_owned(),
-            settings: Settings::default(),
-        };
-        let identity: CommitIdentity = AUTHOR.parse().unwrap();
-        let workspace = tempfile::TempDir::new().unwrap();
-        let process_env = BTreeMap::new();
-        let context = RunContext {
-            base: &base,
-            sources: &sources,
-            renderer: &renderer,
-            drivers: &self.drivers,
-            tools: &self.tools,
-            workspace: workspace.path(),
-            process_env: &process_env,
-            commit_identity: Some(&identity),
-        };
-        verify::verify(&context, &request).environments.remove(0)
+        let mut job = self.job(&[], cancellation);
+        job.request.concurrency = concurrency;
+        self.run_with(&job, verify::verify).environments.remove(0)
     }
 }
 

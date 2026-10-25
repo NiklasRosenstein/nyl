@@ -42,14 +42,6 @@ type Sink = Option<Arc<Mutex<Vec<u8>>>>;
 /// Runs tools as child processes.
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
-    /// Secret values masked in every transcript, in addition to each
-    /// invocation's own [`ToolInvocation::masked`].
-    masked: Vec<String>,
-    /// Default budget for invocations without [`ToolInvocation::timeout`];
-    /// `None` runs those without a deadline. Drivers set the per-invocation
-    /// timeout from their context's `deadline - now`, so this runner never
-    /// reads a clock to decide one (it measures elapsed time with `Instant`).
-    timeout: Option<StdDuration>,
     /// Time between SIGTERM and SIGKILL; [`KILL_GRACE`] except in tests.
     pub(crate) kill_grace: StdDuration,
     /// A buffer that receives the transcript instead of stderr, for tests.
@@ -63,8 +55,6 @@ pub struct ProcessRunner {
 impl Default for ProcessRunner {
     fn default() -> Self {
         Self {
-            masked: Vec::new(),
-            timeout: None,
             kill_grace: KILL_GRACE,
             transcript: None,
             cancel: None,
@@ -75,13 +65,6 @@ impl Default for ProcessRunner {
 impl ProcessRunner {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Mask these values wherever a transcript would show them.
-    #[must_use]
-    pub fn masking(mut self, secrets: Vec<String>) -> Self {
-        self.masked = secrets;
-        self
     }
 
     /// Forward the signal `cancel` holds, once it is set (non-zero), to the
@@ -102,21 +85,13 @@ impl ProcessRunner {
             .map(|cancel| cancel.load(Ordering::SeqCst))
             .filter(|signal| *signal != 0)
     }
-
-    /// Terminate each invocation's process group after `timeout`.
-    #[must_use]
-    pub fn with_timeout(mut self, timeout: StdDuration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
 }
 
 impl ToolRunner for ProcessRunner {
     fn run(&self, invocation: ToolInvocation) -> DriverResult<ToolExit> {
-        let mut masked = self
+        let mut masked = invocation
             .masked
             .iter()
-            .chain(&invocation.masked)
             .filter(|value| !value.is_empty())
             .cloned()
             .collect::<Vec<_>>();
@@ -124,7 +99,7 @@ impl ToolRunner for ProcessRunner {
         masked.sort_by_key(|value| std::cmp::Reverse(value.len()));
         masked.dedup();
         let masked = Arc::new(masked);
-        let timeout = invocation.timeout.or(self.timeout);
+        let timeout = invocation.timeout;
 
         let mut command = Command::new(&invocation.program);
         command
@@ -565,11 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn test_run_masks_invocation_and_default_secrets_in_the_transcript() {
+    fn test_run_masks_invocation_secrets_in_the_transcript() {
         let (runner, transcript) = quiet();
-        let runner = runner.masking(vec!["default-secret".to_owned()]);
         let mut invocation = sh("echo token=hunter2; echo other=default-secret >&2");
-        invocation.masked = vec!["hunter2".to_owned()];
+        invocation.masked = vec!["hunter2".to_owned(), "default-secret".to_owned()];
         let ToolExit::Exited { stdout, .. } = runner.run(invocation).unwrap() else {
             panic!("the tool runs");
         };
@@ -597,30 +571,27 @@ mod tests {
     /// A 30-second sleep in a new session, outside the tool's process group.
     const ESCAPED_SLEEP: &str = "perl -MPOSIX -e 'POSIX::setsid(); sleep 30'";
 
+    /// Covers the escaped child holding the pipes after the tool exited
+    /// and while it still runs.
     #[test]
-    fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_after_the_tool_exits() {
-        let (mut runner, _) = quiet();
-        runner.kill_grace = StdDuration::from_millis(200);
+    fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes() {
         // `setsid()` moves the sleeping child out of the tool's process group,
         // so no group signal reaches it, and it holds stdout and stderr open.
         // Perl's POSIX module provides it on Linux and macOS alike, which has
         // no `setsid` command.
-        let mut invocation = sh(&format!("{ESCAPED_SLEEP} & exit 0"));
-        invocation.timeout = Some(StdDuration::from_millis(300));
-        let started = Instant::now();
-        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
-        assert!(started.elapsed() < StdDuration::from_secs(5), "{:?}", started.elapsed());
-    }
-
-    #[test]
-    fn test_run_deadline_holds_when_an_escaped_child_keeps_the_pipes_while_the_tool_runs() {
-        let (mut runner, _) = quiet();
-        runner.kill_grace = StdDuration::from_millis(200);
-        let mut invocation = sh(&format!("{ESCAPED_SLEEP} & wait"));
-        invocation.timeout = Some(StdDuration::from_millis(300));
-        let started = Instant::now();
-        assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
-        assert!(started.elapsed() < StdDuration::from_secs(5), "{:?}", started.elapsed());
+        for script in [format!("{ESCAPED_SLEEP} & exit 0"), format!("{ESCAPED_SLEEP} & wait")] {
+            let (mut runner, _) = quiet();
+            runner.kill_grace = StdDuration::from_millis(200);
+            let mut invocation = sh(&script);
+            invocation.timeout = Some(StdDuration::from_millis(300));
+            let started = Instant::now();
+            assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded, "{script}");
+            assert!(
+                started.elapsed() < StdDuration::from_secs(5),
+                "{script}: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]

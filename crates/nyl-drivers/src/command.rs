@@ -53,12 +53,14 @@ fn parse_for_driver(spec: &Value) -> DriverResult<CommandSpec> {
 }
 
 /// The resolved spec of a desired document, which execution requires.
-fn resolved(unit: &DesiredUnit) -> DriverResult<CommandSpec> {
-    let spec = unit
-        .resolved_spec
+pub(crate) fn resolved_spec(unit: &DesiredUnit) -> DriverResult<&Value> {
+    unit.resolved_spec
         .as_ref()
-        .ok_or_else(|| DriverError::before_effects(format!("unit {} has no resolved spec", unit.unit.name)))?;
-    parse_for_driver(spec)
+        .ok_or_else(|| DriverError::before_effects(format!("unit {} has no resolved spec", unit.unit.name)))
+}
+
+fn resolved(unit: &DesiredUnit) -> DriverResult<CommandSpec> {
+    parse_for_driver(resolved_spec(unit)?)
 }
 
 /// The tool timeout of a context: `deadline - now`, never negative.
@@ -89,7 +91,7 @@ fn io_error(what: &str, path: &Path, error: &std::io::Error) -> DriverError {
 }
 
 /// Canonical worktree and project directory.
-fn roots(worktree: &Path, project_dir: &Path) -> DriverResult<ProjectPaths> {
+pub(crate) fn roots(worktree: &Path, project_dir: &Path) -> DriverResult<ProjectPaths> {
     let worktree = worktree
         .canonicalize()
         .map_err(|error| io_error("resolve the worktree", worktree, &error))?;
@@ -414,7 +416,8 @@ fn unsuccessful(spec: &CommandSpec, step: &str, exit: &ToolExit) -> Outcome {
     }
 }
 
-fn is_deleting(unit: &DesiredUnit) -> bool {
+/// Whether a unit is being torn down, or held on its way there.
+pub(crate) fn is_deleting(unit: &DesiredUnit) -> bool {
     matches!(
         unit.lifecycle,
         Lifecycle::Deleting { .. } | Lifecycle::Held { deletion: Some(_), .. }

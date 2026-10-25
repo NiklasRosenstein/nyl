@@ -23,23 +23,24 @@ pub fn builtin() -> DriverSet {
 /// `KubernetesPublication`), all sharing one `script`.
 #[cfg(any(test, feature = "test-kinds"))]
 pub fn with_test_kinds(script: &crate::fake::Script) -> DriverSet {
-    use crate::fake::{stand_in_for, FakeImage, FakeInfra, FakePublication};
+    use crate::fake::{FakeImage, FakeInfra, FakePublication};
     use nyl_core::constants::API_VERSION_UNITS;
     use nyl_core::orchestration::driver::Driver;
 
     let mut drivers = builtin();
-    let fakes: Vec<Arc<dyn Driver>> = vec![
-        Arc::new(FakeImage::new(script.clone())),
-        Arc::new(FakeInfra::new(script.clone())),
-        Arc::new(FakePublication::new(script.clone())),
-    ];
-    for fake in fakes {
-        drivers.register(fake.clone());
-        for kind in ["OciImage", "OpenTofu", "Terraform", "KubernetesPublication"] {
-            if stand_in_for(API_VERSION_UNITS, kind) == Some(fake.kind()) {
-                drivers.register_as(API_VERSION_UNITS, kind, fake.clone());
-            }
-        }
+    let image: Arc<dyn Driver> = Arc::new(FakeImage::new(script.clone()));
+    let infra: Arc<dyn Driver> = Arc::new(FakeInfra::new(script.clone()));
+    let publication: Arc<dyn Driver> = Arc::new(FakePublication::new(script.clone()));
+    for (kind, fake) in [
+        ("OciImage", &image),
+        ("OpenTofu", &infra),
+        ("Terraform", &infra),
+        ("KubernetesPublication", &publication),
+    ] {
+        drivers.register_as(API_VERSION_UNITS, kind, fake.clone());
+    }
+    for fake in [image, infra, publication] {
+        drivers.register(fake);
     }
     drivers
 }

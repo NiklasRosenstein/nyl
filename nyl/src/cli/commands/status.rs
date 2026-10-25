@@ -54,10 +54,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
     } else {
         None
     };
-    let state: &dyn StateStore = match &local_store {
-        Some(local_store) => local_store,
-        None => &store,
-    };
+    let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
     let context = session.context(state, wiring, None);
     let mut report =
         nyl_orchestration::shell::inspect::status(&context, &session.resolved.name, &session.resolved.location);

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
-use nyl_core::orchestration::ports::{StateStore, Transition, TransitionChanges};
+use nyl_core::orchestration::ports::{Clock as _, IdGenerator as _, StateStore, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Run, RunKind, StateEvent, StateLocation, StateV1};
 use nyl_core::orchestration::time::Duration;
 use nyl_git::GitAuth;
@@ -160,12 +160,12 @@ fn commit_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: s
     let lease = Lease {
         api_version: StateV1,
         kind: LeaseKind,
-        run: world.ids_run(),
+        run: world.ids.run_id(),
         runner: "seed".to_owned(),
         operation: Operation::Reconcile,
         units: Vec::new(),
-        deadline: world.clock_now() + chrono::Duration::minutes(5),
-        taken_at: world.clock_now(),
+        deadline: world.clock.now() + chrono::Duration::minutes(5),
+        taken_at: world.clock.now(),
         broken: None,
     };
     let store = world.store.as_ref();
@@ -200,23 +200,6 @@ fn commit_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: s
         )
         .unwrap();
     store.release_lease(location, &dev(), &committed.lease_version).unwrap();
-}
-
-trait Helpers {
-    fn ids_run(&self) -> RunId;
-    fn clock_now(&self) -> chrono::DateTime<chrono::Utc>;
-}
-
-impl Helpers for World {
-    fn ids_run(&self) -> RunId {
-        use nyl_core::orchestration::ports::IdGenerator;
-        self.ids.run_id()
-    }
-
-    fn clock_now(&self) -> chrono::DateTime<chrono::Utc> {
-        use nyl_core::orchestration::ports::Clock;
-        self.clock.now()
-    }
 }
 
 #[test]
@@ -273,12 +256,12 @@ fn test_a_held_lease_refuses_with_exit_two_or_waits() {
         let holder = Lease {
             api_version: StateV1,
             kind: LeaseKind,
-            run: world.ids_run(),
+            run: world.ids.run_id(),
             runner: "https://ci.example.com/runs/1".to_owned(),
             operation: Operation::Reconcile,
             units: Vec::new(),
-            deadline: world.clock_now() + chrono::Duration::minutes(5),
-            taken_at: world.clock_now(),
+            deadline: world.clock.now() + chrono::Duration::minutes(5),
+            taken_at: world.clock.now(),
             broken: None,
         };
         world.store.take_lease(&location, &dev(), &holder, None).unwrap();
@@ -354,12 +337,12 @@ fn test_lease_break_lets_the_next_operation_take_over_and_record_the_break() {
         let holder = Lease {
             api_version: StateV1,
             kind: LeaseKind,
-            run: world.ids_run(),
+            run: world.ids.run_id(),
             runner: "lost runner".to_owned(),
             operation: Operation::Reconcile,
             units: Vec::new(),
-            deadline: world.clock_now() + chrono::Duration::hours(1),
-            taken_at: world.clock_now(),
+            deadline: world.clock.now() + chrono::Duration::hours(1),
+            taken_at: world.clock.now(),
             broken: None,
         };
         world.store.take_lease(&location, &dev(), &holder, None).unwrap();
@@ -405,13 +388,13 @@ fn test_lease_break_also_breaks_a_live_run_without_a_lease() {
         let run = Run {
             api_version: StateV1,
             kind: RunKind,
-            run: world.ids_run(),
+            run: world.ids.run_id(),
             runner: "lost runner".to_owned(),
             operation: Operation::Reconcile,
             source_commit: None,
             read_desired: None,
             read_observed: None,
-            deadline: world.clock_now() + chrono::Duration::hours(3),
+            deadline: world.clock.now() + chrono::Duration::hours(3),
             units: Vec::new(),
             finished: false,
         };
@@ -487,7 +470,7 @@ fn test_state_restore_reverts_pushed_local_transitions_with_forward_commits() {
             &location,
             "web",
             active(),
-            &transition_message(&world.ids_run(), false),
+            &transition_message(&world.ids.run_id(), false),
         );
         let restorable = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
         commit_unit(
@@ -495,7 +478,7 @@ fn test_state_restore_reverts_pushed_local_transitions_with_forward_commits() {
             &location,
             "extra",
             active(),
-            &transition_message(&world.ids_run(), true),
+            &transition_message(&world.ids.run_id(), true),
         );
 
         let web = UnitName::new("web").unwrap();

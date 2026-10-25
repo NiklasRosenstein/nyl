@@ -10,6 +10,7 @@
 
 pub mod format;
 pub mod runner;
+pub mod shell;
 pub mod world;
 
 use std::path::{Path, PathBuf};
@@ -24,6 +25,34 @@ pub struct Loaded {
     pub name: String,
     pub directory: PathBuf,
     pub scenario: Scenario,
+}
+
+/// `nyl <args>` through the binary in `checkout`, with a home that holds no
+/// Git configuration, so only `--author` or the clone's own configuration
+/// can name an identity, and without CI variables, a test clock, or colour.
+pub fn nyl_binary(checkout: &Path, home: &Path, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("nyl"));
+    command
+        .current_dir(checkout)
+        .args(args)
+        .env_remove("GITHUB_RUN_ID")
+        .env_remove("CI_JOB_URL")
+        .env_remove("NYL_TEST_NOW")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        // CI forces colour; the assertions read plain text.
+        .env("NO_COLOR", "1");
+    command
+}
+
+/// [`nyl_binary`] with `--author` [`runner::AUTHOR`] and a home of its own.
+pub fn nyl_as_author(checkout: &Path, args: &[&str]) -> std::process::Command {
+    let home = checkout.with_extension("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut command = nyl_binary(checkout, &home, args);
+    command.args(["--author", runner::AUTHOR]);
+    command
 }
 
 pub fn repository_root() -> PathBuf {

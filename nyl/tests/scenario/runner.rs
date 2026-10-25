@@ -36,8 +36,8 @@ use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use serde_json::Value;
 
 use super::format::{
-    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, FaultPointName, PausePoint,
-    ReceiptExpectation, Step, StepKind, UidExpectation, UnitExpectation,
+    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, PointName, ReceiptExpectation, Step,
+    StepKind, UidExpectation, UnitExpectation,
 };
 use super::world::{git_output, World};
 use super::Loaded;
@@ -65,11 +65,18 @@ const OUTCOME_KEYS: [&str; 6] = [
 /// A fault the next `nyl` step dies at, consumed when it fires. A `None`
 /// unit matches only a point the shell consults without a unit.
 #[derive(Default)]
-struct FaultSlot {
+pub struct FaultSlot {
     armed: Mutex<Option<(FaultPoint, Option<UnitName>)>>,
 }
 
 impl FaultSlot {
+    /// A slot that kills once at `point` for `unit`, or for the unit-less call.
+    pub fn kill_once(point: FaultPoint, unit: Option<&str>) -> Self {
+        Self {
+            armed: Mutex::new(Some((point, unit.map(|unit| UnitName::new(unit).unwrap())))),
+        }
+    }
+
     fn is_armed(&self) -> bool {
         self.armed.lock().expect("fault lock").is_some()
     }
@@ -162,9 +169,7 @@ pub fn run(loaded: &Loaded) -> Result<(), String> {
         tools: ProcessRunner::new(),
         faults: FaultSlot::default(),
         author: AUTHOR.parse().expect("identity"),
-        process_env: std::env::var("PATH")
-            .map(|path| BTreeMap::from([("PATH".to_owned(), path)]))
-            .unwrap_or_default(),
+        process_env: super::shell::process_env(),
     };
     std::thread::scope(|scope| {
         let mut state = RunState {
@@ -277,13 +282,10 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::Fault => {
                 let step = step.fault.as_ref().expect("kind");
                 let point = match step.point {
-                    FaultPointName::AfterEffect => FaultPoint::AfterEffect,
-                    FaultPointName::BeforeCheckpoint => FaultPoint::BeforeCheckpoint,
-                    FaultPointName::BeforeLeaseUpdate => FaultPoint::BeforeLeaseUpdate,
-                    FaultPointName::BeforePush => FaultPoint::BeforePush,
-                    FaultPointName::Executing | FaultPointName::WaitingLease => {
+                    PointName::Executing | PointName::WaitingLease => {
                         return Err(format!("fault {:?} only pauses", step.point));
                     }
+                    point => point.fault_point(),
                 };
                 let unit = step
                     .unit
@@ -297,7 +299,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::Nyl => {
                 let args = step.nyl.as_ref().expect("kind");
                 let branch = step.at.as_deref().unwrap_or("main");
-                let before = self.before(args, find_expect(step));
+                let before = self.before(args, step.expect.as_ref());
                 let wiring = shared.wiring(&shared.faults);
                 let outcome = invoke(self.world, &wiring, args, branch)?;
                 self.check(step, step, outcome, &before)?;
@@ -330,14 +332,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         let args = step.nyl.as_ref().expect("kind");
         let id = step.id.clone().expect("validated: a paused step has an id");
         let at = step.pause.as_ref().expect("paused");
-        let point = match at.point {
-            PausePoint::Executing => FaultPoint::Executing,
-            PausePoint::WaitingLease => FaultPoint::WaitingLease,
-            PausePoint::AfterEffect => FaultPoint::AfterEffect,
-            PausePoint::BeforeCheckpoint => FaultPoint::BeforeCheckpoint,
-            PausePoint::BeforeLeaseUpdate => FaultPoint::BeforeLeaseUpdate,
-            PausePoint::BeforePush => FaultPoint::BeforePush,
-        };
+        let point = at.point.fault_point();
         let unit = at
             .unit
             .as_deref()
@@ -354,7 +349,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             .steps
             .iter()
             .find(|candidate| candidate.resume.as_deref() == Some(id.as_str()));
-        let before = self.before(args, resume.and_then(find_expect));
+        let before = self.before(args, resume.and_then(|step| step.expect.as_ref()));
         let branch = step.at.as_deref().unwrap_or("main");
         let (reached_sender, reached) = mpsc::channel();
         let (resume_sender, resume_receiver) = mpsc::channel();
@@ -838,18 +833,28 @@ pub fn glob_matches(pattern: &str, path: &str) -> bool {
 }
 
 /// One in-process invocation in a fresh clone of `branch`.
-fn invoke(world: &World, wiring: &Wiring<'_>, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
-    let clone = world.fresh_clone(branch);
+pub fn invoke(world: &World, wiring: &Wiring<'_>, args: &[String], branch: &str) -> Result<CommandOutcome, String> {
+    invoke_in(world, wiring, args, branch, "")
+}
+
+/// One in-process invocation in `directory` of a fresh clone of `branch`.
+pub fn invoke_in(
+    world: &World,
+    wiring: &Wiring<'_>,
+    args: &[String],
+    branch: &str,
+    directory: &str,
+) -> Result<CommandOutcome, String> {
+    let mut path = world.fresh_clone(branch);
+    if !directory.is_empty() {
+        path.push(directory);
+    }
     let argv = std::iter::once("nyl".to_owned())
         .chain(args.iter().cloned())
-        .chain(std::iter::once(clone.display().to_string()));
+        .chain(std::iter::once(path.display().to_string()));
     let cli = Cli::try_parse_from(argv).map_err(|error| format!("nyl {}: {error}", args.join(" ")))?;
     cli.execute_in_process(wiring)
         .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
-}
-
-fn find_expect(step: &Step) -> Option<&Expect> {
-    step.expect.as_ref()
 }
 
 /// Each unit's result in a transition summary's `units:` block.
