@@ -1640,7 +1640,15 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    its run ref, and releases the lease. It skips the final transition commit
    and exits 4 with `NYL-RUN-CANCELLED`; a run cancelled before it
    checkpointed anything deletes its run ref instead. The next run imports the
-   run ref as after a crash, without waiting for a deadline. CI systems allow
+   run ref as after a crash, without waiting for a deadline. A second signal
+   ends the process at once, with exit code 128 plus the signal number, as a
+   forced kill would; the next run takes over as after a crash. A signal also
+   stops any operation waiting for a held lease (`--wait-lease`) with
+   `NYL-RUN-CANCELLED`, having written nothing: `reconcile` and `verify` exit
+   4, `recover` and the state operations exit 1, like their other refusals.
+   `verify` on a signal starts no further batch and releases the lease
+   without writing an observed commit (exit 4); `recover` and the state
+   operations finish their single commit once they hold the lease. CI systems allow
    only seconds between the signal and a forced kill, so this path does no
    other work. Pipelines should not cancel runs that apply changes; a CI
    concurrency group per environment serializes jobs without cancelling

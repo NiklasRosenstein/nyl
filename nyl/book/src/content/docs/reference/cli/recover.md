@@ -72,6 +72,7 @@ Exactly one of `--retry` and `--accept` is required.
 | `NYL-RECOVER-CHECKPOINT-MISSING` | The run has no checkpoint of the unit, its checkpoint holds a failure instead of a receipt, or `--accept` names no run ID. Pass a run the evidence lists as `receipt`, or use `--retry`. |
 | `NYL-RECOVER-KEY-MISMATCH` | The run executed the unit with another execution key or uid than its current desired document. Use `--retry` to execute it again. |
 | `NYL-UNIT-UNKNOWN` | The environment's state holds no such unit. |
+| `NYL-RUN-CANCELLED` | SIGINT or SIGTERM arrived while `--wait-lease` waited; nothing was written. Once `recover` holds the lease, a signal lets it finish its single commit. |
 
 ## Exit codes
 

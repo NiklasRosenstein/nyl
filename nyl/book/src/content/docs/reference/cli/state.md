@@ -154,6 +154,8 @@ reset` writes no commit, but still resolves the identity.
 
 They exit 0 when done or when nothing needed to change, 2 while another run
 holds the lease (`NYL-LEASE-HELD`), and 1 for every other refusal; each error
-and warning carries a stable code and its fix. Every command that writes
+and warning carries a stable code and its fix. SIGINT or SIGTERM during
+`--wait-lease` refuses with `NYL-RUN-CANCELLED` (exit 1) and writes nothing.
+Every command that writes
 remote state, except `state restore`, exits 1 with `NYL-STATE-LOCAL-TIP` when
 a state ref's tip is a pushed local transition.

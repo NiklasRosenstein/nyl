@@ -50,6 +50,10 @@ signal to running tools, and kills a tool still running 30 seconds later. It
 checkpoints the units that finish, marks the ones still running
 `uncertain`, keeps its run ref for the next run to take over, releases the
 lease, writes no transition commit, and exits 4 with `NYL-RUN-CANCELLED`.
+A second signal ends the process at once, with exit code 128 plus the signal
+number, as a forced kill would; the next run takes over as after a crash. A
+signal while `--wait-lease` waits for another run's lease also exits 4 with
+`NYL-RUN-CANCELLED`, having written nothing.
 
 ## Options
 

@@ -38,6 +38,12 @@ nothing is recorded for that unit.
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot verify as `unsupported`; neither is skipped silently.
 
+SIGINT or SIGTERM cancels the verification: it starts no further batch,
+forwards the signal to running tools, writes no observed commit, releases
+the lease, and exits 4 with `NYL-RUN-CANCELLED`. A signal while
+`--wait-lease` waits does the same, having written nothing. A second signal
+ends the process at once.
+
 ## Options
 
 | Option | Meaning |
@@ -76,7 +82,7 @@ headline counts them, such as `nyl: verify dev (3 clean, 1 drifted)`.
 | 1 | An error, such as `NYL-STATE-MISSING`, `NYL-UNIT-UNKNOWN`, `NYL-DRIVER-ERROR`, or `NYL-COMMIT-IDENTITY-MISSING`. |
 | 2 | A unit could not be verified: it has no current receipt, its kind cannot verify, or its drift is unknown; or another run holds the lease (`NYL-LEASE-HELD`). |
 | 3 | A unit drifted, or one of its attestations failed. |
-| 4 | The lease was taken over before the commit (`NYL-LEASE-LOST`); nothing was written. |
+| 4 | The lease was taken over before the commit (`NYL-LEASE-LOST`), or a signal cancelled the verification (`NYL-RUN-CANCELLED`); nothing was written. |
 
 When several apply, the most severe wins, in the order 4, 3, 1, 2, 0.
 

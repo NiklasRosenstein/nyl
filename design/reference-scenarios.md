@@ -554,7 +554,9 @@ Tier 1 variants:
 - **Cancellation.** A SIGTERM during `database`'s apply stops the tool,
   checkpoints finished units, marks `database` uncertain, and releases the
   lease within the grace the harness allows; the next run starts at once
-  and converges `database`.
+  and converges `database`. A second signal ends the process at once, and a
+  signal during `--wait-lease` refuses with `NYL-RUN-CANCELLED` having
+  written nothing.
 - **Broken lease.** After a forced kill, `nyl lease break -e dev --reason
   "runner lost"` lets the next run take over before the deadline.
 - **Busy instance.** While a pull request job holds `pr-124`'s lease, the

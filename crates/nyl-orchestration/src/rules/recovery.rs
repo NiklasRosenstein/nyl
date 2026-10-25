@@ -322,12 +322,15 @@ mod tests {
     }
 
     /// Catches `--retry` leaving the condition (the unit would stay stuck)
-    /// or dropping the last receipt, which documents what ran.
+    /// or dropping the last receipt, which documents what ran. A retryable
+    /// failure is recoverable too, so an operator need not wait for the next
+    /// reconcile to clear it.
     #[test]
-    fn test_retry_clears_uncertain_and_non_retryable_failed_keeping_the_receipt() {
+    fn test_retry_clears_uncertain_and_failed_keeping_the_receipt() {
         for current in [
             uncertain(observed_named("database", 1, Some(key('a')))),
             failed(observed_named("database", 1, Some(key('a'))), false),
+            failed(observed_named("database", 1, Some(key('a'))), true),
         ] {
             let recovery = decide_for(&current, &RecoverAction::Retry, &[]).unwrap();
             assert_eq!(recovery.observed.condition, None);
