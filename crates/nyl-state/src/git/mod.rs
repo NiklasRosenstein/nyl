@@ -22,8 +22,9 @@ use std::sync::Arc;
 use git2::{Oid, Repository};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Clock, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, HeldLease, RunState, StateError,
-    StateResult, StateStore, StateTips, Transition, TransitionChanges,
+    Checkpoint, Clock, CommitIdentity, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease,
+    LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
+    TransitionChanges,
 };
 use nyl_core::orchestration::state::{
     ArtifactDocument, DesiredUnit, Lease, Observation, ObservationType, ObservedUnit, Run, Signal, StateLocation,
@@ -764,13 +765,8 @@ impl StateStore for GitStateStore {
         let base_desired = base.desired.as_ref().map(oid).transpose()?;
         let base_observed = base.observed.as_ref().map(oid).transpose()?;
         let same_ref = desired_name == observed_name;
-        let side = |tip: Option<Oid>, desired: bool, observed: bool| -> StateResult<Option<Oid>> {
-            let all = tree::read(&repository, tip)?;
-            let mut inner = tree::beneath(&all, &location.path);
-            apply_changes(&mut inner, &transition.changes, desired, observed)?;
-            let files = replace_beneath(&all, &location.path, &inner);
-            let parents = tip.into_iter().collect::<Vec<_>>();
-            tree::commit(&repository, author, &files, &transition.message, &parents, false)
+        let side = |tip: Option<Oid>, desired: bool, observed: bool| {
+            transition_commit(&repository, author, location, transition, tip, (desired, observed))
         };
         // The lease moves to a new commit with the same document, so that
         // the push checks it: git never compares an unchanged ref.
@@ -905,6 +901,278 @@ impl StateStore for GitStateStore {
             Err(UpdateError::Other(error)) => Err(error),
         }
     }
+
+    /// A remote location reads the tracking ref as last fetched, fetching
+    /// it first when the clone has never fetched it; a local location reads
+    /// the clone's branch.
+    fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let name = full_name(match side {
+            StateSide::Desired => &location.desired_ref,
+            StateSide::Observed => &location.observed_ref,
+        });
+        let mut tip = refs.local(&name);
+        if tip.is_none() && refs.url.is_some() {
+            let heads = refs.heads(std::slice::from_ref(&name))?;
+            refs.fetch(&heads, true)?;
+            for (name, oid) in &heads {
+                refs.fast_forward_local_branch(name, *oid)?;
+            }
+            tip = heads.get(&name).and_then(|_| refs.local(&name));
+        }
+        match tip {
+            Some(tip) => first_parent_log(&repository, tip, limit),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
+        if location.repository == LOCAL_REPOSITORY {
+            return Ok(LocalDivergence::default());
+        }
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let names = [full_name(&location.desired_ref), full_name(&location.observed_ref)];
+        let heads = refs.heads(&names)?;
+        refs.fetch(&heads, true)?;
+        let side = |configured: &str| -> StateResult<Option<Divergence>> {
+            if !has_local_branch(configured) {
+                return Ok(None);
+            }
+            let name = full_name(configured);
+            let remote = heads.get(&name).and_then(|_| refs.local(&name));
+            let (Some(remote), Ok(local)) = (remote, repository.refname_to_id(&name)) else {
+                return Ok(None);
+            };
+            let (ahead, behind) = repository.graph_ahead_behind(local, remote).map_err(unavailable)?;
+            Ok(Some(Divergence { ahead, behind }))
+        };
+        Ok(LocalDivergence {
+            desired: side(&location.desired_ref)?,
+            observed: side(&location.observed_ref)?,
+        })
+    }
+
+    fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
+        if location.repository == LOCAL_REPOSITORY {
+            return Err(StateError::Unavailable(
+                "the state lives on the clone's own branches, which have no remote state to reset to".to_owned(),
+            ));
+        }
+        require_local_branches(location)?;
+        if self.author.is_none() {
+            return Err(StateError::Unavailable(
+                "the state store was opened read-only, without a commit identity".to_owned(),
+            ));
+        }
+        let repository = self.open()?;
+        let refs = self.refs(&repository, location);
+        let desired_name = full_name(&location.desired_ref);
+        let observed_name = full_name(&location.observed_ref);
+        let heads = refs.heads(&[desired_name.clone(), observed_name.clone()])?;
+        refs.fetch(&heads, true)?;
+        let remote = |name: &String| heads.get(name).and_then(|_| refs.local(name));
+        let expected_desired = expected.desired.as_ref().map(oid).transpose()?;
+        let expected_observed = expected.observed.as_ref().map(oid).transpose()?;
+        let mut moves = vec![(desired_name.clone(), expected_desired, remote(&desired_name))];
+        if observed_name != desired_name {
+            moves.push((observed_name.clone(), expected_observed, remote(&observed_name)));
+        } else if expected_observed != expected_desired {
+            return Err(StateError::Conflict {
+                reference: observed_name,
+                actual: expected_desired.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
+            });
+        }
+        // A compare-and-swap of both local branches in one transaction.
+        let mut transaction = repository.transaction().map_err(unavailable)?;
+        for (name, _, _) in &moves {
+            transaction.lock_ref(name).map_err(unavailable)?;
+        }
+        for (name, expected, _) in &moves {
+            let current = repository.refname_to_id(name).ok();
+            if current != *expected {
+                return Err(StateError::Conflict {
+                    reference: name.clone(),
+                    actual: current.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
+                });
+            }
+        }
+        for (name, current, new) in &moves {
+            match new {
+                Some(new) => transaction
+                    .set_target(name, *new, None, "nyl: reset local state")
+                    .map_err(unavailable)?,
+                None if current.is_some() => transaction.remove(name).map_err(unavailable)?,
+                None => {}
+            }
+        }
+        transaction.commit().map_err(unavailable)?;
+        Ok(StateTips {
+            desired: remote(&desired_name).map(commit_id),
+            observed: remote(&observed_name).map(commit_id),
+        })
+    }
+
+    fn commit_local(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_location: &StateLocation,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        if location.repository == LOCAL_REPOSITORY {
+            return Err(StateError::Unavailable(
+                "local transition commits go to the local branches of remote state; this state lives on the clone's own branches".to_owned(),
+            ));
+        }
+        require_local_branches(location)?;
+        let repository = self.open()?;
+        let author = self.author.as_ref();
+        let local = Refs {
+            repository: &repository,
+            url: None,
+            push_url: None,
+            auth: &self.auth,
+        };
+        let desired_name = full_name(&location.desired_ref);
+        let observed_name = full_name(&location.observed_ref);
+        let base_desired = base.desired.as_ref().map(oid).transpose()?;
+        let base_observed = base.observed.as_ref().map(oid).transpose()?;
+        // Checked before the lease moves, so a stale base costs nothing.
+        for (name, base) in [(&desired_name, base_desired), (&observed_name, base_observed)] {
+            let current = repository.refname_to_id(name).ok();
+            if current != base {
+                return Err(StateError::Conflict {
+                    reference: name.clone(),
+                    actual: current.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string()),
+                });
+            }
+        }
+        let side = |tip: Option<Oid>, desired: bool, observed: bool| {
+            transition_commit(&repository, author, location, transition, tip, (desired, observed))
+        };
+        let mut updates = Vec::new();
+        let mut committed = Committed::default();
+        if desired_name == observed_name {
+            if let Some(commit) = side(base_desired, true, true)? {
+                updates.push(Update {
+                    name: desired_name.clone(),
+                    new: Some(commit),
+                    expected: base_desired,
+                });
+                committed.desired = Some(commit_id(commit));
+                committed.observed = Some(commit_id(commit));
+            }
+        } else {
+            if let Some(commit) = side(base_desired, true, false)? {
+                updates.push(Update {
+                    name: desired_name.clone(),
+                    new: Some(commit),
+                    expected: base_desired,
+                });
+                committed.desired = Some(commit_id(commit));
+            }
+            if let Some(commit) = side(base_observed, false, true)? {
+                updates.push(Update {
+                    name: observed_name.clone(),
+                    new: Some(commit),
+                    expected: base_observed,
+                });
+                committed.observed = Some(commit_id(commit));
+            }
+        }
+
+        // The fence: renew the lease by compare-and-swap before any local
+        // branch moves, as `commit` moves it in the same push.
+        let lease_refs = self.refs(&repository, lease_location);
+        let lease_name = lease_ref(lease_location, environment);
+        let lease_oid = Oid::from_str(lease_version).map_err(unavailable)?;
+        if updates.is_empty() {
+            if lease_refs.heads(std::slice::from_ref(&lease_name))?.get(&lease_name) != Some(&lease_oid) {
+                return Err(StateError::LeaseLost);
+            }
+            lease_version.clone_into(&mut committed.lease_version);
+            return Ok(committed);
+        }
+        let lease_files = tree::read(&repository, Some(lease_oid)).map_err(|_| StateError::LeaseLost)?;
+        let renewed = tree::commit(&repository, author, &lease_files, "nyl: lease", &[lease_oid], true)?
+            .expect("allow_empty commits");
+        match lease_refs.update(&[Update {
+            name: lease_name,
+            new: Some(renewed),
+            expected: Some(lease_oid),
+        }]) {
+            Ok(()) => {}
+            Err(UpdateError::Stale) => return Err(StateError::LeaseLost),
+            Err(UpdateError::Other(error)) => return Err(error),
+        }
+        committed.lease_version = renewed.to_string();
+        match local.update(&updates) {
+            Ok(()) => Ok(committed),
+            Err(UpdateError::Stale) => Err(StateError::Conflict {
+                reference: desired_name,
+                actual: "another commit".to_owned(),
+            }),
+            Err(UpdateError::Other(error)) => Err(error),
+        }
+    }
+}
+
+/// One side's transition commit on top of `tip`, or `None` when the
+/// location's directory would not change.
+fn transition_commit(
+    repository: &Repository,
+    author: Option<&CommitAuthor>,
+    location: &StateLocation,
+    transition: &Transition,
+    tip: Option<Oid>,
+    (desired, observed): (bool, bool),
+) -> StateResult<Option<Oid>> {
+    let all = tree::read(repository, tip)?;
+    let mut inner = tree::beneath(&all, &location.path);
+    apply_changes(&mut inner, &transition.changes, desired, observed)?;
+    let files = replace_beneath(&all, &location.path, &inner);
+    let parents = tip.into_iter().collect::<Vec<_>>();
+    tree::commit(repository, author, &files, &transition.message, &parents, false)
+}
+
+/// Whether a configured state ref name has a local branch in the clone: a
+/// short name or a `refs/heads/` name. Other full `refs/…` names have none.
+fn has_local_branch(configured: &str) -> bool {
+    !configured.starts_with("refs/") || configured.starts_with("refs/heads/")
+}
+
+/// Refuse a location whose state refs have no local branches.
+fn require_local_branches(location: &StateLocation) -> StateResult<()> {
+    for configured in [&location.desired_ref, &location.observed_ref] {
+        if !has_local_branch(configured) {
+            return Err(StateError::Unavailable(format!(
+                "state ref {configured} is a full ref name outside refs/heads/, which has no local branch in the clone"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The newest `limit` commits of `tip`'s first-parent history, newest first.
+fn first_parent_log(repository: &Repository, tip: Oid, limit: usize) -> StateResult<Vec<LogEntry>> {
+    let mut entries = Vec::new();
+    let mut next = Some(tip);
+    while let Some(oid) = next {
+        if entries.len() >= limit {
+            break;
+        }
+        let commit = repository.find_commit(oid).map_err(unavailable)?;
+        entries.push(LogEntry {
+            commit: commit_id(oid),
+            message: String::from_utf8_lossy(commit.message_raw_bytes()).into_owned(),
+        });
+        next = commit.parent_id(0).ok();
+    }
+    Ok(entries)
 }
 
 /// After a lost push: the new tips to rebuild a transition on, when the
