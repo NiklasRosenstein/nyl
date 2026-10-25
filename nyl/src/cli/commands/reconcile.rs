@@ -53,6 +53,16 @@ pub struct ReconcileArgs {
     #[arg(long)]
     pub wait_lease: Option<Duration>,
 
+    /// Run next to remote state without publishing it: continue from this
+    /// clone's local state branches and commit there, marked Nyl-Local.
+    #[arg(long)]
+    pub local: bool,
+
+    /// With --local, take this clone's own lease instead of the remote one,
+    /// accepting that CI may run at the same time.
+    #[arg(long, requires = "local")]
+    pub local_lease: bool,
+
     /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
@@ -81,7 +91,13 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         concurrency: args.concurrency,
         source: args.source.as_deref(),
         wait: args.wait_lease,
+        local: None,
     })?;
+    if args.local {
+        // Package `local` wires LocalRun into the request and wraps the store in LocalStore.
+        let _ = args.local_lease;
+        todo!("local")
+    }
     let store = session.store(Some(CommitAuthor {
         identity: identity.clone(),
         clock: wiring.clock.clone(),
@@ -96,7 +112,6 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
         renderer: &renderer,
         drivers: wiring.drivers,
         tools: wiring.tools,
-        faults: wiring.faults,
         workspace: workspace.path(),
         process_env: &wiring.process_env,
         commit_identity: Some(&identity),

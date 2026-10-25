@@ -127,6 +127,7 @@ impl Session {
             store,
             clock: wiring.clock.as_ref(),
             ids: wiring.ids,
+            faults: wiring.faults,
             runner: wiring.runner.clone(),
             requested_by: requested_by.unwrap_or_else(|| requested_by_default(&self.resolved.git_dir, &wiring.runner)),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -170,6 +171,7 @@ impl Session {
             concurrency: options.concurrency.max(1),
             source_override: options.source.map(str::to_owned),
             wait: options.wait,
+            local: options.local,
         })
     }
 }
@@ -194,12 +196,14 @@ pub fn project_dir(inventory: &GitOpsInventory) -> String {
     format!("/{relative}")
 }
 
-/// The options of a `plan` or `reconcile` request.
+/// The options of a `plan`, `reconcile`, or `verify` request.
 pub struct RunOptions<'a> {
     pub units: &'a [String],
     pub concurrency: usize,
     pub source: Option<&'a str>,
     pub wait: Option<Duration>,
+    /// `--local` and `--local-lease` of `reconcile`; `None` elsewhere.
+    pub local: Option<nyl_orchestration::shell::local::LocalRun>,
 }
 
 /// A report of `kind` for `environment` that holds only `finding`, for a
@@ -306,6 +310,7 @@ fn table(report: &RunReport) -> String {
             ReportKind::PlanReport => &["UNIT", "KIND", "STATE", "RECEIPT", "CHANGES", "DETAIL"],
             ReportKind::ReconcileReport => &["UNIT", "KIND", "RESULT", "DETAIL"],
             ReportKind::StatusReport => &["UNIT", "KIND", "STATE", "RECEIPT", "LAST RUN", "DETAIL"],
+            ReportKind::VerifyReport => &["UNIT", "KIND", "VERIFICATION", "DETAIL"],
         };
         if rows.is_empty() {
             let _ = writeln!(text, "{}: no units", environment.name);
@@ -343,7 +348,9 @@ fn unit_row(kind: ReportKind, name: &UnitName, unit: &UnitReport) -> Vec<Cell> {
                 .unwrap_or_else(dash);
             vec![name.to_string(), unit.kind.clone(), outcome, receipt, changes, detail]
         }
-        ReportKind::ReconcileReport => vec![name.to_string(), unit.kind.clone(), outcome, detail],
+        ReportKind::ReconcileReport | ReportKind::VerifyReport => {
+            vec![name.to_string(), unit.kind.clone(), outcome, detail]
+        }
         ReportKind::StatusReport => {
             let last_run = unit.last_run.as_ref().map_or_else(dash, ToString::to_string);
             vec![name.to_string(), unit.kind.clone(), outcome, receipt, last_run, detail]

@@ -57,6 +57,7 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
         source: args.source.as_deref(),
         wait: None,
+        local: None,
     })?;
     // A plan writes nothing, so it reads through a read-only store and needs
     // no commit identity.
@@ -71,7 +72,6 @@ fn plan(args: &PlanArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutc
         renderer: &renderer,
         drivers: wiring.drivers,
         tools: wiring.tools,
-        faults: wiring.faults,
         workspace: workspace.path(),
         process_env: &wiring.process_env,
         commit_identity: None,

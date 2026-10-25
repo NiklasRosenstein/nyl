@@ -80,10 +80,48 @@ pub enum Code {
     /// A reference or `dependsOn` entry requires `evidence: attested` or
     /// names attestations, which no kind records yet (M3).
     AttestationsUnsupported,
+    /// A unit has an uncertain condition: its effects may or may not have happened.
+    UnitUncertain,
+    /// A leftover run's checkpoint no longer matches the unit's desired document; it was reported as superseded.
+    RunSuperseded,
+    /// A run checkpointed a unit after the unit was marked uncertain; it is evidence for `nyl recover --accept`.
+    RunLateCheckpoint,
+    /// `nyl recover` names a unit that has no condition to clear.
+    RecoverNothing,
+    /// `nyl recover --accept <run>` names a run without a checkpoint of the unit.
+    RecoverCheckpointMissing,
+    /// `nyl recover --accept <run>` names a checkpoint whose execution key differs from the unit's current desired document.
+    RecoverKeyMismatch,
+    /// `nyl verify` found no current receipt to verify for a unit.
+    VerifyNoReceipt,
+    /// A unit's driver could not tell whether the unit drifted.
+    VerifyUnknown,
+    /// A unit's kind cannot verify; it was reported, not skipped.
+    VerifyUnsupported,
+    /// A unit drifted from its current receipt.
+    VerifyDrift,
+    /// A driver attestation of a unit's current receipt failed.
+    AttestationFailed,
+    /// A remote state ref's tip is a `Nyl-Local` commit, which only a manual push of local branches produces.
+    StateLocalTip,
+    /// The clone's local state branches hold local transitions or are behind the remote.
+    StateLocalDiverged,
+    /// `nyl state reset --local` would forget local receipts the remote does not reflect.
+    StateResetUndiscarded,
+    /// `nyl state reset --local` needs remote state; without a remote the local branches are the state.
+    StateResetUnsupported,
+    /// `nyl state restore --to` names a commit that is not a non-local commit of the environment's state refs.
+    StateRestoreInvalid,
+    /// A `--local` run executed a unit next to remote state; the remote does not record it.
+    LocalRunUnrecorded,
+    /// A `--local` run skipped a unit whose recovery policy is not `converge`.
+    LocalRunNotConverge,
+    /// `--local` cannot run against this state, such as state refs with full `refs/…` names, which have no local branch.
+    LocalRunUnsupported,
 }
 
 impl Code {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 52] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -117,6 +155,25 @@ impl Code {
         Self::TargetEnvironmentConflict,
         Self::UnitSecretsUnsupported,
         Self::AttestationsUnsupported,
+        Self::UnitUncertain,
+        Self::RunSuperseded,
+        Self::RunLateCheckpoint,
+        Self::RecoverNothing,
+        Self::RecoverCheckpointMissing,
+        Self::RecoverKeyMismatch,
+        Self::VerifyNoReceipt,
+        Self::VerifyUnknown,
+        Self::VerifyUnsupported,
+        Self::VerifyDrift,
+        Self::AttestationFailed,
+        Self::StateLocalTip,
+        Self::StateLocalDiverged,
+        Self::StateResetUndiscarded,
+        Self::StateResetUnsupported,
+        Self::StateRestoreInvalid,
+        Self::LocalRunUnrecorded,
+        Self::LocalRunNotConverge,
+        Self::LocalRunUnsupported,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -154,6 +211,25 @@ impl Code {
             Self::TargetEnvironmentConflict => "NYL-TARGET-ENVIRONMENT-CONFLICT",
             Self::UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
             Self::AttestationsUnsupported => "NYL-ATTESTATIONS-UNSUPPORTED",
+            Self::UnitUncertain => "NYL-UNIT-UNCERTAIN",
+            Self::RunSuperseded => "NYL-RUN-SUPERSEDED",
+            Self::RunLateCheckpoint => "NYL-RUN-LATE-CHECKPOINT",
+            Self::RecoverNothing => "NYL-RECOVER-NOTHING",
+            Self::RecoverCheckpointMissing => "NYL-RECOVER-CHECKPOINT-MISSING",
+            Self::RecoverKeyMismatch => "NYL-RECOVER-KEY-MISMATCH",
+            Self::VerifyNoReceipt => "NYL-VERIFY-NO-RECEIPT",
+            Self::VerifyUnknown => "NYL-VERIFY-UNKNOWN",
+            Self::VerifyUnsupported => "NYL-VERIFY-UNSUPPORTED",
+            Self::VerifyDrift => "NYL-VERIFY-DRIFT",
+            Self::AttestationFailed => "NYL-ATTESTATION-FAILED",
+            Self::StateLocalTip => "NYL-STATE-LOCAL-TIP",
+            Self::StateLocalDiverged => "NYL-STATE-LOCAL-DIVERGED",
+            Self::StateResetUndiscarded => "NYL-STATE-RESET-UNDISCARDED",
+            Self::StateResetUnsupported => "NYL-STATE-RESET-UNSUPPORTED",
+            Self::StateRestoreInvalid => "NYL-STATE-RESTORE-INVALID",
+            Self::LocalRunUnrecorded => "NYL-LOCAL-RUN-UNRECORDED",
+            Self::LocalRunNotConverge => "NYL-LOCAL-RUN-NOT-CONVERGE",
+            Self::LocalRunUnsupported => "NYL-LOCAL-RUN-UNSUPPORTED",
         }
     }
 }

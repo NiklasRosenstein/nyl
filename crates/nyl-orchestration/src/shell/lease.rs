@@ -9,6 +9,7 @@ use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Request, State
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
 use super::Context;
+use crate::fault::FaultPoint;
 use crate::rules::lease::{decide, LeaseDecision};
 
 /// A lease this run holds.
@@ -20,6 +21,10 @@ pub struct HeldLease {
     pub version: String,
     /// A `nyl lease break` this lease took over, for the transition commit.
     pub broken: Option<Request>,
+    /// The expired or broken lease this run replaced, whose `units` the dead
+    /// holder was executing; `None` when no lease ref existed. Run takeover
+    /// (`rules::takeover`) reads it next to the leftover run refs.
+    pub replaced: Option<Lease>,
 }
 
 /// Why a run did not get the lease.
@@ -52,6 +57,7 @@ pub fn acquire(
     loop {
         let now = context.clock.now();
         let coordination = context.store.coordination(location, environment)?;
+        let replaced = coordination.lease.as_ref().map(|held| held.lease.clone());
         match decide(&coordination, now) {
             LeaseDecision::Take { expected, broken } => {
                 let lease = Lease {
@@ -76,6 +82,7 @@ pub fn acquire(
                             lease,
                             version,
                             broken,
+                            replaced,
                         })
                     }
                     // Another run took it between the read and the swap:
@@ -93,6 +100,8 @@ pub fn acquire(
                         "wait for that run to finish, pass --wait-lease <duration>, or run `nyl lease break` if its runner is gone",
                     )));
                 }
+                // A pause point: the scenario harness holds a waiting run here.
+                let _ = context.faults.at(FaultPoint::WaitingLease, None);
                 context.clock.wait(context.settings.lease_poll);
             }
         }

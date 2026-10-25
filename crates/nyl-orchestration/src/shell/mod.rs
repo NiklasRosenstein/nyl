@@ -6,10 +6,15 @@
 
 pub mod inspect;
 pub mod lease;
+pub mod local;
+pub mod recover;
 pub mod run;
 pub mod state;
+pub mod verify;
 
 use nyl_core::orchestration::ports::{Clock, IdGenerator, StateStore};
+
+use crate::fault::FaultInjector;
 use nyl_core::orchestration::time::Duration;
 
 /// Defaults of `nyl.toml` that runs use.
@@ -38,6 +43,8 @@ pub struct Context<'a> {
     pub store: &'a dyn StateStore,
     pub clock: &'a dyn Clock,
     pub ids: &'a dyn IdGenerator,
+    /// Fault and pause points; [`crate::fault::NoFaults`] in production.
+    pub faults: &'a dyn FaultInjector,
     /// Who runs it, such as a CI run URL or `user@host`.
     pub runner: String,
     /// Who requested the operation, recorded as `Nyl-Requested-By`.

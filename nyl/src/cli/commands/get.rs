@@ -100,8 +100,12 @@ struct StateOptions {
     environment: Option<String>,
 
     /// Read state as of this earlier state commit.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "local")]
     state_revision: Option<String>,
+
+    /// Read this clone's local state branches, including --local runs.
+    #[arg(long)]
+    local: bool,
 
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
@@ -260,6 +264,10 @@ fn state_form(
     };
     let store = session.store(None)?;
     let location = &session.resolved.location;
+    if options.local {
+        // Package `local` reads the local view of the location.
+        todo!("local")
+    }
     let snapshot = match inspect::snapshot(&store, location, None) {
         Ok(snapshot) => snapshot,
         Err(finding) => return Ok(refused(&finding)),

@@ -262,6 +262,7 @@ impl StateStore for MemoryStateStore {
         let state = runs.entry(run.run.clone()).or_insert_with(|| RunState {
             run: run.clone(),
             checkpoints: Vec::new(),
+            created: Vec::new(),
             version: String::new(),
         });
         state.run = run.clone();
@@ -446,6 +447,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
         artifacts: observed
             .map(|directory| directory.artifacts.clone())
             .unwrap_or_default(),
+        // Package `store` keeps observations and attestations.
+        observations: BTreeMap::new(),
+        attestations: BTreeMap::new(),
     }
 }
 

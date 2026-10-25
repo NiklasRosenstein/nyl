@@ -1,4 +1,4 @@
-//! The typed report of `plan`, `reconcile`, and `status`.
+//! The typed report of `plan`, `reconcile`, `status`, and `verify`.
 //!
 //! Contract: [Planning](../../../../design/orchestration-core.md#planning),
 //! [Inspection](../../../../design/orchestration-core.md#inspection) (the
@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::Change;
 use nyl_core::orchestration::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, RunId, UnitName};
-use nyl_core::orchestration::state::{FailureCategory, Operation};
+use nyl_core::orchestration::state::{AttestationResult, FailureCategory, Operation};
 use serde::Serialize;
 
 use crate::transition::TransitionSummary;
@@ -28,6 +28,8 @@ pub enum ReportKind {
     PlanReport,
     ReconcileReport,
     StatusReport,
+    /// `nyl verify`: per unit its [`UnitVerification`].
+    VerifyReport,
 }
 
 /// The report of one invocation.
@@ -144,6 +146,14 @@ pub struct EnvironmentRunReport {
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
+    /// Units whose result a leftover run checkpointed and this run imported:
+    /// the transition summary's `imported`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<UnitName>,
+    /// Units this run recovered from a dead run or an uncertain condition:
+    /// the transition summary's `recovered`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovered: Vec<UnitName>,
     /// The transition commits written, by state ref side (`desired`, `observed`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
@@ -162,6 +172,8 @@ impl EnvironmentRunReport {
             source_commit: None,
             leaving: Vec::new(),
             units: BTreeMap::new(),
+            imported: Vec::new(),
+            recovered: Vec::new(),
             commits: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -218,8 +230,8 @@ impl EnvironmentRunReport {
                     )
                 })
                 .collect(),
-            recovered: Vec::new(),
-            imported: Vec::new(),
+            recovered: self.recovered.clone(),
+            imported: self.imported.clone(),
             lease_broken: None,
             details: BTreeMap::new(),
         }
@@ -227,7 +239,15 @@ impl EnvironmentRunReport {
 }
 
 /// The results a transition commit's headline counts, in order.
-const HEADLINE_RESULTS: [&str; 5] = ["executed", "failed", "uncertain", "blocked", "awaiting-approval"];
+const HEADLINE_RESULTS: [&str; 7] = [
+    "executed",
+    "recovered",
+    "imported",
+    "failed",
+    "uncertain",
+    "blocked",
+    "awaiting-approval",
+];
 
 /// The exit category one unit contributes to a report of `kind`.
 fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
@@ -247,8 +267,15 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
             Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
             Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
             Some(UnitResult::Blocked { .. } | UnitResult::AwaitingApproval) => ExitCategory::Incomplete,
-            Some(UnitResult::Current | UnitResult::Executed { .. }) | None => ExitCategory::Ok,
+            Some(
+                UnitResult::Current
+                | UnitResult::Executed { .. }
+                | UnitResult::Imported { .. }
+                | UnitResult::Recovered { .. },
+            )
+            | None => ExitCategory::Ok,
         },
+        ReportKind::VerifyReport => crate::rules::verification::unit_exit(unit),
         ReportKind::StatusReport => match unit.state {
             Some(UnitState::Uncertain) => ExitCategory::Uncertain,
             Some(UnitState::Failed) => ExitCategory::Failed,
@@ -330,6 +357,9 @@ pub struct UnitReport {
     /// not a stored condition, makes a plan exit 3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_error: Option<String>,
+    /// What `verify` found; `None` in other reports.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<UnitVerification>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -352,6 +382,7 @@ impl UnitReport {
             summary: None,
             blocked_by: Vec::new(),
             plan_error: None,
+            verification: None,
             message: None,
             last_run: None,
             warnings: Vec::new(),
@@ -367,6 +398,11 @@ impl UnitReport {
             .as_ref()
             .map(UnitResult::name)
             .or_else(|| self.state.map(UnitState::name))
+            .or_else(|| {
+                self.verification
+                    .as_ref()
+                    .map(|verification| verification.result.name())
+            })
     }
 }
 
@@ -379,6 +415,19 @@ pub enum UnitResult {
     Current,
     #[serde(rename_all = "camelCase")]
     Executed {
+        execution_key: ExecutionKey,
+    },
+    /// A leftover run's checkpoint with the same execution key became the
+    /// unit's receipt (`rules::takeover`).
+    #[serde(rename_all = "camelCase")]
+    Imported {
+        execution_key: ExecutionKey,
+        run: RunId,
+    },
+    /// The unit was uncertain, and this run recovered it: executed again
+    /// under the `converge` policy, or `inspect` found its effects applied.
+    #[serde(rename_all = "camelCase")]
+    Recovered {
         execution_key: ExecutionKey,
     },
     Failed {
@@ -400,10 +449,52 @@ impl UnitResult {
         match self {
             Self::Current => "current",
             Self::Executed { .. } => "executed",
+            Self::Imported { .. } => "imported",
+            Self::Recovered { .. } => "recovered",
             Self::Failed { .. } => "failed",
             Self::Uncertain { .. } => "uncertain",
             Self::Blocked { .. } => "blocked",
             Self::AwaitingApproval => "awaiting-approval",
+        }
+    }
+}
+
+/// What `verify` found for one unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitVerification {
+    #[serde(flatten)]
+    pub result: VerifyResult,
+    /// The driver's attestations of the current receipt, by name.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub attestations: BTreeMap<String, AttestationResult>,
+}
+
+/// The drift verdict of one unit's verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "verification", rename_all = "kebab-case")]
+pub enum VerifyResult {
+    Clean,
+    Drifted {
+        summary: String,
+    },
+    Unknown {
+        reason: String,
+    },
+    /// No current receipt to verify.
+    NoReceipt,
+    /// The kind cannot verify.
+    Unsupported,
+}
+
+impl VerifyResult {
+    /// The kebab-case name, as reports serialize it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Drifted { .. } => "drifted",
+            Self::Unknown { .. } => "unknown",
+            Self::NoReceipt => "no-receipt",
+            Self::Unsupported => "unsupported",
         }
     }
 }

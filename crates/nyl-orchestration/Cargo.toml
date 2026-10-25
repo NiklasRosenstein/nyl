@@ -22,4 +22,5 @@ serde_json = { workspace = true }
 
 
 [dev-dependencies]
+proptest = { workspace = true }
 serde-saphyr = { workspace = true }

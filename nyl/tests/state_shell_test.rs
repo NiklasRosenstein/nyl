@@ -10,6 +10,7 @@ use nyl_core::orchestration::ports::{StateStore, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, Run, RunKind, StateEvent, StateLocation, StateV1};
 use nyl_core::orchestration::time::Duration;
 use nyl_git::GitAuth;
+use nyl_orchestration::fault::NoFaults;
 use nyl_orchestration::report::Outcome;
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
@@ -80,6 +81,7 @@ impl World {
             store: self.store.as_ref(),
             clock: &self.clock,
             ids: &self.ids,
+            faults: &NoFaults,
             runner: "test-runner".to_owned(),
             requested_by: "alice".to_owned(),
             version: "0.0.0-test".to_owned(),

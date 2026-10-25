@@ -10,6 +10,7 @@ pub mod init;
 pub mod plan;
 pub mod publish_tree;
 pub mod reconcile;
+pub mod recover;
 pub mod release;
 pub mod render;
 pub mod render_tree;
@@ -20,5 +21,6 @@ pub mod status;
 pub mod update;
 pub mod validate;
 pub mod vendor;
+pub mod verify;
 
 pub mod capture;

@@ -1,9 +1,9 @@
 //! `plan` and `reconcile` of one environment.
 //!
-//! Contract: [Execution](../../../../design/orchestration-core.md#execution),
-//! [Planning](../../../../design/orchestration-core.md#planning),
-//! [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases),
-//! and [Transition commits](../../../../design/orchestration-core.md#transition-commits).
+//! Contract: [Execution](../../../../../design/orchestration-core.md#execution),
+//! [Planning](../../../../../design/orchestration-core.md#planning),
+//! [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases),
+//! and [Transition commits](../../../../../design/orchestration-core.md#transition-commits).
 //!
 //! A reconcile takes the lease, chooses S (`rules::sources`), checks its
 //! reachability, checks out a pinned worktree of S, renders the units
@@ -12,7 +12,8 @@
 //! (`rules::references`), asking each ready unit's driver for its key inputs
 //! (`rules::execution_key`). Then waves: select ready units
 //! (`rules::selection`), execute them in parallel up to the concurrency
-//! limit on scoped threads, each in its own worktree and temp dir, write a
+//! limit on scoped threads, each in its concurrency slot's worktree
+//! ([`slots`]) and its own temp dir ([`execute`]), write a
 //! checkpoint per finished unit on the run ref, and re-resolve at the same S.
 //! When nothing is ready it writes one fenced transition commit per changed
 //! state ref, rendered from the report, releases the lease, and deletes the
@@ -56,7 +57,7 @@ use serde_json::{json, Map, Value};
 use super::lease::{self, HeldLease, LeaseError};
 use super::state::store_error;
 use super::Context;
-use crate::fault::{FaultAction, FaultInjector, FaultPoint};
+use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{desire, DesireInputs, Desired};
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
 use crate::rules::freshness::receipt_is_current;
@@ -71,6 +72,11 @@ use crate::rules::state_location::check_record;
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
 use crate::transition::{self, Trailers};
+use execute::{execute_batch, Execution};
+use slots::Slots;
+
+mod execute;
+pub(crate) mod slots;
 
 /// Default number of units a wave runs at once.
 pub const DEFAULT_CONCURRENCY: usize = 4;
@@ -82,7 +88,6 @@ pub struct RunContext<'a> {
     pub renderer: &'a dyn SourceRenderer,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
-    pub faults: &'a dyn FaultInjector,
     /// A directory this invocation owns: pinned worktrees and per-execution
     /// temp dirs are created beneath it.
     pub workspace: &'a Path,
@@ -120,6 +125,11 @@ pub struct RunRequest {
     pub source_override: Option<String>,
     /// `--wait-lease`.
     pub wait: Option<Duration>,
+    /// `--local`: the run continues from the clone's local state branches
+    /// and commits there with `Nyl-Local: true`; the command line passes a
+    /// [`super::local::LocalStore`] as the context's store. `None` for an
+    /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
+    pub local: Option<super::local::LocalRun>,
 }
 
 /// `nyl plan -e <env>`.
@@ -141,8 +151,11 @@ pub fn plan(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
 pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     let environment = off_runtime(|| {
         let session = Session::new(context, request);
-        let report = reconcile_environment(&session);
+        let mut report = reconcile_environment(&session);
         session.clean();
+        if let Some(local) = &request.local {
+            super::local::finish_local_report(&mut report, request, local);
+        }
         report
     });
     let mut report = RunReport::new(ReportKind::ReconcileReport);
@@ -178,6 +191,8 @@ struct Session<'r, 'a> {
     /// Key inputs per unit, by the resolved spec and commit they were read for.
     keys: RefCell<BTreeMap<UnitName, (Value, CommitId, KeyInputs)>>,
     executions: RefCell<usize>,
+    /// One reusable worktree per concurrency slot.
+    slots: Slots,
     /// The deadline of the lease a reconcile holds, which bounds every
     /// resolution deadline; `None` for a plan, which holds no lease.
     lease_deadline: Cell<Option<Timestamp>>,
@@ -221,6 +236,7 @@ impl<'r, 'a> Session<'r, 'a> {
             }
             index += 1;
         };
+        let slots = Slots::new(&directory);
         Self {
             context,
             request,
@@ -231,6 +247,7 @@ impl<'r, 'a> Session<'r, 'a> {
             worktrees: RefCell::new(BTreeMap::new()),
             keys: RefCell::new(BTreeMap::new()),
             executions: RefCell::new(0),
+            slots,
             lease_deadline: Cell::new(None),
         }
     }
@@ -650,7 +667,7 @@ fn environment_spec(at_source: &Environment, entry: &Environment) -> Value {
 
 /// A unit's admitted variables: `PATH` and its declared `env.passthrough`,
 /// from the process environment snapshot.
-fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMap<String, String> {
+pub(crate) fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     if let Some(path) = process_env.get("PATH") {
         env.insert("PATH".to_owned(), path.clone());
@@ -670,7 +687,7 @@ fn admitted_env(process_env: &BTreeMap<String, String>, spec: &Value) -> BTreeMa
 }
 
 /// The directory of `nyl.toml` inside a worktree, from its worktree-rooted form.
-fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
+pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     let relative = project_dir.trim_matches('/');
     if relative.is_empty() {
         worktree.to_path_buf()
@@ -680,7 +697,7 @@ fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
 }
 
 /// A unit's `timeout`, else its kind's default from the contract's Defaults.
-fn unit_timeout(unit: &DesiredUnit) -> Duration {
+pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     if let Some(timeout) = spec
         .get("timeout")
@@ -823,6 +840,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         drivers: context.drivers,
         named: None,
         attempted: &attempted,
+        local: request.local.is_some(),
     });
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
@@ -866,12 +884,15 @@ fn plan_unit(
         return;
     };
     let directory = session.execution_directory(name);
-    let worktree = directory.join("worktree");
     let temp_dir = directory.join("tmp");
-    if let Err(finding) = session.checkout(commit, &worktree) {
-        entry.plan_error = Some(finding.message);
-        return;
-    }
+    // Planning is sequential, so it always uses the first slot.
+    let worktree = match session.slots.checkout(context.sources, 0, commit) {
+        Ok(worktree) => worktree,
+        Err(message) => {
+            entry.plan_error = Some(message);
+            return;
+        }
+    };
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
@@ -1012,7 +1033,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     }
 
     fn fault(&self, point: FaultPoint, unit: Option<&UnitName>) -> bool {
-        self.context().faults.at(point, unit) == FaultAction::Kill
+        self.context().base.faults.at(point, unit) == FaultAction::Kill
     }
 
     fn killed(&mut self, point: FaultPoint) -> Ending {
@@ -1095,6 +1116,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             self.report.errors.push(finding);
             return Ending::Release;
         }
+        if request.local.is_none() {
+            if let Err(finding) = super::local::check_remote_tips(context.base.store, &request.location) {
+                self.report.errors.push(finding);
+                return Ending::Release;
+            }
+        }
         self.record.read_desired.clone_from(&snapshot.tips.desired);
         self.record.read_observed.clone_from(&snapshot.tips.observed);
         if let Err(error) = self.write_run(None) {
@@ -1157,6 +1184,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
+                local: request.local.is_some(),
             });
             if ready.is_empty() {
                 break (resolved, skipped);
@@ -1276,7 +1304,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             version: context.base.version.clone(),
             requested_by: None,
             reason: None,
-            local: false,
+            local: request.local.is_some(),
         };
         let transition = Transition {
             message: transition::message(&summary, &trailers),
@@ -1382,305 +1410,6 @@ fn unexecuted_result(
             reason: "it cites receipts that are no longer current".to_owned(),
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// execution
-
-/// One finished execution.
-struct Execution {
-    name: UnitName,
-    result: UnitResult,
-    message: Option<String>,
-    warnings: Vec<Finding>,
-    errors: Vec<Finding>,
-    /// What the run ref records; `None` when nothing is recorded, such as
-    /// for a driver error before any effect.
-    checkpoint: Option<Checkpoint>,
-    /// The new artifact set of a success.
-    artifacts: Option<BTreeMap<String, ArtifactDocument>>,
-    /// A fault killed the run after the effect.
-    killed: bool,
-}
-
-/// Everything one execution thread needs, prepared before it starts.
-struct Job<'j> {
-    unit: &'j DesiredUnit,
-    commit: &'j CommitId,
-    observed: Option<&'j ObservedUnit>,
-    previous_artifacts: BTreeMap<String, ArtifactDocument>,
-    directory: PathBuf,
-}
-
-#[allow(clippy::too_many_arguments)] // One wave's inputs: the run, its resolution, its evidence, and the batch.
-fn execute_batch(
-    session: &Session<'_, '_>,
-    prepared: &Prepared,
-    resolved: &Resolved,
-    observed: &BTreeMap<UnitName, ObservedUnit>,
-    artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
-    batch: &[UnitName],
-    run: &RunId,
-    snapshot: &EnvironmentSnapshot,
-) -> Vec<Execution> {
-    let jobs: Vec<Job<'_>> = batch
-        .iter()
-        .map(|name| Job {
-            unit: &resolved.units[name],
-            commit: &resolved.commits[name],
-            observed: observed.get(name),
-            previous_artifacts: artifacts.get(name).cloned().unwrap_or_default(),
-            directory: session.execution_directory(name),
-        })
-        .collect();
-    let shared = Shared {
-        context: session.context,
-        environment: session.environment(),
-        project_dir: &prepared.rendered.project_dir,
-        cache_dir: session.cache_dir(),
-        run,
-        read_desired: snapshot.tips.desired.as_ref(),
-    };
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .map(|job| {
-                let shared = &shared;
-                scope.spawn(move || execute(shared, job))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| match handle.join() {
-                Ok(execution) => execution,
-                Err(panic) => std::panic::resume_unwind(panic),
-            })
-            .collect()
-    })
-}
-
-/// What every execution of a wave shares.
-struct Shared<'s> {
-    context: &'s RunContext<'s>,
-    environment: &'s EnvironmentName,
-    project_dir: &'s str,
-    cache_dir: PathBuf,
-    run: &'s RunId,
-    read_desired: Option<&'s CommitId>,
-}
-
-/// Execute one unit in a worktree of its effective commit and map its outcome.
-#[allow(clippy::too_many_lines)] // One execution in order: worktree, driver call, fault point, and each outcome's record.
-fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
-    let context = shared.context;
-    let unit = job.unit;
-    let name = unit.unit.name.clone();
-    let mut execution = Execution {
-        name: name.clone(),
-        result: UnitResult::Current,
-        message: None,
-        warnings: Vec::new(),
-        errors: Vec::new(),
-        checkpoint: None,
-        artifacts: None,
-        killed: false,
-    };
-    let before_effects = |execution: &mut Execution, message: String| {
-        execution.errors.push(Finding::new(
-            Code::DriverError,
-            format!("unit {name}: {message}"),
-            "fix the cause, such as a missing tool or an unreadable worktree, then run nyl reconcile again",
-        ));
-        execution.result = UnitResult::Blocked {
-            reason: format!("driver error: {message}"),
-        };
-        execution.message = Some(message);
-    };
-    let Some(driver) = context.drivers.get(&unit.unit.api_version, &unit.unit.kind) else {
-        before_effects(&mut execution, format!("no driver serves kind {}", unit.unit.kind));
-        return execution;
-    };
-    let worktree = job.directory.join("worktree");
-    let temp_dir = job.directory.join("tmp");
-    let prepared = std::fs::create_dir_all(&worktree)
-        .and_then(|()| std::fs::create_dir_all(&temp_dir))
-        .map_err(|error| format!("cannot create {}: {error}", job.directory.display()))
-        .and_then(|()| {
-            context
-                .sources
-                .worktree(&SourceRepository::This, job.commit, &worktree)
-                .map_err(|error| format!("cannot check out commit {}: {error}", job.commit))
-        });
-    if let Err(message) = prepared {
-        before_effects(&mut execution, message);
-        let _ = std::fs::remove_dir_all(&job.directory);
-        return execution;
-    }
-    let started = context.base.clock.now();
-    let ctx = ExecutionContext {
-        unit: UnitAddress::new(shared.environment.clone(), name.clone()),
-        operation: DriverOperation::Reconcile,
-        project_dir: project_path(&worktree, shared.project_dir),
-        worktree,
-        temp_dir,
-        env: admitted_env(context.process_env, &unit.spec),
-        approved_digest: None,
-        deadline: unit_timeout(unit).after(started),
-        now: started,
-        observed: job.observed,
-        tools: context.tools,
-        commit_identity: context.commit_identity,
-        cache_dir: shared.cache_dir.clone(),
-    };
-    let outcome = driver.reconcile(&ctx, unit);
-    drop(ctx);
-    execution.killed = context.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;
-    let finished = context.base.clock.now();
-    let _ = std::fs::remove_dir_all(&job.directory);
-    let outcome = match outcome {
-        Ok(Supported::Supported(outcome)) => outcome,
-        Ok(Supported::Unsupported) => {
-            before_effects(&mut execution, format!("kind {} cannot reconcile", unit.unit.kind));
-            return execution;
-        }
-        Err(error) if !error.effects_possible() => {
-            before_effects(&mut execution, error.to_string());
-            return execution;
-        }
-        Err(error) => Outcome::Uncertain {
-            reason: error.to_string(),
-        },
-    };
-    let previous_receipt = same_incarnation(unit, job.observed).and_then(|observed| observed.receipt.clone());
-    let condition = |condition: Condition| ObservedUnit {
-        api_version: StateV1,
-        kind: ObservedUnitKind,
-        unit: unit.unit.clone(),
-        receipt: previous_receipt.clone(),
-        condition: Some(condition),
-    };
-    let observed = match outcome {
-        Outcome::Succeeded { outputs, artifacts, .. } => {
-            let key = unit
-                .execution_key
-                .clone()
-                .expect("an executed unit has an execution key");
-            let (outputs, warnings) = recorded_outputs(unit, outputs);
-            execution.warnings = warnings;
-            let (set, digests) = recorded_artifacts(shared.environment, unit, &key, artifacts);
-            execution.result = UnitResult::Executed {
-                execution_key: key.clone(),
-            };
-            execution.artifacts = Some(set);
-            ObservedUnit {
-                api_version: StateV1,
-                kind: ObservedUnitKind,
-                unit: unit.unit.clone(),
-                receipt: Some(Receipt {
-                    execution_key: key,
-                    behavior_version: driver.behavior_version(),
-                    run: shared.run.clone(),
-                    read_desired: shared.read_desired.cloned(),
-                    started_at: started,
-                    finished_at: finished,
-                    versions: BTreeMap::from([("nyl".to_owned(), context.base.version.clone())]),
-                    approval: None,
-                    provenance: unit.provenance.clone(),
-                    outputs,
-                    artifacts: digests,
-                }),
-                condition: None,
-            }
-        }
-        Outcome::AwaitingApproval { .. } => {
-            execution.result = UnitResult::AwaitingApproval;
-            return execution;
-        }
-        Outcome::Failed {
-            category,
-            retryable,
-            message,
-        } => {
-            execution.result = UnitResult::Failed { category, retryable };
-            execution.message = Some(message.clone());
-            condition(Condition::Failed {
-                since: finished,
-                run: shared.run.clone(),
-                category,
-                retryable,
-                message,
-            })
-        }
-        Outcome::Uncertain { reason } | Outcome::Waiting { reason, .. } => {
-            execution.result = UnitResult::Uncertain { reason: reason.clone() };
-            execution.message = Some(reason.clone());
-            condition(Condition::Uncertain {
-                since: finished,
-                run: shared.run.clone(),
-                reason,
-            })
-        }
-    };
-    execution.checkpoint = Some(Checkpoint {
-        desired: unit.clone(),
-        observed,
-        artifacts: execution.artifacts.clone().unwrap_or(job.previous_artifacts),
-    });
-    execution
-}
-
-/// The outputs a receipt records: the declared, non-sensitive ones a
-/// driver reported, with a `NYL-OUTPUT-UNDECLARED` warning for each
-/// undeclared one.
-fn recorded_outputs(unit: &DesiredUnit, outputs: Value) -> (Value, Vec<Finding>) {
-    let name = &unit.unit.name;
-    let declared = declared_outputs(unit.resolved_spec.as_ref().unwrap_or(&unit.spec));
-    let mut recorded = Map::new();
-    let mut warnings = Vec::new();
-    if let Value::Object(outputs) = outputs {
-        for (output, value) in outputs {
-            match declared.get(&output) {
-                Some(declaration) if !declaration.sensitive => {
-                    recorded.insert(output, value);
-                }
-                Some(_) => {}
-                None => warnings.push(Finding::new(
-                    Code::OutputUndeclared,
-                    format!("unit {name} reported output {output:?}, which it does not declare; it was not recorded"),
-                    format!("declare {output} under the unit's spec.outputs to record it, or stop writing it"),
-                )),
-            }
-        }
-    }
-    (Value::Object(recorded), warnings)
-}
-
-/// A success's artifact documents with `metadata.unit` and `executionKey`
-/// filled in, and the digests its receipt lists.
-fn recorded_artifacts(
-    environment: &EnvironmentName,
-    unit: &DesiredUnit,
-    key: &ExecutionKey,
-    artifacts: Vec<ArtifactDocument>,
-) -> (BTreeMap<String, ArtifactDocument>, Vec<ArtifactDigest>) {
-    let uid = unit.unit.uid.clone().expect("an executed unit has a uid");
-    let mut set = BTreeMap::new();
-    let mut digests = Vec::new();
-    for mut document in artifacts {
-        document.metadata.unit = ArtifactUnit {
-            environment: environment.clone(),
-            name: unit.unit.name.clone(),
-            uid: uid.clone(),
-        };
-        document.execution_key = key.clone();
-        digests.push(ArtifactDigest {
-            name: document.metadata.name.clone(),
-            kind: document.kind.clone(),
-            digest: document.digest(),
-        });
-        set.insert(document.metadata.name.clone(), document);
-    }
-    (set, digests)
 }
 
 #[cfg(test)]

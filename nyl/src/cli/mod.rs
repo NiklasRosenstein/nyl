@@ -107,6 +107,12 @@ enum Commands {
 
     /// Show an environment's units, lease, and runs
     Status(commands::status::StatusArgs),
+
+    /// Verify an environment's current receipts with their drivers
+    Verify(commands::verify::VerifyArgs),
+
+    /// Clear a unit's uncertain or failed condition, or accept a checkpointed result
+    Recover(commands::recover::RecoverArgs),
 }
 
 impl Cli {
@@ -134,7 +140,9 @@ impl Cli {
             | Commands::Lease(_)
             | Commands::Plan(_)
             | Commands::Reconcile(_)
-            | Commands::Status(_) => {
+            | Commands::Status(_)
+            | Commands::Verify(_)
+            | Commands::Recover(_) => {
                 // Drivers may block on runtimes of their own, so orchestration
                 // runs on a thread outside this command line's async runtime.
                 let outcome = std::thread::scope(|scope| {
@@ -157,8 +165,8 @@ impl Cli {
         }
     }
 
-    /// Run an orchestration command (`plan`, `reconcile`, `status`, `get`,
-    /// `state`, `lease`) with injected dependencies, returning its outcome
+    /// Run an orchestration command (`plan`, `reconcile`, `status`,
+    /// `verify`, `recover`, `get`, `state`, `lease`) with injected dependencies, returning its outcome
     /// instead of printing and exiting. The tier-1 scenario harness calls
     /// this. An orchestration command that fails before producing its report,
     /// such as on a project that cannot be discovered, is an outcome with
@@ -174,9 +182,11 @@ impl Cli {
             Commands::Get(args) => commands::get::run(&args, wiring),
             Commands::State(args) => commands::state::run_state(&args, wiring),
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
+            Commands::Verify(args) => commands::verify::run(&args, wiring),
+            Commands::Recover(args) => commands::recover::run(&args, wiring),
             _ => {
                 return Err(crate::NylError::config(
-                    "only plan, reconcile, status, get, state, and lease run in-process",
+                    "only plan, reconcile, status, verify, recover, get, state, and lease run in-process",
                 ))
             }
         };

@@ -55,7 +55,7 @@ pub(crate) fn store_error(environment: &EnvironmentName, error: &StateError) -> 
 }
 
 /// Run `body` holding the lease, and release it afterwards whatever happened.
-fn with_lease(
+pub(crate) fn with_lease(
     context: &Context<'_>,
     report: StateOperationReport,
     operation: Operation,
@@ -90,7 +90,7 @@ fn with_lease(
 /// Write one transition and record it in the report. The fenced push moves
 /// the lease, so `held` carries its new version afterwards.
 #[allow(clippy::too_many_arguments)] // The transition, where it goes, and the lease fencing it.
-fn commit(
+pub(crate) fn commit(
     context: &Context<'_>,
     location: &StateLocation,
     held: &mut HeldLease,
@@ -143,7 +143,7 @@ fn commit(
     }
 }
 
-fn summary(operation: Operation, environment: &EnvironmentName, headline: &str) -> TransitionSummary {
+pub(crate) fn summary(operation: Operation, environment: &EnvironmentName, headline: &str) -> TransitionSummary {
     TransitionSummary {
         operation,
         environment: environment.clone(),
@@ -505,6 +505,16 @@ fn move_holding(
                     .iter()
                     .map(|(unit, set)| (unit.clone(), Some(set.clone())))
                     .collect(),
+                observations: source
+                    .observations
+                    .iter()
+                    .map(|(unit, set)| (unit.clone(), Some(set.clone())))
+                    .collect(),
+                attestations: source
+                    .attestations
+                    .iter()
+                    .map(|(unit, set)| (unit.clone(), Some(set.clone())))
+                    .collect(),
             };
             let copied = commit(
                 context,
@@ -642,4 +652,40 @@ pub fn break_lease(
         )),
         Err(error) => report.refused(store_error(environment, &error)),
     }
+}
+
+/// `nyl state reset -e <env> --local`: drop the clone's local transitions
+/// and follow the remote state again. Lists the units whose local receipts
+/// the remote does not reflect and proceeds only when `discard` covers them;
+/// writes only the clone's local branches, through
+/// [`StateStore::reset_local`](nyl_core::orchestration::ports::StateStore::reset_local).
+/// Refused for state without a remote (`NYL-STATE-RESET-UNSUPPORTED`).
+///
+/// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
+pub fn reset(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    discard: Option<&crate::rules::local::Discard>,
+) -> StateOperationReport {
+    let _ = (context, environment, location, discard);
+    todo!("local")
+}
+
+/// `nyl state restore -e <env> --to <commit>`: one desired and one observed
+/// commit (operation `state-restore`, event `state-restored`) restoring the
+/// content of `to`, on top of the current tips, so protected branches need
+/// no force push; records the local transitions it rejects and never
+/// restores admission. Takes the lease.
+///
+/// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
+pub fn restore(
+    context: &Context<'_>,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+    to: &nyl_core::orchestration::ids::CommitId,
+    requested: &Requested,
+) -> StateOperationReport {
+    let _ = (context, environment, location, to, requested);
+    todo!("local")
 }

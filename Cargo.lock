@@ -2020,6 +2020,7 @@ version = "0.5.9"
 dependencies = [
  "chrono",
  "nyl-core",
+ "proptest",
  "schemars",
  "serde",
  "serde-saphyr 2.0.0",

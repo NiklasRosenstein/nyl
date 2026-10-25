@@ -23,6 +23,10 @@ pub struct StatusArgs {
     #[arg(short = 'e', long = "environment")]
     pub environment: String,
 
+    /// Show this clone's local view of the state, including --local runs.
+    #[arg(long)]
+    pub local: bool,
+
     /// Output format.
     #[arg(short = 'o', long = "output", value_enum, default_value_t)]
     pub output: RunOutput,
@@ -40,6 +44,10 @@ pub fn run(args: &StatusArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 
 fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<CommandOutcome, Stop> {
     let session = Session::open(&args.path, &args.environment)?;
+    if args.local {
+        // Package `local` reads the local view through LocalStore.
+        todo!("local")
+    }
     // Status only reads: a read-only store, no commit identity, no lease.
     let store = session.store(None)?;
     let context = session.context(&store, wiring, None);

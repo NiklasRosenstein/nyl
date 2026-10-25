@@ -14,10 +14,11 @@ use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{DriverOperation, DriverSet};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, SourceRenderer, SourceRepository,
-    SourceResolver, StateError, StateResult, StateStore, StateTips, Transition,
+    Checkpoint, CommitIdentity, Committed, Coordination, EnvironmentSnapshot, LocalDivergence, LogEntry,
+    SourceRenderer, SourceRepository, SourceResolver, StateError, StateResult, StateSide, StateStore, StateTips,
+    Transition,
 };
-use nyl_core::orchestration::state::{FailureCategory, Lease, Run, Signal, StateLocation};
+use nyl_core::orchestration::state::{DesiredUnit, FailureCategory, Lease, Run, Signal, StateLocation};
 use nyl_drivers::fake::{Script, Scripted};
 use nyl_drivers::process::ProcessRunner;
 use nyl_git::GitAuth;
@@ -149,6 +150,7 @@ impl Harness {
             store: self.store.as_ref(),
             clock: self.clock.as_ref(),
             ids: &self.ids,
+            faults: &NoFaults,
             runner: "test-runner".to_owned(),
             requested_by: "test".to_owned(),
             version: "0.0.0-test".to_owned(),
@@ -181,6 +183,7 @@ impl Harness {
                 concurrency: run::DEFAULT_CONCURRENCY,
                 source_override: None,
                 wait: None,
+                local: None,
             },
             workspace: TempDir::new().unwrap(),
         }
@@ -194,7 +197,6 @@ impl Harness {
             renderer: &job.renderer,
             drivers: &self.drivers,
             tools: &self.tools,
-            faults: &NoFaults,
             workspace: job.workspace.path(),
             process_env: &self.process_env,
             commit_identity: identity.then_some(&self.identity),
@@ -649,6 +651,36 @@ impl StateStore for FlakyLeaseStore {
     }
     fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
         self.inner.import_history(from, to)
+    }
+    fn write_run_created(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        run: &Run,
+        created: &[DesiredUnit],
+    ) -> StateResult<()> {
+        self.inner.write_run_created(location, environment, run, created)
+    }
+    fn log(&self, location: &StateLocation, side: StateSide, limit: usize) -> StateResult<Vec<LogEntry>> {
+        self.inner.log(location, side, limit)
+    }
+    fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
+        self.inner.local_divergence(location)
+    }
+    fn reset_local(&self, location: &StateLocation, expected: &StateTips) -> StateResult<StateTips> {
+        self.inner.reset_local(location, expected)
+    }
+    fn commit_local(
+        &self,
+        location: &StateLocation,
+        environment: &EnvironmentName,
+        base: &StateTips,
+        transition: &Transition,
+        lease_location: &StateLocation,
+        lease_version: &str,
+    ) -> StateResult<Committed> {
+        self.inner
+            .commit_local(location, environment, base, transition, lease_location, lease_version)
     }
 }
 

@@ -128,6 +128,7 @@ mod tests {
                 finished,
             },
             checkpoints: Vec::new(),
+            created: Vec::new(),
             version: "r1".to_owned(),
         }
     }

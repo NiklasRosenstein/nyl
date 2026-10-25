@@ -274,6 +274,9 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         desired: units(desired, "desired/units/")?,
         observed: units(observed, "observed/units/")?,
         artifacts: artifacts(observed)?,
+        // Package `store` reads and writes observations and attestations.
+        observations: std::collections::BTreeMap::new(),
+        attestations: std::collections::BTreeMap::new(),
     })
 }
 
@@ -849,6 +852,8 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
     Ok(RunState {
         run,
         checkpoints,
+        // Package `store` records created units on the run ref.
+        created: Vec::new(),
         version,
     })
 }

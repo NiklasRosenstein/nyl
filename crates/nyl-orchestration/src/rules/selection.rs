@@ -27,6 +27,10 @@ pub struct Candidates<'a> {
     pub named: Option<&'a BTreeSet<UnitName>>,
     /// Units this run already executed, whatever the outcome.
     pub attempted: &'a BTreeSet<UnitName>,
+    /// A `--local` run next to remote state: units whose execution recovery
+    /// policy is not `converge` are skipped ([`Skipped::LocalNotConverge`]).
+    /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
+    pub local: bool,
 }
 
 /// Why a unit is not selected.
@@ -40,6 +44,9 @@ pub enum Skipped {
     FailedNonRetryable,
     AwaitingApproval,
     AlreadyAttempted,
+    /// A `--local` run does not execute it: its recovery policy is not
+    /// `converge`, and `--approve` (part 6) is needed to run it locally.
+    LocalNotConverge,
 }
 
 /// The ready units, by name, and why each other unit is skipped.
@@ -252,6 +259,7 @@ mod tests {
                 drivers: &self.drivers,
                 named,
                 attempted: &self.attempted,
+                local: false,
             })
         }
     }

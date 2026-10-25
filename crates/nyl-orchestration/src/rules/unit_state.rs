@@ -490,6 +490,7 @@ mod tests {
             runs: vec![RunState {
                 run,
                 checkpoints: Vec::new(),
+                created: Vec::new(),
                 version: "r1".to_owned(),
             }],
         };

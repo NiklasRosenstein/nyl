@@ -1,5 +1,5 @@
-//! `nyl state` and `nyl lease`: create, move, and forget environment state,
-//! and declare a lease holder gone.
+//! `nyl state` and `nyl lease`: create, move, forget, reset, and restore
+//! environment state, and declare a lease holder gone.
 
 use std::path::PathBuf;
 
@@ -105,6 +105,29 @@ pub enum StateCommand {
         #[arg(long)]
         unit: String,
     },
+    /// Drop this clone's local transitions and follow the remote state again.
+    Reset {
+        #[command(flatten)]
+        common: Common,
+        /// Reset the clone's local state branches (required: reset never changes remote state).
+        #[arg(long, required = true)]
+        local: bool,
+        /// Forget the local receipts of these units, which the remote does not reflect (repeatable, or comma-separated).
+        #[arg(long, value_delimiter = ',', conflicts_with = "discard_all")]
+        discard: Vec<String>,
+        /// Forget every local receipt the remote does not reflect.
+        #[arg(long)]
+        discard_all: bool,
+    },
+    /// Restore remote state to an earlier commit's content with forward commits,
+    /// after local transitions were pushed by hand.
+    Restore {
+        #[command(flatten)]
+        common: Common,
+        /// The state commit whose content to restore.
+        #[arg(long)]
+        to: String,
+    },
 }
 
 /// Manage an environment's run lease.
@@ -135,6 +158,8 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested(common))
             })
         }
+        StateCommand::Reset { .. } => todo!("local"),
+        StateCommand::Restore { .. } => todo!("local"),
         StateCommand::Move {
             common,
             from,
@@ -217,17 +242,17 @@ fn requested(common: &Common) -> Requested {
 }
 
 /// What one state operation runs against.
-struct OperationContext<'a> {
-    context: &'a Context<'a>,
-    environment: EnvironmentName,
-    location: &'a StateLocation,
+pub(crate) struct OperationContext<'a> {
+    pub(crate) context: &'a Context<'a>,
+    pub(crate) environment: EnvironmentName,
+    pub(crate) location: &'a StateLocation,
 }
 
 /// Resolve the environment and the commit identity, run one state
 /// operation, and render its report. Findings before the operation, such as
 /// an unknown environment or a missing identity, are refusals in the same
-/// report.
-fn run(
+/// report. `nyl recover` shares it.
+pub(crate) fn run(
     common: &Common,
     wiring: &Wiring<'_>,
     operation_name: &'static str,
@@ -270,6 +295,7 @@ fn run(
         store: &store,
         clock: wiring.clock.as_ref(),
         ids: wiring.ids,
+        faults: wiring.faults,
         runner: wiring.runner.clone(),
         requested_by: identity.to_string(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
