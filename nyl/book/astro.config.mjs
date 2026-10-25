@@ -180,6 +180,8 @@ export default defineConfig({
                   "reference/cli/plan",
                   "reference/cli/reconcile",
                   "reference/cli/status",
+                  "reference/cli/verify",
+                  "reference/cli/recover",
                   "reference/cli/state",
                 ],
               },

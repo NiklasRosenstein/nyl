@@ -71,6 +71,8 @@ assert_cmd = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 criterion = { workspace = true }
 predicates = { workspace = true }
+# Test drivers that wrap the fake kinds implement `Driver::spec_schema`.
+schemars = { workspace = true }
 serde-saphyr = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
