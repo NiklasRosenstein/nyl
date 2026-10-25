@@ -114,8 +114,6 @@ pub enum Code {
     StateRestoreInvalid,
     /// A `--local` run executed a unit next to remote state; the remote does not record it.
     LocalRunUnrecorded,
-    /// A `--local` run skipped a unit whose recovery policy is not `converge`.
-    LocalRunNotConverge,
     /// `--local` cannot run against this state, such as state refs with full `refs/…` names, which have no local branch.
     LocalRunUnsupported,
     /// A `--local` run found remote run refs of dead runs that remote state
@@ -127,7 +125,7 @@ pub enum Code {
 }
 
 impl Code {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 53] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -178,7 +176,6 @@ impl Code {
         Self::StateResetUnsupported,
         Self::StateRestoreInvalid,
         Self::LocalRunUnrecorded,
-        Self::LocalRunNotConverge,
         Self::LocalRunUnsupported,
         Self::LocalRunLeftovers,
         Self::RunCancelled,
@@ -236,7 +233,6 @@ impl Code {
             Self::StateResetUnsupported => "NYL-STATE-RESET-UNSUPPORTED",
             Self::StateRestoreInvalid => "NYL-STATE-RESTORE-INVALID",
             Self::LocalRunUnrecorded => "NYL-LOCAL-RUN-UNRECORDED",
-            Self::LocalRunNotConverge => "NYL-LOCAL-RUN-NOT-CONVERGE",
             Self::LocalRunUnsupported => "NYL-LOCAL-RUN-UNSUPPORTED",
             Self::LocalRunLeftovers => "NYL-LOCAL-RUN-LEFTOVERS",
             Self::RunCancelled => "NYL-RUN-CANCELLED",

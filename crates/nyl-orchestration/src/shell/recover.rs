@@ -19,8 +19,9 @@
 
 use std::collections::BTreeMap;
 
+use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{RunState, TransitionChanges};
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, RunState, TransitionChanges};
 use nyl_core::orchestration::state::{Condition, Operation, StateLocation};
 use serde_json::json;
 
@@ -28,6 +29,18 @@ use super::state::{commit, store_error, summary, with_lease, Requested};
 use super::Context;
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::recovery::{decide, evidence, RecoverAction};
+
+/// The state record matches the environment, and remote state carries no
+/// local tip.
+fn check_state(
+    context: &Context<'_>,
+    snapshot: &EnvironmentSnapshot,
+    environment: &EnvironmentName,
+    location: &StateLocation,
+) -> Result<(), Finding> {
+    super::local::check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+    super::local::check_remote_tips(context.store, location, environment)
+}
 
 /// `nyl recover`.
 pub fn recover(
@@ -50,10 +63,7 @@ pub fn recover(
                 Ok(snapshot) => snapshot,
                 Err(error) => return report.refused(store_error(environment, &error)),
             };
-            if let Err(finding) = super::local::check_record(context.store, snapshot.record.as_ref(), environment, location) {
-                return report.refused(finding);
-            }
-            if let Err(finding) = super::local::check_remote_tips(context.store, location, environment) {
+            if let Err(finding) = check_state(context, &snapshot, environment, location) {
                 return report.refused(finding);
             }
             let coordination = match context.store.coordination(location, environment) {

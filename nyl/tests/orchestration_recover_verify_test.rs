@@ -325,7 +325,6 @@ fn test_recover_keeps_the_run_ref_of_a_dead_run() {
 /// over the dead run: it consumes its run ref and recovers the unit that
 /// run was executing instead of treating it as never started.
 #[test]
-#[ignore = "needs run takeover (package takeover of M3 part 4)"]
 fn test_reconcile_after_recover_takes_over_the_dead_run() {
     let harness = Harness::new();
     crash_after_effect(&harness);

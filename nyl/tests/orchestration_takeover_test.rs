@@ -829,7 +829,6 @@ fn test_cancelled_run_checkpoints_marks_running_units_uncertain_and_skips_the_co
 /// local transition commit's summary record the `local` approval with the
 /// commit identity.
 #[test]
-#[ignore = "needs the `local` package (rules::local::check_leftovers, shell::local::finish_local_report); the integration step un-ignores it"]
 fn test_local_run_executes_a_unit_that_does_not_converge_only_when_approved() {
     let files = [
         ("nyl/nyl.toml", "[project]\n".to_owned()),
