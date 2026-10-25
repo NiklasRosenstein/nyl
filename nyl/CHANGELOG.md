@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Orchestration recovers from interrupted runs (M3 part 4). A reconcile that
+  finds an expired or broken lease takes over: it adopts the uids of units
+  the dead run created, imports its checkpoints as receipts (`imported` in
+  the transition commit), gives units it left without a checkpoint an
+  `uncertain` condition, executes converging units again (`recovered`), and
+  retires run refs that are still evidence for an uncertain unit to
+  `<prefix><env>/evidence/<run>`. `nyl recover -e <env> --unit <u>` clears a
+  condition with `--retry` or adopts a checkpointed result with
+  `--accept <run>`, and `nyl verify -e <env>` records drift and health
+  observations and driver attestations against current receipts. SIGINT and
+  SIGTERM cancel a reconcile: the signal reaches running tools, finished
+  units are checkpointed, running ones become uncertain, the lease is
+  released, and the run exits 4 with `NYL-RUN-CANCELLED`. `nyl status` shows
+  dead runs and uncertain units (`NYL-UNIT-UNCERTAIN`). Run refs now record
+  the units a run created (`created/<unit>.yaml`).
+
+- Local runs next to remote state: `nyl reconcile --local` continues from the
+  clone's local state branches and commits there with a `Nyl-Local: true`
+  trailer, taking the remote lease or, with `--local-lease`, the clone's own.
+  `--approve <unit>` runs a unit whose recovery policy is not `converge`,
+  recorded with the `local` approval identity. `nyl status --local` and
+  `nyl get --local` show the local view, `nyl state reset --local` follows
+  the remote again (`--discard`, `--discard-all`), and `nyl state restore
+  --to <commit>` repairs remote state whose tip is a pushed local commit
+  (`NYL-STATE-LOCAL-TIP`). State without a remote lives on the clone's own
+  branches, and `nyl state move --from local` publishes it.
+
+- Runs keep one worktree per concurrency slot and reset it between units to
+  the unit's commit, instead of a full checkout per unit.
+
+- A reference page, [Git storage](https://niklasrosenstein.github.io/nyl/reference/git-storage/),
+  lists every repository and ref Nyl reads and writes.
+
 - Orchestration runs one environment (M3 part 3). `nyl reconcile -e <env>`
   renders the environment's units at its source commit, resolves `fromUnit`
   references, executes ready units in dependency waves (`--unit`,

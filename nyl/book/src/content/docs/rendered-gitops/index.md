@@ -77,6 +77,9 @@ Applications use ordinary Git directory sources with recursive discovery.
   Release takes and binds them per target.
 - [Rendered layout](/nyl/rendered-gitops/rendered-layout/) describes the
   generated tree, its catalog, and the ownership index.
+- [Git storage](/nyl/reference/git-storage/) lists the repositories, branches,
+  and path prefixes Nyl reads and publishes to, and when to use separate
+  publication repositories.
 - The workflow pages follow a CI pipeline in order:
   [render and validate](/nyl/rendered-gitops/workflow/render/),
   [diff in pull requests](/nyl/rendered-gitops/workflow/diff/),

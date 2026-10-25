@@ -151,13 +151,12 @@ again only with `idempotent: true` (recovery policy `converge`); otherwise it
 waits for an operator to recover it (`manual`). Idempotency is your claim,
 which Nyl cannot check.
 
-`nyl recover`, which clears a failure or an uncertain execution after you have
-checked it, arrives in a later part of milestone M3. Until then, a failure
-recorded without `idempotent: true` is never retried, even after you fix the
-script, and `nyl status` says so. To run the unit again, start over with
-`nyl state init -e <env> --fresh`, which makes every unit a new incarnation that
-executes at the next reconcile. An uncertain execution also runs again once you
-set `idempotent: true`.
+A failure recorded without `idempotent: true` is not retried, even after you
+fix the script, and `nyl status` says so. Once you have checked what the step
+did, [`nyl recover -e <env> --unit <unit> --retry --reason <text>`](/nyl/reference/cli/recover/)
+clears the failure or the uncertain execution, and the next reconcile runs the
+unit again. [Recovery](/nyl/orchestration/recovery/) describes conditions and
+their recovery in full.
 
 `verify` records a drift observation, never a receipt. It receives the same
 inputs and environment as `command`, without `NYL_OUTPUTS`. `teardown`
