@@ -280,23 +280,73 @@ Without `-e`, nothing records what was applied, so the invocation chooses:
 | Job | Base |
 | --- | --- |
 | Pull request validate or plan | The target branch, such as `--base origin/main`; its merge base with the branch is used |
-| Apply after merge | The revision last applied, such as a tag the pipeline moves after a successful apply |
+| Plan after merge | The last applied commit, read from a tracked ref with `--base <ref>` |
+| Apply after merge | The same ref with `--advance <ref>`, which also moves it once the apply succeeds |
 | Local development | `--no-base`, or the target branch to preview a pull request |
 
-Comparing the apply job with its own branch, `--base origin/main` on `main`,
-compares a commit with itself and detects nothing; the guarded change then
-has to have been caught in the pull request. A tag closes that gap and is
-optional:
+Comparing a job on `main` with `main`, such as `--base origin/main` there,
+compares a commit with itself and detects nothing. Without a tracked ref, a
+guarded change is therefore caught only in its pull request. Tracking is
+optional; see [Tracking the last applied commit](#tracking-the-last-applied-commit).
+
+### Tracking the last applied commit
+
+Under orchestration the receipt records what ran, so nothing else is needed.
+Outside orchestration, `nyl exec` can keep one Git ref per unit that points at
+the commit it last applied, so that the jobs on `main` compare with what was
+applied without custom scripting:
 
 ```sh
-nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan
-git tag -f nyl/applied/aws-accounts HEAD
-git push -f origin refs/tags/nyl/applied/aws-accounts
+nyl exec --unit aws-accounts --base refs/nyl-applied/aws-accounts -- plan -out=tfplan
+nyl exec --unit aws-accounts --advance refs/nyl-applied/aws-accounts -- apply tfplan
 ```
 
-Nyl never writes the tag itself outside orchestration; the pipeline moves it
-once the apply has succeeded, and the first apply, before the tag exists,
-runs with `--no-base`.
+- **Any ref.** The argument is a full ref name on the source repository's
+  `origin`, chosen by the pipeline: a custom ref such as
+  `refs/nyl-applied/<unit>`, which is hidden from the branch list and
+  triggers no CI, but cannot be protected and is rejected by some hosts
+  ([Git host compatibility](../nyl/book/src/content/docs/orchestration/environments-and-state.md#git-host-compatibility));
+  a tag, which is visible and protectable, but may trigger release
+  pipelines; or a branch, which is protectable and visible. Nyl writes it
+  through `nyl-git`, with the same transport and `[[git.credentials]]` as
+  state pushes.
+- **`--advance <ref>`** implies `--base <ref>` and excludes `--base` and
+  `--no-base`. It belongs on the invocation that applies: Nyl cannot tell
+  from the tool's arguments whether they change anything, so it advances
+  whenever the tool exits 0.
+- **Before the tool starts**, Nyl refuses with exit 125 and a stable code when
+  the advance could not be recorded correctly:
+  - `NYL-ADVANCE-DIRTY`: the unit is read from a worktree with uncommitted
+    changes to files it reads, so no commit describes what would be applied.
+  - `NYL-ADVANCE-NOT-DESCENDANT`: the ref points at a commit that is not an
+    ancestor of the source commit, as for a retried job of an older commit
+    after a newer one applied. Moving the ref would record an older state as
+    the last applied one.
+  - `NYL-ADVANCE-NO-PERMISSION`: a dry-run push with the ref's current value
+    as its lease was rejected, so the credentials cannot write the ref.
+    Protection rules that only reject the real update cannot be detected in
+    advance; the recovery below covers them.
+- **After the tool exits 0**, Nyl moves the ref from its value at the start to
+  the source commit, as an atomic compare-and-swap. A tool that exits
+  non-zero leaves the ref untouched, and `exec` exits with the tool's status.
+- **When the update fails**, `exec` exits 125 with `NYL-ADVANCE-FAILED`, says
+  that the apply itself succeeded, and prints the recovery: the push to run
+  once the cause is fixed, with the expected old value as its lease, and,
+  when the ref moved meanwhile, both commits and an instruction not to force
+  it. Exit 125 after the tool ran is specific to `--advance`; it is the only
+  case in which `exec` does not exit with the tool's own status once the
+  tool has started. A missed advance fails closed: the next run compares with the older
+  commit and asks again about guarded changes since then; it never skips
+  one.
+- **Bootstrapping.** A ref that does not exist yet fails with
+  `NYL-ADVANCE-NO-REF`, naming two explicit ways to start: `--bootstrap`
+  runs once without a baseline, as `--no-base` does, and creates the ref,
+  with a lease that requires it to be absent; or the ref is created by hand
+  at the commit that was last applied before adopting Nyl, which gives the
+  first run a real baseline.
+- The ref records only a commit. It is not a receipt, orchestration does not
+  read it, and selecting the unit from an Environment later replaces it with
+  the receipt baseline.
 
 **Failure scope.** Admission results are per resource. `nyl validate` and
 `plan` report every failure. A unit whose collection includes a failing
@@ -536,7 +586,7 @@ through the same code as `reconcile` and writes the results to a directory.
 It needs no lease and writes no state:
 
 ```text
-nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev> | --no-base]
+nyl prepare [-e <env>] --unit <u> [--deployed | --worktree | --source <rev>] [--base <rev> | --no-base]
             [--native] [--check <dir>] [--allow-change <resource>:<reason>]
             [--fixture-outputs <file>] [--output-dir <dir>] [-o yaml|json]
 ```
@@ -548,13 +598,9 @@ nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev> | 
 | `resolved-spec.yaml` | The unit's resolved spec and execution key |
 | `native/` | With `--native`: the driver's `NativeInputs` files and a `steps.txt` with the native commands, secrets shown by name |
 
-- **Source.** By default, files come from the current worktree, uncommitted
-  changes included, as for `nyl build`. `--source <rev>` reads a commit.
-  `--deployed` reads the unit's desired document and bundle from state, which
-  is what is deployed, for inspection and breakglass.
+- **Source.** See [Which files a unit is read from](#which-files-a-unit-is-read-from).
   `-e` names the environment whose values and receipts the unit resolves
-  against; `--deployed` requires it. Without `-e`, see
-  [Outside orchestration](#outside-orchestration).
+  against. Without `-e`, see [Outside orchestration](#outside-orchestration).
 - **References** resolve read-only against current receipts, as `nyl get
   output` does. A blocked reference exits 2, lists the blocked pointers with
   their source paths, and writes no `native/` directory.
@@ -574,6 +620,40 @@ nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev> | 
   for example `tofu plan -var-file=out/native/variables.tfvars.json` against
   an isolated backend. Resolving dependencies still requires Nyl.
 
+### Which files a unit is read from
+
+`prepare` and `exec` read a unit, its definitions, policies, collection
+members, and source files from one of three sources:
+
+| Source | Flag | Available |
+| --- | --- | --- |
+| The deployed desired document and bundle | `--deployed` | With `-e` |
+| The worktree, uncommitted and untracked files included, as `nyl render` sees it | `--worktree` | Always |
+| A commit | `--source <rev>` | Always |
+
+- **Defaults.** `exec -e` uses the deployed spec, as the
+  [operator exec](orchestration-core.md#operator-exec) contract defines.
+  Every other form uses the worktree, because there is either nothing
+  deployed or nothing executed.
+- **Relevant changes.** Only uncommitted changes to files the invocation
+  reads count; stages 0–6 record those files as they read them, so edits
+  elsewhere in the repository never matter.
+- **The worktree is used and has relevant changes.** `prepare` warns with
+  `NYL-SOURCE-DIRTY`, lists the paths, and marks its output as dirty in
+  provenance. `exec` without `-e` refuses with exit 125 unless `--worktree`
+  was given explicitly, to run the uncommitted changes, or `--source HEAD`
+  to run the commit, because otherwise an apply could use inputs that no
+  commit records. This follows `publish-tree`, which refuses dirty
+  provenance unless the user allows it. A clean CI checkout never meets it.
+- **The worktree is not used but has relevant changes.** With `--deployed`,
+  `exec -e`'s default, or `--source`, Nyl warns with
+  `NYL-SOURCE-WORKTREE-IGNORED`, names the changed paths, and says to pass
+  `--worktree` to use them. Passing `--deployed` or `--source` explicitly
+  silences it: the caller knows the current changes will not run.
+- `--base <rev>` compares with the merge base of `<rev>` and the commit the
+  source is based on, which for the worktree is `HEAD`, so uncommitted edits
+  are changes relative to that base.
+
 ### Outside orchestration
 
 Nyl can compile inputs for an existing Terraform or OpenTofu pipeline without
@@ -586,8 +666,9 @@ tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.
 tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
 ```
 
-- Without `-e`, `prepare` renders the unit as `nyl build` does: from the
-  worktree, with no environment values and no state. A spec that uses
+- Without `-e`, `prepare` renders the unit as `nyl build` does, with no
+  environment values and no state, from the worktree unless `--source`
+  names a commit. A spec that uses
   `values`, `environment`, or a `fromUnit` reference, directly or inside a
   member, fails and names `-e`.
 - Stages 0–6 are the same code as under orchestration, so the native inputs
@@ -609,8 +690,8 @@ let Nyl run the tool. `nyl exec` without `-e` runs the unit's
 [`exec` capability](orchestration-core.md#operator-exec) directly:
 
 ```sh
-nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan              # pull request
-nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan      # after merge
+nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan                       # pull request
+nyl exec --unit aws-accounts --advance refs/nyl-applied/aws-accounts -- apply tfplan      # after merge
 ```
 
 - The driver prepares the tool exactly as it does under orchestration, from
@@ -618,9 +699,11 @@ nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan    
   `-lockfile=readonly`, its own `TF_DATA_DIR`, and the variables file. The
   arguments after `--` are passed to the tool unchanged.
 - There is no environment, so there is nothing to hold, no lease, no
-  ownership-scope check against state, and nothing recorded. Files come from
-  the worktree, as for `prepare`, and the tool runs in its own copy, so it
-  never writes into the checkout.
+  ownership-scope check against state, and nothing recorded except the
+  optional [tracked ref](#tracking-the-last-applied-commit). Files come from
+  the worktree or `--source`, under the rules of
+  [Which files a unit is read from](#which-files-a-unit-is-read-from), and the
+  tool runs in its own copy, so it never writes into the checkout.
 - Admission, transition rules against `--base` or none with `--no-base`, and
   guarded changes apply as for `prepare`: a guarded change refuses with exit
   125 unless `--allow-change` names it, before the tool starts.
@@ -840,8 +923,8 @@ consumer, and two owners rejected.
 | R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
-| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, `prepare --check`, removal approval, exec with bundles | M4, M8's `exec` |
-| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, and the `approve` effect for guarded changes | R3, R4 |
+| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4, M8's `exec` |
+| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
 
@@ -917,4 +1000,5 @@ teams/
 | Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R6 |
 | CEL implementation for `x-nyl-validations`: a Rust CEL crate, or rules evaluated through the Kyverno CLI | R5 |
 | Whether `--allow-change` outside orchestration should be tied to a CI provider's own approvals, such as a protected environment | R5 |
-| Whether Nyl should offer to move a last-applied tag itself outside orchestration, or leave it to the pipeline | R5 |
+| Whether drivers should classify tool arguments, such as OpenTofu `apply` and `destroy`, so `--advance` moves the ref only after an invocation that can change something | R5 |
+| A default name for tracked refs, such as `refs/nyl-applied/<unit>`, and whether `nyl.toml` may set the prefix | R5 |

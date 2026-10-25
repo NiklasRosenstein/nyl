@@ -67,6 +67,7 @@ export const domainResourcesRoadmap = {
         { text: 'Approval before collection members are removed', done: false },
         { text: '`nyl exec` with deployed and worktree bundles', done: false },
         { text: '`nyl prepare --native` and `nyl exec` for a unit outside any Environment, and `prepare --check`', done: false },
+        { text: '`--worktree`, `--source`, and `--deployed` with warnings and refusals for relevant uncommitted changes', done: false },
       ],
     },
     {
@@ -79,6 +80,7 @@ export const domainResourcesRoadmap = {
         { text: '`--base` comparing against another revision, and an explicit `--no-base`, required outside orchestration', done: false },
         { text: 'The bundle of the current receipt as the baseline when a unit runs', done: false },
         { text: '`oldObject` and the operation for Kyverno policies', done: false },
+        { text: 'Tracked last-applied refs with `exec --advance`: permission preflight, compare-and-swap, recovery steps, and `--bootstrap`', done: false },
         { text: 'The `approve` effect for guarded changes, with removed members as one of them, and `--allow-change` outside orchestration', done: false },
       ],
     },

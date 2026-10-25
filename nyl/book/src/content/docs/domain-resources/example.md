@@ -226,26 +226,37 @@ before:
 nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan
 
 # After the merge
-nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan
+nyl exec --unit aws-accounts --base refs/nyl-applied/aws-accounts -- plan -out=tfplan
+nyl exec --unit aws-accounts --advance refs/nyl-applied/aws-accounts -- apply tfplan
 ```
 
 `nyl exec` without an environment prepares OpenTofu exactly as an
 orchestrated run would, with the backend, the variables, and its own working
-copy, and then runs `tofu` with the arguments after `--`. It records nothing,
-so the pipeline stays in charge of when to plan and who approves the apply.
+copy, and then runs `tofu` with the arguments after `--`. The pipeline stays
+in charge of when to plan and who approves the apply.
 
 Without orchestration, nothing records what was last applied, so every run
 says what to compare with:
 
 - `--base origin/main` in a pull request compares with where the branch
   forked from `main`.
-- After the merge, comparing `main` with itself would detect nothing. The
-  example uses a tag that the pipeline moves after each successful apply,
-  `nyl/applied/aws-accounts`. The tag is optional; without it, guarded
-  changes are caught only in the pull request.
-- `--no-base` skips the comparison deliberately, for local development or a
-  unit's first apply. Leaving out both is an error, so a pipeline never skips
+- After the merge, comparing `main` with itself would detect nothing.
+  `--advance` names a ref that points at the commit last applied: Nyl
+  compares with it, and moves it to the current commit once `tofu apply`
+  succeeds. Before running the tool, Nyl checks that it may push the ref and
+  that no newer commit was applied already. If the push still fails, it says
+  so, prints the commands to fix it, and the next run simply checks the
+  changes since the older commit again.
+- The ref is optional and can be a custom ref, a tag, or a branch. The first
+  apply, before the ref exists, passes `--bootstrap` to run once without a
+  comparison and create it.
+- `--no-base` skips the comparison deliberately, for local development.
+  Leaving out a base entirely is an error, so a pipeline never skips
   transition rules by accident.
+
+`nyl exec` refuses to run uncommitted changes to the files a unit reads
+unless you pass `--worktree`, so a local apply never uses inputs that no
+commit records. `--source HEAD` runs the committed version instead.
 
 To hand the inputs to a tool invocation of your own instead, write them to a
 directory:
