@@ -183,7 +183,58 @@ A team with a `TeamWorkspace` named `payments` gets the unit
 `team-aws-payments`. Nyl knows the instances before rendering anything,
 because `forEach` and the declarations are both literal.
 
-## 7. Remove access, keep the account
+## 7. Guard sensitive changes
+
+Some fields may be set once but not changed lightly. Changing an AWS
+account's email replaces the account, so the definition makes that change
+wait for an approval, and forbids moving a workload account back to the
+sandbox OU:
+
+```yaml
+# platform/definitions/aws.yaml, beneath spec.schema
+properties:
+  email:
+    type: string
+    x-nyl-validations:
+      - rule: self == oldSelf
+        message: Changing an account email replaces the account.
+        effect: approve
+        reason: email-change
+  ou:
+    type: string
+    x-nyl-validations:
+      - rule: "!(oldSelf == 'workloads' && self == 'sandbox')"
+        message: Workload accounts cannot move back to the sandbox OU.
+```
+
+A rule that uses `oldSelf` compares a declaration with its previous version:
+
+- In a pull request, `nyl validate --base origin/main` compares with the merge
+  base and reports both rules before anything is merged.
+- When `aws-accounts` runs, Nyl compares with what the unit last applied. An
+  email change makes the unit wait for `--approve aws-accounts`, and the plan
+  shows what the provider would do to the account.
+
+## 8. Use your own pipeline
+
+Orchestration is optional. When Terraform or OpenTofu already runs in a CI
+pipeline, Nyl prepares its inputs, and the pipeline plans and applies as
+before:
+
+```sh
+nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/
+tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.tfbackend.json
+tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
+```
+
+The unit document stays the same, and no Environment selects it. Validation,
+policies, and transition rules still apply. An approval-guarded change, such
+as the email change above, stops `prepare` unless the pipeline passes
+`--allow-change AwsAccount/payments-prod:email-change` after its own
+approval. Selecting the unit from an Environment later changes nothing about
+the inputs it receives.
+
+## 9. Remove access, keep the account
 
 Removing a declaration changes the implementing unit's input. What happens next
 is up to the implementation:

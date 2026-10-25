@@ -100,13 +100,16 @@ spec:
   resource, as Kubernetes does for structural schemas. Implementations then
   read effective values and do not repeat the defaults. Other annotations,
   such as `description` and `format`, do not change the bundle.
-- **Schema extensions.** Two keywords carry Nyl-specific meaning:
+- **Schema extensions.** Three keywords carry Nyl-specific meaning:
   - `x-nyl-reference: {kind}`. The string must name an existing resource of
     that kind in the project catalog. This is referential integrity checked
     in stage 2, not a dependency edge.
   - `x-nyl-accepts-references: true`. The field may hold a `fromUnit` or
     `fromPromotion` reference object (see [stage 4](#stage-4-resolution)).
     Any other field that holds a reference object is a schema error.
+  - `x-nyl-validations`: CEL rules on any schema node, including
+    [transition rules](#transition-rules) that compare a resource with its
+    previous version.
 - Definitions are pinned by S like every other file in the project. Sharing
   definitions across repositories through a locked `GitSource` is an
   [open decision](#open-decisions).
@@ -193,6 +196,62 @@ so its result applies to every environment and can be cached under the
      the render path already uses.
    - The Kyverno CLI is an external tool. Its version is part of the
      admission cache key, as for rendering.
+
+### Transition rules
+
+Some changes are fine to make once but not to change later, such as an AWS
+account's email, which the provider can only change by replacing the
+account. A definition states them as CEL rules on schema nodes, in the form
+Kubernetes uses for `x-kubernetes-validations`:
+
+```yaml
+schema:
+  properties:
+    email:
+      type: string
+      x-nyl-validations:
+        - rule: self == oldSelf
+          message: Changing an account email replaces the account.
+          effect: approve            # deny (default) | approve
+          reason: email-change
+    ou:
+      type: string
+      x-nyl-validations:
+        - rule: "!(oldSelf == 'workloads' && self == 'sandbox')"
+          message: Workload accounts cannot move back to the sandbox OU.
+```
+
+- `self` is the node's value. A rule that uses `oldSelf` is a transition
+  rule: it applies only when the resource has a previous version, and only
+  when the node existed in it. Rules without `oldSelf` apply to every
+  version.
+- A resource is matched with its previous version by identity. A new
+  identity is a create, so a rename is a delete and a create, and deleting a
+  resource is handled by [removal](#removal-and-retention), not by
+  transition rules.
+- **Effects.** `deny` fails admission like a schema error, so the consuming
+  units are blocked. `approve` admits the change and makes it a **guarded
+  change**: every consuming unit waits for approval of it (see
+  [Guarded changes](#guarded-changes)).
+- **Baselines.** What counts as the previous version depends on where the
+  rule runs:
+  - **When a unit runs**, the previous version is the resource as the
+    bundle of the unit's current receipt holds it: what its native tool last
+    received. This is the authoritative check. It catches a change spread
+    over several commits, and it applies per consuming unit, because two
+    units may have last run different versions.
+  - **For review**, `nyl validate --base <rev>`, `plan --base <rev>`, and
+    `prepare --base <rev>` compare against the catalog at another revision,
+    typically the pull request's merge base. This works without
+    orchestration, but it judges one change at a time rather than what was
+    applied, which the docs must say.
+- **Policies see the same comparison.** Kyverno receives the previous version
+  as `oldObject` and the operation as `CREATE`, `UPDATE`, or `DELETE`, under
+  the same baselines. Rules about the data belong in the definition, owned by
+  its author. Rules about who may change what belong in policies, owned by
+  the platform, for example only `platform/` may change an `ou`.
+- Rules and their effects are part of the definition, so editing them is a
+  reviewed change to a trusted path.
 
 **Failure scope.** Admission results are per resource. `nyl validate` and
 `plan` report every failure. A unit whose collection includes a failing
@@ -341,8 +400,12 @@ collections:
   are written beside it as `desired/units/<unit>/bundle.yaml` and
   `desired/units/<unit>/bundle-provenance.yaml`. Teardown, `exec` with the
   deployed spec, `prepare --deployed`, and audit can then read exactly what
-  ran without rendering S again. The receipt records the member names of each
-  collection, which [removal](#removal-and-retention) compares against.
+  ran without rendering S again.
+- **Baseline.** Each receipt keeps the bundle it executed as
+  `observed/units/<unit>/bundle.yaml`, next to the observed unit, so
+  [removal](#removal-and-retention) and [transition rules](#transition-rules)
+  compare against what the native tool last received without walking Git
+  history.
 - **Execution key.** The canonical digest of the bundle enters the key through
   `resolvedSpec`. Provenance does not. So:
   - editing a member, adding or removing one, or a schema default changing an
@@ -428,7 +491,8 @@ through the same code as `reconcile` and writes the results to a directory.
 It needs no lease and writes no state:
 
 ```text
-nyl prepare -e <env> --unit <u> [--deployed | --source <rev>] [--native]
+nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev>]
+            [--native] [--check <dir>] [--allow-change <resource>:<reason>]
             [--fixture-outputs <file>] [--output-dir <dir>] [-o yaml|json]
 ```
 
@@ -443,6 +507,9 @@ nyl prepare -e <env> --unit <u> [--deployed | --source <rev>] [--native]
   changes included, as for `nyl build`. `--source <rev>` reads a commit.
   `--deployed` reads the unit's desired document and bundle from state, which
   is what is deployed, for inspection and breakglass.
+  `-e` names the environment whose values and receipts the unit resolves
+  against; `--deployed` requires it. Without `-e`, see
+  [Outside orchestration](#outside-orchestration).
 - **References** resolve read-only against current receipts, as `nyl get
   output` does. A blocked reference exits 2, lists the blocked pointers with
   their source paths, and writes no `native/` directory.
@@ -456,10 +523,40 @@ nyl prepare -e <env> --unit <u> [--deployed | --source <rev>] [--native]
   Fixture values are marked `fixture` in provenance. Only `prepare` accepts
   them, and `prepare` writes no state, so they cannot reach reconciliation.
 - Exit categories: 0 complete, 1 configuration, admission, or resolution
-  error, 2 blocked.
+  error, or `--check` found other inputs, 2 blocked by a reference or a
+  guarded change.
 - Once inputs are materialized, the implementation works with its own tool,
   for example `tofu plan -var-file=out/native/variables.tfvars.json` against
   an isolated backend. Resolving dependencies still requires Nyl.
+
+### Outside orchestration
+
+Nyl can compile inputs for an existing Terraform or OpenTofu pipeline without
+Environments, state refs, or receipts. The unit document is the same; no
+Environment selects it:
+
+```sh
+nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/
+tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.tfbackend.json
+tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
+```
+
+- Without `-e`, `prepare` renders the unit as `nyl build` does: from the
+  worktree, with no environment values and no state. A spec that uses
+  `values`, `environment`, or a `fromUnit` reference, directly or inside a
+  member, fails and names `-e`.
+- Stages 0–6 are the same code as under orchestration, so the native inputs
+  are byte-identical to what an orchestrated run of the same unit would pass.
+  Adopting orchestration later means selecting the unit from an Environment.
+- What remains: schema and transition rules against `--base`, policy
+  admission, ownership claims checked across all declared units, guarded
+  changes through `--allow-change`, deterministic bundles, and provenance.
+- What the pipeline takes over: deciding when to run, since there is no
+  execution key to skip unchanged inputs; plan review and approval, since
+  there are no receipts; and native state locking, as before.
+- `nyl prepare --check <dir>` exits 1 when `<dir>` holds inputs other than
+  what `prepare` would write now, so a later pipeline stage can confirm that
+  an artifact passed from an earlier stage is still current.
 
 ## Planning and inspection
 
@@ -492,16 +589,33 @@ protects the unit, not the native resources its next apply removes. The guide
 and examples must say this plainly.
 
 - With `removal: approve`, the default, a resolution that drops members the
-  current receipt's collection had makes the unit `awaiting-approval` with
-  reason `members-removed`, even under `approval: auto`. `--approve <unit>`
-  releases it. A `bind: plan` approval already covers removals through its
-  change digest.
+  current receipt's collection had is a guarded change with reason
+  `members-removed`.
 - Nyl keeps no state about native resources. Retaining a native resource is
   the implementation's job, for example `prevent_destroy` on accounts. The
   supported way to stop managing an account without closing it is
   breakglass: hold, `nyl exec … -- state rm`, remove the declaration, resume.
 - Revoking a grant is the normal case: delete the declaration, review the
   plan's destroy of that grant, and approve.
+
+### Guarded changes
+
+A guarded change is a change that Nyl admits but does not apply without an
+approval: members removed from a collection, or a member change that a
+transition rule with `effect: approve` matches.
+
+- The consuming unit becomes `awaiting-approval` even under `approval: auto`,
+  with one reason per guarded change, such as `email-change` on
+  `AwsAccount/payments-prod`. `plan` lists them next to the native change
+  summary.
+- `--approve <unit>` approves every guarded change in that unit's plan. The
+  receipt records the approved reasons. A `bind: plan` approval already
+  covers them, because the change digest includes the native consequences.
+- **Outside orchestration** there is no approval record. `nyl prepare` and
+  `nyl validate` exit 2 for a guarded change against `--base` and write no
+  native inputs, unless the invocation names it with
+  `--allow-change <resource>:<reason>`. A pipeline ties that flag to its own
+  approval, such as a protected CI environment.
 
 ## Breakglass
 
@@ -654,9 +768,10 @@ consumer, and two owners rejected.
 | R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
-| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, removal approval, exec with bundles | M4, M8's `exec` |
-| R5 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
-| R6 | The worked guide, validated as a tier-2 reference scenario | R2–R5 |
+| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` outside orchestration with `--check`, removal approval, exec with bundles | M4, M8's `exec` |
+| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `nyl validate --base`, the receipt baseline, Kyverno `oldObject`, and the `approve` effect for guarded changes | R3, R4 |
+| R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
+| R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
 
 ## Guide sketch: implementing a domain resource
 
@@ -704,12 +819,16 @@ teams/
    ValidatingPolicy on `source.gitops.nyl/path` that allows teams only
    `ou: sandbox`. Show the same declaration rejected under `teams/` and
    admitted under `platform/`.
-8. **Breakglass.** Hold the unit, `nyl exec -e org --unit aws-accounts -- state
+8. **Guard changes.** Add a transition rule that makes an account email
+   change need approval. Change an email in a pull request:
+   `nyl validate --base origin/main` reports `email-change`, and the unit
+   waits for `--approve` before the next apply.
+9. **Breakglass.** Hold the unit, `nyl exec -e org --unit aws-accounts -- state
    …` to repair, resume, and approve the next plan.
-9. **Remove.** Delete a grant's declaration: the plan shows
+10. **Remove.** Delete a grant's declaration: the plan shows
    `-1 payments-admins` and the grant's destroy, and approval revokes it.
    Delete an account's declaration: `prevent_destroy` fails the plan, and the
-   retirement flow from step 8 detaches the account instead.
+   retirement flow from step 9 detaches the account instead.
 
 ## Open decisions
 
@@ -722,5 +841,7 @@ teams/
 | Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
-| Whether the character set for `resource` strings printed into templates should be wider, for example to allow `:` inside quoted scalars | R5 |
-| Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R5 |
+| Whether the character set for `resource` strings printed into templates should be wider, for example to allow `:` inside quoted scalars | R6 |
+| Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R6 |
+| CEL implementation for `x-nyl-validations`: a Rust CEL crate, or rules evaluated through the Kyverno CLI | R5 |
+| Whether `--allow-change` outside orchestration should be tied to a CI provider's own approvals, such as a protected environment | R5 |

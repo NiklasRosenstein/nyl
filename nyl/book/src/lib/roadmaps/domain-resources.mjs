@@ -59,17 +59,31 @@ export const domainResourcesRoadmap = {
     {
       id: 'R4',
       title: 'Native adaptation',
-      summary: 'OpenTofu and Terraform consume bundles, and removals wait for approval.',
+      summary: 'OpenTofu and Terraform consume bundles, with or without orchestration, and removals wait for approval.',
       needs: ['M4', 'M8', 'R2'],
       items: [
         { text: 'The driver `prepare` capability and `nyl prepare --native`', done: false },
         { text: 'OpenTofu and Terraform adaptation, checked by the driver conformance suite', done: false },
         { text: 'Approval before collection members are removed', done: false },
         { text: '`nyl exec` with deployed and worktree bundles', done: false },
+        { text: '`nyl prepare --native` for a unit outside any Environment, and `prepare --check`', done: false },
       ],
     },
     {
       id: 'R5',
+      title: 'Transition rules',
+      summary: 'Definitions guard changes between versions, such as an account email, by denying them or requiring approval.',
+      needs: ['R3', 'R4'],
+      items: [
+        { text: '`x-nyl-validations` CEL rules with `self` and `oldSelf`, and the `deny` effect', done: false },
+        { text: '`nyl validate --base`, `plan --base`, and `prepare --base` comparing against another revision', done: false },
+        { text: 'The bundle of the current receipt as the baseline when a unit runs', done: false },
+        { text: '`oldObject` and the operation for Kyverno policies', done: false },
+        { text: 'The `approve` effect for guarded changes, with removed members as one of them, and `--allow-change` outside orchestration', done: false },
+      ],
+    },
+    {
+      id: 'R6',
       title: 'One unit per resource',
       summary: 'A unit instantiates once per matching declaration with `forEach`.',
       needs: ['R2'],
@@ -81,10 +95,10 @@ export const domainResourcesRoadmap = {
       ],
     },
     {
-      id: 'R6',
+      id: 'R7',
       title: 'The worked guide',
       summary: 'The AWS, GitHub, and Bao walkthrough becomes runnable.',
-      needs: ['R2', 'R3', 'R4', 'R5'],
+      needs: ['R2', 'R3', 'R4', 'R5', 'R6'],
       items: [
         { text: 'The development, testing, and breakglass guide for AWS accounts and access grants', done: false },
         { text: 'The guide validated as a tier-2 reference scenario', done: false },
