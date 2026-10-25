@@ -188,7 +188,8 @@ to the tool directly, and Nyl kills it after the same 30 seconds. The
 run checkpoints the units that finish, gives the ones still running an
 <code dir="auto">uncertain</code> condition, marks its run ref finished, releases the lease, and
 exits 4 with <code dir="auto">NYL-RUN-CANCELLED</code>, without a transition commit. The next run
-takes over at once, as after a crash.</p>
+takes over at once, as after a crash. Until then, <code dir="auto">nyl status</code> reports the
+cancelled run with <code dir="auto">NYL-RUN-UNIMPORTED</code> and the units it left uncertain.</p>
 <p>CI systems allow only seconds between the signal and a forced kill, and a
 killed run leaves its lease until the deadline. Do not cancel pipelines that
 apply changes: a CI concurrency group per environment serializes jobs
