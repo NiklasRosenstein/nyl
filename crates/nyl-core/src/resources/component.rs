@@ -42,6 +42,29 @@ pub struct NylComponent {
     /// Helm values — defaults to an empty object when omitted
     #[serde(default = "default_spec")]
     pub spec: serde_json::Value,
+
+    /// Opt this invocation out of the value imports its component declares.
+    ///
+    /// A local component may declare value imports in `nyl-component.yaml`, which supply chart value defaults from the effective Cluster and DeploymentTarget `values`. Imports are enabled unless this field turns them off; invocation `spec` values override imported defaults either way.
+    #[serde(rename = "valueImports", default, skip_serializing_if = "Option::is_none")]
+    pub value_imports: Option<ComponentValueImportOptions>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// An invocation's choice of which declared component value imports apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentValueImportOptions {
+    /// `false` applies none of the component's value imports. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Names of value imports to skip. Every name must be declared by the component.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
 }
 
 /// Return `true` when the manifest's `apiVersion` matches the Component API version.
@@ -261,6 +284,25 @@ mod tests {
         let component: NylComponent = serde_json::from_value(manifest).unwrap();
         assert!(component.spec.is_object());
         assert!(component.spec.as_object().unwrap().is_empty());
+        assert_eq!(component.value_imports, None);
+    }
+
+    #[test]
+    fn test_value_import_options_default_to_enabled() {
+        let component: NylComponent = serde_json::from_value(json!({
+            "apiVersion": "components.k8s.nyl/v1",
+            "kind": "example/v1/PostgresDb",
+            "metadata": { "name": "db" },
+            "valueImports": { "exclude": ["backup"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            component.value_imports,
+            Some(ComponentValueImportOptions {
+                enabled: true,
+                exclude: vec!["backup".to_string()],
+            })
+        );
     }
 
     // --- shortcut parsing tests -------------------------------------------

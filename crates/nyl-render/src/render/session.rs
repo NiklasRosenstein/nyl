@@ -960,7 +960,7 @@ mod tests {
             "kind": "DeploymentTarget",
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
-                "clusterRef": {"name": "kasoku"},
+                "clusterRef": {"name": "prod-eu-1"},
                 "values": {"environment": "production", "nested": {"target": true}},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
@@ -975,12 +975,12 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "apiVersion": API_VERSION,
             "kind": "Cluster",
-            "metadata": {"name": "kasoku", "labels": {"region": "fsn1"}},
+            "metadata": {"name": "prod-eu-1", "labels": {"region": "fsn1"}},
             "spec": {
                 "destination": {"server": "https://kubernetes.default.svc"},
                 "kubernetes": {"kubeVersion": "1.31.4", "apiVersions": ["v1", "apps/v1"]},
                 "values": {"nested": {"cluster": true}},
-                "live": {"context": "kasoku-admin"}
+                "live": {"context": "prod-eu-1-admin"}
             }
         }))
         .unwrap()
@@ -1225,7 +1225,7 @@ data:
         assert_eq!(rendered.manifests[0]["data"]["target"], "true");
         assert_eq!(rendered.manifests[0]["data"]["environment"], "production");
         assert_eq!(rendered.manifests[0]["data"]["region"], "fsn1");
-        assert_eq!(rendered.manifests[0]["data"]["clusterName"], "kasoku");
+        assert_eq!(rendered.manifests[0]["data"]["clusterName"], "prod-eu-1");
         let context = session.template_context().to_json();
         assert!(context.get("profile").is_none());
         assert!(context["cluster"]["spec"].get("live").is_none());

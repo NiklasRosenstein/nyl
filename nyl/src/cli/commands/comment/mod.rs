@@ -111,8 +111,8 @@ mod tests {
     #[test]
     fn test_marker_keys_are_distinct_and_cannot_escape_html_comments() {
         assert_eq!(
-            marker("gitops/kasoku").unwrap(),
-            "<!-- nyl-comment:v1:6769746f70732f6b61736f6b75 -->"
+            marker("gitops/prod-eu-1").unwrap(),
+            "<!-- nyl-comment:v1:6769746f70732f70726f642d65752d31 -->"
         );
         assert_ne!(marker("a").unwrap(), marker("a ").unwrap());
         assert_eq!(marker("-->\n").unwrap(), "<!-- nyl-comment:v1:2d2d3e0a -->");

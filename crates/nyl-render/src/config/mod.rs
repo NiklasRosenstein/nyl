@@ -455,34 +455,63 @@ impl ProjectConfig {
     /// Validate the configuration
     ///
     /// Returns a list of validation warnings
-    pub fn validate(&self) -> Vec<String> {
+    pub fn validate(&self) -> Vec<ConfigWarning> {
         let mut warnings = Vec::new();
 
         for path in self.get_components_search_paths() {
             if !path.exists() {
-                warnings.push(format!("Components search path does not exist: {}", path.display()));
+                warnings.push(ConfigWarning::MissingComponentsSearchPath(path.clone()));
             }
         }
 
         for path in self.get_helm_chart_search_paths() {
             if !path.exists() {
-                warnings.push(format!("Helm chart search path does not exist: {}", path.display()));
+                warnings.push(ConfigWarning::MissingHelmChartSearchPath(path.clone()));
             }
         }
 
         for (key, target) in &self.config.project.aliases {
             if !key.contains('/') {
-                warnings.push(format!(
-                    "Alias key '{}' is invalid; expected '<apiVersion>/<kind>'",
-                    key
-                ));
+                warnings.push(ConfigWarning::InvalidAliasKey(key.clone()));
             }
             if target.trim().is_empty() {
-                warnings.push(format!("Alias '{}' has an empty target", key));
+                warnings.push(ConfigWarning::EmptyAliasTarget(key.clone()));
             }
         }
 
         warnings
+    }
+}
+
+/// A problem in `nyl.toml` that does not prevent loading it.
+///
+/// Paths are absolute, as resolved from the configuration; callers choose how
+/// to display them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigWarning {
+    /// A `project.components_search_paths` entry does not exist.
+    MissingComponentsSearchPath(PathBuf),
+    /// A `project.helm_chart_search_paths` entry does not exist.
+    MissingHelmChartSearchPath(PathBuf),
+    /// A `project.aliases` key is not `<apiVersion>/<kind>`.
+    InvalidAliasKey(String),
+    /// A `project.aliases` entry has an empty target.
+    EmptyAliasTarget(String),
+}
+
+impl ConfigWarning {
+    /// Describe the warning, displaying paths with `display_path`.
+    pub fn describe(&self, display_path: impl Fn(&Path) -> String) -> String {
+        match self {
+            Self::MissingComponentsSearchPath(path) => {
+                format!("Components search path does not exist: {}", display_path(path))
+            }
+            Self::MissingHelmChartSearchPath(path) => {
+                format!("Helm chart search path does not exist: {}", display_path(path))
+            }
+            Self::InvalidAliasKey(key) => format!("Alias key '{key}' is invalid; expected '<apiVersion>/<kind>'"),
+            Self::EmptyAliasTarget(key) => format!("Alias '{key}' has an empty target"),
+        }
     }
 }
 
@@ -627,8 +656,8 @@ strip_empty_metadata_labels = "argocd"
         };
 
         let warnings = config.validate();
-        assert!(warnings.iter().any(|w| w.contains("Alias key 'bad-key' is invalid")));
-        assert!(warnings.iter().any(|w| w.contains("has an empty target")));
+        assert!(warnings.contains(&ConfigWarning::InvalidAliasKey("bad-key".to_string())));
+        assert!(warnings.contains(&ConfigWarning::EmptyAliasTarget("good.io/v1/Empty".to_string())));
     }
 
     #[test]
@@ -718,9 +747,7 @@ components_search_paths = ["comps1", "comps2"]
         };
 
         let warnings = config.validate();
-        assert!(warnings
-            .iter()
-            .any(|w| w.contains("Components search path does not exist")));
+        assert!(warnings.contains(&ConfigWarning::MissingComponentsSearchPath(PathBuf::from("components"))));
     }
 
     #[test]

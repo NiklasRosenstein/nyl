@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::cache::RenderCache;
 use super::RenderResource;
+use crate::components::value_imports::{apply_value_imports, ComponentContract, ImportScope};
 use crate::config::ProjectConfig;
 use crate::constants::{API_VERSION, API_VERSION_COMPONENTS};
 use crate::helm::{HelmChartResolver, HelmTemplateExecutor};
@@ -351,6 +352,14 @@ pub(crate) async fn generate_resource(
             }
 
             let chart_ref = component_kind_to_chart_ref(&parsed);
+            // Remote shortcuts carry no contract; this only validates opt-outs.
+            let values = apply_value_imports(
+                None,
+                component.value_imports.as_ref(),
+                &render_resource_identity(resource),
+                import_scope(context),
+                component.spec,
+            )?;
 
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
@@ -363,7 +372,7 @@ pub(crate) async fn generate_resource(
                 metadata: component.metadata,
                 spec: crate::resources::HelmChartSpec {
                     chart: chart_ref,
-                    values: component.spec,
+                    values,
                     include_crds: None,
                 },
             };
@@ -381,6 +390,14 @@ pub(crate) async fn generate_resource(
         } else {
             // Local component path - use existing component resolution mechanism
             let chart_dir = config.resolve_component_chart_dir(&component.kind)?;
+            let contract = ComponentContract::load(&chart_dir)?;
+            let values = apply_value_imports(
+                contract.as_ref(),
+                component.value_imports.as_ref(),
+                &render_resource_identity(resource),
+                import_scope(context),
+                component.spec,
+            )?;
 
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
@@ -396,7 +413,7 @@ pub(crate) async fn generate_resource(
                         name: Some(chart_dir.to_string_lossy().into_owned()),
                         ..Default::default()
                     },
-                    values: component.spec,
+                    values,
                     include_crds: None,
                 },
             };
@@ -440,6 +457,20 @@ pub(crate) async fn generate_resource(
         // For Phase 3, pass through other resources as-is
         // Phase 4+: Use generator for component instantiation
         Ok(vec![resource.clone()])
+    }
+}
+
+/// The values a component invocation may import: the session target's, if any.
+fn import_scope(context: &TemplateContext) -> ImportScope<'_> {
+    match &context.target {
+        Some(target) => ImportScope::Target {
+            name: target
+                .pointer("/metadata/name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unnamed>"),
+            values: &context.values,
+        },
+        None => ImportScope::Standalone,
     }
 }
 

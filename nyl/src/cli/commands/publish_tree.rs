@@ -629,13 +629,13 @@ mod tests {
                 source_commit: "0123456789abcdef",
                 source_dirty: false,
                 target: "production",
-                cluster: "kasoku",
+                cluster: "prod-eu-1",
             },
         );
 
         assert_eq!(
             message,
-            "Custom rendered update\n\nNyl-Source-Repository: https://example.invalid/source.git\nNyl-Source-Commit: 0123456789abcdef\nNyl-Deployment-Target: production\nNyl-Cluster: kasoku"
+            "Custom rendered update\n\nNyl-Source-Repository: https://example.invalid/source.git\nNyl-Source-Commit: 0123456789abcdef\nNyl-Deployment-Target: production\nNyl-Cluster: prod-eu-1"
         );
     }
 

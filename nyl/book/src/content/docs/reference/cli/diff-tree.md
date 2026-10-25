@@ -159,7 +159,7 @@ findings, without changing exported reports or validation's exit status.
 ## Markdown PR/MR comments
 
 The title identifies the deployment check, target, and outcome, for example
-“Nyl deployment check · kasoku — validation failed.” The summary leads with
+“Nyl deployment check · prod-eu-1 — validation failed.” The summary leads with
 invalid and valid counts; zero counts are omitted. Disabled or incomplete
 validation remains explicit. Source and baseline revisions and dirty state are
 visible. Scope information appears beside the summary when validation and diff

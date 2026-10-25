@@ -15,8 +15,8 @@ command works without a Nyl project and accepts Markdown from any report
 generator.
 
 ```bash
-nyl comment upsert --key gitops/kasoku --body-file report.md
-cat report.md | nyl comment upsert --key gitops/kasoku --body-file -
+nyl comment upsert --key gitops/prod-eu-1 --body-file report.md
+cat report.md | nyl comment upsert --key gitops/prod-eu-1 --body-file -
 ```
 
 ## Options and context
@@ -42,7 +42,7 @@ use the canonical instance URL.
 nyl comment upsert --provider forgejo \
   --server-url https://git.example.com/forge \
   --repository platform/config --request 42 \
-  --key gitops/kasoku --body-file report.md --dry-run
+  --key gitops/prod-eu-1 --body-file report.md --dry-run
 ```
 
 CI detection uses:
@@ -158,13 +158,13 @@ For a GitHub Actions job with Nyl installed and `report.md` available:
 permissions:
   pull-requests: write
 concurrency:
-  group: comment-${{ github.repository }}-${{ github.event.pull_request.number }}-gitops-kasoku
+  group: comment-${{ github.repository }}-${{ github.event.pull_request.number }}-gitops-prod-eu-1
   cancel-in-progress: false
 steps:
   - name: Post report
     env:
       GITHUB_TOKEN: ${{ github.token }}
-    run: nyl comment upsert --key gitops/kasoku --body-file report.md
+    run: nyl comment upsert --key gitops/prod-eu-1 --body-file report.md
 ```
 
 For a GitLab MR job, provide `GITLAB_TOKEN` as a masked CI variable and make the
@@ -174,9 +174,9 @@ report available through the job's artifacts:
 comment:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  resource_group: comment-$CI_MERGE_REQUEST_IID-gitops-kasoku
+  resource_group: comment-$CI_MERGE_REQUEST_IID-gitops-prod-eu-1
   script:
-    - nyl comment upsert --key gitops/kasoku --body-file report.md
+    - nyl comment upsert --key gitops/prod-eu-1 --body-file report.md
 ```
 
 For Forgejo Actions, supply an account token as the `COMMENT_TOKEN` secret:
@@ -186,5 +186,5 @@ steps:
   - name: Post report
     env:
       FORGEJO_TOKEN: ${{ secrets.COMMENT_TOKEN }}
-    run: nyl comment upsert --key gitops/kasoku --body-file report.md
+    run: nyl comment upsert --key gitops/prod-eu-1 --body-file report.md
 ```

@@ -477,14 +477,14 @@ mod tests {
     #[test]
     fn findings_distinguish_the_validated_resource_from_its_expansion_trace() {
         let destination = Destination {
-            name: "kasoku".into(),
+            name: "prod-eu-1".into(),
             kubernetes_version: "1.34.5".into(),
             schema_source: None,
         };
         let mut report = ValidationReport {
             resources: vec![ResourceResult {
                 validator: "kubeconform".into(),
-                destination: "kasoku".into(),
+                destination: "prod-eu-1".into(),
                 resource: ResourceIdentity {
                     api_version: "postgresql.cnpg.io/v1".into(),
                     kind: "Cluster".into(),
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(
             report.destination_text(&destination, false),
             concat!(
-                "kubeconform · kasoku · Kubernetes 1.34.5\n\n",
+                "kubeconform · prod-eu-1 · Kubernetes 1.34.5\n\n",
                 "  FAIL  Cluster rise/rise-db  (postgresql.cnpg.io/v1)\n\n",
                 "    /spec/affinity: got null, want object\n\n",
                 "    Rendered:      cloud/rise/resources.yaml     (document 21)\n",

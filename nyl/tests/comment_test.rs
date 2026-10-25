@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 const TOKEN: &str = "test-token-do-not-print";
-const KEY: &str = "gitops/kasoku";
+const KEY: &str = "gitops/prod-eu-1";
 
 fn isolated_command() -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
@@ -285,7 +285,7 @@ fn roundtrip(provider: &'static str) {
         comment(
             4,
             7,
-            "<!-- nyl-comment:v2:6769746f70732f6b61736f6b75 -->\nfuture version",
+            "<!-- nyl-comment:v2:6769746f70732f70726f642d65752d31 -->\nfuture version",
         ),
     ];
     forge.state.lock().unwrap().comments = unrelated.clone();

@@ -60,6 +60,13 @@ spec:
 
 `spec` is passed to Helm as values, merged on top of chart defaults from `values.yaml`.
 
+## Inherit Platform Defaults
+
+A `nyl-component.yaml` next to `Chart.yaml` can declare
+[value imports](/nyl/kubernetes/components/value-imports/): selections of the
+effective Cluster and DeploymentTarget values that become chart value defaults.
+Invocations then supply only their own settings and overrides.
+
 ## Operational Notes
 
 - Keep component manifests separate from chart templates. `nyl render` accepts a file path, not a directory.

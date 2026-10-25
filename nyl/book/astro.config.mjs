@@ -84,6 +84,7 @@ export default defineConfig({
                     items: [
                       "kubernetes/components/overview",
                       "kubernetes/components/authoring-local-components",
+                      "kubernetes/components/value-imports",
                       "kubernetes/components/resolution-and-lookup",
                       "kubernetes/components/remote-shortcuts-and-aliases",
                       "kubernetes/components/troubleshooting",

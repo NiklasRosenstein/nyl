@@ -1,5 +1,24 @@
 {
   "$defs": {
+    "ComponentValueImportOptions": {
+      "additionalProperties": false,
+      "description": "An invocation's choice of which declared component value imports apply.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "`false` applies none of the component's value imports. Defaults to `true`.",
+          "type": "boolean"
+        },
+        "exclude": {
+          "description": "Names of value imports to skip. Every name must be declared by the component.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ObjectMetadata": {
       "additionalProperties": false,
       "description": "Kubernetes object metadata",
@@ -69,6 +88,17 @@
     "spec": {
       "default": {},
       "description": "Helm values — defaults to an empty object when omitted"
+    },
+    "valueImports": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ComponentValueImportOptions"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Opt this invocation out of the value imports its component declares.\n\nA local component may declare value imports in `nyl-component.yaml`, which supply chart value defaults from the effective Cluster and DeploymentTarget `values`. Imports are enabled unless this field turns them off; invocation `spec` values override imported defaults either way."
     }
   },
   "required": [

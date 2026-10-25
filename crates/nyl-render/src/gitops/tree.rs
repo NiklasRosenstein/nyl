@@ -474,7 +474,9 @@ async fn compile_target_tree_recording(
         .count();
     let argocd = resolve_argocd_instance(inventory, &target, instance_count)?;
     if argocd.source_path.is_none() {
-        tracing::info!(
+        // The implicit instance is the documented default, so it is not news on
+        // every compile; `--verbose` still shows which instance a target uses.
+        tracing::debug!(
             target = %target.metadata.name,
             cluster = %target.cluster_name(),
             "Using the implicit target-local ArgoCDInstance"
