@@ -166,6 +166,12 @@ moving a file, unless the move changes which collections include it or
 which policies admit it.</li>
 <li><strong>Failures stay local.</strong> A declaration that fails its schema or a policy
 blocks only the units that consume it, before anything is applied.</li>
+<li><strong>Sensitive changes are guarded.</strong> A definition can forbid a change, such as
+moving a workload account back to the sandbox OU, or require approval for
+it, such as changing an account’s email.</li>
+<li><strong>Orchestration is optional.</strong> Nyl can prepare the inputs for an existing
+Terraform or OpenTofu pipeline, which then plans and applies as before.
+The inputs are the same bytes an orchestrated run would pass.</li>
 <li><strong>Removing a declaration is an input change.</strong> The implementing unit plans
 and applies the removal like any other change, and removals wait for
 approval by default. A hold on the unit protects the unit, not the native
