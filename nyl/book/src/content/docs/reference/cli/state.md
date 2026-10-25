@@ -11,7 +11,8 @@ Nyl decided and observed.
 
 :::note
 Orchestration is being built in milestone M3. These commands create and
-maintain state; `nyl reconcile` and the other run commands follow.
+maintain state; [`nyl reconcile`](/nyl/reference/cli/reconcile/) runs units
+against it.
 :::
 
 See [Environments and state](/nyl/orchestration/environments-and-state/) for
@@ -85,7 +86,13 @@ still running can still cause effects, but it can no longer write state.
 ## Options and exit codes
 
 All commands take `-e/--environment`, `--reason`, `--wait-lease <duration>`
-to wait for another run's lease, and `-o json` for the operation's versioned
-report. They exit 0 when done or when nothing needed to change, 2 while
+to wait for another run's lease, `--author "Name <email>"`, and `-o json` for
+the operation's versioned report.
+
+`--author` names the author and committer of the state commits the command
+writes. Without it, Nyl uses Git's `user.name` and `user.email` for the
+project's repository; without either, the command exits 1 with
+`NYL-COMMIT-IDENTITY-MISSING` before changing anything. The commit time comes
+from the same clock as the command's other time-based decisions. They exit 0 when done or when nothing needed to change, 2 while
 another run holds the lease (`NYL-LEASE-HELD`), and 1 for every other
 refusal; each error and warning carries a stable code and its fix.

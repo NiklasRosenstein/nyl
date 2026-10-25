@@ -109,8 +109,10 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   `rules::execution_key`, `rules::approval`, `rules::lifecycle`,
   `rules::teardown_readiness`, `rules::teardown_wait`, or `rules::expiry`. Its doc comment links the
   contract section.
-- Contract walkthroughs are executable scenarios against an in-memory
-  `StateStore`, fake drivers, and a fake clock, for example
+- Contract walkthroughs are executable scenarios against the Git
+  `StateStore` on local bare repositories, fake drivers, and a fake clock, so
+  they exercise the same leases, run refs, and fenced pushes as production;
+  the in-memory `StateStore` serves unit tests of the shell. For example
   `nyl/tests/scenarios/walkthroughs/effects-without-receipt/scenario.yaml`. A contract change updates
   its scenario in the same change.
 - The [reference scenarios](reference-scenarios.md) run whole workflows, from
@@ -161,8 +163,10 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   reachability checks against protected refs, fetching commits, worktrees at a
   commit, and keep refs. Each has an in-memory or fake implementation used by
   the scenario tests.
-- Concurrency lives in one place: a wave executor with a bounded semaphore on
-  the existing tokio runtime, and a single writer task for state commits.
+- Concurrency lives in one place: the shell's wave executor runs each batch
+  of at most `--concurrency` units on scoped threads (`std::thread::scope`),
+  never inside a tokio runtime, because drivers block on processes and Git.
+  State commits are written by the shell alone, after the wave.
 
 ## CI graph boundary
 

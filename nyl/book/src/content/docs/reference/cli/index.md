@@ -27,6 +27,9 @@ closely related pair.
 - **CI integration**: report results where reviewers look.
   - [`comment`](/nyl/reference/cli/comment/) - Maintain sticky PR/MR comments on GitHub, GitLab, and Forgejo
 - **Orchestration** (in development): manage environments' state in Git.
+  - [`plan`](/nyl/reference/cli/plan/) - Show what a reconcile would do, without writing anything
+  - [`reconcile`](/nyl/reference/cli/reconcile/) - Execute an environment's ready units and record the results
+  - [`status`](/nyl/reference/cli/status/) - Report each unit's state from one snapshot of an environment's state
   - [`state and lease`](/nyl/reference/cli/state/) - Create, move, and forget an environment's state; break a lost lease
 
 ## Global Options

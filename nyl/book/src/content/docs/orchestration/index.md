@@ -4,9 +4,13 @@ title: 'Orchestration'
 
 :::note
 Orchestration is in development in milestone M3. Environments, their state in
-Git, and the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands
-exist today; units and the run commands such as `nyl plan` and `nyl reconcile`
-follow. The [roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
+Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
+[Command](/nyl/orchestration/resource-guides/command/) units, and one
+environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
+[`nyl reconcile`](/nyl/reference/cli/reconcile/), and
+[`nyl status`](/nyl/reference/cli/status/) exist today. Recovery, teardown,
+holds, approvals, and runs over several environments follow. The
+[roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
 describes the milestones.
 :::
 
@@ -23,3 +27,6 @@ whether it starts on a workstation or in CI.
   gives several environments shared defaults.
 - [Environments and state](/nyl/orchestration/environments-and-state/) explains
   how state is stored, protected by a lease, and supported by Git hosts.
+- [Runs](/nyl/orchestration/runs/) explains how a run chooses its source
+  commit, resolves references between units, decides what executes, and
+  records the result.

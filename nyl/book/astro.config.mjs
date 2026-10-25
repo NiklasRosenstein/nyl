@@ -148,6 +148,7 @@ export default defineConfig({
             items: [
               "orchestration",
               "orchestration/environments-and-state",
+              "orchestration/runs",
               { label: "Resources", items: [{ autogenerate: { directory: "orchestration/resource-guides" } }] },
             ],
           },
@@ -175,6 +176,9 @@ export default defineConfig({
                   "reference/cli/diff-tree",
                   "reference/cli/publish-tree",
                   "reference/cli/comment",
+                  "reference/cli/plan",
+                  "reference/cli/reconcile",
+                  "reference/cli/status",
                   "reference/cli/state",
                 ],
               },
