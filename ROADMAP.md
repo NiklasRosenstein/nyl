@@ -80,32 +80,56 @@ part removes the walkthroughs it makes pass from the harness's pending list.
      naming `attestations` are rejected with `NYL-ATTESTATIONS-UNSUPPORTED`
      until receipts record attestation results (M5/M6), so a bare receipt
      never satisfies a stronger requirement.
-   - `nyl recover` follows in part 4. Until then a non-retryable failure is
-     left only by `nyl state init --fresh`, and status findings say so.
    - Each unit has one effective commit, and a unit whose source fields pin
      different commits is rejected. Per-field worktrees wait for M4.
    - `nyl validate` checks a `fromUnit` artifact reference only for the
      producer's existence and declared non-sensitive outputs; artifact names
      are checked once kinds declare them, in M5.
-4. Recovery and concurrency: `verify`, `recover` (including `--accept`),
-   run takeover from checkpoints, uncertain completion, competing runners
-   with `--wait-lease`, `--local` runs, state without a remote,
-   `state move --from local`, `state reset` and `restore`, crash injection
-   at every fault point, and property tests of the transition table.
-   Runs also stop paying a full checkout of the repository per unit: each
-   concurrency slot keeps one worktree and resets it between units to the
-   unit's commit, removing untracked and ignored files, so a unit sees
-   exactly what a fresh checkout holds; the symbolic-link check of a commit's
-   tree runs once per commit. Walkthroughs: `effects-without-receipt`,
-   `competing-runners`.
+4. Done: recovery and concurrency. `verify` records drift and health
+   observations and driver attestations against current receipts; `recover
+   --retry` and `--accept <run>` clear a condition or adopt a checkpointed
+   result. A run takes over from runs that died, lost their lease, or were
+   cancelled: it adopts the uids of units they created, imports their
+   checkpoints idempotently as `imported` receipts, gives units they left
+   without a checkpoint an `uncertain` condition, recovers converging units
+   in the same run, and retires run refs that are still evidence for an
+   uncertain unit to evidence refs. SIGINT and SIGTERM cancel a run: it
+   forwards the signal to running tools, checkpoints what finished, marks
+   running units uncertain, keeps its run ref, releases the lease, and exits
+   4 with `NYL-RUN-CANCELLED`. Also done: competing runners with
+   `--wait-lease`, `--local` runs (with `--local-lease` and `--approve` for
+   non-converging units, recorded with the `local` approval identity), state
+   without a remote, `state move --from local`, `state reset --local` and
+   `state restore --to`, crash injection at every killable fault point,
+   property tests of the transition table and of import, and one reusable
+   worktree per concurrency slot, reset between units to the unit's commit
+   with untracked and ignored files removed, with the symbolic-link check run
+   once per tree. Walkthroughs `effects-without-receipt` and
+   `competing-runners` and the `recovery/` crash scenarios run in the tier-1
+   harness. Part 4 deliberately leaves out:
+   - `--approve` outside `--local`, and approvals of remote runs, wait for
+     part 6; until then a non-converging unit with an `uncertain` condition
+     in a remote run waits for `nyl recover`.
+   - `verify` takes one environment; `-l` and `-g` selections arrive with
+     multi-environment runs in part 6.
+   - No built-in kind declares the `inspect` recovery policy yet; the policy
+     is implemented and tested with the fake kinds, and drivers adopt it from
+     M4 where they can observe their effects.
+   - Drivers report attestations to `verify`, but `nyl attest` and references
+     requiring `evidence: attested` wait for M5 and M6.
 5. Lifecycle: `teardown` (including `--hold`, `--all`, and
    `--confirm-removed`), `hold`, `resume`, `state delete` with
    decommissioning, teardown order, and `--allow-teardown` /
-   `--allow-dependents`. Walkthrough: `deletion`.
-6. Multi-environment runs, approvals (`verified`, `asserted`, and `local`
-   sources, the GitHub lookup, the `[approval] lookup` hook, and `bind: plan`
-   with destroy digests), the tier-2 harness, and the M3 part of reference
-   scenario 1.
+   `--allow-dependents`. A hold on an `uncertain` unit keeps its last
+   receipt's desired document and uid as desired state, with the condition
+   left in place, so consumers keep resolving from that receipt. Walkthrough:
+   `deletion`, plus a walkthrough step that holds an uncertain producer and
+   reconciles a consumer against its previous outputs.
+6. Multi-environment runs, including `verify` over several environments,
+   approvals (`verified`, `asserted`, and `local` sources, `--approve` for
+   remote runs, the GitHub lookup, the `[approval] lookup` hook, and
+   `bind: plan` with destroy digests), the tier-2 harness, and the M3 part of
+   reference scenario 1.
 
 M3 uses `FakePublication` for Kubernetes publication; the real
 `KubernetesPublication` driver arrives in M5. `nyl exec` belongs to M4 with
@@ -810,7 +834,7 @@ implicit per-target Argo CD instances.
   admission.
 - [ ] Implement pinned source worktrees, reachability checks against protected
   refs, and content-based execution keys.
-- [ ] Prove stale-evidence blocking, competing runners, and recovery after an
+- [x] Prove stale-evidence blocking, competing runners, and recovery after an
   effect succeeds but receipt publication fails.
 - [x] Move the business rules the `nyl` package still holds into the crates
   that own them before orchestration builds on them: ownership-index input
@@ -822,7 +846,7 @@ implicit per-target Argo CD instances.
   `GitInputSource` with the one `GitSource` type of the implementation
   architecture, which command-unit sources then use too. Both already share
   one commit-lock rule.
-- [ ] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
+- [x] Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate
   crates with the scenario harness, property tests, and crash injection.
 - [ ] Expose a pure, versioned graph of literal unit addresses and dependency
   edges before upstream values exist, shared by local execution and future CI

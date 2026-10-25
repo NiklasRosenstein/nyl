@@ -8,7 +8,8 @@ ref and an observed ref, by default the branches `nyl/<environment>/desired`
 and `nyl/<environment>/observed`. Each operation writes at most one commit per
 state ref, so the history of those branches is the reviewable record of what
 Nyl decided and observed. [`nyl state`](/nyl/reference/cli/state/) creates,
-moves, forgets, resets, and restores that state.
+moves, forgets, resets, and restores that state. [Git storage](/nyl/reference/git-storage/)
+lists every ref involved and when to use which repository.
 
 ## Where state lives
 

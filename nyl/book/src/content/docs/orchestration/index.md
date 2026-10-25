@@ -5,11 +5,13 @@ title: 'Orchestration'
 :::note
 Orchestration is in development in milestone M3. Environments, their state in
 Git, the [`nyl state` and `nyl lease`](/nyl/reference/cli/state/) commands,
-[Command](/nyl/orchestration/resource-guides/command/) units, and one
+[Command](/nyl/orchestration/resource-guides/command/) units, one
 environment's runs with [`nyl plan`](/nyl/reference/cli/plan/),
-[`nyl reconcile`](/nyl/reference/cli/reconcile/), and
-[`nyl status`](/nyl/reference/cli/status/) exist today. Recovery, teardown,
-holds, approvals, and runs over several environments follow. The
+[`nyl reconcile`](/nyl/reference/cli/reconcile/) (including `--local` runs),
+and [`nyl status`](/nyl/reference/cli/status/), and recovery with
+[`nyl recover`](/nyl/reference/cli/recover/) and
+[`nyl verify`](/nyl/reference/cli/verify/) exist today. Teardown, holds,
+approvals, and runs over several environments follow. The
 [roadmap](https://github.com/NiklasRosenstein/nyl/blob/develop/ROADMAP.md)
 describes the milestones.
 :::
@@ -30,3 +32,7 @@ whether it starts on a workstation or in CI.
 - [Runs](/nyl/orchestration/runs/) explains how a run chooses its source
   commit, resolves references between units, decides what executes, and
   records the result.
+- [Recovery](/nyl/orchestration/recovery/) explains how a run takes over from
+  one that died, what an uncertain unit is, and how to recover it.
+- [Git storage](/nyl/reference/git-storage/) lists every repository and ref
+  orchestration reads and writes.

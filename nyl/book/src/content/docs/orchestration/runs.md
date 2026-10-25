@@ -13,8 +13,9 @@ read the result.
 
 :::note
 Runs cover one environment at a time and the [Command](/nyl/orchestration/resource-guides/command/)
-unit kind today. Recovery commands, teardown, holds, approvals, and runs over
-several environments follow in later parts of milestone M3.
+unit kind today, with [recovery](/nyl/orchestration/recovery/) from runs that
+died. Teardown, holds, approvals, and runs over several environments follow
+in later parts of milestone M3.
 :::
 
 ## Units
@@ -142,8 +143,10 @@ reconcile with no changes executes nothing and writes no commit.
 1. takes the environment's [lease](/nyl/orchestration/environments-and-state/#where-state-lives);
 2. resolves every unit at S against current receipts;
 3. executes the ready units, independent units in parallel up to
-   `--concurrency` (default 4), each in its own checkout of its effective
-   commit, and checkpoints each result on the run ref;
+   `--concurrency` (default 4), and checkpoints each result on the run ref.
+   Each of the `--concurrency` slots keeps one checkout for the run and resets
+   it to the next unit's effective commit, removing untracked and ignored
+   files, so a unit sees exactly what a fresh checkout of its commit holds;
 4. resolves again at the same S, because new receipts unblock dependents, and
    repeats from step 3 until nothing is ready;
 5. writes one transition commit per state ref, then releases the lease.
@@ -152,9 +155,10 @@ A failed execution records a condition and keeps the unit's previous receipt.
 An execution that may have had effects without completing, such as one that
 passed its timeout, is uncertain. A retryable failure runs again at the next
 reconcile; a non-retryable failure, and an uncertain unit whose kind does not
-converge, wait for `nyl recover`, which arrives in a later part of M3. Until
-then, [`nyl state init --fresh`](/nyl/reference/cli/state/#nyl-state-init)
-starts the environment over, and the [Command guide](/nyl/orchestration/resource-guides/command/#failures-and-retries)
+converge, wait for [`nyl recover`](/nyl/reference/cli/recover/).
+[Recovery](/nyl/orchestration/recovery/) explains conditions, recovery
+policies, and how a run takes over from a run that died, and the
+[Command guide](/nyl/orchestration/resource-guides/command/#failures-and-retries)
 describes how a Command converges. `--unit` executes only the named units;
 resolution still covers the whole environment, and a named unit whose
 dependency has no current receipt stays blocked.
@@ -168,17 +172,44 @@ result, followed by trailers naming the run, the source commit, the state
 commits it read, the runner, and the evaluation time:
 
 ```text
-nyl: reconcile dev (2 executed)
+nyl: reconcile dev (1 imported, 1 uncertain)
 
 units:
-  database: {result: executed, executionKey: sha256:…}
-  migrate: {result: executed, executionKey: sha256:…}
+  database: {"executionKey":"sha256:6916707da65148797708b9f4754dbf1e9fe43eb229a2a6e5db09b933c3b6611f","result":"imported","run":"01a1732a-11d1-7ed6-a3cc-174dc69c7856"}
+  migrate: {"reason":"run 01a1732a-11d1-7ed6-a3cc-174dc69c7856 was executing it when its lease was broken","result":"uncertain"}
+recovered: [migrate]
+imported: [database]
+leaseBroken: {"at":"2026-10-25T13:05:12.386099409Z","by":"Alice Example <alice@example.com>","reason":"runner was killed"}
 
 Nyl-Operation: reconcile
-Nyl-Run-Id: 0192…
+Nyl-Run-Id: 01a1732a-44de-7b8d-90ca-4602a61d3a51
 Nyl-Environment: dev
-Nyl-Source-Commit: 3e7b…
+Nyl-Source-Commit: 8400718ac2236aa6b71cd5a9c43d4ddd94545257
+Nyl-Read-Desired: 1c139deeb2d48d5c13cbda789c5ad66a70b3c59d
+Nyl-Read-Observed: 1c139deeb2d48d5c13cbda789c5ad66a70b3c59d
+Nyl-Runner: unknown@localhost
+Nyl-Evaluated-At: 2026-10-25T13:05:12Z
+Nyl-Version: 0.5.9
 ```
+
+Each unit's `result` is one of:
+
+| Result | Meaning |
+| --- | --- |
+| `current` | The unit already had a current receipt. |
+| `executed` | The unit ran, with this `executionKey`. |
+| `imported` | A run that died or lost its lease checkpointed the unit with the same execution key, and that checkpoint, from `run`, became its receipt. |
+| `recovered` | The unit was uncertain, and this run executed it again or found its effects applied. |
+| `failed` | The execution failed, with its `category` and whether it is `retryable`. |
+| `uncertain` | Effects may have happened; the unit waits for its recovery policy or `nyl recover`. |
+| `blocked` | A reference or dependency has no current receipt. |
+| `awaiting-approval` | The unit needs an approval, such as `--approve` in a `--local` run. |
+
+`imported` lists the units whose receipts came from checkpoints of earlier
+runs, and `recovered` the units this run marked uncertain while taking over or
+recovered by executing them again. `leaseBroken` appears when the run took
+over a lease that [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break)
+broke. The headline counts each result except `current`.
 
 State commits are authored by `--author "Name <email>"`, else by Git's
 `user.name` and `user.email`; without either, `nyl reconcile` exits 1 with
@@ -187,6 +218,7 @@ and `get`, need no identity.
 
 ## See also
 
+- [Recovery](/nyl/orchestration/recovery/)
 - [Environments and state](/nyl/orchestration/environments-and-state/)
 - [Using Command](/nyl/orchestration/resource-guides/command/)
 - [Environment](/nyl/reference/resources/gitops.nyl/v1/environment/)

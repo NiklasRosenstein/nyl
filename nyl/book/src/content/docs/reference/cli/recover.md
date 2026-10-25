@@ -4,8 +4,8 @@ title: 'recover'
 
 Clears a unit's `uncertain` condition or non-retryable failure so the next
 reconcile executes it again, or adopts the result a run checkpointed for it.
-It records who decided and why. See [Runs](/nyl/orchestration/runs/) for
-receipts and conditions.
+It records who decided and why. See [Recovery](/nyl/orchestration/recovery/)
+for conditions, recovery policies, and takeover.
 
 :::note
 Orchestration is being built in milestone M3.
@@ -24,7 +24,8 @@ commit to the observed state ref. It never executes anything:
 - `--retry` clears the unit's condition and keeps its last receipt, so the
   unit is ready for the next [`nyl reconcile`](/nyl/reference/cli/reconcile/).
   An operator can decide locally while CI executes. A retryable failure
-  needs no recover; the next reconcile retries it.
+  needs no recover, because the next reconcile retries it, but `--retry`
+  clears it too.
 - `--accept <run>` adopts the receipt, outputs, and artifacts that run
   checkpointed for the unit, typically after a runner that lost its lease
   finished the unit late. It is allowed only when the checkpoint's execution
