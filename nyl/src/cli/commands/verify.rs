@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use clap::Args;
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::run_report::ReportKind;
-use nyl_orchestration::shell::run::{RunContext, DEFAULT_CONCURRENCY};
+use nyl_orchestration::shell::run::DEFAULT_CONCURRENCY;
 use nyl_state::git::CommitAuthor;
 
 use super::reconcile::RunOutput;
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use crate::Result;
 
 /// Verify an environment's current receipts.
 #[derive(Args, Debug)]
@@ -73,22 +73,13 @@ fn verify(args: &VerifyArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
         identity: identity.clone(),
         clock: wiring.clock.clone(),
     }))?;
-    let sources = session.sources()?;
-    let renderer = session.renderer();
-    let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
-    let base = session.context(&store, wiring, Some(identity.to_string()));
-    let context = RunContext {
-        base: &base,
-        sources: &sources,
-        renderer: &renderer,
-        drivers: wiring.drivers,
-        tools: wiring.tools,
-        workspace: workspace.path(),
-        process_env: &wiring.process_env,
-        commit_identity: Some(&identity),
-    };
-    let mut report = nyl_orchestration::shell::verify::verify(&context, &request);
-    session.add_warnings(&mut report);
+    let report = session.run(
+        wiring,
+        &store,
+        Some(&identity),
+        &request,
+        nyl_orchestration::shell::verify::verify,
+    )?;
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

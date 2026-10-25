@@ -133,6 +133,17 @@ impl World {
         self.commit_and_push(&step.branch, &step.message);
     }
 
+    /// Write `files` over the tip of `branch`, then commit and push them.
+    pub fn commit_files(&self, branch: &str, message: &str, files: &[(&str, &str)]) {
+        self.checkout(branch);
+        for (path, content) in files {
+            let target = self.work().join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, self.substitute(content)).unwrap();
+        }
+        self.commit_and_push(branch, message);
+    }
+
     /// A `branch` step.
     pub fn branch(&self, step: &BranchStep) {
         git(
@@ -196,6 +207,17 @@ impl World {
         .map(str::to_owned)
         .collect()
     }
+}
+
+/// `dev`'s lease in the state repository `bare`, while one is held.
+pub fn lease(bare: &Path) -> Option<nyl_core::orchestration::state::Lease> {
+    let shown = git_command(bare, &["show", "refs/nyl/dev/lease:lease.yaml"])
+        .output()
+        .expect("git runs");
+    shown
+        .status
+        .success()
+        .then(|| serde_saphyr::from_str(&String::from_utf8_lossy(&shown.stdout)).unwrap())
 }
 
 fn git_command(directory: &Path, args: &[&str]) -> Command {

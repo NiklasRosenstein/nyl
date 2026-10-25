@@ -4,8 +4,9 @@
 //! Each fake implements exactly the driver trait and capabilities of the
 //! built-in kind it stands in for, so every milestone runs the whole
 //! platform scenario before the real kind exists, and tier 1 never needs the
-//! real tools. Scenario files name the real kinds; [`stand_in_for`] maps
-//! them.
+//! real tools. Scenario files name the real kinds;
+//! [`with_test_kinds`](crate::registry::with_test_kinds) registers each fake
+//! under the real kinds it stands in for.
 //!
 //! A [`Script`] lets a scenario's `driver` steps decide the outcome of a
 //! fake's next calls, such as a retryable failure. For recovery tests it
@@ -27,26 +28,14 @@ use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::state::FailureCategory;
 use serde_json::Value;
 
+use crate::command::resolved_spec;
+
 pub use image::FakeImage;
 pub use infra::FakeInfra;
 pub use publication::FakePublication;
 
 /// API version of the fake kinds.
 pub const API_VERSION_TEST_UNITS: &str = "units.test.nyl/v1";
-
-/// The fake kind standing in for a built-in kind, by its `apiVersion` and
-/// `kind`, for the kinds a milestone has not built yet.
-pub fn stand_in_for(api_version: &str, kind: &str) -> Option<&'static str> {
-    if api_version != nyl_core::constants::API_VERSION_UNITS {
-        return None;
-    }
-    match kind {
-        "OciImage" => Some(image::KIND),
-        "OpenTofu" | "Terraform" => Some(infra::KIND),
-        "KubernetesPublication" => Some(publication::KIND),
-        _ => None,
-    }
-}
 
 /// A scripted result for a fake's next call of one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,17 +151,20 @@ fn directory_digests(worktree: &Path, directory: &Path) -> DriverResult<BTreeMap
     Ok(digests)
 }
 
-/// Resolve a unit's local `path` under the local path rule.
-fn local_directory(worktree: &Path, project_dir: &Path, field: &str, path: &str) -> DriverResult<std::path::PathBuf> {
-    let worktree = worktree
-        .canonicalize()
-        .map_err(|error| DriverError::before_effects(format!("cannot resolve the worktree: {error}")))?;
-    let project_dir = project_dir
-        .canonicalize()
-        .map_err(|error| DriverError::before_effects(format!("cannot resolve the project directory: {error}")))?;
-    nyl_render::util::project_path::ProjectPaths::new(project_dir, worktree)
+/// The digests of the directory a unit's local path field names, as the
+/// execution key's files: `pointer` in `spec`, `field` in findings.
+fn source_files(
+    ctx: &nyl_core::orchestration::driver::ResolutionContext<'_>,
+    spec: &Value,
+    pointer: &str,
+    field: &str,
+) -> DriverResult<BTreeMap<String, String>> {
+    let path = required_str(spec, pointer)?;
+    let paths = crate::command::roots(&ctx.worktree, &ctx.project_dir)?;
+    let directory = paths
         .resolve(field, path)
-        .map_err(|error| DriverError::before_effects(error.to_string()))
+        .map_err(|error| DriverError::before_effects(error.to_string()))?;
+    directory_digests(&paths.worktree_root, &directory)
 }
 
 /// A field of a resolved spec, or a driver error naming it.
@@ -180,13 +172,6 @@ fn required_str<'a>(spec: &'a Value, pointer: &str) -> DriverResult<&'a str> {
     spec.pointer(pointer)
         .and_then(Value::as_str)
         .ok_or_else(|| DriverError::before_effects(format!("spec{} must be a string", pointer.replace('/', "."))))
-}
-
-/// The resolved spec of a desired document, which execution requires.
-fn resolved_spec(unit: &nyl_core::orchestration::state::DesiredUnit) -> DriverResult<&Value> {
-    unit.resolved_spec
-        .as_ref()
-        .ok_or_else(|| DriverError::before_effects(format!("unit {} has no resolved spec", unit.unit.name)))
 }
 
 #[cfg(test)]
@@ -364,16 +349,5 @@ mod tests {
         let reference = artifacts[0].spec["reference"].as_str().unwrap();
         assert!(reference.starts_with("registry.test/web@sha256:"), "{reference}");
         assert!(artifacts[0].spec["tags"][0].as_str().unwrap().starts_with("nyl-dev-"));
-    }
-
-    #[test]
-    fn test_stand_ins_cover_the_kinds_m3_lacks() {
-        assert_eq!(stand_in_for("units.gitops.nyl/v1", "OciImage"), Some("FakeImage"));
-        assert_eq!(stand_in_for("units.gitops.nyl/v1", "OpenTofu"), Some("FakeInfra"));
-        assert_eq!(
-            stand_in_for("units.gitops.nyl/v1", "KubernetesPublication"),
-            Some("FakePublication")
-        );
-        assert_eq!(stand_in_for("units.gitops.nyl/v1", "Command"), None);
     }
 }

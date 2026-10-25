@@ -14,13 +14,12 @@ use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
 use nyl_orchestration::rules::local::Discard;
 use nyl_orchestration::shell::state::{self, Requested};
-use nyl_orchestration::shell::{Context, Settings};
+use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
 use crate::gitops::discover_gitops_inventory;
-use crate::orchestration::project::{open_store, resolve_environment};
 use crate::orchestration::run::{CommandOutcome, Wiring};
-use crate::orchestration::session::write_finding;
+use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, Session, Stop};
 use crate::{NylError, Result};
 
 /// Output format of state commands.
@@ -279,7 +278,7 @@ fn discard_option(units: &[String], all: bool) -> Result<Option<Discard>> {
 /// The request of a state operation: SIGINT or SIGTERM stops its
 /// `--wait-lease` ("Runs and leases" item 7); once it holds the lease it
 /// finishes its single commit.
-fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
+pub(crate) fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
     Requested {
         reason: common.reason.clone(),
         wait: common.wait_lease,
@@ -306,47 +305,33 @@ pub(crate) fn run(
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
-        let environment = EnvironmentName::new(&common.environment)
-            .or_else(|_| EnvironmentName::new("unknown"))
-            .expect("a valid placeholder name");
+        let environment = placeholder_environment(&common.environment);
         render(
             &StateOperationReport::new(environment, operation_name).refused(finding),
             common.output,
         )
     };
-    let inventory = discover_gitops_inventory(&common.path, None)?;
-    let resolved = match resolve_environment(&inventory, &common.environment) {
-        Ok(resolved) => resolved,
-        Err(finding) => return Ok(refused(finding)),
+    let session = match Session::open(&common.path, &common.environment) {
+        Ok(session) => session,
+        Err(Stop::Finding(finding)) => return Ok(refused(finding)),
+        Err(Stop::Error(error)) => return Err(error),
     };
+    let resolved = &session.resolved;
     let identity = match wiring.commit_identity(&resolved.git_dir, common.author.as_deref()) {
         Ok(identity) => identity,
         Err(finding) => return Ok(refused(finding)),
     };
-    let mut store = open_store(
-        &inventory,
-        &resolved,
-        Some(CommitAuthor {
-            identity: identity.clone(),
-            clock: wiring.clock.clone(),
-        }),
-    )?;
+    let mut store = session.store(Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    }))?;
     if let Some((repository, endpoint)) = extra_endpoint {
         // The configured location keeps the endpoint the project resolved for it.
         if repository != resolved.location.repository {
             store = store.with_endpoint(repository, endpoint);
         }
     }
-    let context = Context {
-        store: &store,
-        clock: wiring.clock.as_ref(),
-        ids: wiring.ids,
-        faults: wiring.faults,
-        runner: wiring.runner.clone(),
-        requested_by: identity.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        settings: Settings::default(),
-    };
+    let context = session.context(&store, wiring, Some(identity.to_string()));
     let mut report = operation(&OperationContext {
         context: &context,
         environment: resolved.name.clone(),
@@ -365,7 +350,7 @@ fn render(report: &StateOperationReport, output: Output) -> CommandOutcome {
     let mut stderr = String::new();
     match output {
         Output::Json => {
-            stdout = format!("{}\n", serde_json::to_string_pretty(&json).expect("JSON prints"));
+            stdout = pretty_json(&json);
         }
         Output::Text => {
             let status = match report.outcome {

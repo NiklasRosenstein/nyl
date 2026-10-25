@@ -14,12 +14,11 @@ use nyl_core::orchestration::time::Duration;
 use nyl_core::orchestration::ports::StateStore;
 use nyl_orchestration::run_report::ReportKind;
 use nyl_orchestration::shell::local::LocalStore;
-use nyl_orchestration::shell::run::RunContext;
 use nyl_state::git::CommitAuthor;
 
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{outcome, stopped, RunOptions, Session, Stop};
-use crate::{NylError, Result};
+use crate::Result;
 
 /// Output format of orchestration commands.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
@@ -113,26 +112,14 @@ fn reconcile(args: &ReconcileArgs, wiring: &Wiring<'_>) -> std::result::Result<C
     }))?;
     // A `--local` run works on the clone's local branches through the same shell.
     let local_store = local.map(|local| LocalStore::new(&store, local));
-    let state: &dyn StateStore = match &local_store {
-        Some(local_store) => local_store,
-        None => &store,
-    };
-    let sources = session.sources()?;
-    let renderer = session.renderer();
-    let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
-    let base = session.context(state, wiring, Some(identity.to_string()));
-    let context = RunContext {
-        base: &base,
-        sources: &sources,
-        renderer: &renderer,
-        drivers: wiring.drivers,
-        tools: wiring.tools,
-        workspace: workspace.path(),
-        process_env: &wiring.process_env,
-        commit_identity: Some(&identity),
-    };
-    let mut report = nyl_orchestration::shell::run::reconcile(&context, &request);
-    session.add_warnings(&mut report);
+    let state = local_store.as_ref().map_or(&store as &dyn StateStore, |local| local);
+    let report = session.run(
+        wiring,
+        state,
+        Some(&identity),
+        &request,
+        nyl_orchestration::shell::run::reconcile,
+    )?;
     let exit = report.exit().code();
     Ok(outcome(&report, args.output, exit))
 }

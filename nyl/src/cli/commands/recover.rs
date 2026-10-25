@@ -16,7 +16,6 @@ use nyl_core::orchestration::state::Operation;
 use nyl_orchestration::report::StateOperationReport;
 use nyl_orchestration::rules::recovery::RecoverAction;
 use nyl_orchestration::shell::recover::recover;
-use nyl_orchestration::shell::state::Requested;
 
 use super::state::Common;
 use crate::orchestration::run::{CommandOutcome, Wiring};
@@ -58,11 +57,7 @@ pub fn run(args: &RecoverArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
                 )
             }),
     };
-    let requested = Requested {
-        reason: args.common.reason.clone(),
-        wait: args.common.wait_lease,
-        cancellation: wiring.cancellation.clone(),
-    };
+    let requested = super::state::requested(&args.common, wiring);
     super::state::run(
         &args.common,
         wiring,
