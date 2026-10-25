@@ -121,10 +121,13 @@ pub enum Code {
     /// A `--local` run found remote run refs of dead runs that remote state
     /// has not taken over yet.
     LocalRunLeftovers,
+    /// A run stopped on SIGINT or SIGTERM: it checkpointed what finished,
+    /// left the units still running `uncertain`, and wrote no transition commit.
+    RunCancelled,
 }
 
 impl Code {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::LeaseHeld,
         Self::LeaseLost,
         Self::StateMissing,
@@ -178,6 +181,7 @@ impl Code {
         Self::LocalRunNotConverge,
         Self::LocalRunUnsupported,
         Self::LocalRunLeftovers,
+        Self::RunCancelled,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -235,6 +239,7 @@ impl Code {
             Self::LocalRunNotConverge => "NYL-LOCAL-RUN-NOT-CONVERGE",
             Self::LocalRunUnsupported => "NYL-LOCAL-RUN-UNSUPPORTED",
             Self::LocalRunLeftovers => "NYL-LOCAL-RUN-LEFTOVERS",
+            Self::RunCancelled => "NYL-RUN-CANCELLED",
         }
     }
 }

@@ -8,7 +8,11 @@
 //! them.
 //!
 //! A [`Script`] lets a scenario's `driver` steps decide the outcome of a
-//! fake's next calls, such as a retryable failure.
+//! fake's next calls, such as a retryable failure. For recovery tests it
+//! can also give `FakeInfra` the `inspect` recovery policy
+//! ([`Script::recover_by`]) and script its `inspect` results: a scripted
+//! success reports the effects applied, a failure not applied, and an
+//! uncertain result unknown.
 
 mod image;
 mod infra;
@@ -18,7 +22,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use nyl_core::orchestration::driver::{DriverError, DriverOperation, DriverResult, Outcome};
+use nyl_core::orchestration::driver::{DriverError, DriverOperation, DriverResult, Outcome, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::state::FailureCategory;
 use serde_json::Value;
@@ -65,6 +69,8 @@ type ScriptEntries = BTreeMap<(UnitName, &'static str), VecDeque<Scripted>>;
 #[derive(Debug, Clone, Default)]
 pub struct Script {
     entries: Arc<Mutex<ScriptEntries>>,
+    /// `FakeInfra`'s execution recovery policy, when a test sets one.
+    execution_policy: Arc<Mutex<Option<RecoveryPolicy>>>,
 }
 
 impl Script {
@@ -79,6 +85,17 @@ impl Script {
         for _ in 0..times {
             queue.push_back(result.clone());
         }
+    }
+
+    /// Give `FakeInfra` this execution recovery policy instead of
+    /// `converge`, such as `inspect` to exercise recovery by inspection.
+    pub fn recover_by(&self, policy: RecoveryPolicy) {
+        *self.execution_policy.lock().expect("script lock") = Some(policy);
+    }
+
+    /// The execution recovery policy a test set, else `default`.
+    fn execution_policy(&self, default: RecoveryPolicy) -> RecoveryPolicy {
+        self.execution_policy.lock().expect("script lock").unwrap_or(default)
     }
 
     fn take(&self, unit: &UnitName, operation: DriverOperation) -> Option<Scripted> {

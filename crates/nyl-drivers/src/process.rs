@@ -2,8 +2,11 @@
 //!
 //! Contract: [Drivers](../../../design/orchestration-core.md#drivers). Each
 //! tool runs in its own process group with exactly the environment its
-//! invocation names. At the deadline, or when the run is cancelled, the
-//! group receives SIGTERM and, 30 seconds later, SIGKILL. This holds
+//! invocation names. At the deadline the group receives SIGTERM and, 30
+//! seconds later, SIGKILL; when the run is cancelled
+//! ([`ProcessRunner::cancelled_by`]), the group receives the run's own
+//! signal, such as SIGINT, and SIGKILL after the same grace, and no further
+//! tool starts. This holds
 //! whether the tool is still running or has exited while other members of
 //! its group, or processes that left it, keep its output open: the runner
 //! waits for output no longer than the deadline plus the grace, then
@@ -14,6 +17,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,6 +52,10 @@ pub struct ProcessRunner {
     pub(crate) kill_grace: StdDuration,
     /// A buffer that receives the transcript instead of stderr, for tests.
     pub(crate) transcript: Sink,
+    /// The run's cancellation: 0 while it runs, else the signal (such as
+    /// SIGINT or SIGTERM) that cancelled it, which the runner forwards to
+    /// every running tool's process group, with SIGKILL after the grace.
+    cancel: Option<Arc<AtomicI32>>,
 }
 
 impl Default for ProcessRunner {
@@ -57,6 +65,7 @@ impl Default for ProcessRunner {
             timeout: None,
             kill_grace: KILL_GRACE,
             transcript: None,
+            cancel: None,
         }
     }
 }
@@ -71,6 +80,25 @@ impl ProcessRunner {
     pub fn masking(mut self, secrets: Vec<String>) -> Self {
         self.masked = secrets;
         self
+    }
+
+    /// Forward the signal `cancel` holds, once it is set (non-zero), to the
+    /// process group of every running tool, and start no tool afterwards.
+    /// A tool that has not exited when [`Self::kill_grace`] passes after
+    /// the signal is killed. The run shell's `Cancellation::shared` is
+    /// such a cell. Contract: [Runs and leases](../../../design/orchestration-core.md#runs-and-leases), item 7.
+    #[must_use]
+    pub fn cancelled_by(mut self, cancel: Arc<AtomicI32>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// The signal that cancelled the run, if it was.
+    fn cancelled(&self) -> Option<i32> {
+        self.cancel
+            .as_ref()
+            .map(|cancel| cancel.load(Ordering::SeqCst))
+            .filter(|signal| *signal != 0)
     }
 
     /// Terminate each invocation's process group after `timeout`.
@@ -114,6 +142,11 @@ impl ToolRunner for ProcessRunner {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
+        if let Some(signal) = self.cancelled() {
+            return Ok(ToolExit::NotStarted {
+                reason: format!("the run was cancelled by signal {signal}"),
+            });
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -150,10 +183,14 @@ impl ToolRunner for ProcessRunner {
         drop(done);
         let mut open = usize::from(stdout.is_some()) + usize::from(stderr.is_some());
 
+        // When the run is cancelled, the signal goes to the group once, and
+        // the tool gets the kill grace to stop cleanly.
+        let mut forwarded: Option<Instant> = None;
         let status = loop {
             if let Some(status) = child.try_wait().map_err(wait_error)? {
                 break status;
             }
+            self.forward_cancellation(&child, &mut forwarded);
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 // Readers still blocked on a pipe that a process outside the
                 // group holds open are detached, never joined.
@@ -165,14 +202,15 @@ impl ToolRunner for ProcessRunner {
 
         // The tool exited; its output ends when every process holding its
         // pipes, such as a background child, has exited too. That wait is
-        // bounded by the deadline like the tool itself.
-        let drained = match deadline {
-            Some(deadline) => drain(&finished, &mut open, deadline),
-            None => drain_unbounded(&finished, &mut open),
-        };
-        if !drained {
-            self.terminate(&mut child, true, &finished, &mut open)?;
-            return Ok(ToolExit::DeadlineExceeded);
+        // bounded by the deadline like the tool itself and, once the run is
+        // cancelled, by the kill grace after the forwarded signal.
+        match self.drain_after_exit(&child, &finished, &mut open, deadline, &mut forwarded) {
+            Drained::Finished => {}
+            Drained::DeadlineExceeded => {
+                self.terminate(&mut child, true, &finished, &mut open)?;
+                return Ok(ToolExit::DeadlineExceeded);
+            }
+            Drained::Cancelled => return Ok(ToolExit::Cancelled),
         }
         let captured = stdout
             .map(|reader| reader.join().unwrap_or_default())
@@ -181,6 +219,78 @@ impl ToolRunner for ProcessRunner {
             let _ = reader.join();
         }
         Ok(exit_of(status, captured))
+    }
+}
+
+impl ProcessRunner {
+    /// Forward the cancelling signal to the tool's group once, and SIGKILL
+    /// the group when the grace after it has passed. `forwarded` holds the
+    /// end of that grace once the signal went out.
+    fn forward_cancellation(&self, child: &Child, forwarded: &mut Option<Instant>) {
+        if forwarded.is_none() {
+            if let Some(signal) = self.cancelled() {
+                kill_group(child, Signal::Forward(signal));
+                *forwarded = Some(Instant::now() + self.kill_grace);
+            }
+        }
+        if forwarded.is_some_and(|end| Instant::now() >= end) {
+            kill_group(child, Signal::Kill);
+        }
+    }
+}
+
+/// How waiting for a tool's output after the tool exited ended.
+enum Drained {
+    /// Every process holding the tool's pipes has closed them.
+    Finished,
+    /// The deadline passed first.
+    DeadlineExceeded,
+    /// The run was cancelled and the grace after the forwarded signal
+    /// passed; the group was killed and the readers detached.
+    Cancelled,
+}
+
+impl ProcessRunner {
+    /// Wait for the transcript of a tool whose leader exited while members
+    /// of its group, or processes that left it, may keep its pipes open.
+    /// The run's cancellation is still honored: the signal goes to the group
+    /// (once, unless it went out while the leader ran), and the group is
+    /// killed and the readers detached when the grace after it passes.
+    fn drain_after_exit(
+        &self,
+        child: &Child,
+        finished: &mpsc::Receiver<()>,
+        open: &mut usize,
+        deadline: Option<Instant>,
+        forwarded: &mut Option<Instant>,
+    ) -> Drained {
+        while *open > 0 {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Drained::DeadlineExceeded;
+            }
+            if forwarded.is_none() {
+                if let Some(signal) = self.cancelled() {
+                    kill_group(child, Signal::Forward(signal));
+                    *forwarded = Some(Instant::now() + self.kill_grace);
+                }
+            }
+            if forwarded.is_some_and(|end| Instant::now() >= end) {
+                kill_group(child, Signal::Kill);
+                drain(finished, open, Instant::now() + KILLED_DRAIN);
+                return Drained::Cancelled;
+            }
+            let mut wait = POLL_INTERVAL;
+            if let Some(until) = deadline.into_iter().chain(*forwarded).min() {
+                wait = wait.min(until.saturating_duration_since(Instant::now()));
+            }
+            match finished.recv_timeout(wait) {
+                Ok(()) => *open -= 1,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Every reader dropped its sender, so every reader finished.
+                Err(mpsc::RecvTimeoutError::Disconnected) => *open = 0,
+            }
+        }
+        Drained::Finished
     }
 }
 
@@ -260,18 +370,6 @@ fn drain(finished: &mpsc::Receiver<()>, open: &mut usize, until: Instant) -> boo
     true
 }
 
-/// [`drain`] for a tool without a deadline: wait as long as its output lasts.
-fn drain_unbounded(finished: &mpsc::Receiver<()>, open: &mut usize) -> bool {
-    while *open > 0 {
-        if finished.recv().is_err() {
-            *open = 0;
-        } else {
-            *open -= 1;
-        }
-    }
-    true
-}
-
 #[allow(clippy::needless_pass_by_value)] // Used as `map_err(wait_error)`.
 fn wait_error(error: std::io::Error) -> DriverError {
     DriverError::after_effects(format!("failed to wait for a tool: {error}"))
@@ -300,6 +398,8 @@ fn exit_of(status: ExitStatus, stdout: Vec<u8>) -> ToolExit {
 enum Signal {
     Term,
     Kill,
+    /// A signal the run received, forwarded on cancellation.
+    Forward(i32),
 }
 
 /// Send a signal to the tool's process group, which `process_group(0)` made
@@ -312,6 +412,7 @@ fn kill_group(child: &Child, signal: Signal) {
     let signal = match signal {
         Signal::Term => libc::SIGTERM,
         Signal::Kill => libc::SIGKILL,
+        Signal::Forward(signal) => signal,
     };
     // SAFETY: kill(2) has no memory-safety preconditions; a group that no
     // longer exists yields ESRCH, which is ignored.
@@ -522,6 +623,72 @@ mod tests {
         assert_eq!(runner.run(invocation).unwrap(), ToolExit::DeadlineExceeded);
         let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
         assert!(transcript.contains("got-term"), "{transcript}");
+    }
+
+    /// Catches a cancelled run leaving its tools running, which would keep
+    /// effects going and native locks held after Nyl exits.
+    #[test]
+    fn test_run_forwards_the_cancelling_signal_to_the_tool_group() {
+        let (runner, transcript) = quiet();
+        let cancel = Arc::new(AtomicI32::new(0));
+        let runner = runner.cancelled_by(cancel.clone());
+        let mut invocation = sh("trap 'echo got-term >&2; exit 7' TERM; sleep 30 & wait");
+        invocation.timeout = Some(StdDuration::from_secs(20));
+        let signaller = thread::spawn(move || {
+            thread::sleep(StdDuration::from_millis(300));
+            cancel.store(libc::SIGTERM, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let exit = runner.run(invocation).unwrap();
+        signaller.join().unwrap();
+        assert!(matches!(exit, ToolExit::Exited { code: 7, .. }), "{exit:?}");
+        assert!(
+            started.elapsed() < StdDuration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let transcript = String::from_utf8(transcript.lock().unwrap().clone()).unwrap();
+        assert!(transcript.contains("got-term"), "{transcript}");
+        // Once cancelled, no further tool starts.
+        assert!(matches!(runner.run(sh("true")).unwrap(), ToolExit::NotStarted { .. }));
+    }
+
+    /// Catches a cancelled run waiting on output until the unit's deadline
+    /// (up to an hour) after the tool's leader exited, while a member of its
+    /// group that ignores the signal keeps the pipes open: CI allows only
+    /// seconds between the signal and a forced kill. Covers the signal
+    /// arriving while the leader runs and after it exited.
+    #[test]
+    fn test_run_cancellation_kills_a_group_member_holding_the_pipes_after_the_tool_exits() {
+        let scripts = [
+            // The leader exits on the forwarded signal; the member ignores it.
+            "(trap '' TERM; sleep 30) & trap 'exit 7' TERM; while :; do sleep 0.05; done",
+            // The leader exits before the signal arrives.
+            "(trap '' TERM; sleep 30) & exit 0",
+        ];
+        for script in scripts {
+            let (runner, _) = quiet();
+            let cancel = Arc::new(AtomicI32::new(0));
+            let runner = ProcessRunner {
+                kill_grace: StdDuration::from_millis(300),
+                ..runner.cancelled_by(cancel.clone())
+            };
+            let mut invocation = sh(script);
+            invocation.timeout = Some(StdDuration::from_secs(25));
+            let signaller = thread::spawn(move || {
+                thread::sleep(StdDuration::from_millis(300));
+                cancel.store(libc::SIGTERM, Ordering::SeqCst);
+            });
+            let started = Instant::now();
+            let exit = runner.run(invocation).unwrap();
+            signaller.join().unwrap();
+            assert_eq!(exit, ToolExit::Cancelled, "{script}");
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "{script}: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]

@@ -184,6 +184,7 @@ impl Harness {
                 source_override: None,
                 wait: None,
                 local: None,
+                cancellation: run::Cancellation::default(),
             },
             workspace: TempDir::new().unwrap(),
         }

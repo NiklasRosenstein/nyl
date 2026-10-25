@@ -3,17 +3,30 @@
 //! Contract: [Execution](../../../../design/orchestration-core.md#execution),
 //! step 3 and `--unit`. A unit is ready when its desired document is ready
 //! and active, it has no current receipt, every receipt its provenance cites
-//! is still current, and it does not await approval. Uncertain units are
-//! skipped unless their recovery policy is `converge`; non-retryable failed
-//! units wait for `recover`; retryable failed units are selected again (once
-//! per run). With `--unit`, only the named units execute: their
-//! dependencies and dependents never do.
+//! is still current, and it does not await approval.
+//!
+//! - An `uncertain` condition of the unit's current incarnation makes it a
+//!   candidate whatever its receipt, even a current one: under the
+//!   `converge` and `inspect` recovery policies it is selected (the run
+//!   shell inspects `inspect` units first); under `manual` it waits for
+//!   `recover` ([`Skipped::Uncertain`]).
+//! - Non-retryable failed units wait for `recover`; retryable failed units
+//!   are selected again (once per run).
+//! - With `--unit`, only the named units execute: their dependencies and
+//!   dependents never do.
+//! - A `--local` run executes a unit whose execution recovery policy is not
+//!   `converge` only when `--approve <unit>` names it; otherwise the unit
+//!   awaits approval ([`Skipped::LocalApproval`]). Contract:
+//!   [Local runs](../../../../design/orchestration-core.md#local-runs).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::driver::{DriverSet, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
-use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness};
+use nyl_core::orchestration::ports::CommitIdentity;
+use nyl_core::orchestration::state::{
+    ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness,
+};
 
 use super::freshness::receipt_is_current;
 
@@ -27,10 +40,11 @@ pub struct Candidates<'a> {
     pub named: Option<&'a BTreeSet<UnitName>>,
     /// Units this run already executed, whatever the outcome.
     pub attempted: &'a BTreeSet<UnitName>,
-    /// A `--local` run next to remote state: units whose execution recovery
-    /// policy is not `converge` are skipped ([`Skipped::LocalNotConverge`]).
+    /// A `--local` run: the units `--approve` names. Units whose execution
+    /// recovery policy is not `converge` and that are not named await
+    /// approval ([`Skipped::LocalApproval`]). `None` for an ordinary run.
     /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
-    pub local: bool,
+    pub local: Option<&'a BTreeSet<UnitName>>,
 }
 
 /// Why a unit is not selected.
@@ -44,9 +58,10 @@ pub enum Skipped {
     FailedNonRetryable,
     AwaitingApproval,
     AlreadyAttempted,
-    /// A `--local` run does not execute it: its recovery policy is not
-    /// `converge`, and `--approve` (part 6) is needed to run it locally.
-    LocalNotConverge,
+    /// A `--local` run executes it only with `--approve <unit>`: its
+    /// execution recovery policy is not `converge`. Reported as
+    /// `awaiting-approval`.
+    LocalApproval,
 }
 
 /// The ready units, by name, and why each other unit is skipped.
@@ -79,31 +94,94 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         return Err(Skipped::Blocked);
     }
     let observed = candidates.observed.get(name);
-    if receipt_is_current(desired, observed) {
-        return Err(Skipped::Current);
-    }
     // A condition of an earlier incarnation does not apply to this one.
     let condition = observed
         .filter(|observed| observed.unit.uid == desired.unit.uid)
         .and_then(|observed| observed.condition.as_ref());
     match condition {
+        // Uncertain: a candidate whatever its receipt, by recovery policy.
         Some(Condition::Uncertain { .. }) => {
-            let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
-            let converges = candidates
-                .drivers
-                .get(&desired.unit.api_version, &desired.unit.kind)
-                .is_some_and(|driver| driver.recovery(spec).execution == RecoveryPolicy::Converge);
-            if !converges {
+            let recovers = matches!(
+                execution_policy(candidates, desired),
+                Some(RecoveryPolicy::Converge | RecoveryPolicy::Inspect)
+            );
+            if !recovers {
                 return Err(Skipped::Uncertain);
             }
         }
         Some(Condition::Failed { retryable: false, .. }) => return Err(Skipped::FailedNonRetryable),
-        Some(Condition::Failed { retryable: true, .. }) | None => {}
+        Some(Condition::Failed { retryable: true, .. }) | None => {
+            if receipt_is_current(desired, observed) {
+                return Err(Skipped::Current);
+            }
+        }
     }
     if !citations_current(candidates, desired) {
         return Err(Skipped::Blocked);
     }
+    if let Some(approved) = candidates.local {
+        if execution_policy(candidates, desired) != Some(RecoveryPolicy::Converge) && !approved.contains(name) {
+            return Err(Skipped::LocalApproval);
+        }
+    }
     Ok(())
+}
+
+/// The units of `approve` (a `--local` run's `--approve`) that a
+/// reconcile may execute: an approval is recorded with the commit identity,
+/// so without one nothing is approved and the units await approval.
+pub fn local_approve<'a>(
+    approve: &'a BTreeSet<UnitName>,
+    identity: Option<&CommitIdentity>,
+) -> Option<&'a BTreeSet<UnitName>> {
+    static NONE: BTreeSet<UnitName> = BTreeSet::new();
+    Some(if identity.is_some() { approve } else { &NONE })
+}
+
+/// The approval a `--local` run records, in the receipt and in the local
+/// transition commit's summary, for each of `units` that `--approve` names
+/// and whose execution recovery policy is not `converge`:
+/// `{by: ["Name <email>"], identity: local, source: "local", digest: null,
+/// reviewed: false}`, with the commit identity. Nothing without an identity
+/// ([`local_approve`]). Contract:
+/// [Local runs](../../../../design/orchestration-core.md#local-runs).
+pub fn local_approvals<'u>(
+    approve: &BTreeSet<UnitName>,
+    identity: Option<&CommitIdentity>,
+    drivers: &DriverSet,
+    units: impl IntoIterator<Item = &'u DesiredUnit>,
+) -> BTreeMap<UnitName, ApprovalRecord> {
+    let Some(identity) = identity else {
+        return BTreeMap::new();
+    };
+    units
+        .into_iter()
+        .filter(|unit| approve.contains(&unit.unit.name))
+        .filter(|unit| execution_recovery(drivers, unit) != Some(RecoveryPolicy::Converge))
+        .map(|unit| {
+            let record = ApprovalRecord {
+                by: vec![format!("{} <{}>", identity.name, identity.email)],
+                identity: ApprovalIdentity::Local,
+                source: Some("local".to_owned()),
+                digest: None,
+                reviewed: false,
+            };
+            (unit.unit.name.clone(), record)
+        })
+        .collect()
+}
+
+fn execution_policy(candidates: &Candidates<'_>, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
+    execution_recovery(candidates.drivers, desired)
+}
+
+/// The unit's execution recovery policy, from its resolved spec when it has
+/// one; `None` when no driver serves its kind.
+pub(crate) fn execution_recovery(drivers: &DriverSet, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
+    let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+    drivers
+        .get(&desired.unit.api_version, &desired.unit.kind)
+        .map(|driver| driver.recovery(spec).execution)
 }
 
 /// Whether every receipt `desired` cites still matches its producer's
@@ -162,6 +240,8 @@ mod tests {
         fn recovery(&self, spec: &Value) -> RecoveryPolicies {
             let execution = if spec["idempotent"] == json!(true) {
                 RecoveryPolicy::Converge
+            } else if spec["inspect"] == json!(true) {
+                RecoveryPolicy::Inspect
             } else {
                 RecoveryPolicy::Manual
             };
@@ -228,6 +308,7 @@ mod tests {
         observed: BTreeMap<UnitName, ObservedUnit>,
         drivers: DriverSet,
         attempted: BTreeSet<UnitName>,
+        local: Option<BTreeSet<UnitName>>,
     }
 
     impl World {
@@ -239,6 +320,7 @@ mod tests {
                 observed: BTreeMap::new(),
                 drivers,
                 attempted: BTreeSet::new(),
+                local: None,
             }
         }
 
@@ -259,7 +341,7 @@ mod tests {
                 drivers: &self.drivers,
                 named,
                 attempted: &self.attempted,
-                local: false,
+                local: self.local.as_ref(),
             })
         }
     }
@@ -304,6 +386,73 @@ mod tests {
         let (ready, skipped) = world.select(None);
         assert_eq!(ready, [name("converge")]);
         assert_eq!(skipped, BTreeMap::from([(name("manual"), Skipped::Uncertain)]));
+    }
+
+    /// Catches an uncertain unit being skipped as current because its last
+    /// receipt still matches: its effects may differ from that receipt, so
+    /// its recovery policy decides, whatever the receipt.
+    #[test]
+    fn test_select_recovers_uncertain_units_with_a_current_receipt_by_policy() {
+        let mut world = World::new();
+        for (unit, spec) in [
+            ("converge", json!({"idempotent": true})),
+            ("inspect", json!({"inspect": true})),
+            ("manual", json!({})),
+        ] {
+            world.add(unit, spec.clone());
+            let mut document = observed(unit, "Command", Some(receipt(unit, spec, Vec::new())));
+            document.condition = Some(uncertain());
+            world.observed.insert(name(unit), document);
+        }
+        let (ready, skipped) = world.select(None);
+        assert_eq!(ready, [name("converge"), name("inspect")]);
+        assert_eq!(skipped, BTreeMap::from([(name("manual"), Skipped::Uncertain)]));
+    }
+
+    /// Catches a `--local` run executing a unit that is not safe to re-run
+    /// without the operator naming it, or refusing one it named.
+    #[test]
+    fn test_select_local_run_needs_approve_for_units_that_do_not_converge() {
+        let mut world = World::new();
+        world.add("converge", json!({"idempotent": true}));
+        world.add("approved", json!({}));
+        world.add("unapproved", json!({}));
+        world.local = Some(BTreeSet::from([name("approved")]));
+        let (ready, skipped) = world.select(None);
+        assert_eq!(ready, [name("approved"), name("converge")]);
+        assert_eq!(skipped, BTreeMap::from([(name("unapproved"), Skipped::LocalApproval)]));
+    }
+
+    /// Catches a `--local` run's approved unit executing without the audit
+    /// record decision 3 requires (receipt and summary), or with an empty
+    /// `by` when the run has no commit identity.
+    #[test]
+    fn test_local_approvals_record_the_commit_identity_for_approved_units_that_do_not_converge() {
+        let mut world = World::new();
+        world.add("converge", json!({"idempotent": true}));
+        world.add("approved", json!({}));
+        world.add("unapproved", json!({}));
+        let approve = BTreeSet::from([name("approved"), name("converge")]);
+        let identity: CommitIdentity = "Jane Doe <jane@example.invalid>".parse().unwrap();
+
+        let approvals = local_approvals(&approve, Some(&identity), &world.drivers, world.desired.values());
+        let expected = ApprovalRecord {
+            by: vec!["Jane Doe <jane@example.invalid>".to_owned()],
+            identity: ApprovalIdentity::Local,
+            source: Some("local".to_owned()),
+            digest: None,
+            reviewed: false,
+        };
+        assert_eq!(approvals, BTreeMap::from([(name("approved"), expected)]));
+        assert_eq!(local_approve(&approve, Some(&identity)), Some(&approve));
+
+        // Without a commit identity nothing is approved: the unit awaits
+        // approval instead of executing without a record of who approved it.
+        assert!(local_approvals(&approve, None, &world.drivers, world.desired.values()).is_empty());
+        world.local = local_approve(&approve, None).cloned();
+        let (ready, skipped) = world.select(None);
+        assert_eq!(ready, [name("converge")]);
+        assert_eq!(skipped[&name("approved")], Skipped::LocalApproval);
     }
 
     #[test]

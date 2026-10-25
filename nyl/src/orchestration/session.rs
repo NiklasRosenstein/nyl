@@ -172,6 +172,7 @@ impl Session {
             source_override: options.source.map(str::to_owned),
             wait: options.wait,
             local: options.local.clone(),
+            cancellation: nyl_orchestration::shell::run::Cancellation::default(),
         })
     }
 }

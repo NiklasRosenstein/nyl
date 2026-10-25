@@ -31,6 +31,20 @@
 //! keeps its run ref, marked finished, so executed units' results are not
 //! lost; every other run deletes it and releases the lease, including runs
 //! that change nothing and runs whose units failed.
+//!
+//! Takeover ([`crate::rules::takeover`]): after the snapshot the run reads
+//! the run refs left by runs before it, overlays the desired documents of
+//! units they created on the snapshot it renders against (so their uids are
+//! reused), imports their checkpoints after each resolution until nothing
+//! new is imported, records units it creates on its run ref before starting
+//! them, and, once its transition commit landed (or it released without
+//! changes), deletes the leftover run refs or retires them to evidence refs.
+//!
+//! Cancellation ([`Cancellation`], "Runs and leases" item 7): once
+//! cancelled, the run starts no unit, checkpoints the units that finish
+//! (units still running become `uncertain`), keeps its run ref marked
+//! finished, releases the lease, and writes no transition commit
+//! (`NYL-RUN-CANCELLED`, exit 4).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,7 +60,7 @@ use nyl_core::orchestration::ports::{
     StateError, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit, ObservedUnitKind,
+    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
     Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
 use nyl_core::orchestration::time::{Duration, Timestamp};
@@ -63,18 +77,21 @@ use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::graph::{extract, topological_order};
 use crate::rules::references::{resolve_unit, ReferenceView};
-use crate::rules::selection::{batches, select, Candidates, Skipped};
+use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
     effective_commit, pin_refs, pin_source_fields, root_local_paths, run_source_refs, source_request, source_revisions,
     unreachable, unsupported_source, SourceRequest,
 };
 use crate::rules::state_location::check_record;
+use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
 use crate::transition::{self, Trailers};
+pub use cancel::{Cancellation, SIGINT, SIGTERM};
 use execute::{execute_batch, Execution};
 use slots::Slots;
 
+mod cancel;
 mod execute;
 pub(crate) mod slots;
 
@@ -130,6 +147,9 @@ pub struct RunRequest {
     /// [`super::local::LocalStore`] as the context's store. `None` for an
     /// ordinary run. Contract: [Local runs](../../../../../design/orchestration-core.md#local-runs).
     pub local: Option<super::local::LocalRun>,
+    /// Set by the command line's SIGINT/SIGTERM handler; never set by
+    /// default. Contract: [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases), item 7.
+    pub cancellation: Cancellation,
 }
 
 /// `nyl plan -e <env>`.
@@ -840,7 +860,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         drivers: context.drivers,
         named: None,
         attempted: &attempted,
-        local: request.local.is_some(),
+        local: request.local.as_ref().map(|local| &local.approve),
     });
     let ready: BTreeSet<UnitName> = ready.into_iter().collect();
     for (name, unit) in &resolved.units {
@@ -946,6 +966,9 @@ enum Ending {
     KeepRun { release: bool },
     /// A fault killed the run: write nothing more.
     Killed,
+    /// SIGINT or SIGTERM: keep the run ref, marked finished, once a
+    /// checkpoint is on it (else delete it), and release the lease.
+    Cancelled,
 }
 
 /// The mutable state of one reconcile holding the lease.
@@ -1149,13 +1172,36 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
         }
+        // The runs before this one, read after taking the lease. A
+        // `--local` run under the remote lease never takes the remote
+        // lease's units as its own leftovers (and vice versa).
+        let coordination = match context.base.store.coordination(&request.location, &environment) {
+            Ok(coordination) => coordination,
+            Err(error) => {
+                self.report.errors.push(store_error(&environment, &error));
+                return Ending::Release;
+            }
+        };
+        let replaced = match &request.local {
+            Some(local) if local.lease == super::local::LeaseScope::Remote => None,
+            _ => self.held.replaced.clone(),
+        };
+        let run = self.run.clone();
+        let leftovers = takeover::leftovers(&run, replaced.as_ref(), &coordination);
+        let mut adopted = takeover::adoptions(&leftovers);
+        adopted.retain(|name, desired| {
+            snapshot.desired.get(name).map(|stored| &stored.unit.uid) != Some(&desired.unit.uid)
+        });
+        let mut overlay = snapshot.clone();
+        overlay.desired.extend(adopted.clone());
+
         self.record.read_desired.clone_from(&snapshot.tips.desired);
         self.record.read_observed.clone_from(&snapshot.tips.observed);
         if let Err(error) = self.write_run(None) {
             self.report.errors.push(store_error(&environment, &error));
             return Ending::Release;
         }
-        let prepared = match session.prepare(&snapshot) {
+        let prepared = match session.prepare(&overlay) {
             Ok(prepared) => prepared,
             Err(findings) => {
                 self.report.errors.extend(findings);
@@ -1176,8 +1222,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
+        let mut created: BTreeSet<UnitName> = BTreeSet::new();
+        let mut taking = Takeover::new(&leftovers, &overlay, &prepared);
         let mut first = true;
         let (resolved, skipped) = loop {
+            if request.cancellation.is_cancelled() {
+                return self.cancelled();
+            }
             // Resolution and its fingerprints run under a lease renewed for
             // the resolution timeout, never one sized for an earlier phase.
             let deadline = lease::deadline(
@@ -1205,18 +1256,41 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
             first = false;
+            if taking.active() {
+                let import = takeover::import(&ImportInputs {
+                    leftovers: &leftovers,
+                    environment: &environment,
+                    now: context.base.clock.now(),
+                    resolved: &resolved.units,
+                    adopted: &taking.unresolved,
+                    snapshot: &snapshot.observed,
+                    observed: &observed,
+                    handled: &taking.handled,
+                    drivers: context.drivers,
+                });
+                if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                    // Imported receipts may change downstream keys: resolve again.
+                    continue;
+                }
+            }
             let (ready, skipped) = select(&Candidates {
                 desired: &resolved.units,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
-                local: request.local.is_some(),
+                local: request
+                    .local
+                    .as_ref()
+                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
             });
             if ready.is_empty() {
                 break (resolved, skipped);
             }
             for batch in batches(&ready, request.concurrency) {
+                if request.cancellation.is_cancelled() {
+                    return self.cancelled();
+                }
                 let now = context.base.clock.now();
                 let longest = batch
                     .iter()
@@ -1226,8 +1300,34 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 if let Err(ending) = self.phase(batch.clone(), lease::deadline(context.base, now, longest)) {
                     return ending;
                 }
+                // Units whose uid this run generated go on the run ref before
+                // they start, so a run taking over adopts them.
+                let new: Vec<DesiredUnit> = batch
+                    .iter()
+                    .map(|name| &resolved.units[name])
+                    .filter(|unit| {
+                        !created.contains(&unit.unit.name)
+                            && !adopted.contains_key(&unit.unit.name)
+                            && snapshot.desired.get(&unit.unit.name).map(|stored| &stored.unit.uid)
+                                != Some(&unit.unit.uid)
+                    })
+                    .cloned()
+                    .collect();
+                if !new.is_empty() {
+                    let written =
+                        context
+                            .base
+                            .store
+                            .write_run_created(&request.location, &environment, &self.record, &new);
+                    if let Err(error) = written {
+                        self.report.errors.push(store_error(&environment, &error));
+                        return self.failed();
+                    }
+                    created.extend(new.into_iter().map(|unit| unit.unit.name));
+                }
+                let approvals = local_approvals(session, &resolved, &batch);
                 let results = execute_batch(
-                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot,
+                    session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot, &approvals,
                 );
                 for execution in results {
                     let name = execution.name.clone();
@@ -1255,12 +1355,48 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             return Ending::KeepRun { release: true };
                         }
                     }
+                    if matches!(execution.result, UnitResult::Recovered { .. }) {
+                        taking.recovered.insert(name.clone());
+                    }
                     self.report.errors.extend(execution.errors.iter().cloned());
                     executions.insert(name, execution);
+                }
+                if request.cancellation.is_cancelled() {
+                    // The units that finished are checkpointed; units still
+                    // running at the signal are uncertain.
+                    self.report_cancelled_units(&resolved.units, &executions);
+                    return self.cancelled();
                 }
             }
         };
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
+        if taking.active() {
+            // Units that never got an execution key import their
+            // checkpoints without a key comparison, so none stays behind.
+            let mut keyed = resolved.units.clone();
+            let mut unkeyed = taking.unresolved.clone();
+            keyed.retain(|name, unit| {
+                if unit.execution_key.is_some() {
+                    return true;
+                }
+                unkeyed.insert(name.clone(), unit.clone());
+                false
+            });
+            let import = takeover::import(&ImportInputs {
+                leftovers: &leftovers,
+                environment: &environment,
+                now: context.base.clock.now(),
+                resolved: &keyed,
+                adopted: &unkeyed,
+                snapshot: &snapshot.observed,
+                observed: &observed,
+                handled: &taking.handled,
+                drivers: context.drivers,
+            });
+            taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report);
+        }
+        self.report.imported = taking.imported.iter().cloned().collect();
+        self.report.recovered = taking.recovered.iter().cloned().collect();
 
         // The report: one result per unit, only the named ones with --unit.
         for (name, unit) in &resolved.units {
@@ -1276,6 +1412,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.result = Some(execution.result.clone());
                 entry.message.clone_from(&execution.message);
                 entry.warnings.clone_from(&execution.warnings);
+            } else if let Some(result) = imported_result(&taking, unit, current) {
+                entry.result = Some(result);
             } else {
                 entry.result = Some(unexecuted_result(
                     unit,
@@ -1284,6 +1422,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     resolved.errors.get(name),
                 ));
                 entry.message = condition_message(same_incarnation(unit, current));
+                if skipped.get(name) == Some(&Skipped::LocalApproval) {
+                    entry.message = Some(format!(
+                        "a --local run executes {name} only with --approve {name}: its recovery policy is not converge"
+                    ));
+                }
             }
             self.report.units.insert(name.clone(), entry);
         }
@@ -1294,6 +1437,13 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             changes.environment = Some(prepared.desired.environment.clone());
         }
         for (name, unit) in &resolved.units {
+            if snapshot.desired.get(name) != Some(unit) {
+                changes.desired.insert(name.clone(), Some(unit.clone()));
+            }
+        }
+        // Adopted units no longer selected keep the desired document of the
+        // incarnation a dead run created, so its resources have state.
+        for (name, unit) in adopted.iter().filter(|(name, _)| !resolved.units.contains_key(*name)) {
             if snapshot.desired.get(name) != Some(unit) {
                 changes.desired.insert(name.clone(), Some(unit.clone()));
             }
@@ -1310,13 +1460,28 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.artifacts.insert(name.clone(), after.cloned());
             }
         }
+        if request.cancellation.is_cancelled() {
+            return self.cancelled();
+        }
         if changes.is_empty() {
+            self.consume(&leftovers, &observed);
             return Ending::Release;
         }
         if self.fault(FaultPoint::BeforePush, None) {
             return self.killed(FaultPoint::BeforePush);
         }
         let mut summary = self.report.transition_summary(Operation::Reconcile);
+        for (name, execution) in &executions {
+            let approval = execution
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.observed.receipt.as_ref())
+                .filter(|receipt| receipt.run == self.run)
+                .and_then(|receipt| receipt.approval.as_ref());
+            if let (Some(approval), Some(Value::Object(entry))) = (approval, summary.units.get_mut(name)) {
+                entry.insert("approval".to_owned(), json!(approval));
+            }
+        }
         summary.lease_broken.clone_from(&self.held.broken);
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
@@ -1352,6 +1517,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 if let Some(commit) = committed.observed {
                     self.report.commits.insert("observed", commit);
                 }
+                self.consume(&leftovers, &observed);
                 Ending::Release
             }
             Err(StateError::LeaseLost) => {
@@ -1365,12 +1531,96 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
     }
 
+    /// End a cancelled run: `NYL-RUN-CANCELLED`, exit 4.
+    fn cancelled(&mut self) -> Ending {
+        let signal = self
+            .session
+            .request
+            .cancellation
+            .signal()
+            .map_or_else(String::new, |signal| format!(" by signal {signal}"));
+        self.report.errors.push(Finding::new(
+            Code::RunCancelled,
+            format!(
+                "the run was cancelled{signal}; it checkpointed the units that finished, left the units still running \
+                 uncertain, and wrote no transition commit"
+            ),
+            "run nyl reconcile again: it imports this run's checkpoints, and units left uncertain run again when \
+             their recovery policy converges; avoid cancelling runs that apply changes",
+        ));
+        Ending::Cancelled
+    }
+
+    /// The units a cancelled run executed, in the report.
+    fn report_cancelled_units(
+        &mut self,
+        units: &BTreeMap<UnitName, DesiredUnit>,
+        executions: &BTreeMap<UnitName, Execution>,
+    ) {
+        for (name, execution) in executions {
+            let kind = units.get(name).map(|unit| unit.unit.kind.clone()).unwrap_or_default();
+            let mut entry = UnitReport::new(kind);
+            entry.result = Some(execution.result.clone());
+            entry.message.clone_from(&execution.message);
+            entry.warnings.clone_from(&execution.warnings);
+            self.report.units.insert(name.clone(), entry);
+        }
+    }
+
+    /// Delete the leftover run refs this run consumed and retire those whose
+    /// checkpoints are evidence for a unit still uncertain; failures are
+    /// warnings, since a re-read leftover imports as a no-op.
+    ///
+    /// The coordination refs are read again first, and only refs unchanged
+    /// since the takeover read them are consumed: a run whose lease was
+    /// broken may still be alive and have checkpointed in the meantime.
+    fn consume(&mut self, leftovers: &Leftovers<'_>, observed: &BTreeMap<UnitName, ObservedUnit>) {
+        let consumption = takeover::consumed(leftovers, observed);
+        if consumption == takeover::Consumption::default() {
+            return;
+        }
+        let store = self.context().base.store;
+        let (location, environment) = (self.location(), self.environment());
+        let consumption = match store.coordination(location, environment) {
+            Ok(current) => takeover::unchanged(consumption, leftovers, &current),
+            Err(error) => {
+                let finding = store_error(environment, &error);
+                self.report.warnings.push(finding);
+                return;
+            }
+        };
+        let mut failures = Vec::new();
+        for run in &consumption.delete {
+            failures.extend(store.delete_run(location, environment, run).err());
+        }
+        for run in &consumption.retire {
+            failures.extend(store.retire_run(location, environment, run).err());
+        }
+        for run in &consumption.delete_evidence {
+            failures.extend(store.delete_evidence(location, environment, run).err());
+        }
+        for error in failures {
+            let finding = store_error(environment, &error);
+            self.report.warnings.push(finding);
+        }
+    }
+
     /// Release the lease and delete or keep the run ref, as `ending` says.
     fn end(&mut self, ending: &Ending) {
         let base = self.context().base;
         let (release, delete) = match ending {
             Ending::Killed => return,
             Ending::Release => (true, true),
+            Ending::Cancelled if !self.checkpointed => (true, true),
+            Ending::Cancelled => {
+                self.record.finished = true;
+                self.record.units.clear();
+                if let Err(error) = self.write_run(None) {
+                    let finding = store_error(self.environment(), &error);
+                    self.report.warnings.push(finding);
+                }
+                (true, false)
+            }
             Ending::KeepRun { release } => {
                 self.record.finished = true;
                 self.record.units.clear();
@@ -1394,6 +1644,98 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         }
     }
+}
+
+/// The takeover state of one reconcile: what it imported, marked, and handled.
+struct Takeover {
+    /// Whether there is anything to take over.
+    active: bool,
+    /// Units with a desired document the run does not resolve (adopted
+    /// units no longer selected, and leaving units).
+    unresolved: BTreeMap<UnitName, DesiredUnit>,
+    handled: BTreeSet<(RunId, UnitName)>,
+    imported: BTreeSet<UnitName>,
+    /// Units the takeover marked uncertain and units the run recovered.
+    recovered: BTreeSet<UnitName>,
+}
+
+impl Takeover {
+    fn new(leftovers: &Leftovers<'_>, overlay: &EnvironmentSnapshot, prepared: &Prepared) -> Self {
+        Self {
+            active: !leftovers.runs.is_empty() || leftovers.replaced.is_some(),
+            unresolved: overlay
+                .desired
+                .iter()
+                .filter(|(name, _)| !prepared.desired.units.contains_key(*name))
+                .map(|(name, unit)| (name.clone(), unit.clone()))
+                .collect(),
+            handled: BTreeSet::new(),
+            imported: BTreeSet::new(),
+            recovered: BTreeSet::new(),
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    /// Overlay an import on the run's evidence; whether it changed any
+    /// observed document.
+    fn apply(
+        &mut self,
+        import: takeover::Import,
+        observed: &mut BTreeMap<UnitName, ObservedUnit>,
+        artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        produced: &mut BTreeSet<UnitName>,
+        report: &mut EnvironmentRunReport,
+    ) -> bool {
+        let changed = !import.observed.is_empty();
+        observed.extend(import.observed);
+        for (name, set) in import.artifacts {
+            if set.is_empty() {
+                artifacts.remove(&name);
+            } else {
+                artifacts.insert(name.clone(), set);
+            }
+            // Its receipt reaches state with this run's commit.
+            produced.insert(name);
+        }
+        self.imported.extend(import.imported);
+        self.recovered.extend(import.recovered);
+        self.handled.extend(import.handled);
+        report.warnings.extend(import.warnings);
+        changed
+    }
+}
+
+/// The result of a unit whose current receipt this run imported.
+fn imported_result(taking: &Takeover, unit: &DesiredUnit, observed: Option<&ObservedUnit>) -> Option<UnitResult> {
+    if !taking.imported.contains(&unit.unit.name) || !receipt_is_current(unit, observed) {
+        return None;
+    }
+    let receipt = observed?.receipt.as_ref()?;
+    Some(UnitResult::Imported {
+        execution_key: receipt.execution_key.clone(),
+        run: receipt.run.clone(),
+    })
+}
+
+/// The approvals a `--local` run records for the units of `batch`
+/// (`rules::selection::local_approvals`).
+fn local_approvals(
+    session: &Session<'_, '_>,
+    resolved: &Resolved,
+    batch: &[UnitName],
+) -> BTreeMap<UnitName, ApprovalRecord> {
+    let Some(local) = &session.request.local else {
+        return BTreeMap::new();
+    };
+    crate::rules::selection::local_approvals(
+        &local.approve,
+        session.context.commit_identity,
+        session.context.drivers,
+        batch.iter().map(|name| &resolved.units[name]),
+    )
 }
 
 /// The result of a unit this run did not execute.
@@ -1429,7 +1771,7 @@ fn unexecuted_result(
             category: *category,
             retryable: false,
         },
-        (Some(Skipped::AwaitingApproval), _) => UnitResult::AwaitingApproval,
+        (Some(Skipped::AwaitingApproval | Skipped::LocalApproval), _) => UnitResult::AwaitingApproval,
         _ if !matches!(unit.lifecycle, Lifecycle::Active) => UnitResult::Blocked {
             reason: "its lifecycle is not active".to_owned(),
         },

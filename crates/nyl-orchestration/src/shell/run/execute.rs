@@ -1,12 +1,29 @@
 //! Executing one wave: a thread per unit, each in its concurrency slot's
 //! worktree, and the mapping of each driver outcome to what the run records.
 //!
-//! Contract: [Execution](../../../../../design/orchestration-core.md#execution)
-//! and [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases)
-//! (checkpoints).
+//! Contract: [Execution](../../../../../design/orchestration-core.md#execution),
+//! [Recovery](../../../../../design/orchestration-core.md#recovery), and
+//! [Runs and leases](../../../../../design/orchestration-core.md#runs-and-leases)
+//! (checkpoints and cancellation).
+//!
+//! - Every outcome becomes the unit's observed document through
+//!   [`transitions::apply`]: a success replaces the receipt and clears any
+//!   condition; a failure or uncertain outcome keeps the last receipt.
+//! - A unit with an `uncertain` condition whose execution recovery policy is
+//!   `inspect` is inspected first: applied records the receipt (outputs
+//!   filtered like a success), not applied executes it, and unknown or
+//!   unsupported leaves the condition for `nyl recover`.
+//! - An execution that clears an `uncertain` condition reports `recovered`.
+//! - Once the run is cancelled, a unit whose driver was not called yet is not
+//!   started, and a unit whose driver returns anything but a success is
+//!   `uncertain`: its tools were signalled while it ran.
+//! - A `--local` run's approved unit records the `local` approval in its receipt.
 
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
+use crate::rules::transitions::{self, Applied, Event};
+use nyl_core::orchestration::driver::{Inspection, RecoveryPolicy};
+use nyl_core::orchestration::state::ApprovalRecord;
 
 /// One finished execution.
 pub(super) struct Execution {
@@ -35,6 +52,8 @@ struct Job<'j> {
     /// The concurrency slot whose worktree the execution uses: its index in
     /// the batch, which never exceeds the concurrency limit.
     slot: usize,
+    /// The approval a `--local` run records for a unit `--approve` named.
+    approval: Option<ApprovalRecord>,
 }
 
 #[allow(clippy::too_many_arguments)] // One wave's inputs: the run, its resolution, its evidence, and the batch.
@@ -47,6 +66,7 @@ pub(super) fn execute_batch(
     batch: &[UnitName],
     run: &RunId,
     snapshot: &EnvironmentSnapshot,
+    approvals: &BTreeMap<UnitName, ApprovalRecord>,
 ) -> Vec<Execution> {
     let jobs: Vec<Job<'_>> = batch
         .iter()
@@ -58,6 +78,7 @@ pub(super) fn execute_batch(
             previous_artifacts: artifacts.get(name).cloned().unwrap_or_default(),
             directory: session.execution_directory(name),
             slot,
+            approval: approvals.get(name).cloned(),
         })
         .collect();
     let shared = Shared {
@@ -68,6 +89,7 @@ pub(super) fn execute_batch(
         cache_dir: session.cache_dir(),
         run,
         read_desired: snapshot.tips.desired.as_ref(),
+        cancellation: &session.request.cancellation,
     };
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -96,10 +118,27 @@ struct Shared<'s> {
     cache_dir: PathBuf,
     run: &'s RunId,
     read_desired: Option<&'s CommitId>,
+    cancellation: &'s super::Cancellation,
+}
+
+/// The condition reason of a unit that was running when the run was cancelled.
+const CANCELLED_WHILE_RUNNING: &str = "the run was cancelled while it executed the unit; its tools received the signal";
+
+/// What an inspection of an uncertain unit decided.
+enum Inspected {
+    /// The effects are applied: record this receipt.
+    Applied {
+        outputs: Value,
+        artifacts: Vec<ArtifactDocument>,
+    },
+    /// Nothing was applied: execute.
+    NotApplied,
+    /// Unknown or unsupported: the condition stays for `nyl recover`.
+    Unknown(String),
 }
 
 /// Execute one unit in a worktree of its effective commit and map its outcome.
-#[allow(clippy::too_many_lines)] // One execution in order: worktree, driver call, fault point, and each outcome's record.
+#[allow(clippy::too_many_lines)] // One execution in order: worktree, inspection, driver call, fault point, and the outcome's record.
 fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     let context = shared.context;
     let unit = job.unit;
@@ -143,27 +182,77 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
     };
     // A pause point: the scenario harness holds a run here while the unit runs.
     let _ = context.base.faults.at(FaultPoint::Executing, Some(&name));
+    if shared.cancellation.is_cancelled() {
+        // A cancelled run starts no unit.
+        execution.result = UnitResult::Blocked {
+            reason: "the run was cancelled before it started the unit".to_owned(),
+        };
+        let _ = std::fs::remove_dir_all(&job.directory);
+        return execution;
+    }
+    let current = same_incarnation(unit, job.observed);
+    let uncertain = matches!(
+        current.and_then(|observed| observed.condition.as_ref()),
+        Some(Condition::Uncertain { .. })
+    );
     let started = context.base.clock.now();
-    let ctx = ExecutionContext {
+    let call = |operation: DriverOperation, now: Timestamp| ExecutionContext {
         unit: UnitAddress::new(shared.environment.clone(), name.clone()),
-        operation: DriverOperation::Reconcile,
+        operation,
         project_dir: project_path(&worktree, shared.project_dir),
-        worktree,
-        temp_dir,
+        worktree: worktree.clone(),
+        temp_dir: temp_dir.clone(),
         env: admitted_env(context.process_env, &unit.spec),
         approved_digest: None,
-        deadline: unit_timeout(unit).after(started),
-        now: started,
+        deadline: unit_timeout(unit).after(now),
+        now,
         observed: job.observed,
         tools: context.tools,
         commit_identity: context.commit_identity,
         cache_dir: shared.cache_dir.clone(),
     };
-    let outcome = driver.reconcile(&ctx, unit);
-    drop(ctx);
+
+    let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+    let inspected = if uncertain && driver.recovery(spec).execution == RecoveryPolicy::Inspect {
+        match driver.inspect(&call(DriverOperation::Inspect, started), unit) {
+            Ok(Supported::Supported(Inspection::Applied { outputs, artifacts })) => {
+                Inspected::Applied { outputs, artifacts }
+            }
+            Ok(Supported::Supported(Inspection::NotApplied)) => Inspected::NotApplied,
+            Ok(Supported::Supported(Inspection::Unknown { reason })) => Inspected::Unknown(reason),
+            Ok(Supported::Unsupported) => Inspected::Unknown(format!("kind {} cannot inspect", unit.unit.kind)),
+            Err(error) => Inspected::Unknown(error.to_string()),
+        }
+    } else {
+        Inspected::NotApplied
+    };
+    let outcome = match inspected {
+        Inspected::Unknown(reason) => {
+            let _ = std::fs::remove_dir_all(&job.directory);
+            let reason = format!("inspect could not tell whether its effects are applied: {reason}");
+            execution.result = UnitResult::Uncertain { reason: reason.clone() };
+            execution.message = Some(reason);
+            return execution;
+        }
+        Inspected::Applied { outputs, artifacts } => Ok(Supported::Supported(Outcome::Succeeded {
+            outputs,
+            artifacts,
+            attestations: Vec::new(),
+        })),
+        Inspected::NotApplied => driver.reconcile(&call(DriverOperation::Reconcile, started), unit),
+    };
     execution.killed = context.base.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;
     let finished = context.base.clock.now();
     let _ = std::fs::remove_dir_all(&job.directory);
+    // The run was cancelled while the unit ran: its tools got the signal, so
+    // anything but a success may have left effects behind.
+    let outcome = match outcome {
+        Ok(Supported::Supported(Outcome::Succeeded { .. }) | Supported::Unsupported) => outcome,
+        _ if shared.cancellation.is_cancelled() => Ok(Supported::Supported(Outcome::Uncertain {
+            reason: CANCELLED_WHILE_RUNNING.to_owned(),
+        })),
+        other => other,
+    };
     let outcome = match outcome {
         Ok(Supported::Supported(outcome)) => outcome,
         Ok(Supported::Unsupported) => {
@@ -178,15 +267,7 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             reason: error.to_string(),
         },
     };
-    let previous_receipt = same_incarnation(unit, job.observed).and_then(|observed| observed.receipt.clone());
-    let condition = |condition: Condition| ObservedUnit {
-        api_version: StateV1,
-        kind: ObservedUnitKind,
-        unit: unit.unit.clone(),
-        receipt: previous_receipt.clone(),
-        condition: Some(condition),
-    };
-    let observed = match outcome {
+    let event = match outcome {
         Outcome::Succeeded { outputs, artifacts, .. } => {
             let key = unit
                 .execution_key
@@ -195,15 +276,18 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             let (outputs, warnings) = recorded_outputs(unit, outputs);
             execution.warnings = warnings;
             let (set, digests) = recorded_artifacts(shared.environment, unit, &key, artifacts);
-            execution.result = UnitResult::Executed {
-                execution_key: key.clone(),
+            execution.result = if uncertain {
+                UnitResult::Recovered {
+                    execution_key: key.clone(),
+                }
+            } else {
+                UnitResult::Executed {
+                    execution_key: key.clone(),
+                }
             };
             execution.artifacts = Some(set);
-            ObservedUnit {
-                api_version: StateV1,
-                kind: ObservedUnitKind,
-                unit: unit.unit.clone(),
-                receipt: Some(Receipt {
+            Event::Succeeded {
+                receipt: Receipt {
                     execution_key: key,
                     behavior_version: driver.behavior_version(),
                     run: shared.run.clone(),
@@ -211,12 +295,11 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
                     started_at: started,
                     finished_at: finished,
                     versions: BTreeMap::from([("nyl".to_owned(), context.base.version.clone())]),
-                    approval: None,
+                    approval: job.approval.clone(),
                     provenance: unit.provenance.clone(),
                     outputs,
                     artifacts: digests,
-                }),
-                condition: None,
+                },
             }
         }
         Outcome::AwaitingApproval { .. } => {
@@ -230,27 +313,32 @@ fn execute(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         } => {
             execution.result = UnitResult::Failed { category, retryable };
             execution.message = Some(message.clone());
-            condition(Condition::Failed {
+            Event::Failed {
                 since: finished,
                 run: shared.run.clone(),
                 category,
                 retryable,
                 message,
-            })
+            }
         }
         Outcome::Uncertain { reason } | Outcome::Waiting { reason, .. } => {
             execution.result = UnitResult::Uncertain { reason: reason.clone() };
             execution.message = Some(reason.clone());
-            condition(Condition::Uncertain {
+            Event::Uncertain {
                 since: finished,
                 run: shared.run.clone(),
                 reason,
-            })
+            }
         }
+    };
+    // Executions always change the observed document; the table refuses
+    // only `recover` events and keeps late imports as evidence.
+    let Ok(Applied::Changed(observed)) = transitions::apply(&unit.unit, current, event) else {
+        return execution;
     };
     execution.checkpoint = Some(Checkpoint {
         desired: unit.clone(),
-        observed,
+        observed: *observed,
         artifacts: execution.artifacts.clone().unwrap_or(job.previous_artifacts),
     });
     execution

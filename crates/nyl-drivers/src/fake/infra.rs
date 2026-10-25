@@ -21,7 +21,7 @@ use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Lifec
 use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
-use super::{directory_digests, local_directory, required_str, resolved_spec, Script, ScriptedOutcome};
+use super::{directory_digests, local_directory, required_str, resolved_spec, Script, Scripted, ScriptedOutcome};
 
 pub(super) const KIND: &str = "FakeInfra";
 
@@ -163,7 +163,7 @@ impl Driver for FakeInfra {
 
     fn recovery(&self, _spec: &Value) -> RecoveryPolicies {
         RecoveryPolicies {
-            execution: RecoveryPolicy::Converge,
+            execution: self.script.execution_policy(RecoveryPolicy::Converge),
             teardown: RecoveryPolicy::Converge,
         }
     }
@@ -286,8 +286,24 @@ impl Driver for FakeInfra {
         }))
     }
 
-    fn inspect(&self, _ctx: &ExecutionContext<'_>, _unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
-        Ok(Supported::Unsupported)
+    /// Only scripted: a scripted success is applied (with its outputs, or
+    /// the derived ones), a failure not applied, and uncertain unknown.
+    fn inspect(&self, _ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
+        let inspection = match self.script.take(&unit.unit.name, DriverOperation::Inspect) {
+            None => return Ok(Supported::Unsupported),
+            Some(Scripted::Succeeded { outputs }) => Inspection::Applied {
+                outputs: match outputs {
+                    Some(outputs) => outputs,
+                    None => Self::outputs(unit, resolved_spec(unit)?)?,
+                },
+                artifacts: Vec::new(),
+            },
+            Some(Scripted::Failed { .. }) => Inspection::NotApplied,
+            Some(Scripted::Uncertain) => Inspection::Unknown {
+                reason: "scripted unknown inspect".to_owned(),
+            },
+        };
+        Ok(Supported::Supported(inspection))
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
