@@ -44,14 +44,6 @@ impl FaultPoint {
         Self::WaitingLease,
     ];
 
-    /// The points a scenario's `fault` step can kill at; the others only pause.
-    pub const KILLABLE: [Self; 4] = [
-        Self::AfterEffect,
-        Self::BeforeCheckpoint,
-        Self::BeforeLeaseUpdate,
-        Self::BeforePush,
-    ];
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AfterEffect => "after-effect",

@@ -1302,7 +1302,6 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     snapshot: &snapshot.observed,
                     observed: &observed,
                     handled: &taking.handled,
-                    drivers: context.drivers,
                 });
                 if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
                     // Imported receipts may change downstream keys: resolve again.
@@ -1440,7 +1439,6 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 snapshot: &snapshot.observed,
                 observed: &observed,
                 handled: &taking.handled,
-                drivers: context.drivers,
             });
             taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report);
         }
@@ -1836,7 +1834,7 @@ fn unexecuted_result(
             category: *category,
             retryable: false,
         },
-        (Some(Skipped::AwaitingApproval | Skipped::LocalApproval), _) => UnitResult::AwaitingApproval,
+        (Some(Skipped::LocalApproval), _) => UnitResult::AwaitingApproval,
         _ if !matches!(unit.lifecycle, Lifecycle::Active) => UnitResult::Blocked {
             reason: "its lifecycle is not active".to_owned(),
         },

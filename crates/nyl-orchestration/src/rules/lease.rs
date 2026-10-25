@@ -13,7 +13,8 @@
 //! - Otherwise the run takes the lease by compare-and-swap against the
 //!   version it read, and the expired runs are left for import.
 
-use nyl_core::orchestration::ports::Coordination;
+use nyl_core::orchestration::ids::RunId;
+use nyl_core::orchestration::ports::{Coordination, RunState};
 use nyl_core::orchestration::state::{Lease, Request, Run};
 use nyl_core::orchestration::time::Timestamp;
 
@@ -52,41 +53,57 @@ pub enum LeaseDecision {
     Held(Holder),
 }
 
-/// Decide from one read of the coordination refs at `now`.
-pub fn decide(coordination: &Coordination, now: Timestamp) -> LeaseDecision {
-    if let Some(held) = &coordination.lease {
-        if held.lease.broken.is_none() && held.lease.deadline > now {
-            return LeaseDecision::Held(Holder::Lease(held.lease.clone()));
-        }
-    }
-    // A broken lease declares its holder gone, its run ref included.
-    let broken_run = coordination
+/// Whether a lease is still held at `now`: unbroken and before its deadline.
+pub(crate) fn lease_live(lease: &Lease, now: Timestamp) -> bool {
+    lease.broken.is_none() && lease.deadline > now
+}
+
+/// Whether an unfinished run ref is still live at `now`: before its deadline
+/// and not the run of a broken lease, which declares its holder gone, its
+/// run ref included.
+pub(crate) fn run_live(coordination: &Coordination, state: &RunState, now: Timestamp) -> bool {
+    let broken = coordination
         .lease
         .as_ref()
         .filter(|held| held.lease.broken.is_some())
         .map(|held| &held.lease.run);
-    if let Some(state) = coordination
-        .runs
-        .iter()
-        .find(|state| !state.run.finished && state.run.deadline > now && Some(&state.run.run) != broken_run)
-    {
-        return LeaseDecision::Held(Holder::Run(state.run.clone()));
+    !state.run.finished && state.run.deadline > now && Some(&state.run.run) != broken
+}
+
+/// Who holds the environment at `now`: a live lease first, then live,
+/// unfinished runs it does not name.
+pub(crate) fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder> {
+    let mut holders = Vec::new();
+    let mut lease_run: Option<&RunId> = None;
+    if let Some(held) = coordination.lease.as_ref().filter(|held| lease_live(&held.lease, now)) {
+        lease_run = Some(&held.lease.run);
+        holders.push(Holder::Lease(held.lease.clone()));
     }
-    LeaseDecision::Take {
-        expected: coordination.lease.as_ref().map(|held| held.version.clone()),
-        broken: coordination.lease.as_ref().and_then(|held| held.lease.broken.clone()),
+    for state in &coordination.runs {
+        if run_live(coordination, state, now) && Some(&state.run.run) != lease_run {
+            holders.push(Holder::Run(state.run.clone()));
+        }
+    }
+    holders
+}
+
+/// Decide from one read of the coordination refs at `now`.
+pub fn decide(coordination: &Coordination, now: Timestamp) -> LeaseDecision {
+    match holders(coordination, now).into_iter().next() {
+        Some(holder) => LeaseDecision::Held(holder),
+        None => LeaseDecision::Take {
+            expected: coordination.lease.as_ref().map(|held| held.version.clone()),
+            broken: coordination.lease.as_ref().and_then(|held| held.lease.broken.clone()),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nyl_core::orchestration::ids::RunId;
-    use nyl_core::orchestration::ports::{HeldLease, RunState};
-    use nyl_core::orchestration::state::{LeaseKind, Operation, RunKind, StateV1};
+    use nyl_core::orchestration::ports::HeldLease;
 
-    const RUN_A: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
-    const RUN_B: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
+    use crate::rules::fixtures::{lease_record, run_record, run_state, RUN_1 as RUN_A, RUN_2 as RUN_B};
 
     fn time(minutes: i64) -> Timestamp {
         chrono::DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
@@ -97,41 +114,16 @@ mod tests {
 
     fn lease(run: &str, deadline: i64) -> HeldLease {
         HeldLease {
-            lease: Lease {
-                api_version: StateV1,
-                kind: LeaseKind,
-                run: RunId::new(run).unwrap(),
-                runner: "ci".to_owned(),
-                operation: Operation::Reconcile,
-                units: Vec::new(),
-                deadline: time(deadline),
-                taken_at: time(0),
-                broken: None,
-            },
+            lease: lease_record(run, time(deadline)),
             version: "v1".to_owned(),
         }
     }
 
     fn run(id: &str, deadline: i64, finished: bool) -> RunState {
-        RunState {
-            run: Run {
-                api_version: StateV1,
-                kind: RunKind,
-                run: RunId::new(id).unwrap(),
-                runner: "ci".to_owned(),
-                operation: Operation::Reconcile,
-                source_commit: None,
-                read_desired: None,
-                read_observed: None,
-                deadline: time(deadline),
-                units: Vec::new(),
-                finished,
-            },
-            checkpoints: Vec::new(),
-            created: Vec::new(),
-            foreign: false,
-            version: "r1".to_owned(),
-        }
+        run_state(Run {
+            finished,
+            ..run_record(id, time(deadline))
+        })
     }
 
     #[test]

@@ -123,94 +123,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::rules::fixtures;
 
     fn identity() -> UnitIdentity {
-        serde_json::from_value(json!({
-            "environment": "dev", "name": "database", "uid": "0192f0c4-8d0a-7c3e-9a51-000000000001",
-            "apiVersion": "units.gitops.nyl/v1", "kind": "Command"
-        }))
-        .unwrap()
+        fixtures::observed("database", "Command", None).unit
     }
 
     fn run() -> RunId {
-        RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap()
+        fixtures::run(fixtures::RUN_1)
     }
 
     fn receipt(key: char) -> Receipt {
-        serde_json::from_value(json!({
-            "executionKey": format!("sha256:{}", key.to_string().repeat(64)),
-            "behaviorVersion": 1,
-            "run": run(),
-            "startedAt": "2026-09-24T10:00:00Z",
-            "finishedAt": "2026-09-24T10:07:12Z",
-        }))
-        .unwrap()
+        fixtures::receipt(&key.to_string(), json!({}), Vec::new())
     }
 
-    fn uncertain(receipt: Option<Receipt>) -> ObservedUnit {
-        ObservedUnit {
-            api_version: StateV1,
-            kind: ObservedUnitKind,
-            unit: identity(),
-            receipt,
-            condition: Some(Condition::Uncertain {
-                since: "2026-09-24T11:00:00Z".parse().unwrap(),
-                run: run(),
-                reason: "run lost its lease".to_owned(),
-            }),
-        }
-    }
-
+    /// Catches a late checkpoint clearing the `uncertain` condition it
+    /// arrived after; the property test below covers every other event.
     #[test]
     fn test_apply_keeps_a_late_checkpoint_as_evidence_of_an_uncertain_unit() {
-        let current = uncertain(Some(receipt('a')));
-        let checkpointed = ObservedUnit {
-            condition: None,
-            receipt: Some(receipt('b')),
-            ..current.clone()
-        };
+        let current = document(Some('a'), 2);
+        let checkpointed = document(Some('b'), 0);
         assert_eq!(
             apply(&identity(), Some(&current), Event::Imported { checkpointed }),
             Ok(Applied::Evidence)
         );
-    }
-
-    #[test]
-    fn test_apply_recover_clears_a_condition_and_refuses_without_one() {
-        let current = uncertain(Some(receipt('a')));
-        let Ok(Applied::Changed(retried)) = apply(&identity(), Some(&current), Event::RecoverRetry) else {
-            panic!("retry applies to an uncertain unit");
-        };
-        assert_eq!(retried.condition, None);
-        assert_eq!(retried.receipt, Some(receipt('a')), "a retry keeps the last receipt");
-        assert_eq!(
-            apply(&identity(), Some(&retried), Event::RecoverRetry),
-            Err(Refusal::NothingToRecover)
-        );
-        assert_eq!(
-            apply(&identity(), None, Event::RecoverAccept { receipt: receipt('b') }),
-            Err(Refusal::NothingToRecover)
-        );
-    }
-
-    #[test]
-    fn test_apply_failure_keeps_the_last_receipt() {
-        let current = ObservedUnit {
-            condition: None,
-            ..uncertain(Some(receipt('a')))
-        };
-        let event = Event::Failed {
-            since: "2026-09-24T11:00:00Z".parse().unwrap(),
-            run: run(),
-            category: FailureCategory::ToolError,
-            retryable: false,
-            message: "exit 1".to_owned(),
-        };
-        let Ok(Applied::Changed(failed)) = apply(&identity(), Some(&current), event) else {
-            panic!("a failure applies");
-        };
-        assert_eq!(failed.receipt, Some(receipt('a')));
-        assert!(matches!(failed.condition, Some(Condition::Failed { .. })));
     }
 
     /// One generated event, with receipts drawn from a small set of keys.

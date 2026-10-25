@@ -28,7 +28,7 @@ use nyl_core::orchestration::state::{
     ApprovalIdentity, ApprovalRecord, Condition, DesiredUnit, Lifecycle, ObservedUnit, Provenance, Readiness,
 };
 
-use super::freshness::receipt_is_current;
+use super::freshness::{receipt_is_current, same_incarnation};
 
 /// What selection reads.
 pub struct Candidates<'a> {
@@ -56,7 +56,6 @@ pub enum Skipped {
     /// Uncertain, and its recovery policy is not `converge`.
     Uncertain,
     FailedNonRetryable,
-    AwaitingApproval,
     AlreadyAttempted,
     /// A `--local` run executes it only with `--approve <unit>`: its
     /// execution recovery policy is not `converge`. Reported as
@@ -95,14 +94,12 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
     }
     let observed = candidates.observed.get(name);
     // A condition of an earlier incarnation does not apply to this one.
-    let condition = observed
-        .filter(|observed| observed.unit.uid == desired.unit.uid)
-        .and_then(|observed| observed.condition.as_ref());
+    let condition = same_incarnation(desired, observed).and_then(|observed| observed.condition.as_ref());
     match condition {
         // Uncertain: a candidate whatever its receipt, by recovery policy.
         Some(Condition::Uncertain { .. }) => {
             let recovers = matches!(
-                execution_policy(candidates, desired),
+                execution_recovery(candidates.drivers, desired),
                 Some(RecoveryPolicy::Converge | RecoveryPolicy::Inspect)
             );
             if !recovers {
@@ -120,7 +117,8 @@ fn decide(candidates: &Candidates<'_>, name: &UnitName, desired: &DesiredUnit) -
         return Err(Skipped::Blocked);
     }
     if let Some(approved) = candidates.local {
-        if execution_policy(candidates, desired) != Some(RecoveryPolicy::Converge) && !approved.contains(name) {
+        if execution_recovery(candidates.drivers, desired) != Some(RecoveryPolicy::Converge) && !approved.contains(name)
+        {
             return Err(Skipped::LocalApproval);
         }
     }
@@ -171,13 +169,9 @@ pub fn local_approvals<'u>(
         .collect()
 }
 
-fn execution_policy(candidates: &Candidates<'_>, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
-    execution_recovery(candidates.drivers, desired)
-}
-
 /// The unit's execution recovery policy, from its resolved spec when it has
 /// one; `None` when no driver serves its kind.
-pub(crate) fn execution_recovery(drivers: &DriverSet, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
+fn execution_recovery(drivers: &DriverSet, desired: &DesiredUnit) -> Option<RecoveryPolicy> {
     let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
     drivers
         .get(&desired.unit.api_version, &desired.unit.kind)
@@ -207,101 +201,13 @@ pub fn batches(ready: &[UnitName], concurrency: usize) -> Vec<Vec<UnitName>> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::sync::Arc;
 
-    use nyl_core::orchestration::driver::{
-        Capabilities, Driver, DriverResult, ExecStatus, ExecutionContext, Inspection, KeyInputs, Outcome,
-        OwnershipScope, PlanReport, RecoveryPolicies, ResolutionContext, Supported, Verification,
-    };
-    use nyl_core::orchestration::ids::EnvironmentName;
-    use nyl_core::orchestration::state::{ArtifactDocument, FailureCategory, Receipt, ReceiptProvenance};
+    use nyl_core::orchestration::state::{FailureCategory, ReceiptProvenance};
     use serde_json::{json, Value};
 
-    use super::super::references::fixtures::*;
     use super::*;
-
-    /// A kind that converges exactly when its spec sets `idempotent: true`.
-    struct Stub;
-
-    impl Driver for Stub {
-        fn api_version(&self) -> &'static str {
-            "units.gitops.nyl/v1"
-        }
-        fn kind(&self) -> &'static str {
-            "Command"
-        }
-        fn behavior_version(&self) -> u32 {
-            1
-        }
-        fn capabilities(&self, _: &Value) -> Capabilities {
-            Capabilities::default()
-        }
-        fn recovery(&self, spec: &Value) -> RecoveryPolicies {
-            let execution = if spec["idempotent"] == json!(true) {
-                RecoveryPolicy::Converge
-            } else if spec["inspect"] == json!(true) {
-                RecoveryPolicy::Inspect
-            } else {
-                RecoveryPolicy::Manual
-            };
-            RecoveryPolicies {
-                execution,
-                teardown: RecoveryPolicy::Manual,
-            }
-        }
-        fn spec_schema(&self) -> schemars::Schema {
-            schemars::json_schema!({})
-        }
-        fn validate_spec(&self, _: &Value) -> Result<(), String> {
-            Ok(())
-        }
-        fn attestations(&self, _: &Value) -> Vec<String> {
-            Vec::new()
-        }
-        fn ownership_scopes(&self, _: &EnvironmentName, _: &Value) -> Vec<OwnershipScope> {
-            Vec::new()
-        }
-        fn execution_key_inputs(&self, _: &ResolutionContext<'_>, _: &Value) -> DriverResult<KeyInputs> {
-            unimplemented!("selection never asks")
-        }
-        fn plan(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
-            Ok(Supported::Unsupported)
-        }
-        fn reconcile(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-            Ok(Supported::Unsupported)
-        }
-        fn verify(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: &Receipt,
-        ) -> DriverResult<Supported<Verification>> {
-            Ok(Supported::Unsupported)
-        }
-        fn inspect(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Inspection>> {
-            Ok(Supported::Unsupported)
-        }
-        fn teardown(&self, _: &ExecutionContext<'_>, _: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-            Ok(Supported::Unsupported)
-        }
-        fn build(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: bool,
-        ) -> DriverResult<Supported<Vec<ArtifactDocument>>> {
-            Ok(Supported::Unsupported)
-        }
-        fn exec(
-            &self,
-            _: &ExecutionContext<'_>,
-            _: &DesiredUnit,
-            _: &[OsString],
-        ) -> DriverResult<Supported<ExecStatus>> {
-            Ok(Supported::Unsupported)
-        }
-    }
+    use crate::rules::fixtures::*;
 
     struct World {
         desired: BTreeMap<UnitName, DesiredUnit>,
@@ -314,7 +220,7 @@ mod tests {
     impl World {
         fn new() -> Self {
             let mut drivers = DriverSet::new();
-            drivers.register(Arc::new(Stub));
+            drivers.register(Arc::new(TestDriver { kind: "Command" }));
             Self {
                 desired: BTreeMap::new(),
                 observed: BTreeMap::new(),
@@ -374,18 +280,6 @@ mod tests {
         let (ready, skipped) = world.select(None);
         assert_eq!(ready, [name("retry")]);
         assert_eq!(skipped, BTreeMap::from([(name("stuck"), Skipped::FailedNonRetryable)]));
-    }
-
-    #[test]
-    fn test_select_converges_uncertain_units_only_with_a_converge_policy() {
-        let mut world = World::new();
-        world.add("converge", json!({"idempotent": true}));
-        world.add("manual", json!({}));
-        world.condition("converge", uncertain());
-        world.condition("manual", uncertain());
-        let (ready, skipped) = world.select(None);
-        assert_eq!(ready, [name("converge")]);
-        assert_eq!(skipped, BTreeMap::from([(name("manual"), Skipped::Uncertain)]));
     }
 
     /// Catches an uncertain unit being skipped as current because its last

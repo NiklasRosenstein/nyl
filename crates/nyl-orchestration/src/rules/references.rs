@@ -228,6 +228,14 @@ pub(crate) fn unsupported_evidence(source: &UnitInputSource) -> Option<String> {
     ))
 }
 
+/// A rendered spec's `dependsOn` entries; none when the field is absent.
+pub(crate) fn depends_on(spec: &Value) -> Result<Vec<DependsOn>, serde_json::Error> {
+    match spec.get("dependsOn") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(entries) => serde_json::from_value(entries.clone()),
+    }
+}
+
 /// Why a `dependsOn` entry's evidence requirement cannot be met yet, as for
 /// [`unsupported_evidence`].
 pub(crate) fn unsupported_depends_on(entry: &DependsOn) -> Option<String> {
@@ -408,15 +416,12 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
 /// blocking at `/dependsOn/<index>`. Entries naming another environment or a
 /// unit outside the ownership set are errors.
 fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut Vec<String>) -> Vec<BlockedReason> {
-    let entries: Vec<DependsOn> = match unit.spec.get("dependsOn") {
-        None | Some(Value::Null) => return Vec::new(),
-        Some(entries) => match serde_json::from_value(entries.clone()) {
-            Ok(entries) => entries,
-            Err(error) => {
-                errors.push(format!("spec.dependsOn is invalid: {error}"));
-                return Vec::new();
-            }
-        },
+    let entries = match depends_on(&unit.spec) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!("spec.dependsOn is invalid: {error}"));
+            return Vec::new();
+        }
     };
     let mut reasons = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -447,149 +452,11 @@ fn depends_on_reasons(view: &ReferenceView<'_>, unit: &DesiredUnit, errors: &mut
     reasons
 }
 
-/// Builders of state documents for the rules' tests.
-#[cfg(test)]
-pub(crate) mod fixtures {
-    use std::collections::BTreeMap;
-
-    use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, Uid, UnitName};
-    use nyl_core::orchestration::state::{
-        ArtifactDigest, ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, DesiredUnitKind, Lifecycle,
-        ObservedUnit, ObservedUnitKind, Readiness, Receipt, StateV1, UnitIdentity,
-    };
-    use serde_json::{json, Value};
-
-    pub const COMMIT: &str = "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a";
-    pub const OTHER_COMMIT: &str = "41f0000000000000000000000000000000000000";
-    pub const RUN_1: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90";
-    pub const RUN_2: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91";
-
-    pub fn env() -> EnvironmentName {
-        EnvironmentName::new("dev").unwrap()
-    }
-
-    pub fn name(unit: &str) -> UnitName {
-        UnitName::new(unit).unwrap()
-    }
-
-    pub fn commit(value: &str) -> CommitId {
-        CommitId::new(value).unwrap()
-    }
-
-    pub fn run(value: &str) -> RunId {
-        RunId::new(value).unwrap()
-    }
-
-    /// A distinct uid per unit name.
-    pub fn uid(unit: &str) -> Uid {
-        let suffix = unit
-            .bytes()
-            .fold(0u64, |hash, byte| hash.wrapping_mul(31).wrapping_add(u64::from(byte)));
-        Uid::new(format!("0192f0c4-8d0a-7c3e-9a51-{:012x}", suffix % 0x1_0000_0000_0000)).unwrap()
-    }
-
-    pub fn key(seed: &str) -> ExecutionKey {
-        ExecutionKey::from_digest_of(seed.as_bytes())
-    }
-
-    fn identity(unit: &str, kind: &str) -> UnitIdentity {
-        UnitIdentity {
-            environment: env(),
-            name: name(unit),
-            uid: Some(uid(unit)),
-            api_version: "units.gitops.nyl/v1".to_owned(),
-            kind: kind.to_owned(),
-        }
-    }
-
-    /// A ready, active desired unit whose execution key derives from `seed`.
-    pub fn desired(unit: &str, kind: &str, spec: Value, seed: &str) -> DesiredUnit {
-        DesiredUnit {
-            api_version: StateV1,
-            kind: DesiredUnitKind,
-            unit: identity(unit, kind),
-            lifecycle: Lifecycle::Active,
-            source_commit: commit(COMMIT),
-            source_revision: commit(COMMIT),
-            spec,
-            resolved_spec: None,
-            provenance: BTreeMap::new(),
-            execution_key: Some(key(seed)),
-            fingerprint: None,
-            attestations: Vec::new(),
-            readiness: Readiness::Ready,
-        }
-    }
-
-    pub fn receipt(seed: &str, outputs: Value, artifacts: Vec<ArtifactDigest>) -> Receipt {
-        let at = "2026-09-24T10:00:00Z".parse().unwrap();
-        Receipt {
-            execution_key: key(seed),
-            behavior_version: 1,
-            run: run(RUN_1),
-            read_desired: None,
-            started_at: at,
-            finished_at: at,
-            versions: BTreeMap::new(),
-            approval: None,
-            provenance: BTreeMap::new(),
-            outputs,
-            artifacts,
-        }
-    }
-
-    pub fn observed(unit: &str, kind: &str, receipt: Option<Receipt>) -> ObservedUnit {
-        ObservedUnit {
-            api_version: StateV1,
-            kind: ObservedUnitKind,
-            unit: identity(unit, kind),
-            receipt,
-            condition: None,
-        }
-    }
-
-    pub fn artifact(unit: &str, artifact: &str, kind: &str, seed: &str, spec: Value) -> ArtifactDocument {
-        ArtifactDocument {
-            api_version: "artifacts.gitops.nyl/v1".to_owned(),
-            kind: kind.to_owned(),
-            metadata: ArtifactMetadata {
-                name: artifact.to_owned(),
-                unit: ArtifactUnit {
-                    environment: env(),
-                    name: name(unit),
-                    uid: uid(unit),
-                },
-            },
-            execution_key: key(seed),
-            spec,
-        }
-    }
-
-    pub fn listed(document: &ArtifactDocument) -> ArtifactDigest {
-        ArtifactDigest {
-            name: document.metadata.name.clone(),
-            kind: document.kind.clone(),
-            digest: document.digest(),
-        }
-    }
-
-    /// The network producer with a declared `vpcId` and a sensitive `token`.
-    pub fn network_spec() -> Value {
-        json!({
-            "outputs": {
-                "vpcId": {"type": "string"},
-                "subnets": {"type": "object"},
-                "token": {"type": "string", "sensitive": true},
-            },
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::fixtures::*;
+    use super::super::fixtures::*;
     use super::*;
 
     struct World {

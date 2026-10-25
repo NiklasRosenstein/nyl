@@ -40,14 +40,9 @@ use nyl_core::orchestration::ports::{
 use nyl_core::orchestration::state::{ObservedUnit, StateLocation, StateRecord};
 use nyl_core::orchestration::time::Timestamp;
 
+use crate::rules::lease::run_live;
 use crate::rules::state_location::describe;
 use crate::transition::trailer;
-
-/// Whether a configured state ref has a branch in the clone: a short name
-/// or a `refs/heads/…` name. Other full `refs/…` names have none.
-fn has_local_branch(configured: &str) -> bool {
-    !configured.starts_with("refs/") || configured.starts_with("refs/heads/")
-}
 
 /// The local view of a remote location: the same refs, path, and prefix in
 /// the clone itself. `--local-lease` takes the lease here too.
@@ -67,7 +62,7 @@ pub fn view(location: &StateLocation) -> Result<StateLocation, Finding> {
         ));
     }
     for configured in [&location.desired_ref, &location.observed_ref] {
-        if !has_local_branch(configured) {
+        if !StateLocation::is_branch_ref(configured) {
             return Err(Finding::new(
                 Code::LocalRunUnsupported,
                 format!("state ref {configured} is a full ref name, which has no local branch in the clone"),
@@ -297,16 +292,10 @@ pub fn check_leftovers(
     coordination: &Coordination,
     now: Timestamp,
 ) -> Result<(), Finding> {
-    let broken = coordination
-        .lease
-        .as_ref()
-        .filter(|held| held.lease.broken.is_some())
-        .map(|held| &held.lease.run);
     let dead = coordination
         .runs
         .iter()
-        .filter(|state| state.foreign && state.run.run != *run)
-        .filter(|state| state.run.finished || state.run.deadline <= now || Some(&state.run.run) == broken)
+        .filter(|state| state.foreign && state.run.run != *run && !run_live(coordination, state, now))
         .map(|state| state.run.run.to_string())
         .collect::<Vec<_>>();
     if dead.is_empty() {
@@ -481,21 +470,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::rules::fixtures::{
+        self, env as dev, hex_key, lease_record, name as unit, observed_numbered, run_record,
+    };
 
     const RUN_A: &str = "00000000-0000-7000-9000-00000000000a";
     const RUN_B: &str = "00000000-0000-7000-9000-00000000000b";
     const RUN_C: &str = "00000000-0000-7000-9000-00000000000c";
 
-    fn dev() -> EnvironmentName {
-        EnvironmentName::new("dev").unwrap()
-    }
-
     fn commit(digit: char) -> CommitId {
         CommitId::new(digit.to_string().repeat(40)).unwrap()
-    }
-
-    fn unit(name: &str) -> UnitName {
-        UnitName::new(name).unwrap()
     }
 
     /// A transition message with `run` and the read trailers, local or not.
@@ -631,24 +615,10 @@ mod tests {
         );
     }
 
-    fn observed(name: &str, uid: &str, key: char, condition: Option<&serde_json::Value>) -> ObservedUnit {
-        serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1",
-            "kind": "ObservedUnit",
-            "unit": {
-                "environment": "dev", "name": name, "uid": uid,
-                "apiVersion": "units.gitops.nyl/v1", "kind": "Command"
-            },
-            "receipt": {
-                "executionKey": format!("sha256:{}", key.to_string().repeat(64)),
-                "behaviorVersion": 1,
-                "run": RUN_A,
-                "startedAt": "2026-09-24T10:00:00Z",
-                "finishedAt": "2026-09-24T10:01:00Z"
-            },
-            "condition": condition
-        }))
-        .unwrap()
+    fn observed(name: &str, uid: u64, key: char, condition: Option<&serde_json::Value>) -> ObservedUnit {
+        let mut document = observed_numbered(name, uid, Some(hex_key(key)));
+        document.condition = condition.map(|condition| serde_json::from_value(condition.clone()).unwrap());
+        document
     }
 
     fn snapshot(units: Vec<ObservedUnit>) -> EnvironmentSnapshot {
@@ -661,26 +631,23 @@ mod tests {
         }
     }
 
-    const UID_1: &str = "00000000-0000-7000-8000-000000000001";
-    const UID_2: &str = "00000000-0000-7000-8000-000000000002";
-
     /// Catches a reset that forgets local receipts without asking, or one
     /// that asks about units the remote reflects.
     #[test]
     fn test_unreflected_lists_local_receipts_the_remote_lacks_and_discard_covers_them() {
         let uncertain = json!({"state": "uncertain", "since": "2026-09-24T10:02:00Z", "run": RUN_B, "reason": "lost"});
         let local = snapshot(vec![
-            observed("same", UID_1, 'a', None),
-            observed("rekeyed", UID_1, 'b', None),
-            observed("reincarnated", UID_2, 'a', None),
-            observed("new", UID_1, 'a', None),
-            observed("conditioned", UID_1, 'a', Some(&uncertain)),
+            observed("same", 1, 'a', None),
+            observed("rekeyed", 1, 'b', None),
+            observed("reincarnated", 2, 'a', None),
+            observed("new", 1, 'a', None),
+            observed("conditioned", 1, 'a', Some(&uncertain)),
         ]);
         let remote = snapshot(vec![
-            observed("same", UID_1, 'a', None),
-            observed("rekeyed", UID_1, 'a', None),
-            observed("reincarnated", UID_1, 'a', None),
-            observed("conditioned", UID_1, 'a', None),
+            observed("same", 1, 'a', None),
+            observed("rekeyed", 1, 'a', None),
+            observed("reincarnated", 1, 'a', None),
+            observed("conditioned", 1, 'a', None),
         ]);
         let units = unreflected(&local, &remote);
         assert_eq!(
@@ -711,15 +678,12 @@ mod tests {
         }))
         .unwrap();
         let mut current = snapshot(vec![
-            observed("kept", UID_1, 'a', None),
-            observed("changed", UID_1, 'b', None),
-            observed("added-locally", UID_1, 'a', None),
+            observed("kept", 1, 'a', None),
+            observed("changed", 1, 'b', None),
+            observed("added-locally", 1, 'a', None),
         ]);
         current.record = Some(record);
-        let mut target = snapshot(vec![
-            observed("kept", UID_1, 'a', None),
-            observed("changed", UID_1, 'a', None),
-        ]);
+        let mut target = snapshot(vec![observed("kept", 1, 'a', None), observed("changed", 1, 'a', None)]);
         target.artifacts.insert(unit("changed"), BTreeMap::new());
         current.artifacts.insert(unit("added-locally"), BTreeMap::new());
         let changes = restore_changes(&current, &target);
@@ -805,17 +769,12 @@ mod tests {
     }
 
     fn run_state(run: &str, deadline: &str, finished: bool, foreign: bool) -> RunState {
-        let run: Run = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": run, "runner": "ci",
-            "operation": "reconcile", "deadline": deadline, "finished": finished
-        }))
-        .unwrap();
         RunState {
-            run,
-            checkpoints: Vec::new(),
-            created: Vec::new(),
-            version: "v".to_owned(),
             foreign,
+            ..fixtures::run_state(Run {
+                finished,
+                ..run_record(run, deadline.parse().unwrap())
+            })
         }
     }
 
@@ -867,12 +826,7 @@ mod tests {
             .unwrap()
             .to_utc();
         let mut held = HeldLease {
-            lease: serde_json::from_value(json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN_C, "runner": "ci",
-                "operation": "reconcile", "deadline": "2026-09-24T11:00:00Z",
-                "takenAt": "2026-09-24T09:00:00Z"
-            }))
-            .unwrap(),
+            lease: lease_record(RUN_C, "2026-09-24T11:00:00Z".parse().unwrap()),
             version: "v1".to_owned(),
         };
         let live = Coordination {
