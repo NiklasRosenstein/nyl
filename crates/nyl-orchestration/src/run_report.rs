@@ -109,9 +109,7 @@ impl ExitCategory {
             self
         }
     }
-}
 
-impl ExitCategory {
     /// The category an error finding contributes: a held lease is
     /// incomplete (2), a lost lease or a cancelled run uncertain (4),
     /// anything else an error (1).
@@ -210,14 +208,7 @@ impl EnvironmentRunReport {
             .iter()
             .filter_map(|(name, unit)| unit.result.as_ref().map(|result| (name, result)))
             .collect();
-        let headline = HEADLINE_RESULTS
-            .iter()
-            .filter_map(|counted| {
-                let count = results.iter().filter(|(_, result)| result.name() == *counted).count();
-                (count > 0).then(|| format!("{count} {counted}"))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let headline = headline(results.iter().map(|(_, result)| result.name()), &HEADLINE_RESULTS);
         TransitionSummary {
             operation,
             environment: self.name.clone(),
@@ -249,6 +240,20 @@ const HEADLINE_RESULTS: [&str; 7] = [
     "blocked",
     "awaiting-approval",
 ];
+
+/// A transition commit's headline: how many of `names` are each of
+/// `counted`, in its order, leaving out zero counts, such as `2 executed, 1 failed`.
+pub(crate) fn headline<'n>(names: impl Iterator<Item = &'n str>, counted: &[&str]) -> String {
+    let names: Vec<&str> = names.collect();
+    counted
+        .iter()
+        .filter_map(|counted| {
+            let count = names.iter().filter(|name| *name == counted).count();
+            (count > 0).then(|| format!("{count} {counted}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// The exit category one unit contributes to a report of `kind`.
 fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
@@ -389,9 +394,7 @@ impl UnitReport {
             warnings: Vec::new(),
         }
     }
-}
 
-impl UnitReport {
     /// The name `expect` keys, tables, and headlines use: the `result` of a
     /// reconcile report, else the `state` of a plan or status report.
     pub fn outcome_name(&self) -> Option<&'static str> {
@@ -468,6 +471,16 @@ pub struct UnitVerification {
     /// The driver's attestations of the current receipt, by name.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attestations: BTreeMap<String, AttestationResult>,
+}
+
+impl From<VerifyResult> for UnitVerification {
+    /// A verdict without attestations.
+    fn from(result: VerifyResult) -> Self {
+        Self {
+            result,
+            attestations: BTreeMap::new(),
+        }
+    }
 }
 
 /// The drift verdict of one unit's verification.

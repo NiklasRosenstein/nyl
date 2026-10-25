@@ -26,7 +26,7 @@ use nyl_core::orchestration::ports::{
 use nyl_core::orchestration::state::{DesiredUnit, Lease, Run, Signal, StateLocation};
 
 use super::run::RunRequest;
-use super::state::store_error;
+use super::store_error;
 use crate::rules;
 use crate::run_report::{EnvironmentRunReport, UnitResult};
 
@@ -262,8 +262,7 @@ impl StateStore for LocalStore<'_> {
     }
 
     /// Refused: state never moves during a `--local` run.
-    fn import_history(&self, from: &StateLocation, to: &StateLocation) -> StateResult<()> {
-        let _ = (from, to);
+    fn import_history(&self, _from: &StateLocation, _to: &StateLocation) -> StateResult<()> {
         Err(StateError::Unavailable("a --local run never moves state".to_owned()))
     }
 
@@ -274,6 +273,15 @@ impl StateStore for LocalStore<'_> {
 
     fn local_divergence(&self, location: &StateLocation) -> StateResult<LocalDivergence> {
         self.inner.local_divergence(location)
+    }
+}
+
+/// The state refs of a location, one when both are the same ref.
+pub(crate) fn sides(location: &StateLocation) -> &'static [StateSide] {
+    if location.desired_ref == location.observed_ref {
+        &[StateSide::Desired]
+    } else {
+        &StateSide::ALL
     }
 }
 
@@ -328,12 +336,7 @@ pub fn check_remote_tips(
     if location.is_local() {
         return Ok(());
     }
-    let sides: &[StateSide] = if location.desired_ref == location.observed_ref {
-        &[StateSide::Desired]
-    } else {
-        &StateSide::ALL
-    };
-    for side in sides {
+    for side in sides(location) {
         let log = match environment_log(store, location, environment, *side, TIP_HISTORY) {
             Ok(log) => log,
             Err(StateError::Unavailable(_)) => return Ok(()),
@@ -343,10 +346,7 @@ pub fn check_remote_tips(
                     format!(
                         "cannot read the history of the {} state ref {}: {error}",
                         side.as_str(),
-                        match side {
-                            StateSide::Desired => &location.desired_ref,
-                            StateSide::Observed => &location.observed_ref,
-                        }
+                        location.state_ref(*side)
                     ),
                     "check access to the state repository and retry",
                 ))
@@ -383,8 +383,7 @@ pub fn check_record(
 
 /// Add a `--local` run's warnings to its report: `NYL-LOCAL-RUN-UNRECORDED`
 /// for every unit it executed, naming the remote command that records it.
-pub fn finish_local_report(report: &mut EnvironmentRunReport, request: &RunRequest, local: &LocalRun) {
-    let _ = local;
+pub fn finish_local_report(report: &mut EnvironmentRunReport, request: &RunRequest) {
     let warnings = report
         .units
         .iter()

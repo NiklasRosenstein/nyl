@@ -57,7 +57,7 @@ use nyl_core::orchestration::driver::{
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, RenderedSource, SourceRenderer, SourceRepository, SourceResolver,
-    StateError, Transition, TransitionChanges,
+    StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
@@ -68,9 +68,8 @@ use nyl_core::resources::environment::Environment;
 use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
-use super::lease::{self, HeldLease, LeaseError};
-use super::state::store_error;
-use super::Context;
+use super::lease::{self, HeldLease};
+use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{desire, DesireInputs, Desired};
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
@@ -85,7 +84,7 @@ use crate::rules::sources::{
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitResult, UnitState};
-use crate::transition::{self, Trailers};
+use crate::transition::Trailers;
 pub use cancel::{Cancellation, SIGINT, SIGTERM};
 use execute::{execute_batch, Execution};
 use slots::Slots;
@@ -172,8 +171,8 @@ pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
         let session = Session::new(context, request);
         let mut report = reconcile_environment(&session);
         session.clean();
-        if let Some(local) = &request.local {
-            super::local::finish_local_report(&mut report, request, local);
+        if request.local.is_some() {
+            super::local::finish_local_report(&mut report, request);
         }
         report
     });
@@ -184,11 +183,35 @@ pub fn reconcile(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
 
 /// Run `body` on a scoped thread of its own, outside any async runtime the
 /// caller may be in.
-fn off_runtime<T: Send>(body: impl FnOnce() -> T + Send) -> T {
-    std::thread::scope(|scope| match scope.spawn(body).join() {
+pub(crate) fn off_runtime<T: Send>(body: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| join(scope.spawn(body)))
+}
+
+/// The value of a scoped thread, resuming its panic.
+pub(crate) fn join<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
         Ok(value) => value,
         Err(panic) => std::panic::resume_unwind(panic),
-    })
+    }
+}
+
+/// A new directory `<prefix>-<n>` beneath the workspace, for one operation.
+pub(crate) fn fresh_directory(workspace: &Path, prefix: &str) -> PathBuf {
+    let mut index = 0usize;
+    loop {
+        let candidate = workspace.join(format!("{prefix}-{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+impl RunContext<'_> {
+    /// The workspace's render cache, shared by the invocation's runs.
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.workspace.join("cache")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,14 +270,7 @@ struct Evidence<'e> {
 
 impl<'r, 'a> Session<'r, 'a> {
     fn new(context: &'r RunContext<'a>, request: &'r RunRequest) -> Self {
-        let mut index = 0usize;
-        let directory = loop {
-            let candidate = context.workspace.join(format!("session-{index}"));
-            if !candidate.exists() {
-                break candidate;
-            }
-            index += 1;
-        };
+        let directory = fresh_directory(context.workspace, "session");
         let slots = Slots::new(&directory);
         Self {
             context,
@@ -282,11 +298,6 @@ impl<'r, 'a> Session<'r, 'a> {
     /// Remove every worktree and temp dir of this operation.
     fn clean(&self) {
         let _ = std::fs::remove_dir_all(&self.directory);
-    }
-
-    /// The workspace's render cache, shared by the invocation's runs.
-    fn cache_dir(&self) -> PathBuf {
-        self.context.workspace.join("cache")
     }
 
     /// A new directory for one execution or plan of `unit`.
@@ -593,7 +604,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 deadline: resolution_deadline(&self.base().settings, now, self.lease_deadline.get()),
                 now,
                 tools: self.context.tools,
-                cache_dir: self.cache_dir(),
+                cache_dir: self.context.cache_dir(),
             };
             let inputs = driver.execution_key_inputs(&context, spec).map_err(|error| {
                 Finding::new(
@@ -631,12 +642,7 @@ impl<'r, 'a> Session<'r, 'a> {
 fn resolution_deadline(settings: &super::Settings, now: Timestamp, lease: Option<Timestamp>) -> Timestamp {
     let own = settings.resolution_timeout.after(now);
     match lease {
-        Some(lease) => {
-            let bound = lease
-                .checked_sub_signed(settings.lease_grace.to_chrono())
-                .unwrap_or(lease);
-            own.min(bound)
-        }
+        Some(lease) => own.min(lease::bound(settings, lease)),
         None => own,
     }
 }
@@ -715,6 +721,11 @@ pub(crate) fn project_path(worktree: &Path, project_dir: &str) -> PathBuf {
     }
 }
 
+/// The longest timeout of `units`, which a phase running them needs.
+pub(crate) fn longest_timeout<'u>(units: impl Iterator<Item = &'u DesiredUnit>) -> Duration {
+    units.map(unit_timeout).max().unwrap_or_default()
+}
+
 /// A unit's `timeout`, else its kind's default from the contract's Defaults.
 pub(crate) fn unit_timeout(unit: &DesiredUnit) -> Duration {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
@@ -771,20 +782,10 @@ fn same_incarnation<'o>(unit: &DesiredUnit, observed: Option<&'o ObservedUnit>) 
     observed.filter(|observed| observed.unit.uid == unit.unit.uid)
 }
 
-/// The run of a unit's latest condition or receipt.
-fn last_run(observed: Option<&ObservedUnit>) -> Option<RunId> {
-    let observed = observed?;
-    match &observed.condition {
-        Some(Condition::Failed { run, .. } | Condition::Uncertain { run, .. }) => Some(run.clone()),
-        None => observed.receipt.as_ref().map(|receipt| receipt.run.clone()),
-    }
-}
-
-fn condition_message(observed: Option<&ObservedUnit>) -> Option<String> {
-    match observed?.condition.as_ref()? {
-        Condition::Failed { message, .. } => Some(message.clone()),
-        Condition::Uncertain { reason, .. } => Some(reason.clone()),
-    }
+/// The failure or uncertainty message of the unit's current incarnation.
+fn condition_message(unit: &DesiredUnit, observed: Option<&ObservedUnit>) -> Option<String> {
+    let condition = same_incarnation(unit, observed)?.condition.as_ref()?;
+    Some(condition.message().to_owned())
 }
 
 /// The warning listing the units that leave the ownership set.
@@ -874,8 +875,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         let observed = snapshot.observed.get(name);
         let mut entry = UnitReport::new(unit.unit.kind.clone());
         entry.receipt = Some(receipt_state(Some(unit), observed));
-        entry.last_run = last_run(observed);
-        entry.message = condition_message(same_incarnation(unit, observed));
+        entry.last_run = observed.and_then(ObservedUnit::last_run).cloned();
+        entry.message = condition_message(unit, observed);
         entry.blocked_by = blocked_by(unit);
         entry.state = Some(if ready.contains(name) {
             UnitState::Ready
@@ -935,7 +936,7 @@ fn plan_unit(
         observed,
         tools: context.tools,
         commit_identity: context.commit_identity,
-        cache_dir: session.cache_dir(),
+        cache_dir: session.context.cache_dir(),
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {
@@ -991,6 +992,18 @@ struct Reconcile<'s, 'r, 'a> {
     checkpointed: bool,
 }
 
+/// A `--local` run never imports remote run refs: it refuses while the
+/// remote holds leftovers a remote run must take over first.
+fn check_local_leftovers(session: &Session<'_, '_>, run: &RunId) -> Result<(), Finding> {
+    let base = session.base();
+    let environment = session.environment();
+    let coordination = base
+        .store
+        .coordination(&session.request.location, environment)
+        .map_err(|error| store_error(environment, &error))?;
+    crate::rules::local::check_leftovers(environment, run, &coordination, base.clock.now())
+}
+
 fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let context = session.context;
     let request = session.request;
@@ -1002,38 +1015,27 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     // A `--local` run checks for remote run refs it would have to take over
     // before it takes the lease, so a refusal leaves the remote lease (and
     // the break it may record) as it was; it checks again once it holds it.
-    if request.local.is_some() {
-        let checked = base
-            .store
-            .coordination(&request.location, environment)
-            .map_err(|error| store_error(environment, &error))
-            .and_then(|coordination| {
-                crate::rules::local::check_leftovers(environment, &run, &coordination, base.clock.now())
-            });
-        if let Err(finding) = checked {
-            report.errors.push(finding);
-            report.finish(ReportKind::ReconcileReport);
-            return report;
-        }
-    }
-    let held = match lease::acquire(
-        base,
-        &request.location,
-        environment,
-        &run,
-        Operation::Reconcile,
-        base.settings.resolution_timeout,
-        request.wait,
-        &request.cancellation,
-    ) {
+    let checked = if request.local.is_some() {
+        check_local_leftovers(session, &run)
+    } else {
+        Ok(())
+    };
+    let held = checked.and_then(|()| {
+        lease::acquire(
+            base,
+            &request.location,
+            environment,
+            &run,
+            Operation::Reconcile,
+            base.settings.resolution_timeout,
+            request.wait,
+            &request.cancellation,
+        )
+    });
+    let held = match held {
         Ok(held) => held,
-        Err(LeaseError::Held(finding)) => {
+        Err(finding) => {
             report.errors.push(finding);
-            report.finish(ReportKind::ReconcileReport);
-            return report;
-        }
-        Err(LeaseError::Store(error)) => {
-            report.errors.push(store_error(environment, &error));
             report.finish(ReportKind::ReconcileReport);
             return report;
         }
@@ -1113,23 +1115,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         {
             return Err(self.killed(FaultPoint::BeforeLeaseUpdate));
         }
-        let mut lease = self.held.lease.clone();
-        lease.units.clone_from(&units);
-        lease.deadline = deadline;
-        let store = self.context().base.store;
-        match store.update_lease(self.location(), self.environment(), &lease, &self.held.version) {
-            Ok(version) => {
-                self.held.lease = lease;
-                self.held.version = version;
-                self.session.lease_deadline.set(Some(deadline));
-            }
-            Err(StateError::LeaseLost) => {
-                self.report.errors.push(lease::lost(self.environment()));
-                return Err(Ending::KeepRun {
-                    release: false,
-                    unrecorded: Vec::new(),
-                });
-            }
+        match lease::update(self.context().base, &mut self.held, units.clone(), deadline) {
+            Ok(()) => self.session.lease_deadline.set(Some(deadline)),
+            Err(StateError::LeaseLost) => return Err(self.lost()),
             Err(error) => {
                 let finding = store_error(self.environment(), &error);
                 self.report.errors.push(finding);
@@ -1144,6 +1132,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             return Err(self.failed());
         }
         Ok(())
+    }
+
+    /// How a run ends that lost its lease: `NYL-LEASE-LOST`, and it keeps
+    /// its run ref for the run holding the lease to import.
+    fn lost(&mut self) -> Ending {
+        self.report.errors.push(lease::lost(self.environment()));
+        Ending::KeepRun {
+            release: false,
+            unrecorded: Vec::new(),
+        }
     }
 
     /// How a run that holds the lease ends on a store failure: it keeps its
@@ -1187,26 +1185,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 self.report.errors.push(finding);
                 return Ending::Release;
             }
-        } else {
+        } else if let Err(finding) = check_local_leftovers(session, &self.run) {
             // A `--local` run never imports remote run refs, so it waits
             // until remote state took over dead ones.
-            let checked = context
-                .base
-                .store
-                .coordination(&request.location, &environment)
-                .map_err(|error| store_error(&environment, &error))
-                .and_then(|coordination| {
-                    crate::rules::local::check_leftovers(
-                        &environment,
-                        &self.run,
-                        &coordination,
-                        context.base.clock.now(),
-                    )
-                });
-            if let Err(finding) = checked {
-                self.report.errors.push(finding);
-                return Ending::Release;
-            }
+            self.report.errors.push(finding);
+            return Ending::Release;
         }
         // The runs before this one, read after taking the lease. A
         // `--local` run under the remote lease never takes the remote
@@ -1292,7 +1275,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 return Ending::Release;
             }
             first = false;
-            if taking.active() {
+            if taking.active {
                 let import = takeover::import(&ImportInputs {
                     leftovers: &leftovers,
                     environment: &environment,
@@ -1327,11 +1310,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     return self.cancelled();
                 }
                 let now = context.base.clock.now();
-                let longest = batch
-                    .iter()
-                    .map(|unit| unit_timeout(&resolved.units[unit]))
-                    .max()
-                    .unwrap_or_default();
+                let longest = longest_timeout(batch.iter().map(|unit| &resolved.units[unit]));
                 if let Err(ending) = self.phase(batch.clone(), lease::deadline(context.base, now, longest)) {
                     return ending;
                 }
@@ -1418,7 +1397,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
         };
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
-        if taking.active() {
+        if taking.active {
             // Units that never got an execution key import their
             // checkpoints without a key comparison, so none stays behind.
             let mut keyed = resolved.units.clone();
@@ -1453,7 +1432,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let current = observed.get(name);
             let mut entry = UnitReport::new(unit.unit.kind.clone());
             entry.receipt = Some(receipt_state(Some(unit), current));
-            entry.last_run = last_run(current);
+            entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
             entry.blocked_by = blocked_by(unit);
             if let Some(execution) = executions.get(name) {
                 entry.result = Some(execution.result.clone());
@@ -1468,7 +1447,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     skipped.get(name),
                     resolved.errors.get(name),
                 ));
-                entry.message = condition_message(same_incarnation(unit, current));
+                entry.message = condition_message(unit, current);
                 if skipped.get(name) == Some(&Skipped::LocalApproval) {
                     entry.message = Some(format!(
                         "a --local run executes {name} only with --approve {name}: its recovery policy is not converge"
@@ -1483,14 +1462,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         if snapshot.environment.as_ref() != Some(&prepared.desired.environment) {
             changes.environment = Some(prepared.desired.environment.clone());
         }
-        for (name, unit) in &resolved.units {
-            if snapshot.desired.get(name) != Some(unit) {
-                changes.desired.insert(name.clone(), Some(unit.clone()));
-            }
-        }
         // Adopted units no longer selected keep the desired document of the
         // incarnation a dead run created, so its resources have state.
-        for (name, unit) in adopted.iter().filter(|(name, _)| !resolved.units.contains_key(*name)) {
+        let unselected = adopted.iter().filter(|(name, _)| !resolved.units.contains_key(*name));
+        for (name, unit) in resolved.units.iter().chain(unselected) {
             if snapshot.desired.get(name) != Some(unit) {
                 changes.desired.insert(name.clone(), Some(unit.clone()));
             }
@@ -1529,51 +1504,30 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.insert("approval".to_owned(), json!(approval));
             }
         }
-        summary.lease_broken.clone_from(&self.held.broken);
         if let Some(revision) = &request.source_override {
             summary.details.insert("sourceOverride".to_owned(), json!(revision));
         }
         let trailers = Trailers {
-            run: self.run.clone(),
             source_commit: Some(source_commit),
-            read_desired: snapshot.tips.desired.clone(),
-            read_observed: snapshot.tips.observed.clone(),
-            runner: context.base.runner.clone(),
-            evaluated_at: self.held.lease.taken_at,
-            version: context.base.version.clone(),
-            requested_by: None,
-            reason: None,
             local: request.local.is_some(),
+            ..super::trailers(context.base, &self.held, &snapshot.tips)
         };
-        let transition = Transition {
-            message: transition::message(&summary, &trailers),
-            changes,
-        };
-        match context.base.store.commit(
+        let committed = super::commit_transition(
+            context.base,
             &request.location,
-            &environment,
+            &mut self.held,
             &snapshot.tips,
-            &transition,
-            &self.held.version,
-        ) {
-            Ok(committed) => {
-                self.held.version = committed.lease_version;
-                if let Some(commit) = committed.desired {
-                    self.report.commits.insert("desired", commit);
-                }
-                if let Some(commit) = committed.observed {
-                    self.report.commits.insert("observed", commit);
-                }
+            summary,
+            changes,
+            &trailers,
+        );
+        match committed {
+            Ok(commits) => {
+                self.report.commits.extend(commits);
                 self.consume(&leftovers, &observed);
                 Ending::Release
             }
-            Err(StateError::LeaseLost) => {
-                self.report.errors.push(lease::lost(&environment));
-                Ending::KeepRun {
-                    release: false,
-                    unrecorded: Vec::new(),
-                }
-            }
+            Err(StateError::LeaseLost) => self.lost(),
             Err(error) => {
                 self.report.errors.push(store_error(&environment, &error));
                 self.failed()
@@ -1672,23 +1626,18 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             Ending::Killed => return,
             Ending::Release => (true, true),
             Ending::Cancelled if !self.checkpointed => (true, true),
-            Ending::Cancelled => {
+            Ending::Cancelled | Ending::KeepRun { .. } => {
+                let (release, unrecorded) = match ending {
+                    Ending::KeepRun { release, unrecorded } => (*release, unrecorded.as_slice()),
+                    _ => (true, &[][..]),
+                };
                 self.record.finished = true;
-                self.record.units.clear();
+                self.record.units = unrecorded.to_vec();
                 if let Err(error) = self.write_run(None) {
                     let finding = store_error(self.environment(), &error);
                     self.report.warnings.push(finding);
                 }
-                (true, false)
-            }
-            Ending::KeepRun { release, unrecorded } => {
-                self.record.finished = true;
-                self.record.units.clone_from(unrecorded);
-                if let Err(error) = self.write_run(None) {
-                    let finding = store_error(self.environment(), &error);
-                    self.report.warnings.push(finding);
-                }
-                (*release, false)
+                (release, false)
             }
         };
         if delete {
@@ -1736,10 +1685,6 @@ impl Takeover {
             imported: BTreeSet::new(),
             recovered: BTreeSet::new(),
         }
-    }
-
-    fn active(&self) -> bool {
-        self.active
     }
 
     /// Overlay an import on the run's evidence; whether it changed any

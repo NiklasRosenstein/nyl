@@ -14,8 +14,7 @@ use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore, StateTips}
 use nyl_core::orchestration::state::{DesiredUnit, ObservedUnit, StateLocation};
 use serde_json::Value;
 
-use super::state::store_error;
-use super::Context;
+use super::{store_error, Context};
 use crate::rules::references::{resolve_reference, ReferenceValue, ReferenceView};
 use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
 
@@ -23,34 +22,36 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
 /// the clone's local state branches diverged from the remote. Through a
 /// [`super::local::LocalStore`] (`--local`) it reports the local view.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
-    let mut report = RunReport::new(ReportKind::StatusReport);
-    let failed = |finding: Finding| {
-        let mut environment_report = EnvironmentRunReport::new(environment.clone());
-        environment_report.errors.push(finding);
-        environment_report.finish(ReportKind::StatusReport);
-        environment_report
+    let read = || {
+        let snapshot = context
+            .store
+            .snapshot(location)
+            .map_err(|error| store_error(environment, &error))?;
+        super::local::check_record(context.store, snapshot.record.as_ref(), environment, location)?;
+        let coordination = context
+            .store
+            .coordination(location, environment)
+            .map_err(|error| store_error(environment, &error))?;
+        Ok(crate::rules::unit_state::status(
+            environment,
+            &snapshot,
+            &coordination,
+            context.clock.now(),
+        ))
     };
-    let environment_report = match context.store.snapshot(location) {
-        Err(error) => failed(store_error(environment, &error)),
-        Ok(snapshot) => {
-            match super::local::check_record(context.store, snapshot.record.as_ref(), environment, location) {
-                Err(finding) => failed(finding),
-                Ok(()) => match context.store.coordination(location, environment) {
-                    Err(error) => failed(store_error(environment, &error)),
-                    Ok(coordination) => {
-                        crate::rules::unit_state::status(environment, &snapshot, &coordination, context.clock.now())
-                    }
-                },
-            }
-        }
-    };
-    let mut environment_report = environment_report;
+    let mut environment_report = read().unwrap_or_else(|finding: Finding| {
+        let mut failed = EnvironmentRunReport::new(environment.clone());
+        failed.errors.push(finding);
+        failed.finish(ReportKind::StatusReport);
+        failed
+    });
     // Diverged local branches are reported, never an exit category.
     match super::local::divergence(context.store, location, environment) {
         Ok(Some(warning)) => environment_report.warnings.push(warning),
         Ok(None) => {}
         Err(finding) => environment_report.warnings.push(finding),
     }
+    let mut report = RunReport::new(ReportKind::StatusReport);
     report.environments.push(environment_report);
     report
 }
