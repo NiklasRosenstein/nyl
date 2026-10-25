@@ -63,7 +63,23 @@ part removes the walkthroughs it makes pass from the harness's pending list.
    `get -e`, `nyl validate` of targets whose bindings orchestration resolves,
    and state commits whose author and time the command line passes in.
    Walkthroughs: `dependency-wave`, `unit-jobs`,
-   `unavailable-upstream-output`.
+   `unavailable-upstream-output`. Part 3 deliberately leaves out:
+   - A KubernetesPublication unit's `releases` holds only the bindings
+     orchestration resolves, `fromUnit` and `fromPromotion`; the other inputs
+     enter its key through the render's input record until the real driver
+     (M5) and PromotionPath selectors (M6) add them.
+   - Orchestrated publications keep ownership index version 2; version 3,
+     which records the owning environment and unit, arrives with the
+     KubernetesPublication driver in M5.
+   - Unit source fields that name another repository wait for M4, the first
+     kinds that build from one.
+   - Unit `env.secrets` is rejected with `NYL-UNIT-SECRETS-UNSUPPORTED` until
+     the common credential admission of part 6; `env.passthrough` works.
+   - Each unit has one effective commit, and a unit whose source fields pin
+     different commits is rejected. Per-field worktrees wait for M4.
+   - `nyl validate` checks a `fromUnit` artifact reference only for the
+     producer's existence and declared non-sensitive outputs; artifact names
+     are checked once kinds declare them, in M5.
 4. Recovery and concurrency: `verify`, `recover` (including `--accept`),
    run takeover from checkpoints, uncertain completion, competing runners
    with `--wait-lease`, `--local` runs, state without a remote,

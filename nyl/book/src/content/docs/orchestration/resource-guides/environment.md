@@ -39,6 +39,16 @@ Create the state once with `nyl state init`. After changing `spec.state`, move
 existing state to the new location with `nyl state move`. See
 [`nyl state`](/nyl/reference/cli/state/).
 
+## Source and protected refs
+
+`spec.source` decides the commit each run renders units at: omitted, the
+commit of the worktree you run from; with `revision`, that ref's tip; with
+`revision` and `commit`, the pinned commit. Runs check that commit against
+`spec.protectedRefs`, by default the repository's default branch, and
+`allowUnprotectedSource: true` lets an environment such as dev run from any
+commit. An EnvironmentGroup supplies these fields when the Environment omits
+them. See [Runs](/nyl/orchestration/runs/#source-commit).
+
 ## See also
 
 - [EnvironmentGroup](/nyl/reference/resources/gitops.nyl/v1/environment-group/)

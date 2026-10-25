@@ -4,7 +4,8 @@ title: 'get and update'
 
 ## Inspect project resources
 
-`nyl get` reports GitOps control resources discovered in project source:
+`nyl get` reports GitOps control resources, Environments, and units discovered
+in project source:
 
 ```bash
 nyl get repositories
@@ -13,6 +14,8 @@ nyl get argocd-instances
 nyl get targets
 nyl get app-projects
 nyl get application-groups
+nyl get environments
+nyl get units
 nyl get cluster primary
 ```
 
@@ -41,6 +44,41 @@ web         web (generated)         applications/web         applications/web/gr
 `CONTEXT` is the Cluster's `spec.live.context`, `PUBLICATION` the target's
 repository and revision, and `PROJECT` the ApplicationGroup's AppProject, marked
 `(generated)` when Nyl derives it.
+
+## Inspect environment state
+
+With `-e <environment>`, `nyl get` reads that environment's orchestration
+state instead of source. It only reads: it needs read access to the state
+repository, never takes the lease, and needs no commit identity.
+
+```bash
+nyl get units -e dev                          # NAME KIND STATE RECEIPT LAST RUN
+nyl get unit migrate -e dev -o yaml           # the persisted desired and observed documents
+nyl get unit migrate -e dev -o json --observed
+nyl get output database/host -e dev           # resolves like {fromUnit: {unit: database, output: host}}
+nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
+nyl get artifact web/image -e dev --pointer /reference
+nyl get units -e dev --state-revision 41f0c2e
+```
+
+- `get units -e` joins desired and observed state into one row per unit:
+  its kind, its [state](/nyl/reference/cli/status/), whether its latest
+  receipt is current, and the run of its latest receipt or condition.
+- `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
+  `{desired, observed}` documents, never a synthesized merge. `--desired` or
+  `--observed` prints only one of them.
+- `get output <unit>/<output>` and `get artifact <unit>/<name> --pointer …`
+  print one value for scripts and resolve exactly like the matching
+  `fromUnit` reference: the pointer is relative to the artifact's `spec`, and
+  only a current receipt counts. When the reference would not resolve, they
+  print nothing and exit 1. `--allow-stale` prints the latest receipt's value
+  with the warning `NYL-REFERENCE-STALE` instead.
+- `--state-revision <commit>` reads state as of an earlier state commit.
+- `-o` selects `table` (default), `wide`, `yaml`, `json`, or `name`.
+
+Every form takes the project directory, or a path beneath it, as its last
+argument, default `.`. Document and table forms exit 0 when they can read the
+requested state and 1 otherwise, for example with `NYL-STATE-MISSING`.
 
 ## Update cluster capabilities
 
