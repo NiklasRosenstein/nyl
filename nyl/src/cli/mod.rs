@@ -118,7 +118,6 @@ impl Cli {
             Commands::RenderTree(args) => commands::render_tree::execute(args).await,
             Commands::PublishTree(args) => commands::publish_tree::execute(args).await,
             Commands::Create(args) => commands::create::execute(args),
-            Commands::Get(args) => commands::get::execute(args),
             Commands::Capture(args) => commands::capture::execute(args).await,
             Commands::Update(args) => commands::update::execute(args),
             Commands::Delete(args) => commands::delete::execute(args),
@@ -130,12 +129,24 @@ impl Cli {
             Commands::Validate(args) => commands::validate::execute(args).await,
             Commands::Release(args) => commands::release::execute(args).await,
             Commands::Vendor(args) => commands::vendor::execute(args).await,
-            Commands::State(args) => commands::state::execute_state(args),
-            Commands::Lease(args) => commands::state::execute_lease(args),
-            Commands::Plan(_) | Commands::Reconcile(_) | Commands::Status(_) => {
-                let owned = crate::orchestration::run::ProcessWiring::new();
-                let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
-                let outcome = self.execute_in_process(&wiring)?;
+            Commands::Get(_)
+            | Commands::State(_)
+            | Commands::Lease(_)
+            | Commands::Plan(_)
+            | Commands::Reconcile(_)
+            | Commands::Status(_) => {
+                // Drivers may block on runtimes of their own, so orchestration
+                // runs on a thread outside this command line's async runtime.
+                let outcome = std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || -> Result<crate::orchestration::run::CommandOutcome> {
+                            let owned = crate::orchestration::run::ProcessWiring::new();
+                            let wiring = crate::orchestration::run::Wiring::from_process(&owned)?;
+                            self.execute_in_process(&wiring)
+                        })
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })?;
                 print!("{}", outcome.stdout);
                 eprint!("{}", outcome.stderr);
                 if outcome.exit != 0 {
@@ -146,20 +157,30 @@ impl Cli {
         }
     }
 
-    /// Run an orchestration command (`plan`, `reconcile`, `status`, `get`
-    /// with `-e`, `state`, `lease`) with injected dependencies, returning its
-    /// outcome instead of printing and exiting. The tier-1 scenario harness
-    /// calls this; other commands are an error.
+    /// Run an orchestration command (`plan`, `reconcile`, `status`, `get`,
+    /// `state`, `lease`) with injected dependencies, returning its outcome
+    /// instead of printing and exiting. The tier-1 scenario harness calls
+    /// this. An orchestration command that fails before producing its report,
+    /// such as on a project that cannot be discovered, is an outcome with
+    /// exit 1; other commands are an error.
     pub fn execute_in_process(
         self,
         wiring: &crate::orchestration::run::Wiring<'_>,
     ) -> Result<crate::orchestration::run::CommandOutcome> {
-        match self.command {
+        let result = match self.command {
             Commands::Plan(args) => commands::plan::run(&args, wiring),
             Commands::Reconcile(args) => commands::reconcile::run(&args, wiring),
             Commands::Status(args) => commands::status::run(&args, wiring),
-            _ => todo!("cli-integration: state, lease, and get -e in-process"),
-        }
+            Commands::Get(args) => commands::get::run(&args, wiring),
+            Commands::State(args) => commands::state::run_state(&args, wiring),
+            Commands::Lease(args) => commands::state::run_lease(&args, wiring),
+            _ => {
+                return Err(crate::NylError::config(
+                    "only plan, reconcile, status, get, state, and lease run in-process",
+                ))
+            }
+        };
+        Ok(result.unwrap_or_else(crate::orchestration::run::CommandOutcome::error))
     }
 }
 

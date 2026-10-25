@@ -14,19 +14,33 @@ fn project() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs/_project")
 }
 
-fn nyl(checkout: &Path, args: &[&str]) -> Command {
+/// The author state commits are written with: fresh clones have no Git
+/// identity, and the host's must not matter.
+const AUTHOR: &str = "Scenario <scenario@example.invalid>";
+
+/// `nyl <args>` in `checkout`, with a home that holds no Git configuration,
+/// so only `--author` or the clone's own configuration can name an identity.
+fn bare_nyl(checkout: &Path, home: &Path, args: &[&str]) -> Command {
     let mut command = Command::cargo_bin("nyl").unwrap();
     command
         .current_dir(checkout)
         .args(args)
         .env_remove("GITHUB_RUN_ID")
         .env_remove("CI_JOB_URL")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         // CI forces colour; the assertions read plain text.
-        .env("NO_COLOR", "1")
-        .env("GIT_AUTHOR_NAME", "Scenario")
-        .env("GIT_COMMITTER_NAME", "Scenario")
-        .env("GIT_AUTHOR_EMAIL", "scenario@example.invalid")
-        .env("GIT_COMMITTER_EMAIL", "scenario@example.invalid");
+        .env("NO_COLOR", "1");
+    command
+}
+
+/// `nyl <args> --author <AUTHOR>` in `checkout`.
+fn nyl(checkout: &Path, args: &[&str]) -> Command {
+    let home = checkout.with_extension("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut command = bare_nyl(checkout, &home, args);
+    command.args(["--author", AUTHOR]);
     command
 }
 
@@ -49,6 +63,17 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
         &["log", "-1", "--format=%B", "refs/heads/nyl/dev/desired"],
     );
     assert!(message.contains("Nyl-Operation: state-init"), "{message}");
+    // The commit is signed by --author, as author and committer.
+    let signature = git_output(
+        &world.bare(),
+        &[
+            "log",
+            "-1",
+            "--format=%an <%ae>|%cn <%ce>",
+            "refs/heads/nyl/dev/desired",
+        ],
+    );
+    assert_eq!(signature, format!("{AUTHOR}|{AUTHOR}"));
     // The lease is released and the clone's own state branches follow the remote.
     assert!(git_output(&world.bare(), &["for-each-ref", "refs/nyl/"]).is_empty());
     assert!(!git_output(&checkout, &["rev-parse", "--verify", "nyl/dev/desired"]).is_empty());
@@ -59,6 +84,37 @@ fn test_state_init_writes_state_once_to_the_configured_repository() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"outcome\": \"unchanged\""));
+}
+
+/// State commits need an identity: `--author`, else the clone's Git
+/// configuration. Without either, a writing command refuses with a code
+/// whose fix names both, instead of signing with an invented identity.
+#[test]
+fn test_state_commands_take_their_identity_from_author_or_git_config() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let home = world.scenario_tmp().join("empty-home");
+    std::fs::create_dir_all(&home).unwrap();
+    bare_nyl(&checkout, &home, &["state", "init", "-e", "dev"])
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("NYL-COMMIT-IDENTITY-MISSING")
+                .and(predicate::str::contains("--author"))
+                .and(predicate::str::contains("user.name")),
+        );
+    assert!(git_output(&world.bare(), &["for-each-ref", "refs/heads/nyl/"]).is_empty());
+
+    git_output(&checkout, &["config", "user.name", "Clone User"]);
+    git_output(&checkout, &["config", "user.email", "clone@example.invalid"]);
+    bare_nyl(&checkout, &home, &["state", "init", "-e", "dev"])
+        .assert()
+        .success();
+    let signature = git_output(
+        &world.bare(),
+        &["log", "-1", "--format=%an <%ae>", "refs/heads/nyl/dev/desired"],
+    );
+    assert_eq!(signature, "Clone User <clone@example.invalid>");
 }
 
 #[test]
@@ -162,8 +218,46 @@ fn test_validate_rejects_state_refs_git_cannot_hold_together() {
         "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: previews\nspec:\n  unitSelector:\n    matchLabels:\n      preview: 'true'\n  state:\n    repositoryRef:\n      name: platform\n    desiredRef: nyl/dev\n    observedRef: nyl/dev\n    path: previews\n",
     )
     .unwrap();
-    nyl(&checkout, &["validate"])
+    bare_nyl(&checkout, &world.scenario_tmp(), &["validate"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("NYL-STATE-REF-CONFLICT").and(predicate::str::contains("refs/heads/nyl/dev")));
+}
+
+/// The tier-1 harness runs state commands in-process: the wiring's author
+/// signs the commit, and the outcome carries the typed report and exit
+/// instead of printing and exiting.
+#[test]
+fn test_state_commands_run_in_process_with_the_wiring_author() {
+    use clap::Parser as _;
+    use nyl::cli::Cli;
+    use nyl::orchestration::run::{ProcessWiring, Wiring};
+
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let owned = ProcessWiring::new();
+    let mut wiring = Wiring::from_process(&owned).unwrap();
+    wiring.author = Some(AUTHOR.parse().unwrap());
+    let path = checkout.to_str().unwrap();
+
+    let cli = Cli::try_parse_from(["nyl", "state", "init", "-e", "dev", "-o", "json", path]).unwrap();
+    let outcome = cli.execute_in_process(&wiring).unwrap();
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.report["outcome"], "done");
+    let signature = git_output(
+        &world.bare(),
+        &["log", "-1", "--format=%an <%ae>", "refs/heads/nyl/dev/desired"],
+    );
+    assert_eq!(signature, AUTHOR);
+
+    let cli = Cli::try_parse_from(["nyl", "state", "init", "-e", "prod", path]).unwrap();
+    let outcome = cli.execute_in_process(&wiring).unwrap();
+    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.report["errors"][0]["code"], "NYL-ENVIRONMENT-UNKNOWN");
+
+    // get reads declarations in-process too, never needing an identity.
+    let cli = Cli::try_parse_from(["nyl", "get", "environments", "dev", path]).unwrap();
+    let outcome = cli.execute_in_process(&wiring).unwrap();
+    assert_eq!(outcome.exit, 0, "{}", outcome.stderr);
+    assert!(outcome.stdout.contains("dev"), "{}", outcome.stdout);
 }
