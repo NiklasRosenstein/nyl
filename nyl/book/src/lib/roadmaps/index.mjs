@@ -29,16 +29,34 @@ export function roadmapProgress(roadmap) {
 /**
  * A stage is done only when it says so, because a milestone is done when its
  * exit criterion holds, not merely when its items are ticked. It is in progress
- * once any item is done.
+ * once any item is done. A delegating stage follows its roadmap: done when the
+ * roadmap says so, in progress once any of its stages is.
  */
 export function stageStatus(stage) {
   if (stage.delegate) {
-    const stages = byId(stage.delegate).stages;
-    if (stages.every((child) => stageStatus(child) === 'done')) return 'done';
-    return stages.some((child) => stageStatus(child) !== 'planned') ? 'in-progress' : 'planned';
+    const roadmap = byId(stage.delegate);
+    if (roadmap.done) return 'done';
+    return roadmap.stages.some((child) => stageStatus(child) !== 'planned') ? 'in-progress' : 'planned';
   }
   if (stage.done) return 'done';
   return stage.items.some((item) => item.done) ? 'in-progress' : 'planned';
+}
+
+/** The stages of other roadmaps that a roadmap's stages need, in ID order. */
+export function prerequisites(roadmap) {
+  const own = new Set(roadmap.stages.map((stage) => stage.id));
+  const needs = roadmap.stages.flatMap((stage) => stageNeeds(stage)).filter((id) => !own.has(id));
+  return [...new Set(needs)].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+}
+
+/** A stage's title; a delegating stage takes its roadmap's. */
+export function stageTitle(stage) {
+  return stage.delegate ? byId(stage.delegate).title : stage.title;
+}
+
+/** A stage's needs; a delegating stage needs its roadmap's prerequisites. */
+export function stageNeeds(stage) {
+  return stage.delegate ? prerequisites(byId(stage.delegate)) : stage.needs;
 }
 
 /** The stage with this ID in any roadmap, with the roadmap that holds it. */

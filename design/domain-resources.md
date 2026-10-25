@@ -347,8 +347,12 @@ collections:
   `resolvedSpec`. Provenance does not. So:
   - editing a member, adding or removing one, or a schema default changing an
     effective value re-runs the unit;
-  - moving a file, editing an annotation, rewording a definition's
+  - moving a file to a place that the collection's `paths` and the admission
+    policies treat the same, editing an annotation, rewording a definition's
     `description`, or changing an unrelated team's declarations does not;
+  - a move into or out of a collection's `paths`, or across a folder that a
+    policy treats differently, changes membership or admission, and with them
+    the bundle or whether the unit may run;
   - an implementation reads only inputs the key covers. If the implementation
     received provenance, a file move could change its result without changing
     the key.
@@ -578,11 +582,16 @@ spec:                                 # rendered once per (environment, resource
   a resource that instantiates units.
 - **Escaping across the trust boundary.** Structural templating renders text
   and then parses YAML. Until now that text was platform-authored; `resource`
-  is not. A string field of `resource` therefore always renders as one quoted
-  YAML scalar, so `"x\napproval: auto"` stays a string. A template that inserts
-  structure on purpose writes `{{ resource.spec.tags | tojson }}`. Schemas
-  should constrain the fields that templates use; names already follow the
-  DNS label rule.
+  is not. A string from `resource` printed with `{{ … }}` must therefore
+  consist only of letters, digits, spaces, and `. _ - / @ + =`, which cannot
+  change YAML structure whether the template places it in a plain or a quoted
+  scalar, so `'teams/{{ resource.metadata.name }}'` renders as
+  `'teams/payments'`. Any other string fails rendering with
+  `NYL-UNIT-RESOURCE-UNSAFE-VALUE`, naming the field, so `"x\napproval: auto"`
+  never becomes structure. A template inserts such a value as a whole YAML
+  value with `{{ resource.spec.description | tojson }}`, which renders a
+  quoted JSON string, or a list or object. Names already follow the DNS label
+  rule, and schemas should constrain the other fields that templates use.
 - `nyl get units` lists the instances under their base unit. `nyl get unit
   team-aws` shows the `forEach` match for each instance.
 
@@ -646,7 +655,7 @@ consumer, and two owners rejected.
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, removal approval, exec with bundles | M4, M8's `exec` |
-| R5 | `forEach` unit instances: the `resource` context, YAML-escaped values, instance names, leaving and teardown | R2 |
+| R5 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R6 | The worked guide, validated as a tier-2 reference scenario | R2–R5 |
 
 ## Guide sketch: implementing a domain resource
@@ -681,8 +690,8 @@ teams/
 4. **Inspect.** `nyl prepare -e org --unit aws-accounts --native` writes the
    bundle, its provenance, and the variables file. Run
    `tofu plan -var-file=…` against a scratch backend. Move a declaration to
-   another folder and re-run: same bundle digest, same execution key. Change
-   a budget: new key.
+   another folder that the collection's `paths` still match and re-run: same
+   bundle digest, same execution key. Change a budget: new key.
 5. **Reference another unit.** Add `AwsAccessGrant` with a
    `principalGroupId` that accepts references, set it with `fromUnit` to the
    identity unit's output, and watch `prepare` exit 2 with the blocked
@@ -713,5 +722,5 @@ teams/
 | Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
-| How YAML escaping of `resource` values is implemented: an escaping mode of the template engine, or values that are wrapped and render as quoted scalars | R5 |
+| Whether the character set for `resource` strings printed into templates should be wider, for example to allow `:` inside quoted scalars | R5 |
 | Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R5 |

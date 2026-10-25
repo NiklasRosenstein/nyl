@@ -143,13 +143,16 @@ resource "aws_organizations_account" "this" {
 
 ## 5. Know what re-runs
 
-The unit's execution key covers the collected content, not where it came from:
+The unit's execution key covers the collected content, not where it came
+from. Where a declaration lives matters only for membership and admission:
 
 | Change | Does `aws-accounts` run again? |
 | --- | --- |
 | A team adds or edits an account | Yes |
 | A schema default changes an account's effective value | Yes |
-| A declaration moves to another folder | No |
+| A declaration moves to another folder under `teams/` | No |
+| A declaration moves into or out of the collection's `paths` | Yes: it joins or leaves the collection |
+| A declaration moves across a folder the policy treats differently | Yes: admission changes, so the unit is blocked or unblocked |
 | Another team changes its GitHub declarations | No |
 
 ## 6. One configuration per team

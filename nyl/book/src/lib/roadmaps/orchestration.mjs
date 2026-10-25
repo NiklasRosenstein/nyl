@@ -9,11 +9,10 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    stage: 'M3',
     intro: 'Continue M3, delivered in four parts against the [orchestration core contract](https://github.com/NiklasRosenstein/nyl/blob/develop/design/orchestration-core.md) and its executable [walkthrough scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/nyl/tests/scenarios/walkthroughs/):',
     steps: [
       { text: 'Foundations: the business rules moved out of the `nyl` package, one `GitSource`, the `nyl-state`, `nyl-orchestration`, and `nyl-drivers` crates, the orchestration types and traits in `nyl-core` with golden files, the scenario format and Git test world, fault points, the `FakeImage` and `FakeInfra` kinds, and the `test-clock` feature. The harness validates every scenario and lists the reached ones as pending until the commands they use exist.', done: true },
-      { text: 'The Git state store in `nyl-state` over the shared `nyl-git` transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and run refs with compare-and-swap, the fenced transition commit, optional dedicated credentials, and the Environment and EnvironmentGroup resources. Custom refs and atomic leased pushes are verified on GitHub, GitLab, Forgejo, and plain Git with both coordination prefixes ([Git host compatibility](/nyl/reference/cli/state/#git-host-compatibility)).', done: true },
+      { text: 'The Git state store in `nyl-state` over the shared `nyl-git` transport, `nyl state init`/`move`/`forget`, `nyl lease break`, leases and run refs with compare-and-swap, the fenced transition commit, optional dedicated credentials, and the Environment and EnvironmentGroup resources. Custom refs and atomic leased pushes are verified on GitHub, GitLab, Forgejo, and plain Git with both coordination prefixes ([Git host compatibility](/nyl/orchestration/environments-and-state/#git-host-compatibility)).', done: true },
       { text: 'Resolution and the command unit: `plan`, `reconcile`, `status`, `verify`, `recover`, and `get -e`, with `FakePublication`, pinned source worktrees, execution keys, `--local` runs, and `nyl validate` of targets whose bindings orchestration resolves. Unit `values` and `variables` resolve through `nyl_core::bindings`.', done: false },
       { text: '`teardown`, `hold`, `resume`, `state delete`, multi-environment runs, approvals, the tier-2 harness, and the M3 part of reference scenario 1.', done: false },
     ],
@@ -63,7 +62,8 @@ export const orchestrationRoadmap = {
       needs: ['M1'],
       exitCriterion: 'Two dependent command units reconcile locally and in CI with identical results; repeat execution is a no-op; interruption has a demonstrated recovery path; the M3 part of the [reference scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/design/reference-scenarios.md) and every [walkthrough scenario](https://github.com/NiklasRosenstein/nyl/blob/develop/nyl/tests/scenarios/walkthroughs/) marked M3 pass.',
       items: [
-        { text: 'Implement environments, YAML state files with published schemas, `nyl state init`/`move`/`forget`/`delete` (including decommissioning declared environments and moves between branches and custom refs), leases and run checkpoints under a configurable coordination ref prefix, validated against GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one transition commit per operation with a machine-readable summary, pushed atomically with the lease check.', done: false },
+        { text: 'Implement environments, YAML state files with published schemas, `nyl state init`/`move`/`forget` (including moves between branches and custom refs), leases and run checkpoints under a configurable coordination ref prefix, validated against GitHub, GitLab, and Forgejo for custom refs and mixed atomic pushes, and one transition commit per operation with a machine-readable summary, pushed atomically with the lease check.', done: true },
+        { text: 'Implement `nyl state delete`, including decommissioning declared environments.', done: false },
         { text: 'Support optional dedicated SSH keys and HTTPS tokens, configured only when needed, for state pushes and `publish-tree`. Remote Git operations run the `git` command line through `nyl-git`, so by default they authenticate as the user\'s `git` does (SSH config and keys, agent, credential helpers); `[[git.credentials]]` in `nyl.toml` names a key file, or a key or token in an environment variable, per repository URL prefix, for runners without those. State pushes use the same transport, including atomic multi-ref pushes with per-ref leases; libgit2 handles only local repository access.', done: true },
         { text: 'Implement `plan`, `reconcile`, `status`, `verify`, `recover`, `teardown` (including `--hold`), `hold`, and `resume` for a dependency graph of command units with `fromUnit` references, including `--local` runs next to remote state on the clone\'s own state branches, state without a remote, and `state move --from local` when a remote is added.', done: false },
         { text: 'Implement cross-environment references and multi-environment runs by repeated `-e`, a label selector, or an EnvironmentGroup with shared defaults, ordered by those references, each environment with its own lease and transition commit.', done: false },
@@ -72,9 +72,10 @@ export const orchestrationRoadmap = {
         { text: 'Prove stale-evidence blocking, competing runners, and recovery after an effect succeeds but receipt publication fails.', done: false },
         { text: 'Move the business rules the `nyl` package still holds into the crates that own them before orchestration builds on them: ownership-index input hashing (`hash_inputs`), the worktree source state with its carry exclusion (`source_state`), and publication-base verification (`verify_publication_base`). The command line then only parses arguments, wires crates, and renders reports.', done: true },
         { text: 'Replace the remote fields of `ApplicationGroupSource` and `fromGit`\'s `GitInputSource` with the one `GitSource` type of the implementation architecture, which command-unit sources then use too. Both already share one commit-lock rule.', done: true },
-        { text: 'Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate crates with the scenario harness, property tests, and crash injection.', done: false },
+        { text: 'Start `nyl-state`, `nyl-orchestration`, and `nyl-drivers` as separate crates with the scenario harness, property tests, and crash injection.', done: true },
         { text: 'Expose a pure, versioned graph of literal unit addresses and dependency edges before upstream values exist, shared by local execution and future CI exporters. Prove separate unit-scoped invocations through the [unit-jobs walkthrough](https://github.com/NiklasRosenstein/nyl/blob/develop/nyl/tests/scenarios/walkthroughs/unit-jobs/scenario.yaml) without changing environment-wide lease or ownership semantics.', done: false },
-        { text: 'Add the `test-clock` Cargo feature, the test-only fake kinds, and the two-tier harness for the reference scenarios: in-process with fakes, and through the real binary under the `tier2` Cargo feature.', done: false },
+        { text: 'Add the `test-clock` Cargo feature and the test-only fake kinds.', done: true },
+        { text: 'Add the two-tier harness for the reference scenarios: in-process with fakes, and through the real binary under the `tier2` Cargo feature.', done: false },
       ],
     },
     {
@@ -137,7 +138,7 @@ export const orchestrationRoadmap = {
         { text: 'Decide which command-unit uses warrant typed drivers, and whether to add the plugin driver protocol.', done: false },
         { text: 'Support minimum healthy durations and flapping guards over recorded observations.', done: false },
         { text: 'Evaluate application-level checks as promotion evidence.', done: false },
-        { text: 'Record the selected direction and constraints in this roadmap.', done: false },
+        { text: 'Record the selected direction and constraints in ROADMAP.md.', done: false },
       ],
     },
     {
@@ -157,10 +158,9 @@ export const orchestrationRoadmap = {
       ],
     },
     {
+      // Title and needs come from the domain resources roadmap.
       id: 'M9',
-      title: 'Domain resource collections as unit inputs',
       summary: 'Team-owned, typed declarations that units implement, the fourth layer of Nyl.',
-      needs: ['M2', 'M3', 'M4', 'M8'],
       delegate: 'domain-resources',
     },
   ],

@@ -1,7 +1,8 @@
 // The roadmap of domain resource collections, milestone M9, rendered on the
 // Domain resources roadmap page and summarized as M9 on the Orchestration
 // roadmap. Tick a deliverable in the change that ships it, and set `done` on a
-// slice only when all of it has shipped.
+// slice only when all of it has shipped. The orchestration milestones it
+// builds on are the M-numbered needs of its slices.
 
 export const domainResourcesRoadmap = {
   id: 'domain-resources',
@@ -9,12 +10,10 @@ export const domainResourcesRoadmap = {
   title: 'Domain resource collections as unit inputs',
   page: 'domain-resources/roadmap/',
   itemNoun: 'deliverables',
-  issue: 'https://github.com/NiklasRosenstein/nyl/issues/173',
-  design: 'https://github.com/NiklasRosenstein/nyl/blob/develop/design/domain-resources.md',
   exitCriterion:
-    'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. The guide runs end to end.',
-  // Orchestration milestones the slices build on.
-  prerequisites: ['M2', 'M3', 'M4', 'M8'],
+    'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. The guide runs end to end.',
+  // Set when the exit criterion is met, which completes M9.
+  done: false,
   stages: [
     {
       id: 'R1',
@@ -74,7 +73,7 @@ export const domainResourcesRoadmap = {
       needs: ['R2'],
       items: [
         { text: '`forEach` scanned statically and expanded from the catalog', done: false },
-        { text: '`resource` in the structural pass, with YAML-escaped values', done: false },
+        { text: '`resource` in the structural pass, with only YAML-safe values printed', done: false },
         { text: 'Instance names with the clash check', done: false },
         { text: 'Instances leaving the ownership set under the teardown gate', done: false },
       ],

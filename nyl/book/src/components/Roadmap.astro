@@ -9,16 +9,19 @@ import RoadmapText from './RoadmapText.astro';
 import {
   delegateRoadmap,
   findStage,
+  prerequisites,
   roadmapProgress,
+  stageNeeds,
   stageProgress,
   stageStatus,
+  stageTitle,
   statusLabels,
 } from '../lib/roadmaps/index.mjs';
 
 interface Props {
   // The data modules are plain JavaScript; their shape is checked by tests.
   roadmap: any;
-  part: 'progress' | 'next' | 'prerequisites' | 'stages';
+  part: 'exit' | 'progress' | 'next' | 'prerequisites' | 'stages';
 }
 
 const { roadmap, part } = Astro.props;
@@ -37,15 +40,23 @@ const stages = roadmap.stages.map((stage: any) => {
   const delegate = stage.delegate ? delegateRoadmap(stage) : undefined;
   // A done stage fills its rail even when items were dropped from scope.
   const fill = status === 'done' ? 100 : percent(progress);
-  return { stage, status, progress, delegate, fill };
+  return { stage, title: stageTitle(stage), needs: stageNeeds(stage), status, progress, delegate, fill };
 });
-const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
+const required = prerequisites(roadmap).map((id: string) => {
   const found = findStage(id);
-  return { id, title: found?.stage.title ?? id, status: found ? stageStatus(found.stage) : 'planned' };
+  return { id, title: found ? stageTitle(found.stage) : id, status: found ? stageStatus(found.stage) : 'planned' };
 });
 ---
 
 <div class="roadmap not-content">
+  {
+    part === 'exit' && roadmap.exitCriterion && (
+      <p class="roadmap-exit">
+        <strong>Done when:</strong> <RoadmapText text={roadmap.exitCriterion} />
+      </p>
+    )
+  }
+
   {
     part === 'progress' && (
       <div class="overall">
@@ -76,11 +87,12 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
           <RoadmapText text={roadmap.nextStep.intro} />
         </p>
         <ol class="checklist">
-          {roadmap.nextStep.steps.map((step: any) => (
+          {roadmap.nextStep.steps.map((step: any, index: number) => (
             <li class={step.done ? 'done' : undefined}>
               <span class="check" aria-hidden="true">
                 {step.done ? '✓' : ''}
               </span>
+              <span class="step-number">{index + 1}.</span>
               <span class="sr-only">{step.done ? 'Done: ' : 'Not done: '}</span>
               <span>
                 <RoadmapText text={step.text} />
@@ -95,7 +107,7 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
   {
     part === 'prerequisites' && (
       <ul class="prerequisites">
-        {prerequisites.map((prerequisite: any) => (
+        {required.map((prerequisite: any) => (
           <li>
             <a href={stageHref(prerequisite.id)}>{prerequisite.id}</a>
             <span class="prerequisite-title">{prerequisite.title}</span>
@@ -109,7 +121,7 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
   {
     part === 'stages' && (
       <ol class="timeline">
-        {stages.map(({ stage, status, progress, delegate, fill }: any) => (
+        {stages.map(({ stage, title, needs, status, progress, delegate, fill }: any) => (
           <li class={`stage ${status}`} id={anchor(stage.id)} style={`--fill: ${fill}%`}>
             <div class="rail" aria-hidden="true">
               <span class="node">{status === 'done' ? '✓' : ''}</span>
@@ -120,7 +132,7 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
             <section class="card" aria-labelledby={`${anchor(stage.id)}-title`}>
               <header>
                 <span class="stage-id">{stage.id}</span>
-                <h3 id={`${anchor(stage.id)}-title`}>{stage.title}</h3>
+                <h3 id={`${anchor(stage.id)}-title`}>{title}</h3>
                 <span class={`status ${status}`}>{statusLabels[status as keyof typeof statusLabels]}</span>
               </header>
               <p class="summary">
@@ -160,10 +172,10 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
                 <span>
                   {progress.done} of {progress.total} done
                 </span>
-                {stage.needs.length > 0 && (
+                {needs.length > 0 && (
                   <span class="needs">
                     Needs
-                    {stage.needs.map((need: string) => (
+                    {needs.map((need: string) => (
                       <a href={stageHref(need)}>{need}</a>
                     ))}
                   </span>
@@ -208,6 +220,17 @@ const prerequisites = (roadmap.prerequisites ?? []).map((id: string) => {
   .bar-fill {
     height: 100%;
     background: var(--sl-color-accent);
+  }
+  .roadmap a {
+    color: var(--sl-color-text-accent);
+  }
+  .roadmap-exit {
+    margin: 0;
+  }
+  .step-number {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-gray-3);
   }
   .next p {
     margin: 0 0 0.75rem;

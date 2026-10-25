@@ -92,8 +92,9 @@ for example one OpenTofu configuration per team, each with its own state.
   of the units that consume it, never their identity, so it is never a
   replacement.
 - **Only relevant changes re-run.** Editing a member re-runs its consumers.
-  Moving a file to another folder, or another team editing its own
-  declarations, re-runs nothing.
+  Another team editing its own declarations re-runs nothing, and so does
+  moving a file, unless the move changes which collections include it or
+  which policies admit it.
 - **Failures stay local.** A declaration that fails its schema or a policy
   blocks only the units that consume it, before anything is applied.
 - **Removing a declaration is an input change.** The implementing unit plans
