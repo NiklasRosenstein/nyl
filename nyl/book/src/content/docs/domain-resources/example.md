@@ -222,8 +222,11 @@ pipeline, Nyl prepares its inputs, and the pipeline plans and applies as
 before:
 
 ```sh
+# In the pull request
 nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan
-nyl exec --unit aws-accounts --base origin/main -- apply tfplan
+
+# After the merge
+nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan
 ```
 
 `nyl exec` without an environment prepares OpenTofu exactly as an
@@ -231,11 +234,24 @@ orchestrated run would, with the backend, the variables, and its own working
 copy, and then runs `tofu` with the arguments after `--`. It records nothing,
 so the pipeline stays in charge of when to plan and who approves the apply.
 
+Without orchestration, nothing records what was last applied, so every run
+says what to compare with:
+
+- `--base origin/main` in a pull request compares with where the branch
+  forked from `main`.
+- After the merge, comparing `main` with itself would detect nothing. The
+  example uses a tag that the pipeline moves after each successful apply,
+  `nyl/applied/aws-accounts`. The tag is optional; without it, guarded
+  changes are caught only in the pull request.
+- `--no-base` skips the comparison deliberately, for local development or a
+  unit's first apply. Leaving out both is an error, so a pipeline never skips
+  transition rules by accident.
+
 To hand the inputs to a tool invocation of your own instead, write them to a
 directory:
 
 ```sh
-nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/
+nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/   # in a pull request
 tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.tfbackend.json
 tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
 ```

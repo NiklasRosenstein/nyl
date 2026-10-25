@@ -240,11 +240,14 @@ schema:
     received. This is the authoritative check. It catches a change spread
     over several commits, and it applies per consuming unit, because two
     units may have last run different versions.
-  - **For review**, `nyl validate --base <rev>`, `plan --base <rev>`, and
-    `prepare --base <rev>` compare against the catalog at another revision,
-    typically the pull request's merge base. This works without
-    orchestration, but it judges one change at a time rather than what was
-    applied, which the docs must say.
+  - **Against a revision**, `--base <rev>` on `validate`, `plan`,
+    `prepare`, and `exec` compares against the catalog at the merge base of
+    `<rev>` and the source commit. In a pull request that is where the branch
+    forked. This is the only baseline outside orchestration, and it judges
+    the change since that revision rather than what was applied, which the
+    docs must say (see [Choosing a base](#choosing-a-base)).
+  - **No baseline**, `--no-base`, skips rules that use `oldSelf` and does not
+    detect guarded changes. It is never implied.
 - **Policies see the same comparison.** Kyverno receives the previous version
   as `oldObject` and the operation as `CREATE`, `UPDATE`, or `DELETE`, under
   the same baselines. Rules about the data belong in the definition, owned by
@@ -252,6 +255,48 @@ schema:
   the platform, for example only `platform/` may change an `ou`.
 - Rules and their effects are part of the definition, so editing them is a
   reviewed change to a trusted path.
+
+### Choosing a base
+
+With `-e`, the receipt is always the baseline. `--base` adds a comparison
+with a revision, as a pull request plan shows it, and `--no-base` is
+rejected because the receipt comparison cannot be turned off.
+
+Without `-e`, nothing records what was applied, so the invocation chooses:
+
+- A command that would compare with a previous version requires exactly one
+  of `--base <rev>` and `--no-base`: `validate` when any definition declares a
+  rule that uses `oldSelf`, and `prepare` and `exec` when the unit has
+  collections. Neither fails with `NYL-RESOURCE-BASE-REQUIRED`, exit 1, whose
+  fix names both options. Nyl never picks a base from the upstream branch,
+  the default branch, or `nyl.toml`, because the right one depends on the
+  job, and the refs a clone happens to have would otherwise decide the result.
+- `--no-base` reports `baseline: none` and lists the rules it skipped, so a
+  log shows what was not checked. It suits local development and a unit's
+  first apply.
+- A `<rev>` that does not resolve fails, never falling back to no baseline;
+  a shallow CI clone has to fetch it.
+
+| Job | Base |
+| --- | --- |
+| Pull request validate or plan | The target branch, such as `--base origin/main`; its merge base with the branch is used |
+| Apply after merge | The revision last applied, such as a tag the pipeline moves after a successful apply |
+| Local development | `--no-base`, or the target branch to preview a pull request |
+
+Comparing the apply job with its own branch, `--base origin/main` on `main`,
+compares a commit with itself and detects nothing; the guarded change then
+has to have been caught in the pull request. A tag closes that gap and is
+optional:
+
+```sh
+nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan
+git tag -f nyl/applied/aws-accounts HEAD
+git push -f origin refs/tags/nyl/applied/aws-accounts
+```
+
+Nyl never writes the tag itself outside orchestration; the pipeline moves it
+once the apply has succeeded, and the first apply, before the tag exists,
+runs with `--no-base`.
 
 **Failure scope.** Admission results are per resource. `nyl validate` and
 `plan` report every failure. A unit whose collection includes a failing
@@ -491,7 +536,7 @@ through the same code as `reconcile` and writes the results to a directory.
 It needs no lease and writes no state:
 
 ```text
-nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev>]
+nyl prepare [-e <env>] --unit <u> [--deployed | --source <rev>] [--base <rev> | --no-base]
             [--native] [--check <dir>] [--allow-change <resource>:<reason>]
             [--fixture-outputs <file>] [--output-dir <dir>] [-o yaml|json]
 ```
@@ -536,7 +581,7 @@ Environments, state refs, or receipts. The unit document is the same; no
 Environment selects it:
 
 ```sh
-nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/
+nyl prepare --unit aws-accounts --native --base origin/main --output-dir out/   # in a pull request
 tofu -chdir=platform/aws-accounts init -backend-config=../../out/native/backend.tfbackend.json
 tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfvars.json
 ```
@@ -548,7 +593,8 @@ tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfva
 - Stages 0–6 are the same code as under orchestration, so the native inputs
   are byte-identical to what an orchestrated run of the same unit would pass.
   Adopting orchestration later means selecting the unit from an Environment.
-- What remains: schema and transition rules against `--base`, policy
+- What remains: schema checks, transition rules against `--base` (see
+  [Choosing a base](#choosing-a-base)), policy
   admission, ownership claims checked across all declared units, guarded
   changes through `--allow-change`, deterministic bundles, and provenance.
 - What the pipeline takes over: deciding when to run, since there is no
@@ -563,8 +609,8 @@ let Nyl run the tool. `nyl exec` without `-e` runs the unit's
 [`exec` capability](orchestration-core.md#operator-exec) directly:
 
 ```sh
-nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan
-nyl exec --unit aws-accounts --base origin/main -- apply tfplan
+nyl exec --unit aws-accounts --base origin/main -- plan -out=tfplan              # pull request
+nyl exec --unit aws-accounts --base nyl/applied/aws-accounts -- apply tfplan      # after merge
 ```
 
 - The driver prepares the tool exactly as it does under orchestration, from
@@ -575,9 +621,9 @@ nyl exec --unit aws-accounts --base origin/main -- apply tfplan
   ownership-scope check against state, and nothing recorded. Files come from
   the worktree, as for `prepare`, and the tool runs in its own copy, so it
   never writes into the checkout.
-- Admission, transition rules against `--base`, and guarded changes apply as
-  for `prepare`: a guarded change refuses with exit 125 unless
-  `--allow-change` names it, before the tool starts.
+- Admission, transition rules against `--base` or none with `--no-base`, and
+  guarded changes apply as for `prepare`: a guarded change refuses with exit
+  125 unless `--allow-change` names it, before the tool starts.
 - Credentials are the unit's admitted `env`, as always; the process
   environment reaches the tool only through `env.passthrough`.
 - With `-e`, `nyl exec` keeps its orchestrated meaning: a held unit, the
@@ -637,7 +683,8 @@ transition rule with `effect: approve` matches.
   receipt records the approved reasons. A `bind: plan` approval already
   covers them, because the change digest includes the native consequences.
 - **Outside orchestration** there is no approval record. `nyl prepare` and
-  `nyl validate` exit 2 for a guarded change against `--base` and write no
+  `nyl validate` exit 2 for a guarded change against `--base`, and `nyl exec`
+  refuses with exit 125 before the tool starts, writing no
   native inputs, unless the invocation names it with
   `--allow-change <resource>:<reason>`. A pipeline ties that flag to its own
   approval, such as a protected CI environment.
@@ -794,7 +841,7 @@ consumer, and two owners rejected.
 | R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, `prepare --check`, removal approval, exec with bundles | M4, M8's `exec` |
-| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `nyl validate --base`, the receipt baseline, Kyverno `oldObject`, and the `approve` effect for guarded changes | R3, R4 |
+| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, and the `approve` effect for guarded changes | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
 
@@ -870,3 +917,4 @@ teams/
 | Whether instance names use a separator that cannot occur in unit names, which would make the name clash check unnecessary | R6 |
 | CEL implementation for `x-nyl-validations`: a Rust CEL crate, or rules evaluated through the Kyverno CLI | R5 |
 | Whether `--allow-change` outside orchestration should be tied to a CI provider's own approvals, such as a protected environment | R5 |
+| Whether Nyl should offer to move a last-applied tag itself outside orchestration, or leave it to the pipeline | R5 |

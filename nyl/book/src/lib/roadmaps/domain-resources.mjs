@@ -76,7 +76,7 @@ export const domainResourcesRoadmap = {
       needs: ['R3', 'R4'],
       items: [
         { text: '`x-nyl-validations` CEL rules with `self` and `oldSelf`, and the `deny` effect', done: false },
-        { text: '`nyl validate --base`, `plan --base`, and `prepare --base` comparing against another revision', done: false },
+        { text: '`--base` comparing against another revision, and an explicit `--no-base`, required outside orchestration', done: false },
         { text: 'The bundle of the current receipt as the baseline when a unit runs', done: false },
         { text: '`oldObject` and the operation for Kyverno policies', done: false },
         { text: 'The `approve` effect for guarded changes, with removed members as one of them, and `--allow-change` outside orchestration', done: false },
