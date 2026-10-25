@@ -7,8 +7,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::CommitIdentity;
 use nyl_core::orchestration::state::StateLocation;
-use nyl_core::resources::environment::{Environment, EnvironmentGroup};
-use nyl_orchestration::rules::environment_groups::sharing_group;
+use nyl_core::resources::environment::{sharing_group, Environment, EnvironmentGroup};
 use nyl_orchestration::rules::state_location::{resolve, LocationInputs};
 use nyl_state::git::{CommitAuthor, Endpoint, GitStateStore};
 

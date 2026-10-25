@@ -265,7 +265,9 @@ pub fn root_local_paths(resolved_spec: &mut Value, fields: &[LocalPathField], pr
     for field in fields {
         let name = format!("spec{}", field.pointer.replace('/', "."));
         let rooted = match resolved_spec.pointer(&field.pointer) {
-            None | Some(Value::Null) if field.defaults_to_project_dir => Value::String(project_dir_path(project_dir)),
+            None | Some(Value::Null) if field.defaults_to_project_dir => {
+                Value::String(format!("/{}", project_segments(project_dir).join("/")))
+            }
             None | Some(Value::Null) => continue,
             Some(Value::String(path)) => Value::String(worktree_path(&name, project_dir, path)?),
             Some(Value::Array(paths)) => Value::Array(
@@ -297,10 +299,10 @@ pub fn root_local_paths(resolved_spec: &mut Value, fields: &[LocalPathField], pr
     Ok(())
 }
 
-/// The worktree-rooted `project_dir` in normalized form: `/` or `/a/b`.
-fn project_dir_path(project_dir: &str) -> String {
-    let segments: Vec<&str> = project_dir.split('/').filter(|segment| !segment.is_empty()).collect();
-    format!("/{}", segments.join("/"))
+/// The segments of the worktree-rooted `project_dir`; `/` joins them into
+/// its normalized form, `/` or `/a/b`.
+fn project_segments(project_dir: &str) -> Vec<&str> {
+    project_dir.split('/').filter(|segment| !segment.is_empty()).collect()
 }
 
 /// A local path in its worktree-rooted form: relative paths resolve against
@@ -314,7 +316,7 @@ fn worktree_path(field: &str, project_dir: &str, path: &str) -> Result<String, S
     if path.starts_with('/') {
         return Ok(path.to_owned());
     }
-    let mut segments: Vec<&str> = project_dir.split('/').filter(|segment| !segment.is_empty()).collect();
+    let mut segments = project_segments(project_dir);
     for segment in path.split('/') {
         if segment == ".." {
             if segments.pop().is_none() {

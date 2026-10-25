@@ -55,7 +55,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Checkpoint, Coordination, RunState};
 use nyl_core::orchestration::state::{
@@ -63,6 +62,7 @@ use nyl_core::orchestration::state::{
 };
 use nyl_core::orchestration::time::Timestamp;
 
+use super::freshness::same_incarnation;
 use super::transitions::{apply, Applied, Event};
 
 /// What a run that took over the lease found of the runs before it.
@@ -153,10 +153,6 @@ pub struct ImportInputs<'a> {
     /// (imported, superseded, marked uncertain, or reported as late), which
     /// this call neither applies nor reclassifies again.
     pub handled: &'a BTreeSet<(RunId, UnitName)>,
-    /// The kinds' drivers. Takeover itself decides without recovery
-    /// policies (a superseded result is uncertain whatever the policy);
-    /// selection applies them afterwards.
-    pub drivers: &'a DriverSet,
 }
 
 /// What a takeover imports into the run.
@@ -254,37 +250,20 @@ fn touches<'a>(leftovers: &Leftovers<'a>) -> BTreeMap<UnitName, Vec<Touched<'a>>
     touched
 }
 
-/// The time an observed document last changed: its condition's, else its
-/// receipt's finish.
-fn changed_at(observed: &ObservedUnit) -> Option<Timestamp> {
-    match &observed.condition {
-        Some(Condition::Failed { since, .. } | Condition::Uncertain { since, .. }) => Some(*since),
-        None => observed.receipt.as_ref().map(|receipt| receipt.finished_at),
-    }
-}
-
-/// The run of an observed document's latest change.
-fn changed_by(observed: &ObservedUnit) -> Option<&RunId> {
-    match &observed.condition {
-        Some(Condition::Failed { run, .. } | Condition::Uncertain { run, .. }) => Some(run),
-        None => observed.receipt.as_ref().map(|receipt| &receipt.run),
-    }
-}
-
 /// Whether the snapshot's observed document already holds `checkpoint` of
 /// `run`, or something newer: a re-read leftover is then a no-op.
 fn not_newer(snapshot: Option<&ObservedUnit>, run: &RunId, checkpoint: &Checkpoint) -> bool {
     let Some(snapshot) = snapshot.filter(|snapshot| snapshot.unit.uid == checkpoint.observed.unit.uid) else {
         return false;
     };
-    let (Some(stored), Some(checked)) = (changed_at(snapshot), changed_at(&checkpoint.observed)) else {
+    let (Some(stored), Some(checked)) = (snapshot.changed_at(), checkpoint.observed.changed_at()) else {
         return false;
     };
-    stored > checked || (stored == checked && changed_by(snapshot) == Some(run))
+    stored > checked || (stored == checked && snapshot.last_run() == Some(run))
 }
 
 /// The receipt a checkpoint recorded for its own run, if it is a success.
-fn checkpointed_receipt<'c>(run: &RunId, checkpoint: &'c Checkpoint) -> Option<&'c Receipt> {
+pub(crate) fn checkpointed_receipt<'c>(run: &RunId, checkpoint: &'c Checkpoint) -> Option<&'c Receipt> {
     checkpoint
         .observed
         .receipt
@@ -416,10 +395,7 @@ pub fn import(inputs: &ImportInputs<'_>) -> Import {
 
 /// The unit's observed document of `target`'s incarnation, as imported so far.
 fn current<'o>(inputs: &'o ImportInputs<'_>, name: &UnitName, target: &DesiredUnit) -> Option<&'o ObservedUnit> {
-    inputs
-        .observed
-        .get(name)
-        .filter(|observed| observed.unit.uid == target.unit.uid)
+    same_incarnation(target, inputs.observed.get(name))
 }
 
 /// The run an `uncertain` condition names, if the unit has one.
@@ -463,11 +439,8 @@ fn started(
     }
     // A document that changed at or after the dead run's deadline came from
     // a later run, such as an earlier takeover whose run ref deletion failed.
-    let changed_later = inputs
-        .snapshot
-        .get(name)
-        .filter(|snapshot| snapshot.unit.uid == target.unit.uid)
-        .and_then(changed_at)
+    let changed_later = same_incarnation(target, inputs.snapshot.get(name))
+        .and_then(ObservedUnit::changed_at)
         .is_some_and(|changed| changed >= touched.deadline);
     if changed_later {
         return Decision::Nothing;
@@ -607,44 +580,39 @@ pub fn consumed(leftovers: &Leftovers<'_>, observed: &BTreeMap<UnitName, Observe
 /// what was handled imports as a no-op. Contract:
 /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), items 4 and 8.
 pub fn unchanged(consumption: Consumption, leftovers: &Leftovers<'_>, current: &Coordination) -> Consumption {
-    let same = |read: &[&RunState], now: &[RunState], run: &RunId| {
-        let before = read
-            .iter()
-            .find(|state| &state.run.run == run)
-            .map(|state| &state.version);
-        let after = now
-            .iter()
-            .find(|state| &state.run.run == run)
-            .map(|state| &state.version);
-        before.is_some() && before == after
+    let keep = |runs: Vec<RunId>, read: &[&RunState], now: &[RunState]| -> Vec<RunId> {
+        let version = |run: &RunId| {
+            now.iter()
+                .find(|state| &state.run.run == run)
+                .map(|state| &state.version)
+        };
+        runs.into_iter()
+            .filter(|run| {
+                let before = read
+                    .iter()
+                    .find(|state| &state.run.run == run)
+                    .map(|state| &state.version);
+                before.is_some() && before == version(run)
+            })
+            .collect()
     };
     Consumption {
-        delete: consumption
-            .delete
-            .into_iter()
-            .filter(|run| same(&leftovers.runs, &current.runs, run))
-            .collect(),
-        retire: consumption
-            .retire
-            .into_iter()
-            .filter(|run| same(&leftovers.runs, &current.runs, run))
-            .collect(),
-        delete_evidence: consumption
-            .delete_evidence
-            .into_iter()
-            .filter(|run| same(&leftovers.evidence, &current.evidence, run))
-            .collect(),
+        delete: keep(consumption.delete, &leftovers.runs, &current.runs),
+        retire: keep(consumption.retire, &leftovers.runs, &current.runs),
+        delete_evidence: keep(consumption.delete_evidence, &leftovers.evidence, &current.evidence),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::ports::HeldLease;
-    use nyl_core::orchestration::state::{LeaseKind, Request, Run, RunKind, StateV1};
+    use nyl_core::orchestration::state::{Request, Run};
     use serde_json::json;
 
-    use super::super::references::fixtures::{desired, env, name, observed, receipt, run, RUN_1, RUN_2};
     use super::*;
+    use crate::rules::fixtures::{
+        self, desired, env, lease_record, name, observed, receipt, run, run_record, RUN_1, RUN_2,
+    };
 
     const OWN: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b99";
     const OLDER: &str = "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b80";
@@ -675,41 +643,24 @@ mod tests {
 
     fn run_state(id: &str, deadline: &str, units: &[&str], checkpoints: Vec<Checkpoint>) -> RunState {
         RunState {
-            run: Run {
-                api_version: StateV1,
-                kind: RunKind,
-                run: run(id),
-                runner: "ci".to_owned(),
-                operation: Operation::Reconcile,
-                source_commit: None,
-                read_desired: None,
-                read_observed: None,
-                deadline: at(deadline),
-                units: units.iter().map(|unit| name(unit)).collect(),
-                finished: false,
-            },
             checkpoints,
-            created: Vec::new(),
-            version: "v1".to_owned(),
-            foreign: false,
+            ..fixtures::run_state(Run {
+                units: units.iter().map(|unit| name(unit)).collect(),
+                ..run_record(id, at(deadline))
+            })
         }
     }
 
     fn lease(id: &str, operation: Operation, units: &[&str], broken: bool) -> Lease {
         Lease {
-            api_version: StateV1,
-            kind: LeaseKind,
-            run: run(id),
-            runner: "ci".to_owned(),
             operation,
             units: units.iter().map(|unit| name(unit)).collect(),
-            deadline: at("11:00"),
-            taken_at: at("09:00"),
             broken: broken.then(|| Request {
                 by: "alice".to_owned(),
                 at: at("10:30"),
                 reason: None,
             }),
+            ..lease_record(id, at("11:00"))
         }
     }
 
@@ -722,7 +673,6 @@ mod tests {
         resolved: BTreeMap<UnitName, DesiredUnit>,
         adopted: BTreeMap<UnitName, DesiredUnit>,
         snapshot: BTreeMap<UnitName, ObservedUnit>,
-        drivers: DriverSet,
     }
 
     impl World {
@@ -738,7 +688,6 @@ mod tests {
                 resolved: BTreeMap::new(),
                 adopted: BTreeMap::new(),
                 snapshot: BTreeMap::new(),
-                drivers: DriverSet::new(),
             }
         }
 
@@ -766,7 +715,6 @@ mod tests {
                 snapshot,
                 observed: snapshot,
                 handled,
-                drivers: &self.drivers,
             })
         }
 

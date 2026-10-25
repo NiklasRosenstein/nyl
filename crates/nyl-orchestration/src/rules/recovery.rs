@@ -19,9 +19,10 @@ use std::collections::BTreeMap;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey, RunId, UnitName};
 use nyl_core::orchestration::ports::{Checkpoint, RunState};
-use nyl_core::orchestration::state::{ArtifactDocument, Condition, DesiredUnit, ObservedUnit};
+use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, ObservedUnit};
 use serde::Serialize;
 
+use crate::rules::freshness::same_incarnation;
 use crate::rules::transitions::{apply, Applied, Event, Refusal};
 
 /// What the operator asked for.
@@ -74,7 +75,7 @@ pub fn decide(
         ));
     };
     // A condition applies only to the incarnation it was recorded for.
-    let observed = observed.filter(|observed| observed.unit.uid == desired.unit.uid);
+    let observed = same_incarnation(desired, observed);
     let nothing = || {
         Finding::new(
             Code::RecoverNothing,
@@ -84,17 +85,21 @@ pub fn decide(
             ),
         )
     };
-    let refused = |refusal: Refusal| match refusal {
-        Refusal::NothingToRecover => nothing(),
+    // `apply` refuses only a unit without a condition, and records no
+    // recover event as evidence only.
+    let recovered = |event: Event, artifacts: Option<BTreeMap<String, ArtifactDocument>>| match apply(
+        &desired.unit,
+        observed,
+        event,
+    ) {
+        Ok(Applied::Changed(document)) => Ok(Recovery {
+            observed: *document,
+            artifacts,
+        }),
+        Ok(Applied::Evidence) | Err(Refusal::NothingToRecover) => Err(nothing()),
     };
     match action {
-        RecoverAction::Retry => match apply(&desired.unit, observed, Event::RecoverRetry).map_err(refused)? {
-            Applied::Changed(document) => Ok(Recovery {
-                observed: *document,
-                artifacts: None,
-            }),
-            Applied::Evidence => Err(nothing()),
-        },
+        RecoverAction::Retry => recovered(Event::RecoverRetry, None),
         RecoverAction::Accept { run } => {
             if observed.and_then(|observed| observed.condition.as_ref()).is_none() {
                 return Err(nothing());
@@ -119,7 +124,7 @@ pub fn decide(
                 (Some(condition), _) => {
                     return Err(missing(&format!(
                         "checkpointed {unit} as {}, not with a receipt",
-                        condition_name(condition)
+                        condition.name()
                     )))
                 }
                 (None, None) => return Err(missing(&format!("checkpointed {unit} without a receipt"))),
@@ -140,13 +145,7 @@ pub fn decide(
                     "a checkpoint is accepted only for what the unit runs now; use --retry to execute the unit again",
                 ));
             }
-            match apply(&desired.unit, observed, Event::RecoverAccept { receipt }).map_err(refused)? {
-                Applied::Changed(document) => Ok(Recovery {
-                    observed: *document,
-                    artifacts: Some(checkpoint.artifacts.clone()),
-                }),
-                Applied::Evidence => Err(nothing()),
-            }
+            recovered(Event::RecoverAccept { receipt }, Some(checkpoint.artifacts.clone()))
         }
     }
 }
@@ -176,13 +175,6 @@ fn uid_name(unit: &DesiredUnit) -> String {
         .map_or_else(|| "none".to_owned(), ToString::to_string)
 }
 
-fn condition_name(condition: &Condition) -> &'static str {
-    match condition {
-        Condition::Failed { .. } => "failed",
-        Condition::Uncertain { .. } => "uncertain",
-    }
-}
-
 /// A checkpoint of a unit on a run ref, shown next to the unit's condition
 /// as evidence for `--accept`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -209,7 +201,7 @@ pub fn evidence(unit: &UnitName, desired: Option<&DesiredUnit>, runs: &[RunState
                 .filter(|checkpoint| checkpoint.desired.unit.name == *unit)
                 .map(|checkpoint| {
                     let (result, execution_key) = match &checkpoint.observed.condition {
-                        Some(condition) => (condition_name(condition), checkpoint.desired.execution_key.clone()),
+                        Some(condition) => (condition.name(), checkpoint.desired.execution_key.clone()),
                         None => (
                             "receipt",
                             checkpoint
@@ -236,14 +228,12 @@ pub fn evidence(unit: &UnitName, desired: Option<&DesiredUnit>, runs: &[RunState
 
 #[cfg(test)]
 mod tests {
-    use nyl_core::orchestration::state::{FailureCategory, Operation, Run, RunKind, StateV1};
+    use nyl_core::orchestration::state::{Condition, FailureCategory, Run};
 
     use super::*;
-    use crate::rules::freshness::fixtures::{desired_named, key, observed_named, uid};
-
-    fn dev() -> EnvironmentName {
-        EnvironmentName::new("dev").unwrap()
-    }
+    use crate::rules::fixtures::{
+        desired_numbered, env, hex_key, observed_numbered, run_record, run_state, uid_numbered,
+    };
 
     fn database() -> UnitName {
         UnitName::new("database").unwrap()
@@ -280,41 +270,30 @@ mod tests {
         let artifact: ArtifactDocument = serde_json::from_value(serde_json::json!({
             "apiVersion": "artifacts.gitops.nyl/v1",
             "kind": "ContainerImage",
-            "metadata": {"name": "image", "unit": {"environment": "dev", "name": "database", "uid": uid(uid_number)}},
-            "executionKey": key(key_digit),
+            "metadata": {"name": "image", "unit": {"environment": "dev", "name": "database", "uid": uid_numbered(uid_number)}},
+            "executionKey": hex_key(key_digit),
             "spec": {"reference": "registry.example/web@sha256:1"}
         }))
         .unwrap();
         RunState {
-            run: Run {
-                api_version: StateV1,
-                kind: RunKind,
-                run: run_id(number),
-                runner: "ci".to_owned(),
-                operation: Operation::Reconcile,
-                source_commit: None,
-                read_desired: None,
-                read_observed: None,
-                deadline: "2026-01-01T02:00:00Z".parse().unwrap(),
-                units: Vec::new(),
-                finished: true,
-            },
             checkpoints: vec![Checkpoint {
-                desired: desired_named("database", uid_number, Some(key(key_digit))),
+                desired: desired_numbered("database", uid_number, Some(hex_key(key_digit))),
                 observed,
                 artifacts: BTreeMap::from([("image".to_owned(), artifact)]),
             }],
-            created: Vec::new(),
             version: format!("v{number}"),
-            foreign: false,
+            ..run_state(Run {
+                finished: true,
+                ..run_record(run_id(number).as_str(), "2026-01-01T02:00:00Z".parse().unwrap())
+            })
         }
     }
 
     fn decide_for(observed: &ObservedUnit, action: &RecoverAction, runs: &[RunState]) -> Result<Recovery, Finding> {
         decide(
-            &dev(),
+            &env(),
             &database(),
-            Some(&desired_named("database", 1, Some(key('b')))),
+            Some(&desired_numbered("database", 1, Some(hex_key('b')))),
             Some(observed),
             action,
             runs,
@@ -328,9 +307,9 @@ mod tests {
     #[test]
     fn test_retry_clears_uncertain_and_failed_keeping_the_receipt() {
         for current in [
-            uncertain(observed_named("database", 1, Some(key('a')))),
-            failed(observed_named("database", 1, Some(key('a'))), false),
-            failed(observed_named("database", 1, Some(key('a'))), true),
+            uncertain(observed_numbered("database", 1, Some(hex_key('a')))),
+            failed(observed_numbered("database", 1, Some(hex_key('a'))), false),
+            failed(observed_numbered("database", 1, Some(hex_key('a'))), true),
         ] {
             let recovery = decide_for(&current, &RecoverAction::Retry, &[]).unwrap();
             assert_eq!(recovery.observed.condition, None);
@@ -343,7 +322,7 @@ mod tests {
     /// recover, or treating an unknown unit as recoverable.
     #[test]
     fn test_recover_refuses_without_a_condition_and_for_unknown_units() {
-        let current = observed_named("database", 1, Some(key('a')));
+        let current = observed_numbered("database", 1, Some(hex_key('a')));
         let refusal = decide_for(&current, &RecoverAction::Retry, &[]).unwrap_err();
         assert_eq!(refusal.code, Code::RecoverNothing);
         assert!(refusal.fix.contains("nyl status"), "{}", refusal.fix);
@@ -352,7 +331,7 @@ mod tests {
             decide_for(&current, &accept, &[]).unwrap_err().code,
             Code::RecoverNothing
         );
-        let unknown = decide(&dev(), &database(), None, Some(&current), &RecoverAction::Retry, &[]);
+        let unknown = decide(&env(), &database(), None, Some(&current), &RecoverAction::Retry, &[]);
         assert_eq!(unknown.unwrap_err().code, Code::UnitUnknown);
     }
 
@@ -360,7 +339,7 @@ mod tests {
     /// current one: it does not apply to the new uid.
     #[test]
     fn test_condition_of_another_incarnation_is_not_recoverable() {
-        let former = uncertain(observed_named("database", 9, Some(key('a'))));
+        let former = uncertain(observed_numbered("database", 9, Some(hex_key('a'))));
         assert_eq!(
             decide_for(&former, &RecoverAction::Retry, &[]).unwrap_err().code,
             Code::RecoverNothing
@@ -371,8 +350,8 @@ mod tests {
     /// the unit runs now, or losing its artifacts.
     #[test]
     fn test_accept_adopts_a_matching_checkpoint_with_its_artifacts() {
-        let current = uncertain(observed_named("database", 1, Some(key('a'))));
-        let late = run_ref(2, 1, 'b', observed_named("database", 1, Some(key('b'))));
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
+        let late = run_ref(2, 1, 'b', observed_numbered("database", 1, Some(hex_key('b'))));
         let recovery = decide_for(
             &current,
             &RecoverAction::Accept { run: run_id(2) },
@@ -388,17 +367,17 @@ mod tests {
     /// incarnation, or a run without a receipt of the unit.
     #[test]
     fn test_accept_refuses_a_mismatched_key_and_a_missing_or_failed_checkpoint() {
-        let current = uncertain(observed_named("database", 1, Some(key('a'))));
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
         let accept = RecoverAction::Accept { run: run_id(2) };
-        let other_key = run_ref(2, 1, 'c', observed_named("database", 1, Some(key('c'))));
+        let other_key = run_ref(2, 1, 'c', observed_numbered("database", 1, Some(hex_key('c'))));
         let refusal = decide_for(&current, &accept, &[other_key]).unwrap_err();
         assert_eq!(refusal.code, Code::RecoverKeyMismatch);
         assert!(
-            refusal.message.contains(key('c').as_str()) && refusal.message.contains(key('b').as_str()),
+            refusal.message.contains(hex_key('c').as_str()) && refusal.message.contains(hex_key('b').as_str()),
             "{}",
             refusal.message
         );
-        let other_uid = run_ref(2, 5, 'b', observed_named("database", 5, Some(key('b'))));
+        let other_uid = run_ref(2, 5, 'b', observed_numbered("database", 5, Some(hex_key('b'))));
         assert_eq!(
             decide_for(&current, &accept, &[other_uid]).unwrap_err().code,
             Code::RecoverKeyMismatch
@@ -407,7 +386,7 @@ mod tests {
             decide_for(&current, &accept, &[]).unwrap_err().code,
             Code::RecoverCheckpointMissing
         );
-        let failure = run_ref(2, 1, 'b', failed(observed_named("database", 1, None), true));
+        let failure = run_ref(2, 1, 'b', failed(observed_numbered("database", 1, None), true));
         assert_eq!(
             decide_for(&current, &accept, &[failure]).unwrap_err().code,
             Code::RecoverCheckpointMissing
@@ -419,9 +398,9 @@ mod tests {
     /// checkpoint instead of the newer one.
     #[test]
     fn test_accept_takes_the_last_checkpoint_of_a_run_in_order() {
-        let current = uncertain(observed_named("database", 1, Some(key('a'))));
-        let older = run_ref(2, 1, 'b', failed(observed_named("database", 1, None), true));
-        let newer = run_ref(2, 1, 'b', observed_named("database", 1, Some(key('b'))));
+        let current = uncertain(observed_numbered("database", 1, Some(hex_key('a'))));
+        let older = run_ref(2, 1, 'b', failed(observed_numbered("database", 1, None), true));
+        let newer = run_ref(2, 1, 'b', observed_numbered("database", 1, Some(hex_key('b'))));
         let accept = RecoverAction::Accept { run: run_id(2) };
         assert!(decide_for(&current, &accept, &[older, newer]).is_ok());
     }
@@ -431,11 +410,11 @@ mod tests {
     #[test]
     fn test_evidence_lists_checkpoints_newest_first_with_acceptability() {
         let runs = [
-            run_ref(2, 1, 'c', observed_named("database", 1, Some(key('c')))),
-            run_ref(3, 1, 'b', observed_named("database", 1, Some(key('b')))),
-            run_ref(4, 1, 'b', uncertain(observed_named("database", 1, None))),
+            run_ref(2, 1, 'c', observed_numbered("database", 1, Some(hex_key('c')))),
+            run_ref(3, 1, 'b', observed_numbered("database", 1, Some(hex_key('b')))),
+            run_ref(4, 1, 'b', uncertain(observed_numbered("database", 1, None))),
         ];
-        let desired = desired_named("database", 1, Some(key('b')));
+        let desired = desired_numbered("database", 1, Some(hex_key('b')));
         let found = evidence(&database(), Some(&desired), &runs);
         let summary: Vec<(RunId, &str, bool)> = found
             .iter()

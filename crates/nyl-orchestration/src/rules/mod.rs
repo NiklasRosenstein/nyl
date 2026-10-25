@@ -2,8 +2,9 @@
 //! contracts, links its section, and has its tests.
 
 pub mod desired;
-pub mod environment_groups;
 pub mod execution_key;
+#[cfg(test)]
+mod fixtures;
 pub mod freshness;
 pub mod graph;
 pub mod lease;

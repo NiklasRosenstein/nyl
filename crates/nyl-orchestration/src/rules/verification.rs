@@ -291,31 +291,14 @@ mod tests {
     use nyl_core::orchestration::driver::AttestationOutcome;
 
     use super::*;
-    use crate::rules::freshness::fixtures::{desired_named, key, observed_named};
-
-    fn dev() -> EnvironmentName {
-        EnvironmentName::new("dev").unwrap()
-    }
-
-    fn name(value: &str) -> UnitName {
-        UnitName::new(value).unwrap()
-    }
+    use crate::rules::fixtures::{desired_numbered, env, hex_key, name, observed_numbered};
 
     fn at(minute: u32) -> Timestamp {
         format!("2026-01-01T00:{minute:02}:00Z").parse().unwrap()
     }
 
     fn snapshot() -> EnvironmentSnapshot {
-        let mut snapshot = EnvironmentSnapshot {
-            tips: nyl_core::orchestration::ports::StateTips::default(),
-            record: None,
-            environment: None,
-            desired: BTreeMap::new(),
-            observed: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            observations: BTreeMap::new(),
-            attestations: BTreeMap::new(),
-        };
+        let mut snapshot = EnvironmentSnapshot::default();
         for (unit, desired_key, observed_key) in [
             ("network", 'a', Some('a')),
             ("database", 'b', Some('a')),
@@ -323,10 +306,10 @@ mod tests {
         ] {
             snapshot
                 .desired
-                .insert(name(unit), desired_named(unit, 1, Some(key(desired_key))));
+                .insert(name(unit), desired_numbered(unit, 1, Some(hex_key(desired_key))));
             snapshot
                 .observed
-                .insert(name(unit), observed_named(unit, 1, observed_key.map(key)));
+                .insert(name(unit), observed_numbered(unit, 1, observed_key.map(hex_key)));
         }
         snapshot
     }
@@ -373,11 +356,11 @@ mod tests {
     /// because time moved on, and a changed result not being written.
     #[test]
     fn test_records_keep_stored_documents_that_differ_only_in_time() {
-        let unit = desired_named("network", 1, Some(key('a')));
-        let observed = observed_named("network", 1, Some(key('a')));
+        let unit = desired_numbered("network", 1, Some(hex_key('a')));
+        let observed = observed_numbered("network", 1, Some(hex_key('a')));
         let receipt = observed.receipt.as_ref().unwrap();
         let first = records(
-            &dev(),
+            &env(),
             &unit,
             receipt,
             &verification(Drift::Clean, Some(AttestationResult::Pass)),
@@ -394,7 +377,7 @@ mod tests {
         assert_eq!(first.attestations["healthy"].source, json!({"driver": "verify"}));
 
         let again = records(
-            &dev(),
+            &env(),
             &unit,
             receipt,
             &verification(Drift::Clean, Some(AttestationResult::Pass)),
@@ -404,7 +387,7 @@ mod tests {
         assert_eq!(again, first, "nothing changed but the time");
 
         let drifted = records(
-            &dev(),
+            &env(),
             &unit,
             receipt,
             &verification(
@@ -425,20 +408,20 @@ mod tests {
     /// receipt's set, where it would satisfy a requirement it never checked.
     #[test]
     fn test_settle_drops_documents_of_an_earlier_receipt() {
-        let unit = desired_named("network", 1, Some(key('a')));
-        let old = observed_named("network", 1, Some(key('f')));
+        let unit = desired_numbered("network", 1, Some(hex_key('a')));
+        let old = observed_numbered("network", 1, Some(hex_key('f')));
         let earlier = records(
-            &dev(),
+            &env(),
             &unit,
             old.receipt.as_ref().unwrap(),
             &verification(Drift::Clean, Some(AttestationResult::Pass)),
             at(1),
         );
-        let current = observed_named("network", 1, Some(key('a')));
+        let current = observed_numbered("network", 1, Some(hex_key('a')));
         let receipt = current.receipt.as_ref().unwrap();
         let mut plain = verification(Drift::Clean, None);
         plain.observations.clear();
-        let settled = records(&dev(), &unit, receipt, &plain, at(2)).settle(
+        let settled = records(&env(), &unit, receipt, &plain, at(2)).settle(
             Some(&earlier.observations),
             Some(&earlier.attestations),
             receipt,
@@ -491,7 +474,7 @@ mod tests {
         for (result, attestation, expected) in cases {
             let unit = report(result.clone(), attestation);
             assert_eq!(unit_exit(&unit), expected, "{result:?} {attestation:?}");
-            let codes: Vec<Code> = warnings(&dev(), &name("network"), unit.verification.as_ref().unwrap())
+            let codes: Vec<Code> = warnings(&env(), &name("network"), unit.verification.as_ref().unwrap())
                 .iter()
                 .map(|finding| finding.code)
                 .collect();

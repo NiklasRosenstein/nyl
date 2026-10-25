@@ -27,13 +27,12 @@ use std::collections::BTreeSet;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
-use nyl_core::orchestration::state::{
-    Condition, DesiredUnit, Lease, Lifecycle, ObservedUnit, Readiness, TeardownProgress,
-};
+use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::freshness::receipt_is_current;
-use crate::rules::lease::Holder;
+use crate::rules::lease::{holders, lease_live, run_live};
+use crate::rules::takeover::checkpointed_receipt;
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReceiptState, ReportKind, UnitReport, UnitState};
 
 /// The stable reason of a blocker waiting for a producer's receipt.
@@ -81,22 +80,6 @@ pub fn unit_state(desired: &DesiredUnit, observed: Option<&ObservedUnit>, runnin
     } else {
         UnitState::Ready
     }
-}
-
-/// Whether a lease is still held at `now`: unbroken and before its deadline.
-fn lease_live(lease: &Lease, now: Timestamp) -> bool {
-    lease.broken.is_none() && lease.deadline > now
-}
-
-/// Whether an unfinished run ref is still live at `now`: before its deadline
-/// and not the run of a broken lease, which declares its holder gone.
-fn run_live(coordination: &Coordination, state: &RunState, now: Timestamp) -> bool {
-    let broken = coordination
-        .lease
-        .as_ref()
-        .filter(|held| held.lease.broken.is_some())
-        .map(|held| &held.lease.run);
-    !state.run.finished && state.run.deadline > now && Some(&state.run.run) != broken
 }
 
 /// The units an unfinished run ref names that it has not checkpointed yet.
@@ -199,23 +182,6 @@ fn unimported_runs(coordination: &Coordination) -> Vec<(&RunId, BTreeSet<UnitNam
         .collect()
 }
 
-/// Who holds the environment at `now`: a live lease, and live, unfinished
-/// runs it does not name.
-fn holders(coordination: &Coordination, now: Timestamp) -> Vec<Holder> {
-    let mut holders = Vec::new();
-    let mut lease_run: Option<&RunId> = None;
-    if let Some(held) = coordination.lease.as_ref().filter(|held| lease_live(&held.lease, now)) {
-        lease_run = Some(&held.lease.run);
-        holders.push(Holder::Lease(held.lease.clone()));
-    }
-    for state in &coordination.runs {
-        if run_live(coordination, state, now) && Some(&state.run.run) != lease_run {
-            holders.push(Holder::Run(state.run.clone()));
-        }
-    }
-    holders
-}
-
 /// The runs, on run refs or evidence refs, that checkpointed a receipt of
 /// `observed`'s incarnation: what `nyl recover --accept <run>` may adopt.
 fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) -> Vec<&'c RunId> {
@@ -227,12 +193,7 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
             state.checkpoints.iter().any(|checkpoint| {
                 checkpoint.desired.unit.name == observed.unit.name
                     && checkpoint.desired.unit.uid == observed.unit.uid
-                    && checkpoint.observed.condition.is_none()
-                    && checkpoint
-                        .observed
-                        .receipt
-                        .as_ref()
-                        .is_some_and(|receipt| receipt.run == state.run.run)
+                    && checkpointed_receipt(&state.run.run, checkpoint).is_some()
             })
         })
         .map(|state| &state.run.run)
@@ -377,12 +338,7 @@ pub fn status(
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
         let condition = observed.and_then(|observed| observed.condition.as_ref());
-        unit.last_run = match condition {
-            Some(Condition::Failed { run, .. } | Condition::Uncertain { run, .. }) => Some(run.clone()),
-            None => observed
-                .and_then(|observed| observed.receipt.as_ref())
-                .map(|receipt| receipt.run.clone()),
-        };
+        unit.last_run = observed.and_then(ObservedUnit::last_run).cloned();
         if let Readiness::Blocked { reasons } = &desired.readiness {
             unit.blocked_by = reasons
                 .iter()
@@ -390,10 +346,7 @@ pub fn status(
                 .collect();
         }
         if let Some(condition) = condition {
-            unit.message = Some(match condition {
-                Condition::Failed { message, .. } => message.clone(),
-                Condition::Uncertain { reason, .. } => reason.clone(),
-            });
+            unit.message = Some(condition.message().to_owned());
             if desired.lifecycle == Lifecycle::Active {
                 let accept = observed
                     .map(|observed| acceptable_runs(coordination, observed))
@@ -419,11 +372,14 @@ pub fn status(
 mod tests {
     use std::collections::BTreeMap;
 
-    use nyl_core::orchestration::ports::{HeldLease, RunState};
+    use nyl_core::orchestration::ports::{Checkpoint, HeldLease};
+    use nyl_core::orchestration::state::{Lease, Run};
     use serde_json::json;
 
     use super::*;
-    use crate::rules::freshness::fixtures::{desired, desired_named, key, observed, observed_named, RUN};
+    use crate::rules::fixtures::{
+        desired_numbered, hex_key, lease_record, name, observed_numbered, run_record, run_state, RUN,
+    };
     use crate::run_report::ExitCategory;
 
     fn condition(value: serde_json::Value) -> Condition {
@@ -441,17 +397,23 @@ mod tests {
     /// stale when there is none.
     #[test]
     fn test_receipt_state_is_current_stale_or_none() {
-        let current = desired(1, Some(key('a')));
+        let current = desired_numbered("network", 1, Some(hex_key('a')));
         assert_eq!(
-            receipt_state(Some(&current), Some(&observed(1, Some(key('a'))))),
+            receipt_state(
+                Some(&current),
+                Some(&observed_numbered("network", 1, Some(hex_key('a'))))
+            ),
             ReceiptState::Current
         );
         assert_eq!(
-            receipt_state(Some(&current), Some(&observed(1, Some(key('b'))))),
+            receipt_state(
+                Some(&current),
+                Some(&observed_numbered("network", 1, Some(hex_key('b'))))
+            ),
             ReceiptState::Stale
         );
         assert_eq!(
-            receipt_state(Some(&current), Some(&observed(1, None))),
+            receipt_state(Some(&current), Some(&observed_numbered("network", 1, None))),
             ReceiptState::None
         );
         assert_eq!(receipt_state(Some(&current), None), ReceiptState::None);
@@ -461,13 +423,13 @@ mod tests {
     /// reported as current because an older receipt still matches.
     #[test]
     fn test_unit_state_follows_the_priority_order() {
-        let current = desired(1, Some(key('a')));
-        let mut failing = observed(1, Some(key('a')));
+        let current = desired_numbered("network", 1, Some(hex_key('a')));
+        let mut failing = observed_numbered("network", 1, Some(hex_key('a')));
         failing.condition = Some(failed(true));
         assert_eq!(unit_state(&current, Some(&failing), true), UnitState::Running);
         assert_eq!(unit_state(&current, Some(&failing), false), UnitState::Failed);
 
-        let mut uncertain = observed(1, Some(key('a')));
+        let mut uncertain = observed_numbered("network", 1, Some(hex_key('a')));
         uncertain.condition = Some(condition(json!({
             "state": "uncertain", "since": "2026-01-01T00:00:00Z", "run": RUN, "reason": "lost its lease"
         })));
@@ -505,20 +467,71 @@ mod tests {
         .unwrap();
         assert_eq!(unit_state(&retained, None, false), UnitState::Retained);
 
-        let mut blocked = desired(1, None);
+        let mut blocked = desired_numbered("network", 1, None);
         blocked.readiness = Readiness::Blocked { reasons: Vec::new() };
         assert_eq!(
-            unit_state(&blocked, Some(&observed(1, Some(key('a')))), false),
+            unit_state(
+                &blocked,
+                Some(&observed_numbered("network", 1, Some(hex_key('a')))),
+                false
+            ),
             UnitState::Blocked
         );
         assert_eq!(
-            unit_state(&current, Some(&observed(1, Some(key('a')))), false),
+            unit_state(
+                &current,
+                Some(&observed_numbered("network", 1, Some(hex_key('a')))),
+                false
+            ),
             UnitState::Current
         );
         assert_eq!(
-            unit_state(&current, Some(&observed(1, Some(key('b')))), false),
+            unit_state(
+                &current,
+                Some(&observed_numbered("network", 1, Some(hex_key('b')))),
+                false
+            ),
             UnitState::Ready
         );
+    }
+
+    /// Units of the given names and incarnations, each with a current receipt.
+    fn snapshot(units: &[(&str, u64)]) -> EnvironmentSnapshot {
+        EnvironmentSnapshot {
+            desired: units
+                .iter()
+                .map(|(unit, uid)| (name(unit), desired_numbered(unit, *uid, Some(hex_key('a')))))
+                .collect(),
+            observed: units
+                .iter()
+                .map(|(unit, uid)| (name(unit), observed_numbered(unit, *uid, Some(hex_key('a')))))
+                .collect(),
+            ..EnvironmentSnapshot::default()
+        }
+    }
+
+    /// A time on 2026-01-01, as `HH:MM`.
+    fn at(time: &str) -> Timestamp {
+        format!("2026-01-01T{time}:00Z").parse().unwrap()
+    }
+
+    fn held(lease: Lease) -> HeldLease {
+        HeldLease {
+            lease,
+            version: "1".to_owned(),
+        }
+    }
+
+    /// Run [`RUN`]'s record, due at 01:00, naming `units`.
+    fn run_naming(units: &[&str]) -> Run {
+        Run {
+            units: units.iter().map(|unit| name(unit)).collect(),
+            ..run_record(RUN, at("01:00"))
+        }
+    }
+
+    fn status_at(snapshot: &EnvironmentSnapshot, coordination: &Coordination, now: Timestamp) -> EnvironmentRunReport {
+        status(&EnvironmentName::new("dev").unwrap(), snapshot, coordination, now)
     }
 
     /// Catches status losing what the operator needs next: the blocker's
@@ -526,55 +539,33 @@ mod tests {
     /// and status exiting 0 while units are not current.
     #[test]
     fn test_status_reports_blockers_suggestions_and_the_holder() {
-        let mut blocked = desired_named("database", 2, None);
+        let mut snapshot = snapshot(&[("network", 1), ("web", 3)]);
+        let mut blocked = desired_numbered("database", 2, None);
         blocked.readiness = serde_json::from_value(json!({
             "state": "blocked",
             "reasons": [{"pointer": "/values/vpc", "reason": "network has no current receipt"}]
         }))
         .unwrap();
-        let mut failing = observed_named("web", 3, Some(key('a')));
-        failing.condition = Some(failed(false));
-        let snapshot = EnvironmentSnapshot {
-            desired: BTreeMap::from([
-                (UnitName::new("network").unwrap(), desired(1, Some(key('a')))),
-                (UnitName::new("database").unwrap(), blocked),
-                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
-            ]),
-            observed: BTreeMap::from([
-                (UnitName::new("network").unwrap(), observed(1, Some(key('a')))),
-                (UnitName::new("web").unwrap(), failing),
-            ]),
-            ..EnvironmentSnapshot::default()
-        };
-        let lease = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN, "runner": "ci",
-            "operation": "reconcile", "units": ["network"],
-            "deadline": "2026-01-01T01:00:00Z", "takenAt": "2026-01-01T00:00:00Z"
-        }))
-        .unwrap();
+        snapshot.desired.insert(name("database"), blocked);
+        snapshot.observed.get_mut(&name("web")).unwrap().condition = Some(failed(false));
         let coordination = Coordination {
-            lease: Some(HeldLease {
-                lease,
-                version: "1".to_owned(),
-            }),
-            runs: Vec::<RunState>::new(),
+            lease: Some(held(Lease {
+                units: vec![name("network")],
+                ..lease_record(RUN, at("01:00"))
+            })),
+            runs: Vec::new(),
             evidence: Vec::new(),
         };
-        let report = status(
-            &EnvironmentName::new("dev").unwrap(),
-            &snapshot,
-            &coordination,
-            Timestamp::UNIX_EPOCH,
-        );
+        let report = status_at(&snapshot, &coordination, Timestamp::UNIX_EPOCH);
 
-        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        let unit = |unit: &str| &report.units[&name(unit)];
         assert_eq!(unit("network").state, Some(UnitState::Running));
         assert_eq!(unit("database").state, Some(UnitState::Blocked));
         assert_eq!(
             unit("database").blocked_by,
             [BlockedBy {
                 pointer: "/values/vpc".to_owned(),
-                unit: Some(UnitName::new("network").unwrap()),
+                unit: Some(name("network")),
                 reason: NO_CURRENT_RECEIPT.to_owned(),
             }]
         );
@@ -598,53 +589,19 @@ mod tests {
     /// units need recovery.
     #[test]
     fn test_status_reports_a_broken_lease_as_lost_not_running() {
-        let snapshot = EnvironmentSnapshot {
-            desired: BTreeMap::from([
-                (UnitName::new("network").unwrap(), desired(1, Some(key('a')))),
-                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
-            ]),
-            observed: BTreeMap::from([
-                (UnitName::new("network").unwrap(), observed(1, Some(key('a')))),
-                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
-            ]),
-            ..EnvironmentSnapshot::default()
-        };
-        let lease = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": RUN, "runner": "ci",
-            "operation": "reconcile", "units": [],
-            "deadline": "2026-01-01T01:00:00Z", "takenAt": "2026-01-01T00:00:00Z",
-            "broken": {"by": "alice", "at": "2026-01-01T00:10:00Z"}
-        }))
-        .unwrap();
-        let run = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": RUN, "runner": "ci",
-            "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["web"]
-        }))
-        .unwrap();
+        let snapshot = snapshot(&[("network", 1), ("web", 3)]);
         let coordination = Coordination {
-            lease: Some(HeldLease {
-                lease,
-                version: "1".to_owned(),
-            }),
-            runs: vec![RunState {
-                run,
-                checkpoints: Vec::new(),
-                created: Vec::new(),
-                foreign: false,
-                version: "r1".to_owned(),
-            }],
+            lease: Some(held(Lease {
+                broken: Some(serde_json::from_value(json!({"by": "alice", "at": "2026-01-01T00:10:00Z"})).unwrap()),
+                ..lease_record(RUN, at("01:00"))
+            })),
+            runs: vec![run_state(run_naming(&["web"]))],
             evidence: Vec::new(),
         };
-        let report = status(
-            &EnvironmentName::new("dev").unwrap(),
-            &snapshot,
-            &coordination,
-            Timestamp::UNIX_EPOCH,
-        );
+        let report = status_at(&snapshot, &coordination, Timestamp::UNIX_EPOCH);
 
-        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
-        assert_eq!(unit("web").state, Some(UnitState::Uncertain));
-        assert_eq!(unit("network").state, Some(UnitState::Current));
+        assert_eq!(report.units[&name("web")].state, Some(UnitState::Uncertain));
+        assert_eq!(report.units[&name("network")].state, Some(UnitState::Current));
         assert!(
             report.warnings.iter().all(|warning| warning.code != Code::LeaseHeld),
             "{:?}",
@@ -658,16 +615,8 @@ mod tests {
         let mut finished = coordination.clone();
         finished.runs[0].run.finished = true;
         finished.runs[0].run.units.clear();
-        let report = status(
-            &EnvironmentName::new("dev").unwrap(),
-            &snapshot,
-            &finished,
-            Timestamp::UNIX_EPOCH,
-        );
-        assert_eq!(
-            report.units[&UnitName::new("web").unwrap()].state,
-            Some(UnitState::Current)
-        );
+        let report = status_at(&snapshot, &finished, Timestamp::UNIX_EPOCH);
+        assert_eq!(report.units[&name("web")].state, Some(UnitState::Current));
         assert!(report.errors.is_empty());
         assert_eq!(codes(&report.warnings), [Code::RunUnimported]);
         assert_eq!(report.exit, ExitCategory::Ok);
@@ -679,52 +628,29 @@ mod tests {
     /// without recording an outcome (still named by its finished record).
     #[test]
     fn test_status_reports_units_an_unimported_run_left_uncertain() {
-        let snapshot = EnvironmentSnapshot {
-            desired: BTreeMap::from([
-                (UnitName::new("network").unwrap(), desired(1, Some(key('a')))),
-                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
-                (UnitName::new("db").unwrap(), desired_named("db", 4, Some(key('a')))),
-            ]),
-            observed: BTreeMap::from([
-                (UnitName::new("network").unwrap(), observed(1, Some(key('a')))),
-                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
-                (UnitName::new("db").unwrap(), observed_named("db", 4, Some(key('a')))),
-            ]),
-            ..EnvironmentSnapshot::default()
-        };
-        let mut cancelled = observed_named("web", 3, Some(key('a')));
+        let snapshot = snapshot(&[("network", 1), ("web", 3), ("db", 4)]);
+        let mut cancelled = observed_numbered("web", 3, Some(hex_key('a')));
         cancelled.condition = Some(condition(json!({
             "state": "uncertain", "since": "2026-01-01T00:00:00Z", "run": RUN, "reason": "cancelled"
         })));
-        let run = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": RUN, "runner": "ci",
-            "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["db"],
-            "finished": true
-        }))
-        .unwrap();
         let coordination = Coordination {
             lease: None,
             runs: vec![RunState {
-                run,
-                checkpoints: vec![nyl_core::orchestration::ports::Checkpoint {
-                    desired: desired_named("web", 3, Some(key('a'))),
+                checkpoints: vec![Checkpoint {
+                    desired: desired_numbered("web", 3, Some(hex_key('a'))),
                     observed: cancelled,
                     artifacts: BTreeMap::new(),
                 }],
-                created: Vec::new(),
-                foreign: false,
-                version: "r1".to_owned(),
+                ..run_state(Run {
+                    finished: true,
+                    ..run_naming(&["db"])
+                })
             }],
             evidence: Vec::new(),
         };
-        let report = status(
-            &EnvironmentName::new("dev").unwrap(),
-            &snapshot,
-            &coordination,
-            Timestamp::UNIX_EPOCH,
-        );
+        let report = status_at(&snapshot, &coordination, Timestamp::UNIX_EPOCH);
 
-        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        let unit = |unit: &str| &report.units[&name(unit)];
         assert_eq!(unit("web").state, Some(UnitState::Uncertain));
         assert_eq!(unit("db").state, Some(UnitState::Uncertain));
         assert_eq!(unit("network").state, Some(UnitState::Current));
@@ -743,70 +669,35 @@ mod tests {
     /// `--accept` for a checkpointed receipt on an evidence ref.
     #[test]
     fn test_status_reports_an_expired_lease_as_lost_and_names_recover() {
-        let mut uncertain = observed_named("database", 2, Some(key('a')));
-        uncertain.condition = Some(condition(json!({
+        let mut snapshot = snapshot(&[("database", 2), ("web", 3)]);
+        snapshot.observed.get_mut(&name("database")).unwrap().condition = Some(condition(json!({
             "state": "uncertain", "since": "2026-01-01T03:00:00Z", "run": RUN, "reason": "superseded"
         })));
-        let snapshot = EnvironmentSnapshot {
-            desired: BTreeMap::from([
-                (
-                    UnitName::new("database").unwrap(),
-                    desired_named("database", 2, Some(key('a'))),
-                ),
-                (UnitName::new("web").unwrap(), desired_named("web", 3, Some(key('a')))),
-            ]),
-            observed: BTreeMap::from([
-                (UnitName::new("database").unwrap(), uncertain),
-                (UnitName::new("web").unwrap(), observed_named("web", 3, Some(key('a')))),
-            ]),
-            ..EnvironmentSnapshot::default()
-        };
         let dead = "00000000-0000-7000-8000-00000000000b";
-        let lease = serde_json::from_value(json!({
-            "apiVersion": "gitops.nyl/v1", "kind": "Lease", "run": dead, "runner": "ci",
-            "operation": "reconcile", "units": ["web"],
-            "deadline": "2026-01-01T01:00:00Z", "takenAt": "2026-01-01T00:00:00Z"
-        }))
-        .unwrap();
-        let run = |id: &str| -> nyl_core::orchestration::state::Run {
-            serde_json::from_value(json!({
-                "apiVersion": "gitops.nyl/v1", "kind": "Run", "run": id, "runner": "ci",
-                "operation": "reconcile", "deadline": "2026-01-01T01:00:00Z", "units": ["web"]
-            }))
-            .unwrap()
-        };
-        let checkpoint = nyl_core::orchestration::ports::Checkpoint {
-            desired: desired_named("database", 2, Some(key('a'))),
-            observed: observed_named("database", 2, Some(key('a'))),
-            artifacts: BTreeMap::new(),
-        };
         let coordination = Coordination {
-            lease: Some(HeldLease {
-                lease,
-                version: "1".to_owned(),
-            }),
-            runs: vec![RunState {
-                run: run(dead),
-                checkpoints: Vec::new(),
-                created: Vec::new(),
-                foreign: false,
-                version: "r1".to_owned(),
-            }],
+            lease: Some(held(Lease {
+                units: vec![name("web")],
+                ..lease_record(dead, at("01:00"))
+            })),
+            runs: vec![run_state(Run {
+                run: RunId::new(dead).unwrap(),
+                ..run_naming(&["web"])
+            })],
             evidence: vec![RunState {
-                run: nyl_core::orchestration::state::Run {
+                checkpoints: vec![Checkpoint {
+                    desired: desired_numbered("database", 2, Some(hex_key('a'))),
+                    observed: observed_numbered("database", 2, Some(hex_key('a'))),
+                    artifacts: BTreeMap::new(),
+                }],
+                ..run_state(Run {
                     finished: true,
-                    ..run(RUN)
-                },
-                checkpoints: vec![checkpoint],
-                created: Vec::new(),
-                foreign: false,
-                version: "e1".to_owned(),
+                    ..run_naming(&["web"])
+                })
             }],
         };
-        let now = "2026-01-01T02:00:00Z".parse().unwrap();
-        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination, now);
+        let report = status_at(&snapshot, &coordination, at("02:00"));
 
-        let unit = |name: &str| &report.units[&UnitName::new(name).unwrap()];
+        let unit = |unit: &str| &report.units[&name(unit)];
         assert_eq!(unit("web").state, Some(UnitState::Uncertain));
         assert_eq!(codes(&report.errors), [Code::LeaseLost]);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
@@ -827,12 +718,8 @@ mod tests {
         assert_eq!(report.exit, ExitCategory::Uncertain);
 
         // Before the deadline the same run holds the environment and runs web.
-        let early = "2026-01-01T00:30:00Z".parse().unwrap();
-        let report = status(&EnvironmentName::new("dev").unwrap(), &snapshot, &coordination, early);
-        assert_eq!(
-            report.units[&UnitName::new("web").unwrap()].state,
-            Some(UnitState::Running)
-        );
+        let report = status_at(&snapshot, &coordination, at("00:30"));
+        assert_eq!(report.units[&name("web")].state, Some(UnitState::Running));
         assert!(report.errors.is_empty());
     }
 
