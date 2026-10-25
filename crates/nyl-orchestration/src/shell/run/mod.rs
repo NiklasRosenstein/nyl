@@ -966,8 +966,11 @@ enum Ending {
     /// Release the lease and delete the run ref.
     Release,
     /// Keep the run ref, marked finished, for the next run to import;
-    /// release the lease when it is still this run's.
-    KeepRun { release: bool },
+    /// release the lease when it is still this run's. `unrecorded` names
+    /// the units that ran but whose checkpoint did not reach the run ref:
+    /// the record keeps them as started, so the run taking over gives them
+    /// an `uncertain` condition instead of losing their effects.
+    KeepRun { release: bool, unrecorded: Vec<UnitName> },
     /// A fault killed the run: write nothing more.
     Killed,
     /// SIGINT or SIGTERM: keep the run ref, marked finished, once a
@@ -1122,7 +1125,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             Err(StateError::LeaseLost) => {
                 self.report.errors.push(lease::lost(self.environment()));
-                return Err(Ending::KeepRun { release: false });
+                return Err(Ending::KeepRun {
+                    release: false,
+                    unrecorded: Vec::new(),
+                });
             }
             Err(error) => {
                 let finding = store_error(self.environment(), &error);
@@ -1144,7 +1150,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
     /// run ref once a checkpoint is on it, else it deletes it.
     fn failed(&self) -> Ending {
         if self.checkpointed {
-            Ending::KeepRun { release: true }
+            Ending::KeepRun {
+                release: true,
+                unrecorded: Vec::new(),
+            }
         } else {
             Ending::Release
         }
@@ -1356,7 +1365,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 let results = execute_batch(
                     session, &prepared, &resolved, &observed, &artifacts, &batch, &self.run, &snapshot, &approvals,
                 );
-                for execution in results {
+                let mut results = results.into_iter();
+                while let Some(execution) = results.next() {
                     let name = execution.name.clone();
                     attempted.insert(name.clone());
                     if execution.killed {
@@ -1379,7 +1389,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
                             self.report.errors.push(finding);
-                            return Ending::KeepRun { release: true };
+                            // This unit and the later ones of the batch ran,
+                            // but no checkpoint of theirs is on the run ref.
+                            let unrecorded = std::iter::once(name)
+                                .chain(
+                                    results
+                                        .filter(|execution| execution.checkpoint.is_some())
+                                        .map(|execution| execution.name),
+                                )
+                                .collect();
+                            return Ending::KeepRun {
+                                release: true,
+                                unrecorded,
+                            };
                         }
                     }
                     if matches!(execution.result, UnitResult::Recovered { .. }) {
@@ -1549,7 +1571,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             Err(StateError::LeaseLost) => {
                 self.report.errors.push(lease::lost(&environment));
-                Ending::KeepRun { release: false }
+                Ending::KeepRun {
+                    release: false,
+                    unrecorded: Vec::new(),
+                }
             }
             Err(error) => {
                 self.report.errors.push(store_error(&environment, &error));
@@ -1648,9 +1673,9 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
                 (true, false)
             }
-            Ending::KeepRun { release } => {
+            Ending::KeepRun { release, unrecorded } => {
                 self.record.finished = true;
-                self.record.units.clear();
+                self.record.units.clone_from(unrecorded);
                 if let Err(error) = self.write_run(None) {
                     let finding = store_error(self.environment(), &error);
                     self.report.warnings.push(finding);

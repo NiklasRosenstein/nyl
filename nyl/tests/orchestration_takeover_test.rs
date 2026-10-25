@@ -34,6 +34,7 @@ use nyl_orchestration::run_report::{EnvironmentRunReport, RunReport};
 use nyl_orchestration::shell::local::{LeaseScope, LocalRun};
 use nyl_orchestration::shell::run::{self, Cancellation, RunContext, RunRequest};
 use nyl_orchestration::shell::state::{self as state_ops, Requested};
+use nyl_orchestration::shell::verify;
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
 use nyl_render::gitops::units::UnitSourceRenderer;
@@ -239,6 +240,10 @@ impl Harness {
     }
 
     fn run(&self, job: &Job) -> RunReport {
+        self.run_with(job, run::reconcile)
+    }
+
+    fn run_with(&self, job: &Job, operation: fn(&RunContext<'_>, &RunRequest) -> RunReport) -> RunReport {
         let base = self.context();
         // Running tools receive the run's cancelling signal.
         let tools = ProcessRunner::new().cancelled_by(job.request.cancellation.shared());
@@ -252,7 +257,12 @@ impl Harness {
             process_env: &self.process_env,
             commit_identity: Some(&self.identity),
         };
-        run::reconcile(&context, &job.request)
+        operation(&context, &job.request)
+    }
+
+    fn verify(&self) -> EnvironmentRunReport {
+        let job = self.job(&[], Cancellation::default());
+        self.run_with(&job, verify::verify).environments.remove(0)
     }
 
     fn reconcile_with(&self, units: &[&str], cancellation: Cancellation) -> EnvironmentRunReport {
@@ -359,6 +369,8 @@ type Interleaved = Box<dyn FnOnce(&MemoryStateStore) + Send>;
 struct FailingDeleteStore {
     inner: MemoryStateStore,
     failures: Arc<AtomicUsize>,
+    /// How many of the next checkpoint writes fail.
+    checkpoint_failures: Arc<AtomicUsize>,
     before_commit: Arc<Mutex<Option<Interleaved>>>,
 }
 
@@ -405,6 +417,14 @@ impl StateStore for FailingDeleteStore {
         run: &Run,
         checkpoint: Option<&Checkpoint>,
     ) -> StateResult<()> {
+        let failing = checkpoint.is_some()
+            && self
+                .checkpoint_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+                .is_ok();
+        if failing {
+            return Err(StateError::Unavailable("push failed: connection reset".to_owned()));
+        }
         self.inner.write_run(location, environment, run, checkpoint)
     }
     fn delete_run(&self, location: &StateLocation, environment: &EnvironmentName, run: &RunId) -> StateResult<()> {
@@ -494,6 +514,7 @@ fn test_takeover_is_idempotent_when_a_leftover_is_read_again() {
     harness.store = Box::new(FailingDeleteStore {
         inner: MemoryStateStore::new(),
         failures: failures.clone(),
+        checkpoint_failures: Arc::default(),
         before_commit: Arc::default(),
     });
     let dead = crashed_after_database(&mut harness);
@@ -538,6 +559,7 @@ fn test_takeover_keeps_a_run_ref_that_checkpointed_after_it_was_read() {
     harness.store = Box::new(FailingDeleteStore {
         inner: MemoryStateStore::new(),
         failures: Arc::new(AtomicUsize::new(0)),
+        checkpoint_failures: Arc::default(),
         before_commit: before_commit.clone(),
     });
     let dead = crashed_after_database(&mut harness);
@@ -587,6 +609,113 @@ fn test_takeover_keeps_a_run_ref_that_checkpointed_after_it_was_read() {
         [&dead],
         "the late checkpoint is kept as evidence"
     );
+}
+
+/// A unit's checkpoint write fails after its effects ran: the run keeps its
+/// run ref, marked finished, with the units of the batch whose checkpoint
+/// did not reach it recorded as started, so the next run gives them an
+/// `uncertain` condition and recovers them instead of running them again as
+/// if nothing had happened.
+#[test]
+fn test_a_failed_checkpoint_write_leaves_the_unit_uncertain_for_the_next_run() {
+    let mut harness = Harness::new(&shared_project(), false);
+    let checkpoint_failures = Arc::new(AtomicUsize::new(1));
+    harness.store = Box::new(FailingDeleteStore {
+        inner: MemoryStateStore::new(),
+        failures: Arc::default(),
+        checkpoint_failures: checkpoint_failures.clone(),
+        before_commit: Arc::default(),
+    });
+    harness.init();
+    let failed = harness.reconcile(&[]);
+    assert_eq!(codes(&failed.errors), [Code::StateUnavailable], "{failed:#?}");
+    assert!(failed.commits.is_empty(), "{failed:#?}");
+    let coordination = harness.coordination();
+    assert!(coordination.lease.is_none(), "the lease is released: {coordination:#?}");
+    let [kept] = coordination.runs.as_slice() else {
+        panic!("the run ref is kept: {coordination:#?}");
+    };
+    assert!(kept.run.finished);
+    let unrecorded = names(&kept.run.units);
+    assert!(
+        !unrecorded.is_empty(),
+        "the unit without a checkpoint is recorded as started"
+    );
+    for unit in &kept.run.units {
+        assert!(
+            kept.checkpoints
+                .iter()
+                .all(|checkpoint| &checkpoint.desired.unit.name != unit),
+            "{unit} has no checkpoint"
+        );
+    }
+
+    let next = harness.reconcile(&[]);
+    assert_eq!(next.exit.code(), 0, "{next:#?}");
+    assert_eq!(names(&next.recovered), unrecorded, "{next:#?}");
+    assert!(harness.coordination().runs.is_empty());
+}
+
+/// "Runs and leases" item 8: an operation that takes over a broken lease
+/// without consuming the broken run's ref (here `verify`) puts the break
+/// back when it releases, so the next reconcile still takes the run over at
+/// once, before its deadline, and records the break in its commit.
+#[test]
+fn test_a_lease_break_survives_an_operation_that_does_not_take_the_run_over() {
+    let mut harness = Harness::new(&shared_project(), true);
+    harness.init();
+    let first = harness.reconcile(&[]);
+    assert_eq!(first.exit.code(), 0, "{first:#?}");
+    let steps = TempDir::new().unwrap();
+    let patch = steps.path().join("web-page/services/web");
+    std::fs::create_dir_all(&patch).unwrap();
+    std::fs::write(patch.join("index.html"), "<h1>Changed</h1>\n").unwrap();
+    harness.world.commit(
+        &CommitStep {
+            branch: "main".to_owned(),
+            message: "Change the web page".to_owned(),
+            apply: Some("web-page".to_owned()),
+            delete: Vec::new(),
+        },
+        steps.path(),
+    );
+    // The run dies while executing web-image, its run ref live for an hour.
+    harness.faults = Box::new(KillOnce::new(FaultPoint::AfterEffect, "web-image"));
+    let dead = harness.reconcile(&[]).run.unwrap();
+    let broken = state_ops::break_lease(
+        &harness.context(),
+        &dev(),
+        &harness.location,
+        Some("runner lost".to_owned()),
+    );
+    assert_eq!(broken.exit, 0, "{broken:?}");
+
+    let verified = harness.verify();
+    assert!(verified.run.is_some(), "verify took the lease: {verified:#?}");
+    assert!(!codes(&verified.errors).contains(&Code::LeaseHeld), "{verified:#?}");
+    let lease = harness
+        .coordination()
+        .lease
+        .expect("the broken lease is put back")
+        .lease;
+    assert_eq!(lease.run, dead);
+    assert_eq!(
+        lease.broken.map(|request| request.reason),
+        Some(Some("runner lost".to_owned()))
+    );
+
+    let takeover = harness.reconcile(&[]);
+    assert_eq!(takeover.exit.code(), 0, "{takeover:#?}");
+    assert_eq!(names(&takeover.recovered), set(&["web-image"]), "{takeover:#?}");
+    let message = git_output(
+        &harness.world.bare(),
+        &["log", "-1", "--format=%B", "refs/heads/nyl/dev/observed"],
+    );
+    assert!(
+        message.contains("\nleaseBroken: {") && message.contains("runner lost"),
+        "{message}"
+    );
+    assert!(harness.coordination().lease.is_none());
 }
 
 /// A crashed run created and started a unit that the next run no longer

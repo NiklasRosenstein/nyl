@@ -37,7 +37,8 @@ pub struct Wiring<'a> {
     /// shell admits only `PATH` and each unit's declared passthrough from it.
     pub process_env: BTreeMap<String, String>,
     /// Set by the command line's SIGINT/SIGTERM handler for `reconcile`,
-    /// `verify`, and `recover` ("Runs and leases" item 7); `tools` forwards
+    /// `verify`, `recover`, and the state operations ("Runs and leases"
+    /// item 7); `tools` forwards
     /// it to running tools. Never set elsewhere.
     pub cancellation: Cancellation,
 }

@@ -136,8 +136,11 @@ nyl lease break -e dev --reason "runner was killed"
 Declares the lease holder gone, for example after a forced kill. The holder is
 the lease, or a live run whose lease ref is already gone. The next run
 takes over at once instead of waiting for the lease's deadline, and records
-who broke the lease and why in its transition commit. A holder that is in fact
-still running can still cause effects, but it can no longer write state.
+who broke the lease and why in its transition commit. The break stays in effect
+until a `reconcile` takes the broken run over: `verify`, `recover`, and the
+state operations, which do not, put the broken lease back when they finish. A
+holder that is in fact still running can still cause effects, but it can no
+longer write state.
 
 ## Options and exit codes
 

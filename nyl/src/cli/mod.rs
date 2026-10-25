@@ -185,11 +185,13 @@ impl Cli {
 
     /// Whether the command cancels on SIGINT and SIGTERM ("Runs and leases"
     /// item 7): the commands that take the lease to execute, verify, or
-    /// recover units. Other commands keep the default disposition.
+    /// recover units, and the state operations, whose `--wait-lease` a
+    /// signal stops. `lease break` waits for nothing; other commands keep the
+    /// default disposition.
     fn cancels_on_signal(&self) -> bool {
         matches!(
             self.command,
-            Commands::Reconcile(_) | Commands::Verify(_) | Commands::Recover(_)
+            Commands::Reconcile(_) | Commands::Verify(_) | Commands::Recover(_) | Commands::State(_)
         )
     }
 

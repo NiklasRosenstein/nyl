@@ -151,13 +151,17 @@ pub enum LeaseCommand {
 /// Run a `nyl state` command in-process with `wiring`.
 pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        StateCommand::Init { common, fresh } => run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
-            state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested(common))
-        }),
+        StateCommand::Init { common, fresh } => {
+            let requested = requested(common, wiring);
+            run(common, wiring, Operation::StateInit.as_str(), None, |ctx| {
+                state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
+            })
+        }
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
+            let requested = requested(common, wiring);
             run(common, wiring, Operation::StateForget.as_str(), None, |ctx| {
-                state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested(common))
+                state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested)
             })
         }
         StateCommand::Reset {
@@ -177,8 +181,9 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                     "--to {to:?} is not a full commit ID, as `git log` of the state ref prints it: {error}"
                 ))
             })?;
+            let requested = requested(common, wiring);
             run(common, wiring, Operation::StateRestore.as_str(), None, |ctx| {
-                state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested(common))
+                state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested)
             })
         }
         StateCommand::Move {
@@ -222,6 +227,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             let extra = from
                 .as_ref()
                 .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
+            let requested = requested(common, wiring);
             run(common, wiring, Operation::StateMove.as_str(), extra, |ctx| {
                 let location = ctx.location;
                 let mut old = location.clone();
@@ -240,7 +246,7 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 if let Some(prefix) = coordination_refs {
                     old.coordination_ref_prefix.clone_from(prefix);
                 }
-                state::relocate(ctx.context, &ctx.environment, location, &old, &requested(common))
+                state::relocate(ctx.context, &ctx.environment, location, &old, &requested)
             })
         }
     }
@@ -270,11 +276,14 @@ fn discard_option(units: &[String], all: bool) -> Result<Option<Discard>> {
     Ok(Some(Discard::Units(units)))
 }
 
-fn requested(common: &Common) -> Requested {
+/// The request of a state operation: SIGINT or SIGTERM stops its
+/// `--wait-lease` ("Runs and leases" item 7); once it holds the lease it
+/// finishes its single commit.
+fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
     Requested {
         reason: common.reason.clone(),
         wait: common.wait_lease,
-        cancellation: nyl_orchestration::shell::run::Cancellation::default(),
+        cancellation: wiring.cancellation.clone(),
     }
 }
 

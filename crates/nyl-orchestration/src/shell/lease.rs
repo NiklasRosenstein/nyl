@@ -126,7 +126,31 @@ pub fn deadline(context: &Context<'_>, now: Timestamp, phase: Duration) -> Times
 
 /// Release a lease this run holds. A lease that was taken over meanwhile is
 /// not this run's to release.
+///
+/// A broken lease declares its holder gone only while it exists
+/// (`rules::lease`). When this run took over a broken lease and the broken
+/// run's ref is still on the remote, unconsumed, the break is put back by
+/// compare-and-swap from this run's lease version instead of deleting the
+/// lease ref: it keeps the original request and names the original run, so
+/// the next run still takes over at once and records the break ("Runs and
+/// leases" item 8).
 pub fn release(context: &Context<'_>, held: &HeldLease) -> Result<(), StateError> {
+    if let Some(broken) = held.replaced.as_ref().filter(|lease| lease.broken.is_some()) {
+        let coordination = context.store.coordination(&held.location, &held.environment)?;
+        let pending = coordination
+            .runs
+            .iter()
+            .any(|state| !state.foreign && state.run.run == broken.run && !state.run.finished);
+        if pending {
+            return match context
+                .store
+                .take_lease(&held.location, &held.environment, broken, Some(&held.version))
+            {
+                Ok(_) | Err(StateError::LeaseRace | StateError::LeaseLost) => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+    }
     match context
         .store
         .release_lease(&held.location, &held.environment, &held.version)

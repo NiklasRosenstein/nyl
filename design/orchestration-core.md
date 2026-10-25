@@ -1662,7 +1662,11 @@ check. They sit under `coordinationRefPrefix`, shown here with its default:
    units the holder was executing become `uncertain`. The command warns that
    a holder that is in fact alive may still be causing effects; the fenced
    final push keeps it from overwriting state either way. The break is
-   recorded in the next transition commit with who broke it and why.
+   recorded in the next transition commit with who broke it and why. An
+   operation that takes over a broken lease without consuming the broken
+   run's ref, such as `verify`, `recover`, a state operation, or a reconcile
+   that ends before its final push, puts the broken lease back when it
+   releases, so the break stays in effect until a run takes the run ref over.
 
 `nyl status` reads the lease and run refs, so it shows a run in progress and
 the units it is executing.

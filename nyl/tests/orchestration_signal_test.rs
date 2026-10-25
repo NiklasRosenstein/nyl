@@ -113,3 +113,84 @@ fn test_reconcile_on_sigterm_keeps_its_run_ref_and_releases_the_lease() {
         "{report:#}"
     );
 }
+
+/// SIGTERM while a state operation waits for a held lease: `nyl state init
+/// --fresh --wait-lease` stops waiting and refuses with `NYL-RUN-CANCELLED`
+/// (exit 1), having written nothing, instead of dying with the default
+/// disposition. Catches a command line that installs no handler for the
+/// state operations or does not hand them its flag.
+#[test]
+fn test_state_operation_waiting_for_the_lease_refuses_on_sigterm() {
+    let markers = TempDir::new().unwrap();
+    let started = markers.path().join("started");
+    let slow = format!("touch {}; sleep 60", started.display());
+    let directory = TempDir::new().unwrap();
+    for (path, content) in [
+        ("nyl/nyl.toml", "[project]\n".to_owned()),
+        ("nyl/environment.yaml", ENVIRONMENT.to_owned()),
+        ("nyl/slow.yaml", command("slow", &slow, "  idempotent: true\n")),
+    ] {
+        let target = directory.path().join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, content).unwrap();
+    }
+    let world = World::new(directory.path());
+    let checkout = world.fresh_clone("main");
+    let init = nyl(&checkout, &["state", "init", "-e", "dev"]).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    let desired = git_output(&world.bare(), &["rev-parse", "refs/heads/nyl/dev/desired"]);
+
+    let begun = Instant::now();
+    let holder = nyl(&checkout, &["reconcile", "-e", "dev", "-o", "json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    while !started.exists() && begun.elapsed() < Duration::from_secs(60) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(started.exists(), "the holding run started its unit");
+
+    let waiting = nyl(
+        &world.fresh_clone("main"),
+        &[
+            "state",
+            "init",
+            "-e",
+            "dev",
+            "--fresh",
+            "--wait-lease",
+            "10m",
+            "-o",
+            "json",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let killed = Command::new("kill")
+        .args(["-TERM", &waiting.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let output = waiting.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stdout.contains("NYL-RUN-CANCELLED"), "{stdout}");
+
+    let stopped = Command::new("kill")
+        .args(["-TERM", &holder.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(stopped.success());
+    let held = holder.wait_with_output().unwrap();
+    assert_eq!(held.status.code(), Some(4), "the holding run was cancelled too");
+    assert_eq!(
+        git_output(&world.bare(), &["rev-parse", "refs/heads/nyl/dev/desired"]),
+        desired,
+        "the cancelled state operation wrote nothing"
+    );
+}
