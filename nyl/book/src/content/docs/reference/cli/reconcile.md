@@ -36,6 +36,9 @@ that changes nothing writes no commit.
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
 | `--wait-lease <duration>` | Wait up to this long, such as `10m`, while another run holds the lease. |
+| `--local` | Run next to remote state without publishing it: continue from this clone's [local state branches](/nyl/orchestration/environments-and-state/#local-runs) and commit there, marked `Nyl-Local: true`. Warns `NYL-LOCAL-RUN-UNRECORDED` for every unit it executes. Exits 1 with `NYL-LOCAL-RUN-UNSUPPORTED` for state without a remote or with full `refs/…` state refs, and with `NYL-LOCAL-RUN-LEFTOVERS` while remote state has dead runs to take over. |
+| `--local-lease` | With `--local`, take this clone's own lease instead of the remote one, accepting that CI may run at the same time. |
+| `--approve <unit>` | With `--local`, execute this unit although its recovery policy is not `converge`, recorded with the `local` approval identity. Repeatable or comma-separated. Other such units wait as `awaiting-approval`. |
 | `--author "Name <email>"` | The author of the state commits. Default: Git's `user.name` and `user.email`. |
 | `-o`, `--output <table\|json>` | A table of units, or the typed `ReconcileReport`. Default `table`. |
 | `[PATH]` | The project directory or a path beneath it. Default `.`. |

@@ -1,16 +1,18 @@
 //! `nyl state` and `nyl lease`: create, move, forget, reset, and restore
 //! environment state, and declare a lease holder gone.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use std::fmt::Write as _;
 
 use clap::{Args, Subcommand, ValueEnum};
 use nyl_core::orchestration::codes::Finding;
-use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
+use nyl_orchestration::rules::local::Discard;
 use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::{Context, Settings};
 use nyl_state::git::{CommitAuthor, Endpoint};
@@ -158,8 +160,27 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
                 state::forget(ctx.context, &ctx.environment, ctx.location, &unit, &requested(common))
             })
         }
-        StateCommand::Reset { .. } => todo!("local"),
-        StateCommand::Restore { .. } => todo!("local"),
+        StateCommand::Reset {
+            common,
+            local: _,
+            discard,
+            discard_all,
+        } => {
+            let discard = discard_option(discard, *discard_all)?;
+            run(common, wiring, "state-reset", None, |ctx| {
+                state::reset(ctx.context, &ctx.environment, ctx.location, discard.as_ref())
+            })
+        }
+        StateCommand::Restore { common, to } => {
+            let to = CommitId::new(to.trim().to_ascii_lowercase()).map_err(|error| {
+                NylError::config(format!(
+                    "--to {to:?} is not a full commit ID, as `git log` of the state ref prints it: {error}"
+                ))
+            })?;
+            run(common, wiring, Operation::StateRestore.as_str(), None, |ctx| {
+                state::restore(ctx.context, &ctx.environment, ctx.location, &to, &requested(common))
+            })
+        }
         StateCommand::Move {
             common,
             from,
@@ -232,6 +253,21 @@ pub fn run_lease(args: &LeaseArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
             state::break_lease(ctx.context, &ctx.environment, ctx.location, common.reason.clone())
         }),
     }
+}
+
+/// `--discard <unit>…` or `--discard-all` of `state reset`; `None` for neither.
+fn discard_option(units: &[String], all: bool) -> Result<Option<Discard>> {
+    if all {
+        return Ok(Some(Discard::All));
+    }
+    if units.is_empty() {
+        return Ok(None);
+    }
+    let units = units
+        .iter()
+        .map(|unit| UnitName::new(unit).map_err(|error| NylError::config(error.to_string())))
+        .collect::<Result<BTreeSet<_>>>()?;
+    Ok(Some(Discard::Units(units)))
 }
 
 fn requested(common: &Common) -> Requested {

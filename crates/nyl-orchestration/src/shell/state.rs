@@ -1,4 +1,4 @@
-//! `nyl state init`, `nyl state forget`, `nyl state move`, and `nyl lease break`.
+//! `nyl state init`, `forget`, `move`, `reset`, and `restore`, and `nyl lease break`.
 //!
 //! Contract: [Initialization and moves](../../../../design/orchestration-core.md#initialization-and-moves),
 //! [Deletion](../../../../design/orchestration-core.md#deletion) for forgetting,
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, Transition, TransitionChanges};
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateError, StateSide, Transition, TransitionChanges};
 use nyl_core::orchestration::state::{
     Lease, LeaseKind, Lifecycle, Operation, Request, StateEvent, StateLocation, StateRecord, StateRecordKind, StateV1,
     TeardownProgress,
@@ -18,9 +18,11 @@ use nyl_core::orchestration::state::{
 use serde_json::{json, Value};
 
 use super::lease::{self, HeldLease, LeaseError};
+use super::local::{check_remote_tips, TIP_HISTORY};
 use super::Context;
 use crate::report::{Outcome, StateOperationReport};
 use crate::rules::lease::{self as lease_rule, Holder, LeaseDecision};
+use crate::rules::local as local_rule;
 use crate::rules::state_location::{check_record, describe};
 use crate::transition::{self, Trailers, TransitionSummary};
 
@@ -211,6 +213,9 @@ pub fn init(
                             .insert("note".to_owned(), json!("state already exists at this location"));
                         return report;
                     }
+                    if let Err(finding) = check_remote_tips(context.store, location) {
+                        return report.refused(finding);
+                    }
                     // A fresh start drops every unit's documents.
                     changes.desired = snapshot.desired.keys().map(|unit| (unit.clone(), None)).collect();
                     changes.observed = snapshot.observed.keys().map(|unit| (unit.clone(), None)).collect();
@@ -267,6 +272,9 @@ pub fn forget(
                 Err(error) => return report.refused(store_error(environment, &error)),
             };
             if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
+                return report.refused(finding);
+            }
+            if let Err(finding) = check_remote_tips(context.store, location) {
                 return report.refused(finding);
             }
             let Some(desired) = snapshot.desired.get(unit) else {
@@ -415,6 +423,15 @@ fn move_holding(
         Ok(snapshot) => snapshot,
         Err(error) => return report.refused(store_error(environment, &error)),
     };
+    // Neither location may carry pushed local transitions at its tip.
+    if let Err(finding) = check_remote_tips(context.store, from) {
+        return report.refused(finding);
+    }
+    if target.record.is_some() {
+        if let Err(finding) = check_remote_tips(context.store, to) {
+            return report.refused(finding);
+        }
+    }
     let Some(source_record) = source.record.clone() else {
         return report.refused(Finding::new(
             Code::StateMissing,
@@ -573,7 +590,7 @@ fn move_holding(
         record: Some(record),
         ..TransitionChanges::default()
     };
-    commit(
+    let report = commit(
         context,
         to,
         held_to,
@@ -582,7 +599,17 @@ fn move_holding(
         changes,
         requested.reason.as_ref(),
         report,
-    )
+    );
+    // A move from the clone's own branches leaves them following the
+    // remote: reading it fast-forwards them to the move's tip.
+    if from.is_local() && report.outcome == Outcome::Done {
+        if let Err(error) = context.store.snapshot(to) {
+            let mut report = report;
+            report.warnings.push(store_error(environment, &error));
+            return report;
+        }
+    }
+    report
 }
 
 /// `nyl lease break -e <env> --reason <text>`: declare the lease holder gone.
@@ -658,25 +685,93 @@ pub fn break_lease(
 /// and follow the remote state again. Lists the units whose local receipts
 /// the remote does not reflect and proceeds only when `discard` covers them;
 /// writes only the clone's local branches, through
-/// [`StateStore::reset_local`](nyl_core::orchestration::ports::StateStore::reset_local).
-/// Refused for state without a remote (`NYL-STATE-RESET-UNSUPPORTED`).
+/// [`StateStore::reset_local`](nyl_core::orchestration::ports::StateStore::reset_local),
+/// and takes no lease. Refused for state without a remote
+/// (`NYL-STATE-RESET-UNSUPPORTED`).
 ///
 /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
 pub fn reset(
     context: &Context<'_>,
     environment: &EnvironmentName,
     location: &StateLocation,
-    discard: Option<&crate::rules::local::Discard>,
+    discard: Option<&local_rule::Discard>,
 ) -> StateOperationReport {
-    let _ = (context, environment, location, discard);
-    todo!("local")
+    let mut report = StateOperationReport::new(environment.clone(), "state-reset");
+    if location.is_local() {
+        return report.refused(Finding::new(
+            Code::StateResetUnsupported,
+            format!(
+                "the state of {environment} lives on this clone's own branches, so there is no remote state to follow"
+            ),
+            format!(
+                "configure a state repository and move the state there with `nyl state move -e {environment} --from local`"
+            ),
+        ));
+    }
+    let view = match local_rule::view(location) {
+        Ok(view) => view,
+        Err(finding) => return report.refused(finding),
+    };
+    // The remote first: it fetches, and fast-forwards branches that follow it.
+    let remote = match context.store.snapshot(location) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return report.refused(store_error(environment, &error)),
+    };
+    let local = match context.store.snapshot(&view) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return report.refused(store_error(environment, &error)),
+    };
+    if local.tips == remote.tips {
+        report
+            .details
+            .insert("note".to_owned(), json!("the local state branches follow the remote"));
+        return report;
+    }
+    let unreflected = local_rule::unreflected(&local, &remote);
+    if let Err(finding) = local_rule::check_discard(environment, &unreflected, discard) {
+        return report.refused(finding);
+    }
+    let mut dropped = Vec::new();
+    for side in sides(location) {
+        match context.store.log(&view, *side, TIP_HISTORY) {
+            Ok(log) => {
+                for commit in local_rule::rejected(&log) {
+                    if !dropped.contains(&commit) {
+                        dropped.push(commit);
+                    }
+                }
+            }
+            // Without history the dropped commits are not listed.
+            Err(StateError::Unavailable(_)) => {}
+            Err(error) => return report.refused(store_error(environment, &error)),
+        }
+    }
+    if let Err(error) = context.store.reset_local(location, &local.tips) {
+        return report.refused(store_error(environment, &error));
+    }
+    report.details.insert("discarded".to_owned(), json!(unreflected));
+    report.details.insert("dropped".to_owned(), json!(dropped));
+    report.done()
 }
+
+/// The state refs of a location, one when both are the same ref.
+fn sides(location: &StateLocation) -> &'static [StateSide] {
+    if location.desired_ref == location.observed_ref {
+        &[StateSide::Desired]
+    } else {
+        &StateSide::ALL
+    }
+}
+
+/// How far back `state restore` looks for the commit it restores.
+const RESTORE_HISTORY: usize = 1000;
 
 /// `nyl state restore -e <env> --to <commit>`: one desired and one observed
 /// commit (operation `state-restore`, event `state-restored`) restoring the
 /// content of `to`, on top of the current tips, so protected branches need
 /// no force push; records the local transitions it rejects and never
-/// restores admission. Takes the lease.
+/// restores admission. Takes the lease. The other ref's commit is paired
+/// through the transition trailers ([`local_rule::restore_tips`]).
 ///
 /// Contract: [Local runs](../../../../design/orchestration-core.md#local-runs).
 pub fn restore(
@@ -686,6 +781,76 @@ pub fn restore(
     to: &nyl_core::orchestration::ids::CommitId,
     requested: &Requested,
 ) -> StateOperationReport {
-    let _ = (context, environment, location, to, requested);
-    todo!("local")
+    let report = StateOperationReport::new(environment.clone(), Operation::StateRestore.as_str());
+    with_lease(
+        context,
+        report,
+        Operation::StateRestore,
+        location,
+        requested.wait,
+        |held, report| {
+            let snapshot = match context.store.snapshot(location) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return report.refused(store_error(environment, &error)),
+            };
+            if let Err(finding) = check_record(snapshot.record.as_ref(), environment, location) {
+                return report.refused(finding);
+            }
+            let shared = location.desired_ref == location.observed_ref;
+            let mut logs = Vec::new();
+            for side in sides(location) {
+                match context.store.log(location, *side, RESTORE_HISTORY) {
+                    Ok(log) => logs.push(log),
+                    Err(error) => return report.refused(store_error(environment, &error)),
+                }
+            }
+            let (desired_log, observed_log) = (&logs[0], logs.last().expect("one log per side"));
+            let tips = match local_rule::restore_tips(environment, to, desired_log, observed_log, shared) {
+                Ok(tips) => tips,
+                Err(finding) => return report.refused(finding),
+            };
+            let target = match context.store.snapshot_at(location, &tips) {
+                Ok(target) => target,
+                Err(error) => return report.refused(store_error(environment, &error)),
+            };
+            let mut changes = local_rule::restore_changes(&snapshot, &target);
+            let mut rejected = local_rule::rejected(desired_log);
+            for commit in local_rule::rejected(observed_log) {
+                if !rejected.contains(&commit) {
+                    rejected.push(commit);
+                }
+            }
+            let mut report = report;
+            if changes.is_empty() && rejected.is_empty() {
+                report.details.insert(
+                    "note".to_owned(),
+                    json!(format!("the state already holds the content of {to}")),
+                );
+                return report;
+            }
+            let mut record = snapshot.record.clone().expect("check_record found state.yaml");
+            record.events.push(StateEvent::StateRestored {
+                at: held.lease.taken_at,
+                by: context.requested_by.clone(),
+                reason: requested.reason.clone(),
+                to: to.clone(),
+            });
+            changes.record = Some(record);
+            let mut summary = summary(Operation::StateRestore, environment, "restored");
+            summary.details.insert("to".to_owned(), json!(to));
+            summary.details.insert("rejected".to_owned(), json!(rejected));
+            report.details.insert("to".to_owned(), json!(to));
+            report.details.insert("rejected".to_owned(), json!(rejected));
+            commit(
+                context,
+                location,
+                held,
+                &snapshot,
+                &summary,
+                changes,
+                requested.reason.as_ref(),
+                report,
+            )
+        },
+    )
 }

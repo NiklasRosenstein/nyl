@@ -10,8 +10,8 @@ state ref, so the history of those branches is the reviewable record of what
 Nyl decided and observed.
 
 :::note
-Orchestration is being built in milestone M3. These commands create and
-maintain state; [`nyl reconcile`](/nyl/reference/cli/reconcile/) runs units
+Orchestration is being built in milestone M3. These commands create,
+maintain, and repair state; [`nyl reconcile`](/nyl/reference/cli/reconcile/) runs units
 against it.
 :::
 
@@ -71,6 +71,61 @@ nyl state forget -e dev --unit cache --reason "removed by hand"
 Drops a `retained` tombstone or a `pending-teardown` unit from state without
 touching its resources. A unit that returns later starts a new incarnation.
 
+## `nyl state reset`
+
+```bash
+nyl state reset -e dev --local
+nyl state reset -e dev --local --discard network,database
+nyl state reset -e dev --local --discard-all
+```
+
+Drops this clone's [local transitions](/nyl/orchestration/environments-and-state/#local-runs),
+the commits `nyl reconcile --local` wrote to the clone's `nyl/<env>/*`
+branches, and moves those branches back to the remote state refs. It writes
+only the clone's branches: it takes no lease and never changes remote state,
+so `--local` is required.
+
+Forgetting a local receipt can leave resources behind, because the remote
+state does not record them. When a unit's receipt or condition in the local
+view differs from the remote's, the command lists those units, exits 1 with
+`NYL-STATE-RESET-UNDISCARDED`, and proceeds only once `--discard <unit>…`
+(repeatable or comma-separated) or `--discard-all` covers them. Let the remote
+record the change first, with `nyl reconcile -e <env> --unit <unit>` after the
+change is committed, or undo the local effects.
+
+The report lists the units discarded and the local commits dropped. When the
+branches already follow the remote, nothing changes. State that lives on the
+clone's own branches, without a remote, exits 1 with
+`NYL-STATE-RESET-UNSUPPORTED`.
+
+## `nyl state restore`
+
+```bash
+nyl state restore -e dev --to 41f0c2e9b7d14c3a8e2f6b1d0c9a7e5f3b2d1c0a --reason "local transitions were pushed"
+```
+
+Restores the content of an earlier state commit after local branches were
+pushed to the remote state refs by hand. Such a push puts `Nyl-Local`
+commits at the remote tips, and every state-writing command then exits 1
+with `NYL-STATE-LOCAL-TIP`, naming the last commit without the trailer;
+pushed local transitions are never accepted, because their source commits may
+be unpushed or dirty.
+
+`--to` takes a full commit ID of the desired or the observed state ref. The
+command pairs it with the other ref's commit of the same transition, the one
+with the same `Nyl-Run-Id` trailer, else the one its `Nyl-Read-Desired` or
+`Nyl-Read-Observed` trailer names, so it never restores a desired and
+observed pair that did not exist together. A commit outside the state refs, a
+`Nyl-Local` commit, or one whose pair cannot be found exits 1 with
+`NYL-STATE-RESTORE-INVALID`.
+
+It takes the lease and writes one desired and one observed commit on top of
+the current tips, so protected branches need no force push. The commits
+restore every unit document, artifact, observation, and attestation of that
+commit, carry `state.yaml` forward with a `state-restored` event, and list
+the rejected local commits. Admission is never restored. When the state
+already holds that content and its tips are not local, nothing changes.
+
 ## `nyl lease break`
 
 ```bash
@@ -93,6 +148,11 @@ the operation's versioned report.
 writes. Without it, Nyl uses Git's `user.name` and `user.email` for the
 project's repository; without either, the command exits 1 with
 `NYL-COMMIT-IDENTITY-MISSING` before changing anything. The commit time comes
-from the same clock as the command's other time-based decisions. They exit 0 when done or when nothing needed to change, 2 while
-another run holds the lease (`NYL-LEASE-HELD`), and 1 for every other
-refusal; each error and warning carries a stable code and its fix.
+from the same clock as the command's other time-based decisions. `state
+reset` writes no commit, but still resolves the identity.
+
+They exit 0 when done or when nothing needed to change, 2 while another run
+holds the lease (`NYL-LEASE-HELD`), and 1 for every other refusal; each error
+and warning carries a stable code and its fix. Every command that writes
+remote state, except `state restore`, exits 1 with `NYL-STATE-LOCAL-TIP` when
+a state ref's tip is a pushed local transition.

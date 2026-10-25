@@ -20,7 +20,9 @@ use crate::rules::references::{resolve_reference, ReferenceValue, ReferenceView}
 use crate::rules::state_location::check_record;
 use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport};
 
-/// `nyl status -e <env>`.
+/// `nyl status -e <env>`, with a `NYL-STATE-LOCAL-DIVERGED` warning when
+/// the clone's local state branches diverged from the remote. Through a
+/// [`super::local::LocalStore`] (`--local`) it reports the local view.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
     let mut report = RunReport::new(ReportKind::StatusReport);
     let failed = |finding: Finding| {
@@ -41,6 +43,13 @@ pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &S
             },
         },
     };
+    let mut environment_report = environment_report;
+    // Diverged local branches are reported, never an exit category.
+    match super::local::divergence(context.store, location, environment) {
+        Ok(Some(warning)) => environment_report.warnings.push(warning),
+        Ok(None) => {}
+        Err(finding) => environment_report.warnings.push(finding),
+    }
     report.environments.push(environment_report);
     report
 }
